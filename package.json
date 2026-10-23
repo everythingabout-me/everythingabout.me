@@ -7,9 +7,10 @@
     "build": "next build",
     "start": "next start",
     "typecheck": "tsc --noEmit",
-    "db:init": "psql \"$DATABASE_URL\" -f sql/001_init.sql",
-    "reconcile": "tsx scripts/reconcile.ts",
-    "purge": "tsx scripts/purge.ts",
+    "db:init": "tsx --env-file=.env scripts/migrate.ts",
+    "reconcile": "tsx --env-file=.env scripts/reconcile.ts",
+    "purge": "tsx --env-file=.env scripts/purge.ts",
+    "claim": "tsx --env-file=.env scripts/claim.ts",
     "check": "tsx --env-file=.env scripts/doctor.ts"
   },
   "dependencies": {
@@ -19,7 +20,8 @@
     "pg": "^8.23.1",
     "qcloud-cos-sts": "^3.1.3",
     "react": "^19.3.1",
-    "react-dom": "^19.3.1"
+    "react-dom": "^19.3.1",
+    "tencentcloud-sdk-nodejs-ses": "^4.1.271"
   },
   "devDependencies": {
     "@types/node": "^26.6.5",

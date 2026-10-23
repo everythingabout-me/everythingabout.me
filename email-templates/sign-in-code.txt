@@ -1,0 +1,11 @@
+【Everything About Me】验证码
+
+你正在登录或注册 Everything About Me。请在页面中输入下面的验证码：
+
+{{code}}
+
+验证码 10 分钟内有效，只能使用一次。
+
+如果这不是你本人的操作，请忽略这封邮件，不要将验证码转发给任何人。
+
+此邮件由 Everything About Me 自动发送，请勿直接回复。

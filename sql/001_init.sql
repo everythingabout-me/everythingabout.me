@@ -21,10 +21,8 @@ create table if not exists nodes (
   meta          jsonb not null default '{}'::jsonb -- 标签 / EXIF / 自定义属性
 );
 
--- 同一路径同时只能有一条存活记录（回收站里的可以重名）
-create unique index if not exists nodes_path_live_uniq
-  on nodes (path) where deleted_at is null;
-
+-- 路径唯一性由 002_users.sql 按用户建立；这里不建全局唯一索引，
+-- 否则多用户出现同名路径后重跑迁移会失败。
 create index if not exists nodes_parent_live
   on nodes (parent) where deleted_at is null;
 

@@ -5,9 +5,9 @@
  *   npm run check -- --write # 额外测试一次写入+删除
  */
 import { pool } from "../lib/db";
+import { emailDeliveryConfigured } from "../lib/email";
 import { env } from "../lib/env";
-import { storage } from "../lib/storage";
-import { storage as cos } from "../lib/cos";
+import { storage } from "../lib/cos";
 
 const writeTest = process.argv.includes("--write");
 let failed = 0;
@@ -40,21 +40,57 @@ async function main() {
       const count = await pool().query<{ n: string }>("select count(*) as n from nodes");
       ok("连接正常，nodes 表就绪", `当前 ${count.rows[0].n} 条记录`);
     }
+
+    const tables = await pool().query<{
+      users: string | null;
+      sessions: string | null;
+      email_codes: string | null;
+    }>(
+      "select to_regclass('public.users') as users, to_regclass('public.sessions') as sessions, to_regclass('public.email_codes') as email_codes",
+    );
+    if (!tables.rows[0]?.users || !tables.rows[0]?.sessions || !tables.rows[0]?.email_codes) {
+      bad("users / sessions / email_codes 表不存在", new Error("missing"), "先跑 npm run db:init");
+    } else {
+      const count = await pool().query<{ n: string }>("select count(*) as n from users");
+      const unowned = await pool().query<{ n: string }>(
+        "select count(*) as n from nodes where owner_id is null and deleted_at is null",
+      );
+      ok("用户表就绪", `当前 ${count.rows[0].n} 个账号`);
+      if (Number(unowned.rows[0].n) > 0) {
+        console.log(
+          `    ! 还有 ${unowned.rows[0].n} 条旧文件没有归属，跑 npm run claim -- --email 你@example.com 认领`,
+        );
+      }
+    }
   } catch (error) {
     bad("连接失败", error, "检查 DATABASE_URL；端口被别的库占用时换一个端口");
   }
 
+  console.log("\n邮件");
+  if (emailDeliveryConfigured()) {
+    ok("腾讯云 SES 已配置", `${env.ses.region} · ${env.ses.fromEmailAddress}`);
+  } else if (process.env.NODE_ENV === "production") {
+    bad(
+      "腾讯云 SES 未配置",
+      new Error("生产环境无法发送注册验证码"),
+      "填 SES_FROM_EMAIL_ADDRESS / SES_TEMPLATE_ID 等；或在开发环境运行",
+    );
+  } else {
+    console.log(
+      "  ! 腾讯云 SES 未配置：开发环境验证码会打印到服务端日志，并在注册页自动填入",
+    );
+  }
+
   console.log("\nCOS");
-  const probe = `drive/__doctor__/probe-${Date.now()}.txt`;
-  try {
-    const head = await cos().head(probe);
+  const probe = `drive/__doctor__/probe-${Date.now()}.txt`;  try {
+    const head = await storage().head(probe);
     ok("鉴权与桶可达", head ? "（意外：探针对象存在）" : "（探针对象不存在，符合预期）");
   } catch (error) {
     bad("headObject 失败", error, "多为桶名缺 APPID、region 填错、或密钥无权限");
   }
 
   try {
-    const cred = await cos().temporaryCredentials(probe, 900);
+    const cred = await storage().temporaryCredentials(probe, 900);
     ok("STS 临时凭证签发成功", `有效期至 ${new Date(cred.expiredTime * 1000).toLocaleString()}`);
   } catch (error) {
     bad(

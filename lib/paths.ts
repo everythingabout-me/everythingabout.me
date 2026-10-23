@@ -42,21 +42,39 @@ export function isInside(path: string, ancestor: string): boolean {
   return path === ancestor || path.startsWith(ancestor + "/");
 }
 
-/** 文件对象 key */
-export function keyFor(path: string): string {
-  return DRIVE_PREFIX + path;
+/** 文件对象 key：每个用户一个独立前缀，避免不同用户同名路径在桶里撞车 */
+export function keyFor(path: string, ownerId: string): string {
+  return `${DRIVE_PREFIX}${ownerId}/${path}`;
 }
 
 /** 目录标记对象 key（以 / 结尾，方便 coscli / rclone 识别空目录） */
-export function dirKeyFor(path: string): string {
-  return DRIVE_PREFIX + (path ? path + "/" : "");
+export function dirKeyFor(path: string, ownerId: string): string {
+  return `${DRIVE_PREFIX}${ownerId}/${path ? path + "/" : ""}`;
 }
 
-/** 从对象 key 还原逻辑路径；不属于 drive/ 的返回 null */
-export function pathFromKey(key: string): string | null {
+/** 某个用户在桶里的前缀，以 / 结尾 */
+export function ownerPrefix(ownerId: string): string {
+  return `${DRIVE_PREFIX}${ownerId}/`;
+}
+
+/** 从对象 key 还原逻辑路径；不属于该用户的返回 null */
+export function pathFromKey(key: string, ownerId?: string | null): string | null {
+  if (ownerId) {
+    const prefix = ownerPrefix(ownerId);
+    if (!key.startsWith(prefix)) return null;
+    return key.slice(prefix.length).replace(/\/+$/, "");
+  }
   if (!key.startsWith(DRIVE_PREFIX)) return null;
-  const rest = key.slice(DRIVE_PREFIX.length).replace(/\/+$/, "");
-  return rest;
+  return key.slice(DRIVE_PREFIX.length).replace(/\/+$/, "");
+}
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/** key 的第二段像不像用户 ID（用于区分 drive/<path> 和 drive/<ownerId>/<path>） */
+export function ownerSegmentOf(key: string): string | null {
+  if (!key.startsWith(DRIVE_PREFIX)) return null;
+  const [first] = key.slice(DRIVE_PREFIX.length).split("/");
+  return first && UUID_RE.test(first) ? first : null;
 }
 
 export function ancestorsOf(path: string): string[] {

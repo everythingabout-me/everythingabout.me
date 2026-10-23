@@ -20,3 +20,12 @@ export function query<T extends QueryResultRow = QueryResultRow>(
 ): Promise<QueryResult<T>> {
   return pool().query<T>(text, params);
 }
+
+/** Postgres 唯一约束冲突（邮箱重复等） */
+export function isUniqueViolation(error: unknown): boolean {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    (error as { code?: string }).code === "23505"
+  );
+}

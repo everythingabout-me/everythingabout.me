@@ -1,5 +1,6 @@
 import type { NextRequest } from "next/server";
 import { handle } from "@/lib/api";
+import { requireUser } from "@/lib/auth";
 import { query } from "@/lib/db";
 import type { NodeRow } from "@/lib/nodes";
 
@@ -12,6 +13,7 @@ function escapeLike(value: string): string {
 
 export async function GET(request: NextRequest) {
   return handle(async () => {
+    const user = await requireUser();
     const keyword = (request.nextUrl.searchParams.get("q") ?? "").trim();
     if (!keyword) return { items: [] };
 
@@ -19,11 +21,12 @@ export async function GET(request: NextRequest) {
     const { rows } = await query<NodeRow>(
       `select id, path, parent, name, is_dir, size, mime, updated_at, meta
          from nodes
-        where deleted_at is null
-          and (name ilike $1 or path ilike $1)
+        where owner_id = $1
+          and deleted_at is null
+          and (name ilike $2 or path ilike $2)
         order by is_dir desc, lower(name) asc
         limit 200`,
-      [pattern],
+      [user.id, pattern],
     );
 
     return { items: rows.map((row) => ({ ...row, size: Number(row.size) })) };

@@ -124,6 +124,47 @@
   opacity: 0;
 }
 
+.accountBtn {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  max-width: 190px;
+  height: 34px;
+  padding: 0 11px 0 6px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text-2);
+  font-size: 12.5px;
+  transition: border-color 0.14s ease, background 0.14s ease, color 0.14s ease;
+}
+
+.accountBtn:hover {
+  border-color: var(--border-strong);
+  background: var(--hover);
+  color: var(--text);
+}
+
+.avatar {
+  display: grid;
+  place-items: center;
+  flex: 0 0 auto;
+  width: 22px;
+  height: 22px;
+  border-radius: 999px;
+  background: var(--accent-soft);
+  color: var(--accent-deep);
+  font-size: 11px;
+  font-weight: 650;
+  line-height: 1;
+}
+
+.accountEmail {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .primaryBtn {
   display: inline-flex;
   align-items: center;
@@ -714,6 +755,16 @@
 
   .primaryBtn {
     padding: 0 13px;
+  }
+
+  .accountBtn {
+    padding: 0;
+    border-color: transparent;
+    background: transparent;
+  }
+
+  .accountEmail {
+    display: none;
   }
 
   .main {
