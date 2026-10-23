@@ -131,19 +131,19 @@
   height: 34px;
   padding: 0 15px;
   border-radius: 999px;
-  background: var(--btn-bg);
+  background: linear-gradient(140deg, var(--btn-from) 0%, var(--btn-to) 100%);
   color: var(--btn-fg);
   font-size: 13px;
   font-weight: 500;
   white-space: nowrap;
-  box-shadow: 0 6px 14px -10px rgba(18, 24, 22, 0.5);
-  transition: background-color 0.16s ease, transform 0.14s ease, filter 0.14s ease;
+  box-shadow: 0 8px 18px -12px color-mix(in srgb, var(--btn-to) 90%, transparent);
+  transition: transform 0.14s ease, filter 0.14s ease, box-shadow 0.16s ease;
 }
 
 .primaryBtn:hover {
-  background: var(--btn-bg-hover);
   transform: translateY(-1px);
   filter: brightness(1.06);
+  box-shadow: 0 12px 22px -12px color-mix(in srgb, var(--btn-to) 95%, transparent);
 }
 
 .primaryBtn:active {

@@ -19,8 +19,8 @@
   --danger: #d24f45;
   --danger-soft: #fdeceb;
 
-  --btn-bg: #171b1a;
-  --btn-bg-hover: #2b302e;
+  --btn-from: #26ab8c;
+  --btn-to: #127a63;
   --btn-fg: #ffffff;
 
   --toast-bg: #171b1a;
@@ -51,9 +51,9 @@
     --danger: #f28076;
     --danger-soft: #241614;
 
-    --btn-bg: #eef2f0;
-    --btn-bg-hover: #ffffff;
-    --btn-fg: #0e1211;
+    --btn-from: #6fe0c6;
+    --btn-to: #3ec5a6;
+    --btn-fg: #06231c;
   
     --toast-bg: #1a1f1d;
     --toast-fg: #eef2f0;
