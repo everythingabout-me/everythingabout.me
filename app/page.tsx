@@ -295,7 +295,6 @@ export default function Page() {
 
   const totalSize = items.reduce((sum, item) => (item.is_dir ? sum : sum + Number(item.size)), 0);
   const fileCount = items.filter((item) => !item.is_dir).length;
-  const dirCount = items.length - fileCount;
 
   const onDrop = (event: React.DragEvent) => {
     event.preventDefault();
@@ -323,7 +322,7 @@ export default function Page() {
         <div className={styles.topbarInner}>
           <div className={styles.brand}>
             <span className={styles.brandDot} />
-            <span className={styles.brandText}>everything about me</span>
+            <span className={styles.brandText}>Everything About Me</span>
           </div>
 
           <div className={styles.topSpacer} />
@@ -529,25 +528,19 @@ export default function Page() {
               <span className={styles.emptyTitle}>
                 {activeQuery ? "没有找到匹配的文件" : "这里还空着"}
               </span>
-              <span className={styles.emptyText}>
-                {activeQuery ? (
-                  "换个关键词试试，搜索会匹配文件名和完整路径。"
-                ) : (
-                  <>
-                    拖文件到这里上传，或用 <code>coscli</code> 灌进 <code>drive/</code> 后跑一遍 reconcile。
-                  </>
-                )}
-              </span>
+              {activeQuery && (
+                <span className={styles.emptyText}>
+                  换个关键词试试，搜索会匹配文件名和完整路径。
+                </span>
+              )}
             </div>
           )}
         </section>
 
-        {!loading && items.length > 0 && (
+        {!loading && items.length > 0 && (fileCount > 0 || totalSize > 0) && (
           <footer className={styles.footer}>
-            <span>{dirCount > 0 ? `${dirCount} 个目录` : `${fileCount} 个文件`}</span>
-            {dirCount > 0 && fileCount > 0 && <span>·</span>}
-            {dirCount > 0 && fileCount > 0 && <span>{fileCount} 个文件</span>}
-            {totalSize > 0 && <span>·</span>}
+            {fileCount > 0 && <span>{fileCount} 个文件</span>}
+            {fileCount > 0 && totalSize > 0 && <span>·</span>}
             {totalSize > 0 && <span>{formatSize(totalSize)}</span>}
           </footer>
         )}

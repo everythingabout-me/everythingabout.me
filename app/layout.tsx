@@ -2,7 +2,7 @@ import type { Metadata } from "next";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "everything about me",
+  title: "Everything About Me",
   description: "个人数据基座",
 };
 
