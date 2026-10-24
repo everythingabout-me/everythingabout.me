@@ -1,11 +1,14 @@
 node_modules/
-.next/
+dist/
+
+# Go
+bin/
+.gocache/
+
+# 本地环境与缓存
 .env
 .env.local
-*.tsbuildinfo
-next-env.d.ts
-.DS_Store
-
 .npm-cache/
-
 .tmp/
+*.tsbuildinfo
+.DS_Store

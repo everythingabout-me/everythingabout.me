@@ -3,18 +3,44 @@
 个人数据基座：**邮箱注册的账号系统 + 文件层**。
 账号、会话、目录树、属性、检索放 Postgres；文件字节放腾讯云 COS。
 
+前后端分离：**Go 后端（net/http） + React 前端（Vite + React Router）**，没有 Next.js。
+
 ```
-浏览器 ──登录态 cookie──▶ Next.js API ──▶ Postgres (users / sessions / nodes)
-   │
-   └──STS 临时凭证直传──▶ COS (drive/<用户ID>/…)
+浏览器 ──登录态 cookie──▶ Go API ──▶ Postgres (users / sessions / nodes)
+   │                        │
+   │                        └──▶ COS (drive/<用户ID>/…)
+   └──STS 临时凭证直传──▶ COS
+```
+
+## 技术栈与目录
+
+| 路径 | 内容 |
+|---|---|
+| `backend/` | Go 1.26+。标准库 `net/http`（Go 1.22 路由模式）、pgx、腾讯云 COS SDK。 |
+| `web/` | React 19 + Vite + React Router（data router / loader）。 |
+| `sql/` | 按文件名顺序执行的建表迁移。 |
+| `email-templates/` | SES 验证码邮件模板参考。 |
+| `docs/` | 设计草案与截图。 |
+
+后端是一个二进制，同时提供 JSON API 和前端构建产物：
+
+```bash
+make build          # 构建 web/dist，再编译出 bin/eam
+./bin/eam server    # 生产模式：/ 返回 SPA，/api/* 返回接口
+```
+
+开发时前端跑 Vite（5173，`/api` 代理到 8080），后端跑 Go（8080）：
+
+```bash
+make dev
 ```
 
 ## 用户系统
 
 - **邮箱验证码登录 / 注册合并**：输入邮箱 → 收验证码 → 已有账号直接登录，没有账号自动创建。没有用户名，默认也不需要密码。
 - 每个账号有一个**唯一且不变的 `users.id`（UUID）**作为内部身份；用户不需要关心它，界面上邮箱就是唯一标识。改邮箱时 id 和文件归属都不变。
-- 密码是**可选的**：账户页可以设置、修改或移除；设置后登录页多一个「用密码登录」的入口。密码同样用 Node 内置 `scrypt` 加盐哈希。
-- 登录态是 httpOnly cookie（`eam_session`），数据库只存 token 的 SHA-256；默认 30 天过期。
+- 密码是**可选的**：账户页可以设置、修改或移除；设置后登录页多一个「用密码登录」的入口。密码用 Go 的 `scrypt` 加盐哈希，**格式与改造前完全一致**（`scrypt$N$r$p$salt$hash`），老密码可以直接用。
+- 登录态是 httpOnly cookie（`eam_session`），数据库只存 token 的 SHA-256；默认 30 天过期。token 格式也与旧版一致，迁移后已有会话不会失效。
 - 文件按 `owner_id` 隔离，COS 里每个用户一个独立前缀 `drive/<用户ID>/`，不同账号可以有同名路径。
 - `/account` 可以修改邮箱（需要**当前邮箱 + 新邮箱**两个验证码），也可以设置/移除密码；界面只显示邮箱和注册时间。
 - 注册默认开放；个人实例注册完自己后，建议把 `ALLOW_REGISTRATION=false` 写进 `.env` 并重启。
@@ -46,27 +72,40 @@ key 直接落在路径上（`drive/<用户ID>/Photos/2024/a.jpg`），意味着�
 - 搜索会同时匹配文件名和完整路径，结果右侧显示所在目录
 - 新建目录是行内输入框，删除有确认弹窗（进回收站）
 - 顶栏右侧显示当前账号，点进 `/account` 改邮箱、设置密码或退出
+- 目录用 URL 的 `?path=` 表示，可以直接分享/刷新到某一层
+- 前端路由：`/`（文件）、`/login`（`?mode=password` 切密码登录）、`/account`
 
 ## 起步
 
+前置：**Go 1.26+**、**Node 20.19+**（只用来构建前端）、一个 Postgres。
+
 ```bash
 cp .env.example .env      # 填 DATABASE_URL / COS_*
-npm run db:init           # 建表：nodes / users / sessions / email_codes
-npm run check             # 自检：数据库 / COS 鉴权 / STS 签发 / SES
-npm run dev
+make install              # go mod download + 前端 npm install
+make migrate              # 建表：nodes / users / sessions / email_codes
+make check                # 自检：数据库 / COS 鉴权 / STS 签发 / SES
+make dev                  # 后端 :8080 + 前端 :5173（/api 已代理）
 ```
 
-打开 http://127.0.0.1:3000 ，输入邮箱收验证码；第一次验证会自动创建账号。
-开发环境没配 SES 时，验证码会打印在 `npm run dev` 的终端里，也会自动填入登录页。
+打开 http://127.0.0.1:5173 ，输入邮箱收验证码；第一次验证会自动创建账号。
+开发环境没配 SES 时，验证码会打印在 `make dev` 的后端终端里，也会自动填入登录页。
 
-用 `127.0.0.1` 或局域网 IP 访问 dev server 时，Next 16 默认会拦掉 `/_next/hmr`，
-表现为页面一直停在骨架屏。`next.config.ts` 里已经加了 `allowedDevOrigins`。
+也可以分两个终端跑：
+
+```bash
+cd backend && go run ./cmd/eam server   # API + 静态文件
+cd web && npm run dev                   # Vite dev server
+```
+
+> 后端命令会自动读取仓库根目录的 `.env`（从当前目录往上找三层），不用手动 export。
+> `make build` 之后用 `./bin/eam server` 单进程就能跑完整站点：Go 会把 `web/dist` 作为 SPA 托管，未知路径回退到 `index.html`。
 
 ### 登录 / 注册验证码（腾讯云 SES）
 
 登录、注册、改邮箱共用 6 位邮箱验证码。配好 SES 就真实发信；**没配 SES 时**，开发环境会把验证码打印到服务端日志并在登录页自动填入，生产环境会直接拒绝发送。
 
-> 开发模式的验证码会直接返回给浏览器，所以不要把 `npm run dev` 暴露到公网。
+> 开发模式的验证码会直接返回给浏览器，所以不要把开发服务器暴露到公网。
+> `APP_ENV=production` 时才会启用生产行为（cookie 加 Secure、SES 未配置时拒绝发码）。
 
 1. 在腾讯云 SES 控制台完成发件域名 / 发件地址验证（含 SPF、DKIM）。
 2. 新建一个验证码模板，内容例如：
@@ -114,21 +153,25 @@ npm run dev
 多用户改造之前的数据 `owner_id` 为空，不会自动出现在任何账号里。用验证码登录（会自动创建账号）后运行：
 
 ```bash
-npm run claim -- --email you@example.com --dry-run   # 先看会把哪些对象搬到哪里
-npm run claim -- --email you@example.com             # 正式认领
+cd backend
+go run ./cmd/eam claim --email you@example.com --dry-run   # 先看会把哪些对象搬到哪里
+go run ./cmd/eam claim --email you@example.com             # 正式认领
 ```
 
 它会把 COS 对象从 `drive/<路径>` 复制到 `drive/<用户ID>/<路径>`，改写数据库里的 key 和
 `owner_id`，然后删掉旧对象（`--keep-source` 可保留）。数据量大时可以先用 coscli 分目录搬，
-再跑 `npm run reconcile -- --owner you@example.com`。
+再跑 `reconcile --owner you@example.com`。
+
+**从 Next.js 版本迁移不需要动数据**：表结构、COS key、密码哈希、会话 token 都没变，
+直接用新的 `eam` 二进制启动即可，用户不用重新登录。
 
 ### COS 侧要配三样
 
 1. **CORS**（允许浏览器直传）
-   - 来源：`http://localhost:3000`、你的正式域名
+   - 来源：`http://localhost:5173`、`http://127.0.0.1:5173`、你的正式域名
    - 方法：`PUT, GET, POST, HEAD`
    - 头部：`*`，暴露头部：`ETag, x-cos-request-id`
-2. **子账号 + STS 权限**：主账号密钥只放在服务端，`qcloud-cos-sts` 会按单个对象的 key 下发临时凭证（30–60 分钟）。
+2. **子账号 + STS 权限**：主账号密钥只放在服务端，`eam` 会按单个对象的 key 下发临时凭证（30–60 分钟）。
 3. **（可选）数据万象**：开了之后图片可以走 `?imageMogr2/thumbnail/300x` 出缩略图，不用自己跑 Sharp。
 
 ## 首次灌 TB 级数据
@@ -137,14 +180,15 @@ npm run claim -- --email you@example.com             # 正式认领
 
 ```bash
 coscli cp -r ~/Pictures cos://your-bucket-1250000000/drive/<用户ID>/Pictures
-npm run reconcile -- --owner you@example.com --dry-run   # 先看会写多少条
-npm run reconcile -- --owner you@example.com
+cd backend
+go run ./cmd/eam reconcile --owner you@example.com --dry-run   # 先看会写多少条
+go run ./cmd/eam reconcile --owner you@example.com
 ```
 
 百万对象时改用 COS **清单（Inventory）**，避免全量 List 的请求费：
 
 ```bash
-npm run reconcile -- --owner you@example.com --inventory ./inventory.csv
+go run ./cmd/eam reconcile --owner you@example.com --inventory ./inventory.csv
 ```
 
 `reconcile` 做三件事：补新增、更新变动的（size/etag）、把桶里已消失的标成删除。
@@ -155,13 +199,17 @@ npm run reconcile -- --owner you@example.com --inventory ./inventory.csv
 删除是软删除：`deleted_at` 打标记，对象留在原地。
 
 ```bash
-npm run purge -- --days 30 --dry-run
-npm run purge -- --days 30
+go run ./cmd/eam purge --days 30 --dry-run
+go run ./cmd/eam purge --days 30
 ```
 
 ## 接口
 
+> 给外部程序（第三方 App、一次性脚本）用的读写接口另有一套设计草案：[docs/api/v1.md](docs/api/v1.md)。
+> 核心是「HTTP 动词 + 文件路径」的最小通用核，WebDAV / S3 作为两扇兼容门。
+
 所有 `/api/fs/*` 都要求登录，并且只操作当前账号自己的文件（未登录返回 401）。
+接口地址和响应信封（`{ok, data}` / `{ok, error}`）与改造前完全一致。
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
@@ -172,6 +220,7 @@ npm run purge -- --days 30
 | DELETE | `/api/auth/password` | 移除密码（需当前密码） |
 | POST | `/api/auth/logout` | 注销当前会话 |
 | GET | `/api/auth/me` | 当前用户（含 `hasPassword`）；未登录返回 `user: null` |
+| GET | `/api/account` | 账户页摘要（当前用户 + 未认领的旧文件数） |
 | POST | `/api/auth/email/current-code` | 发送改邮箱验证码到**当前邮箱**（需登录，用于身份确认） |
 | POST | `/api/auth/email/code` | 发送改邮箱验证码到**新邮箱**（需登录） |
 | POST | `/api/auth/email` | 修改邮箱（需当前邮箱 + 新邮箱两个验证码） |
@@ -183,6 +232,7 @@ npm run purge -- --days 30
 | POST | `/api/fs/mkdir` | 建目录（写零字节占位对象） |
 | POST | `/api/fs/rename` | 单文件改名/移动；目录请用 coscli |
 | POST | `/api/fs/delete` | 软删除（子树上所有记录） |
+| GET | `/api/health` | 存活探针 |
 
 认证写接口会校验 `Origin`/`Host`，并做了单进程内存限流（验证码发送 30 次/小时/IP、
 5 次/小时/邮箱、同一邮箱 60 秒冷却；验证码校验 30 次/15 分钟/IP；
@@ -195,9 +245,12 @@ npm run purge -- --days 30
 | `DATABASE_URL` | Postgres 连接串 |
 | `COS_SECRET_ID` / `COS_SECRET_KEY` | 服务端密钥，不要给前端 |
 | `COS_BUCKET` / `COS_REGION` | 桶必须带 APPID |
+| `APP_ENV` | `development`（默认）或 `production`；决定 Secure cookie 和未配 SES 时的行为 |
 | `SESSION_TTL_DAYS` | 登录态有效期，默认 30 天 |
 | `COOKIE_SECURE` | 不设置时生产环境自动加 Secure；本地 http 调试可设 false |
 | `ALLOW_REGISTRATION` | 设为 false 关闭注册；默认开放 |
+| `ADDR` / `PORT` | 监听地址；默认 `:8080`（`ADDR` 优先） |
+| `WEB_DIR` | 前端构建产物目录；不填时自动找仓库里的 `web/dist` |
 | `SES_REGION` | 腾讯云 SES 区域，默认 `ap-guangzhou` |
 | `SES_FROM_EMAIL_ADDRESS` | 已在 SES 验证的发件地址；可带显示名，如 `Everything About Me <noreply@yourdomain.com>` |
 | `SES_TEMPLATE_ID` | 验证码模板 ID |
@@ -205,6 +258,29 @@ npm run purge -- --days 30
 | `SES_SUBJECT` | 验证码邮件标题 |
 | `SES_REPLY_TO_ADDRESS` | 可选回复地址 |
 | `SES_SECRET_ID` / `SES_SECRET_KEY` | 可选；不填时复用 COS 密钥 |
+
+## 运维命令
+
+后端所有维护脚本都收在一个二进制里（`make` 只是快捷方式）：
+
+```bash
+cd backend && go run ./cmd/eam --help          # 或 ./bin/eam --help
+go run ./cmd/eam migrate                       # 建表 / 升级
+go run ./cmd/eam doctor [--write]              # 自检（--write 会写一个探针对象再删掉）
+go run ./cmd/eam purge --days 30 [--dry-run]   # 清回收站
+go run ./cmd/eam reconcile --owner … [--inventory …] [--dry-run]
+go run ./cmd/eam claim --email … [--dry-run] [--keep-source]
+```
+
+`make` 里也有对应目标：
+
+| 目标 | 作用 |
+|---|---|
+| `make install` | 首次安装依赖（Go modules + 前端 npm） |
+| `make dev` | 同时起 Go 后端和 Vite |
+| `make build` | 构建前端 + 编译 `bin/eam` |
+| `make migrate` / `make check` / `make check-write` | 对应 `eam migrate` / `eam doctor` |
+| `make test` | Go 测试 + 前端类型检查 |
 
 ## 已知取舍
 
@@ -215,5 +291,7 @@ npm run purge -- --days 30
 - **限流是单进程内存的**：多实例部署时每个实例各算各的，严格限流要换 Redis。
 - **目录重命名**要逐个对象做服务端复制，TB 级会很久。先用 coscli 改，再 reconcile。
 - **秒传**没做：TB 级算全量 SHA256 等于读一遍数据。要做的话用 `size + 首尾 1MB hash`。
-- **旧数据要手动认领**：`npm run claim` 是 O(对象数) 的服务端复制；跑之前先 `--dry-run`。
+- **旧数据要手动认领**：`eam claim` 是 O(对象数) 的服务端复制；跑之前先 `--dry-run`。
 - **删除账号**只级联数据库记录；COS 里 `drive/<用户ID>/` 的对象需要按前缀自行清理。
+- **前端是纯 SPA**：首屏要等 JS 加载完（约 110KB gzip，COS SDK 按需再加载）；没有 SSR，但也不需要在服务端渲染用户数据。
+- **`cos-js-sdk-v5` 的 XML 解析依赖有审计告警**：官方 SDK 固定了 `fast-xml-parser@4.5.0`，`npm audit` 会报 critical。它只解析 COS 返回的 XML（走 TLS），目前没有无损升级路径；等官方 SDK 升级后再跟进。

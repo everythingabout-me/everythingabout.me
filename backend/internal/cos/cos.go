@@ -1,0 +1,235 @@
+// Package cos 是 storage.Storage 的腾讯云 COS 实现。
+package cos
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"net/http"
+	"net/url"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/tencentyun/cos-go-sdk-v5"
+
+	"everythingabout.me/backend/internal/config"
+	"everythingabout.me/backend/internal/storage"
+	"everythingabout.me/backend/internal/tencent"
+)
+
+type Client struct {
+	bucket string
+	region string
+	appID  string
+	client *cos.Client
+	cred   tencent.Credentials
+}
+
+func New(cfg config.COS) (*Client, error) {
+	bucketURL, err := url.Parse(fmt.Sprintf("https://%s.cos.%s.myqcloud.com", cfg.Bucket, cfg.Region))
+	if err != nil {
+		return nil, err
+	}
+	client := cos.NewClient(
+		&cos.BaseURL{BucketURL: bucketURL},
+		&http.Client{
+			Timeout: 60 * time.Second,
+			Transport: &cos.AuthorizationTransport{
+				SecretID:  cfg.SecretID,
+				SecretKey: cfg.SecretKey,
+			},
+		},
+	)
+	return &Client{
+		bucket: cfg.Bucket,
+		region: cfg.Region,
+		appID:  config.COSAppID(cfg.Bucket),
+		client: client,
+		cred:   tencent.Credentials{SecretID: cfg.SecretID, SecretKey: cfg.SecretKey},
+	}, nil
+}
+
+func (c *Client) Head(ctx context.Context, key string) (*storage.ObjectInfo, error) {
+	resp, err := c.client.Object.Head(ctx, key, nil)
+	if err != nil {
+		if cos.IsNotFoundError(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	info := &storage.ObjectInfo{
+		Key:          key,
+		ETag:         strings.Trim(resp.Header.Get("ETag"), `"`),
+		StorageClass: resp.Header.Get("x-cos-storage-class"),
+	}
+	info.Size, _ = strconv.ParseInt(resp.Header.Get("Content-Length"), 10, 64)
+	if modified := resp.Header.Get("Last-Modified"); modified != "" {
+		if parsed, err := http.ParseTime(modified); err == nil {
+			info.LastModified = parsed
+		}
+	}
+	return info, nil
+}
+
+func (c *Client) Copy(ctx context.Context, sourceKey, targetKey string) error {
+	source := fmt.Sprintf("%s.cos.%s.myqcloud.com/%s", c.bucket, c.region, sourceKey)
+	_, _, err := c.client.Object.Copy(ctx, targetKey, source, nil)
+	return err
+}
+
+func (c *Client) Remove(ctx context.Context, key string) error {
+	_, err := c.client.Object.Delete(ctx, key)
+	return err
+}
+
+func (c *Client) PutEmpty(ctx context.Context, key string) error {
+	_, err := c.client.Object.Put(ctx, key, bytes.NewReader(nil), nil)
+	return err
+}
+
+func (c *Client) List(ctx context.Context, prefix string, onPage func(storage.Page) (bool, error)) error {
+	marker := ""
+	for {
+		result, _, err := c.client.Bucket.Get(ctx, &cos.BucketGetOptions{
+			Prefix:  prefix,
+			Marker:  marker,
+			MaxKeys: 1000,
+		})
+		if err != nil {
+			return err
+		}
+
+		page := storage.Page{NextMarker: result.NextMarker, Objects: make([]storage.ObjectInfo, 0, len(result.Contents))}
+		for _, object := range result.Contents {
+			info := storage.ObjectInfo{
+				Key:          object.Key,
+				Size:         object.Size,
+				ETag:         strings.Trim(object.ETag, `"`),
+				StorageClass: object.StorageClass,
+			}
+			if object.LastModified != "" {
+				if parsed, err := time.Parse(time.RFC3339, object.LastModified); err == nil {
+					info.LastModified = parsed
+				}
+			}
+			page.Objects = append(page.Objects, info)
+		}
+
+		if len(result.Contents) > 0 {
+			proceed, err := onPage(page)
+			if err != nil {
+				return err
+			}
+			if !proceed {
+				return nil
+			}
+		}
+		if !result.IsTruncated || len(result.Contents) == 0 {
+			return nil
+		}
+
+		next := result.NextMarker
+		if next == "" {
+			next = result.Contents[len(result.Contents)-1].Key
+		}
+		if next == marker {
+			// 防御性判断：marker 没前进就不要无限循环
+			return errors.New("COS 列举没有前进，可能桶配置异常")
+		}
+		marker = next
+	}
+}
+
+func (c *Client) GetURL(ctx context.Context, key string, opts storage.URLOptions) (string, error) {
+	expires := opts.ExpiresSeconds
+	if expires <= 0 {
+		expires = 900
+	}
+
+	query := url.Values{}
+	if opts.DownloadName != "" {
+		query.Set("response-content-disposition",
+			"inline; filename*=UTF-8''"+url.PathEscape(opts.DownloadName))
+	}
+	if opts.ContentType != "" {
+		query.Set("response-content-type", opts.ContentType)
+	}
+
+	var options *cos.PresignedURLOptions
+	if len(query) > 0 {
+		options = &cos.PresignedURLOptions{Query: &query}
+	}
+	signed, err := c.client.Object.GetPresignedURL3(
+		ctx, http.MethodGet, key, time.Duration(expires)*time.Second, options,
+	)
+	if err != nil {
+		return "", err
+	}
+	return signed.String(), nil
+}
+
+var uploadActions = []string{
+	"name/cos:PutObject",
+	"name/cos:PostObject",
+	"name/cos:InitiateMultipartUpload",
+	"name/cos:UploadPart",
+	"name/cos:CompleteMultipartUpload",
+	"name/cos:AbortMultipartUpload",
+	"name/cos:ListMultipartUploads",
+	"name/cos:ListParts",
+}
+
+type stsCredentialResponse struct {
+	Credentials struct {
+		TmpSecretID  string `json:"TmpSecretId"`
+		TmpSecretKey string `json:"TmpSecretKey"`
+		Token        string `json:"Token"`
+	} `json:"Credentials"`
+	ExpiredTime int64 `json:"ExpiredTime"`
+	StartTime   int64 `json:"StartTime"`
+}
+
+func (c *Client) TemporaryCredentials(
+	ctx context.Context,
+	key string,
+	expiresSeconds int,
+) (*storage.Credentials, error) {
+	if expiresSeconds <= 0 || expiresSeconds > 7200 {
+		expiresSeconds = 3600
+	}
+
+	resource := fmt.Sprintf("qcs::cos:%s:uid/%s:%s/%s", c.region, c.appID, c.bucket, key)
+	policy := map[string]any{
+		"version": "2.0",
+		"statement": []any{map[string]any{
+			"effect":   "allow",
+			"action":   uploadActions,
+			"resource": []string{resource},
+		}},
+	}
+	policyJSON, err := json.Marshal(policy)
+	if err != nil {
+		return nil, err
+	}
+
+	var response stsCredentialResponse
+	err = tencent.Call(ctx, c.cred, "sts", "2018-08-13", c.region, "GetFederationToken", map[string]any{
+		"Name":            "eam-cos-sts",
+		"Policy":          string(policyJSON),
+		"DurationSeconds": expiresSeconds,
+	}, &response)
+	if err != nil {
+		return nil, err
+	}
+
+	return &storage.Credentials{
+		TmpSecretID:  response.Credentials.TmpSecretID,
+		TmpSecretKey: response.Credentials.TmpSecretKey,
+		SessionToken: response.Credentials.Token,
+		StartTime:    response.StartTime,
+		ExpiredTime:  response.ExpiredTime,
+	}, nil
+}
