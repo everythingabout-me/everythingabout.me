@@ -13,6 +13,7 @@ import {
   TrashIcon,
   UploadIcon,
 } from "../components/icons";
+import { BrandMark } from "../components/BrandMark";
 import styles from "./DrivePage.module.css";
 
 function joinPath(dir: string, name: string): string {
@@ -278,7 +279,7 @@ export function DrivePage() {
       <header className={styles.topbar}>
         <div className={styles.topbarInner}>
           <div className={styles.brand}>
-            <span className={styles.brandDot} />
+            <BrandMark className={styles.brandMark} />
             <span className={styles.brandText}>Everything About Me</span>
           </div>
 
