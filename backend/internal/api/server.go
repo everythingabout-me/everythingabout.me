@@ -13,8 +13,8 @@ import (
 	"everythingabout.me/backend/internal/config"
 	"everythingabout.me/backend/internal/emailcode"
 	"everythingabout.me/backend/internal/httpx"
+	"everythingabout.me/backend/internal/jobs"
 	"everythingabout.me/backend/internal/mail"
-	"everythingabout.me/backend/internal/mover"
 	"everythingabout.me/backend/internal/nodes"
 	"everythingabout.me/backend/internal/paths"
 	"everythingabout.me/backend/internal/ratelimit"
@@ -30,7 +30,7 @@ type Server struct {
 	mail    *mail.Sender
 	storage storage.Storage
 	nodes   *nodes.Service
-	mover   *mover.Service
+	jobs    *jobs.Service
 	limiter *ratelimit.Limiter
 	web     http.Handler
 }
@@ -46,7 +46,7 @@ func New(cfg *config.Config, db *store.DB, objectStorage storage.Storage, web ht
 		mail:    mail.New(cfg),
 		storage: objectStorage,
 		nodes:   nodeService,
-		mover:   mover.New(db, objectStorage, nodeService),
+		jobs:    jobs.New(db, objectStorage, nodeService),
 		limiter: ratelimit.New(),
 		web:     web,
 	}
@@ -84,13 +84,21 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/fs/delete", s.wrap(s.handleDelete))
 
 	// 对外 API：路径就是功能本身，不带 /v1 或 /api 前缀。
+	mux.HandleFunc("GET /capabilities", s.api(s.handleAPICapabilities))
 	mux.HandleFunc("GET /list", s.api(s.handleAPIList))
 	mux.HandleFunc("GET /me", s.api(s.handleAPIMe))
 	mux.HandleFunc("GET /search", s.api(s.handleAPISearch))
+	mux.HandleFunc("POST /mkdir", s.api(s.handleAPIMkdir))
 	mux.HandleFunc("POST /move", s.api(s.handleAPIMove))
-	mux.HandleFunc("GET /move/{id}", s.api(s.handleAPIMoveJob))
-	mux.HandleFunc("POST /move/{id}/retry", s.api(s.handleAPIMoveRetry))
+	mux.HandleFunc("GET /move/{id}", s.api(s.jobGet(jobs.OpMove)))
+	mux.HandleFunc("POST /move/{id}/cancel", s.api(s.jobCancel(jobs.OpMove)))
+	mux.HandleFunc("POST /move/{id}/retry", s.api(s.jobRetry(jobs.OpMove)))
+	mux.HandleFunc("POST /copy", s.api(s.handleAPICopy))
+	mux.HandleFunc("GET /copy/{id}", s.api(s.jobGet(jobs.OpCopy)))
+	mux.HandleFunc("POST /copy/{id}/cancel", s.api(s.jobCancel(jobs.OpCopy)))
+	mux.HandleFunc("POST /copy/{id}/retry", s.api(s.jobRetry(jobs.OpCopy)))
 	mux.HandleFunc("POST /upload", s.api(s.handleAPIUpload))
+	mux.HandleFunc("GET /upload/{id}", s.api(s.handleAPIUploadStatus))
 	mux.HandleFunc("POST /upload/complete", s.api(s.handleAPIComplete))
 	mux.HandleFunc("GET /files/{path...}", s.api(s.handleAPIGetFile))
 	mux.HandleFunc("HEAD /files/{path...}", s.api(s.handleAPIHeadFile))
@@ -166,17 +174,25 @@ func (s *Server) limitAPI(w http.ResponseWriter, r *http.Request) error {
 // isAPIPath 判断是否是对外 API 的路径，用于 CORS 和预检。
 func isAPIPath(path string) bool {
 	switch path {
-	case "/list", "/me", "/move", "/search", "/files", "/upload", "/upload/complete":
+	case "/capabilities", "/list", "/me", "/mkdir", "/move", "/copy",
+		"/search", "/files", "/upload", "/upload/complete":
 		return true
 	}
-	return strings.HasPrefix(path, "/files/") || strings.HasPrefix(path, "/move/")
+	for _, prefix := range []string{"/files/", "/move/", "/copy/", "/upload/"} {
+		if strings.HasPrefix(path, prefix) {
+			return true
+		}
+	}
+	return false
 }
 
 func setCORSHeaders(w http.ResponseWriter) {
 	w.Header().Set("Access-Control-Allow-Origin", "*")
 	w.Header().Set("Access-Control-Allow-Methods", "GET, HEAD, PUT, DELETE, POST, OPTIONS")
-	w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type, If-Match, If-None-Match")
-	w.Header().Set("Access-Control-Expose-Headers", "ETag, Content-Length, Content-Type")
+	w.Header().Set("Access-Control-Allow-Headers",
+		"Authorization, Content-Type, If-Match, If-None-Match, Prefer")
+	w.Header().Set("Access-Control-Expose-Headers",
+		"ETag, Content-Length, Content-Type, Location, Retry-After, X-RateLimit-Limit")
 	w.Header().Set("Access-Control-Max-Age", "86400")
 }
 

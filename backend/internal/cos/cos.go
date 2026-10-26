@@ -354,3 +354,36 @@ func (c *Client) AbortMultipart(ctx context.Context, key, uploadID string) error
 	_, err := c.client.Object.AbortMultipartUpload(ctx, key, uploadID)
 	return err
 }
+
+// ListParts 列出已经传上来的分片。上传会话不存在（被 abort 或过期回收）
+// 时返回空列表，让接口能给出"重新发起"的提示而不是 500。
+func (c *Client) ListParts(ctx context.Context, key, uploadID string) ([]storage.PartInfo, error) {
+	var (
+		parts  []storage.PartInfo
+		marker string
+	)
+	for {
+		opt := &cos.ObjectListPartsOptions{MaxParts: "1000"}
+		if marker != "" {
+			opt.PartNumberMarker = marker
+		}
+		result, _, err := c.client.Object.ListParts(ctx, key, uploadID, opt)
+		if err != nil {
+			if cos.IsNotFoundError(err) {
+				return nil, nil
+			}
+			return nil, err
+		}
+		for _, part := range result.Parts {
+			parts = append(parts, storage.PartInfo{
+				PartNumber: part.PartNumber,
+				Size:       part.Size,
+				ETag:       strings.Trim(part.ETag, `"`),
+			})
+		}
+		if !result.IsTruncated || result.NextPartNumberMarker == "" {
+			return parts, nil
+		}
+		marker = result.NextPartNumberMarker
+	}
+}

@@ -219,22 +219,29 @@ curl -H "Authorization: Bearer eam_..." https://your-host/list?path=Apps/badmint
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
-| GET | `/list?path=&limit=&cursor=` | 列目录（keyset 分页） |
-| GET | `/files/<path>` | 302 到预签名下载地址；`?json=1` 拿地址、`?meta=1` 拿元信息 |
+| GET | `/capabilities` | 免鉴权：上限、能力、限流（客户端从这里读，别写死） |
+| GET | `/list?path=&limit=&cursor=` | 列目录（keyset 分页，带 `writable`） |
+| GET | `/files/<path>` | 302 到预签名下载地址；`?json=1` 拿地址 |
 | HEAD | `/files/<path>` | 元信息（长度 / 类型 / ETag / 修改时间） |
 | PUT | `/files/<path>` | 写文件（≤ 32 MiB；默认不覆盖，要覆盖加 `?overwrite=1`） |
 | DELETE | `/files/<path>` | 永久删除（目录需 `?recursive=1`） |
-| POST | `/move` | `{"from","to","overwrite"}` 移动 / 改名；目录返回 202 + 任务 ID |
-| GET | `/move/{id}` | 查询目录移动的进度 |
-| POST | `/move/{id}/retry` | 从失败的地方继续 |
+| POST | `/mkdir` | `{"path"}` 建目录（自动建父目录；已存在返回 200，幂等） |
+| POST | `/move` | `{"from","to","overwrite"}` 移动 / 改名 |
+| POST | `/copy` | `{"from","to","overwrite"}` 复制（文件和目录） |
+| GET | `/move/{id}` · `/copy/{id}` | 目录操作的进度（`POST .../cancel` · `.../retry`） |
 | GET | `/search?q=&path=&mime=&type=` | 搜文件名和路径 |
 | POST | `/upload` | 建上传会话，返回预签名 PUT 地址（超过阈值自动分片；覆盖需 `overwrite: true`） |
+| GET | `/upload/{id}` | 查到哪了（已收到的分片），断了接着传 |
 | POST | `/upload/complete` | 传完确认，校验大小后落索引 |
 | GET | `/me` | 当前账号、令牌权限、用量 |
 
 大文件流程：`POST /upload` 拿地址 → 直接 PUT 到 COS（不经过本服）→ `POST /upload/complete`。
 写操作会记进 `audit_log`；限流是每令牌 600 次/分钟。
 超过阈值的上传自动走分片（每片一个预签名 URL，`complete` 时合并）。
+
+长操作统一用标准的 `Prefer: respond-async[, wait=N]`：服务端做完就回 `200`，
+没做完回 `202` + `Location`（指向动作自己的 `/{id}`），客户端一行分支即可。
+对外没有“任务”这个概念，也没有对象 `id`——路径就是身份。
 
 令牌管理：
 

@@ -62,6 +62,18 @@ func (p *Principal) RequireRead(path string) error {
 	return nil
 }
 
+// CanWrite 判断这个身份能不能写某个目录——列目录时用来告诉客户端
+// "这个位置你可以落笔"，省得它靠撞 403 试错。
+func (p *Principal) CanWrite(path string) bool {
+	if p.FullAccess() {
+		return true
+	}
+	if !p.Token.CanWrite {
+		return false
+	}
+	return paths.IsInside(path, p.Token.Prefix)
+}
+
 func (p *Principal) RequireWrite(path string) error {
 	if p.FullAccess() {
 		return nil

@@ -1,12 +1,16 @@
 package api
 
 import (
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"everythingabout.me/backend/internal/auth"
+	"everythingabout.me/backend/internal/config"
+	"everythingabout.me/backend/internal/jobs"
 	"everythingabout.me/backend/internal/nodes"
 )
 
@@ -54,8 +58,12 @@ func TestFilesRoute(t *testing.T) {
 }
 
 func TestIsAPIPath(t *testing.T) {
-	yes := []string{"/list", "/me", "/move", "/files", "/files/a/b", "/upload", "/upload/complete"}
-	no := []string{"/", "/api/fs/list", "/filesx", "/login"}
+	yes := []string{
+		"/capabilities", "/list", "/me", "/mkdir", "/move", "/copy", "/search",
+		"/files", "/files/a/b", "/upload", "/upload/complete", "/upload/u_1",
+		"/move/m_1", "/copy/c_1", "/copy/c_1/cancel",
+	}
+	no := []string{"/", "/api/fs/list", "/filesx", "/login", "/capabilitiesx"}
 
 	for _, path := range yes {
 		if !isAPIPath(path) {
@@ -139,5 +147,151 @@ func TestScopePrefix(t *testing.T) {
 				t.Fatalf("got %q, want %q", got, tc.want)
 			}
 		})
+	}
+}
+
+func TestParsePrefer(t *testing.T) {
+	cases := []struct {
+		name      string
+		header    string
+		requested bool
+		wait      time.Duration
+	}{
+		{"没有头", "", false, 0},
+		{"只要求异步", "respond-async", true, 0},
+		{"平铺 wait", "respond-async, wait=10", true, 10 * time.Second},
+		{"分号 wait", "respond-async; wait=3", true, 3 * time.Second},
+		{"wait 0", "respond-async,wait=0", true, 0},
+		{"wait 超过上限", "respond-async, wait=999", true, maxAsyncWait},
+		{"wait 不是数字", "respond-async, wait=abc", true, 0},
+		{"别的偏好不认", "return=minimal", false, 0},
+		{"大小写不敏感", "Respond-Async, Wait=5", true, 5 * time.Second},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := parsePrefer(tc.header)
+			if got.Requested != tc.requested || got.Wait != tc.wait {
+				t.Fatalf("parsePrefer(%q) = %+v, want requested=%v wait=%v",
+					tc.header, got, tc.requested, tc.wait)
+			}
+		})
+	}
+}
+
+func TestPreferBudget(t *testing.T) {
+	if got := (preferAsync{}).Budget(); got != defaultSyncBudget {
+		t.Fatalf("没带 Prefer 应该等 %v，实际 %v", defaultSyncBudget, got)
+	}
+	if got := (preferAsync{Requested: true}).Budget(); got != 0 {
+		t.Fatalf("respond-async 不带 wait 应该立刻回 202，实际等 %v", got)
+	}
+	if got := (preferAsync{Requested: true, Wait: 5 * time.Second}).Budget(); got != 5*time.Second {
+		t.Fatalf("wait=5 应该等 5s，实际 %v", got)
+	}
+}
+
+func TestSourceAndTarget(t *testing.T) {
+	full := &auth.Principal{}
+	scoped := &auth.Principal{Token: &auth.Token{Prefix: "Apps/x", CanRead: true, CanWrite: true}}
+
+	cases := []struct {
+		name    string
+		p       *auth.Principal
+		from    string
+		to      string
+		wantErr bool
+	}{
+		{"正常", full, "a.md", "b/a.md", false},
+		{"根目录不行", full, "", "b", true},
+		{"路径没变", full, "a.md", "a.md", true},
+		{"目标在源里面", full, "Docs", "Docs/sub", true},
+		{"令牌外", scoped, "Apps/y/a.md", "Apps/y/b.md", true},
+		{"令牌内", scoped, "Apps/x/a.md", "Apps/x/b.md", false},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, _, err := sourceAndTarget(tc.from, tc.to, tc.p)
+			if tc.wantErr && err == nil {
+				t.Fatal("应该报错")
+			}
+			if !tc.wantErr && err != nil {
+				t.Fatalf("不该报错: %v", err)
+			}
+		})
+	}
+}
+
+func TestCapabilities(t *testing.T) {
+	s := &Server{cfg: &config.Config{
+		QuotaBytes:         1024,
+		MultipartThreshold: 5 << 30,
+		UploadPartSize:     64 << 20,
+	}}
+	recorder := httptest.NewRecorder()
+	if err := s.handleAPICapabilities(recorder, httptest.NewRequest(http.MethodGet, "/capabilities", nil)); err != nil {
+		t.Fatalf("不该报错: %v", err)
+	}
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d", recorder.Code)
+	}
+
+	var got map[string]any
+	if err := json.Unmarshal(recorder.Body.Bytes(), &got); err != nil {
+		t.Fatalf("响应不是 JSON: %v", err)
+	}
+	for _, key := range []string{
+		"maxPutBytes", "maxUploadBytes", "multipartThreshold", "partSize",
+		"maxParts", "list", "rateLimit", "quotaBytes",
+	} {
+		if _, ok := got[key]; !ok {
+			t.Errorf("缺少字段 %s", key)
+		}
+	}
+	if got["quotaBytes"].(float64) != 1024 {
+		t.Errorf("quotaBytes = %v", got["quotaBytes"])
+	}
+	if async, ok := got["async"].(map[string]any); !ok || async["value"] != "respond-async" {
+		t.Errorf("async 字段不对: %v", got["async"])
+	}
+}
+
+func TestWriteJobResult(t *testing.T) {
+	cases := []struct {
+		name     string
+		job      *jobs.Job
+		status   int
+		location bool
+	}{
+		{"还没做完", &jobs.Job{ID: "m_1", Status: "running"}, http.StatusAccepted, true},
+		{"做完了", &jobs.Job{ID: "m_1", Status: "done"}, http.StatusOK, true},
+		{"取消了", &jobs.Job{ID: "m_1", Status: "cancelled"}, http.StatusOK, true},
+		{"失败了", &jobs.Job{ID: "m_1", Status: "failed", Error: "boom"}, http.StatusInternalServerError, false},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			recorder := httptest.NewRecorder()
+			writeJobResult(recorder, "move", tc.job)
+
+			if recorder.Code != tc.status {
+				t.Fatalf("status = %d, want %d", recorder.Code, tc.status)
+			}
+			location := recorder.Header().Get("Location")
+			if tc.location && location != "/move/m_1" {
+				t.Fatalf("Location = %q", location)
+			}
+			if tc.status == http.StatusAccepted && recorder.Header().Get("Retry-After") == "" {
+				t.Fatal("202 应该带 Retry-After")
+			}
+		})
+	}
+}
+
+// Handler 里 ServeMux 的路由冲突会 panic，这个测试就是那道闸。
+func TestHandlerRegistersRoutes(t *testing.T) {
+	if handler := (&Server{}).Handler(); handler == nil {
+		t.Fatal("Handler 返回 nil")
 	}
 }

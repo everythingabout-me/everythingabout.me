@@ -14,6 +14,7 @@ import (
 
 	"everythingabout.me/backend/internal/auth"
 	"everythingabout.me/backend/internal/httpx"
+	"everythingabout.me/backend/internal/jobs"
 	"everythingabout.me/backend/internal/nodes"
 	"everythingabout.me/backend/internal/paths"
 	"everythingabout.me/backend/internal/storage"
@@ -211,9 +212,10 @@ func (s *Server) handleAPIList(w http.ResponseWriter, r *http.Request) error {
 	}
 
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{
-		"path":   path,
-		"items":  toAPINodes(items),
-		"cursor": next,
+		"path":     path,
+		"writable": p.CanWrite(path),
+		"items":    toAPINodes(items),
+		"cursor":   next,
 	})
 	return nil
 }
@@ -289,8 +291,8 @@ func (s *Server) handleAPIGetFile(w http.ResponseWriter, r *http.Request) error 
 
 	query := r.URL.Query()
 	if query.Get("meta") == "1" {
-		httpx.WriteJSON(w, http.StatusOK, toAPINode(node))
-		return nil
+		// 同一个东西两个入口是 API 最容易长出来的脂肪，已经砍掉。
+		return httpx.BadRequest("?meta=1 已移除，元信息请用 HEAD /files/<path>")
 	}
 
 	url, err := s.storage.GetURL(r.Context(), node.Key, storage.URLOptions{
@@ -404,6 +406,9 @@ func (s *Server) handleAPIPutFile(w http.ResponseWriter, r *http.Request) error 
 		mime = "application/octet-stream"
 	}
 
+	if err := s.assertParentDirs(r.Context(), p.User.ID, path); err != nil {
+		return err
+	}
 	if err := s.nodes.EnsureParents(r.Context(), path, p.User.ID); err != nil {
 		return err
 	}
@@ -505,32 +510,14 @@ func (s *Server) handleAPIMove(w http.ResponseWriter, r *http.Request) error {
 	if err != nil {
 		return err
 	}
-	from, err := paths.Normalize(body.From)
+	from, to, err := sourceAndTarget(body.From, body.To, p)
 	if err != nil {
 		return err
 	}
-	to, err := paths.Normalize(body.To)
-	if err != nil {
+	if err := s.assertParentDirs(r.Context(), p.User.ID, to); err != nil {
 		return err
 	}
-	if err := nodes.AssertNotRoot(from); err != nil {
-		return err
-	}
-	if err := nodes.AssertNotRoot(to); err != nil {
-		return err
-	}
-	if from == to {
-		return httpx.BadRequest("路径没有变化")
-	}
-	if err := p.RequireWrite(from); err != nil {
-		return err
-	}
-	if err := p.RequireWrite(to); err != nil {
-		return err
-	}
-	if paths.IsInside(to, from) {
-		return httpx.BadRequest("不能把文件移动到自己的子路径里")
-	}
+	pref := parsePrefer(r.Header.Get("Prefer"))
 
 	source, err := s.nodes.Live(r.Context(), from, p.User.ID)
 	if err != nil {
@@ -539,27 +526,24 @@ func (s *Server) handleAPIMove(w http.ResponseWriter, r *http.Request) error {
 	if source == nil {
 		return httpx.NotFound("源文件不存在")
 	}
-	if source.IsDir {
-		target, err := s.nodes.Live(r.Context(), to, p.User.ID)
-		if err != nil {
-			return err
-		}
-		if target != nil {
-			return httpx.Conflict("目标路径已存在")
-		}
-		job, err := s.mover.Start(r.Context(), p.User.ID, from, to)
-		if err != nil {
-			return err
-		}
-		s.recordAudit(r, p, "move", from, http.StatusAccepted, map[string]any{"to": to, "job": job.ID})
-		httpx.WriteJSON(w, http.StatusAccepted, job)
-		return nil
-	}
-
 	target, err := s.nodes.Live(r.Context(), to, p.User.ID)
 	if err != nil {
 		return err
 	}
+
+	if source.IsDir {
+		if target != nil {
+			return httpx.Conflict("目标路径已存在")
+		}
+		job, err := s.runJob(r, jobs.OpMove, p.User.ID, from, to, pref)
+		if err != nil {
+			return err
+		}
+		s.recordAudit(r, p, "move", from, auditStatus(job), map[string]any{"to": to, "job": job.ID})
+		writeJobResult(w, "move", job)
+		return nil
+	}
+
 	if target != nil {
 		if !body.Overwrite {
 			return httpx.Conflict("目标路径已存在")

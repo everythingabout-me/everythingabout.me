@@ -27,6 +27,13 @@ type MultipartPart struct {
 	ETag       string
 }
 
+// PartInfo 描述服务端已经收到的分片，用来让客户端断了之后接着传。
+type PartInfo struct {
+	PartNumber int    `json:"partNumber"`
+	Size       int64  `json:"size"`
+	ETag       string `json:"etag"`
+}
+
 type URLOptions struct {
 	// ExpiresSeconds 默认 900 秒。
 	ExpiresSeconds int
@@ -68,6 +75,8 @@ type Storage interface {
 	MultipartPartURL(ctx context.Context, key, uploadID string, partNumber, expiresSeconds int) (string, error)
 	CompleteMultipart(ctx context.Context, key, uploadID string, parts []MultipartPart) (*ObjectInfo, error)
 	AbortMultipart(ctx context.Context, key, uploadID string) error
+	// ListParts 列出已经传上来的分片（续传用）。上传不存在时返回空列表。
+	ListParts(ctx context.Context, key, uploadID string) ([]PartInfo, error)
 	// TemporaryCredentials 生成前端直传所需的临时凭证。
 	TemporaryCredentials(ctx context.Context, key string, expiresSeconds int) (*Credentials, error)
 }

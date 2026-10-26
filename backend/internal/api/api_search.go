@@ -70,8 +70,9 @@ func (s *Server) handleAPISearch(w http.ResponseWriter, r *http.Request) error {
 	}
 
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{
-		"items":  toAPINodes(items),
-		"cursor": next,
+		"writable": p.CanWrite(scoped),
+		"items":    toAPINodes(items),
+		"cursor":   next,
 	})
 	return nil
 }

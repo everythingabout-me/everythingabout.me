@@ -106,6 +106,9 @@ func (s *Server) handleAPIUpload(w http.ResponseWriter, r *http.Request) error {
 	if err := p.RequireWrite(path); err != nil {
 		return err
 	}
+	if err := s.assertParentDirs(r.Context(), p.User.ID, path); err != nil {
+		return err
+	}
 	if body.Size <= 0 {
 		return httpx.BadRequest("文件大小不合法")
 	}
@@ -453,4 +456,58 @@ func (s *Server) loadUploadSession(ctx context.Context, id string) (*uploadSessi
 	session.Completed = completedAt != nil
 	session.Cancelled = cancelledAt != nil
 	return &session, nil
+}
+
+// ---- GET /upload/{id} ----
+
+// handleAPIUploadStatus 让客户端断了之后先问"传到哪了"，再补剩下的分片。
+// 服务端不记分片，直接问 COS（ListParts）。
+func (s *Server) handleAPIUploadStatus(w http.ResponseWriter, r *http.Request) error {
+	p, err := s.principal(r)
+	if err != nil {
+		return err
+	}
+	session, err := s.loadUploadSession(r.Context(), r.PathValue("id"))
+	if err != nil {
+		return err
+	}
+	// 别人的会话也返回 404，不泄露存在性。
+	if session == nil || session.UserID != p.User.ID {
+		return httpx.NotFound("上传会话不存在")
+	}
+	if err := p.RequireWrite(session.Path); err != nil {
+		return err
+	}
+
+	status := "pending"
+	switch {
+	case session.Completed:
+		status = "completed"
+	case session.Cancelled:
+		status = "cancelled"
+	case time.Now().After(session.ExpiresAt):
+		status = "expired"
+	}
+
+	received := make([]storage.PartInfo, 0, 8)
+	if status == "pending" && session.ProviderUploadID != "" {
+		parts, err := s.storage.ListParts(
+			r.Context(), paths.KeyFor(session.Path, p.User.ID), session.ProviderUploadID)
+		if err != nil {
+			return err
+		}
+		received = append(received, parts...)
+	}
+
+	httpx.WriteJSON(w, http.StatusOK, map[string]any{
+		"uploadId":  session.ID,
+		"path":      session.Path,
+		"mode":      sessionMode(session),
+		"size":      session.Size,
+		"partSize":  session.PartSize,
+		"expiresAt": session.ExpiresAt.UTC().Format(isoFormat),
+		"status":    status,
+		"received":  received,
+	})
+	return nil
 }
