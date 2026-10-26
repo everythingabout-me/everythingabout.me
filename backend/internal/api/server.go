@@ -2,6 +2,7 @@
 package api
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -20,36 +21,44 @@ import (
 	"everythingabout.me/backend/internal/ratelimit"
 	"everythingabout.me/backend/internal/storage"
 	"everythingabout.me/backend/internal/store"
+	"everythingabout.me/backend/internal/timeline"
 )
 
 type Server struct {
-	cfg     *config.Config
-	db      *store.DB
-	auth    *auth.Service
-	codes   *emailcode.Service
-	mail    *mail.Sender
-	storage storage.Storage
-	nodes   *nodes.Service
-	jobs    *jobs.Service
-	limiter *ratelimit.Limiter
-	web     http.Handler
+	cfg      *config.Config
+	db       *store.DB
+	auth     *auth.Service
+	codes    *emailcode.Service
+	mail     *mail.Sender
+	storage  storage.Storage
+	nodes    *nodes.Service
+	jobs     *jobs.Service
+	timeline *timeline.Service
+	limiter  *ratelimit.Limiter
+	web      http.Handler
 }
 
 // New 组装依赖。web 是前端构建产物（SPA）的处理器，可以是 nil。
 func New(cfg *config.Config, db *store.DB, objectStorage storage.Storage, web http.Handler) *Server {
 	nodeService := nodes.New(db, objectStorage)
 	return &Server{
-		cfg:     cfg,
-		db:      db,
-		auth:    auth.New(db, cfg),
-		codes:   emailcode.New(db),
-		mail:    mail.New(cfg),
-		storage: objectStorage,
-		nodes:   nodeService,
-		jobs:    jobs.New(db, objectStorage, nodeService),
-		limiter: ratelimit.New(),
-		web:     web,
+		cfg:      cfg,
+		db:       db,
+		auth:     auth.New(db, cfg),
+		codes:    emailcode.New(db),
+		mail:     mail.New(cfg),
+		storage:  objectStorage,
+		nodes:    nodeService,
+		jobs:     jobs.New(db, objectStorage, nodeService),
+		timeline: timeline.New(db, objectStorage, cfg.Timeline),
+		limiter:  ratelimit.New(),
+		web:      web,
 	}
+}
+
+// StartTimeline 启动后台整理器。放在 server 启动之后调用，避免拖慢监听。
+func (s *Server) StartTimeline(ctx context.Context) {
+	s.timeline.Start(ctx)
 }
 
 type handlerFunc func(http.ResponseWriter, *http.Request) error
@@ -73,6 +82,10 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/auth/email/code", s.wrap(s.handleNewEmailCode))
 	mux.HandleFunc("POST /api/auth/email", s.wrap(s.handleChangeEmail))
 	mux.HandleFunc("GET /api/account", s.wrap(s.handleAccount))
+
+	mux.HandleFunc("GET /api/timeline", s.wrap(s.handleTimeline))
+	mux.HandleFunc("GET /api/timeline/status", s.wrap(s.handleTimelineStatus))
+	mux.HandleFunc("POST /api/timeline/rebuild", s.wrap(s.handleTimelineRebuild))
 
 	mux.HandleFunc("GET /api/fs/list", s.wrap(s.handleList))
 	mux.HandleFunc("GET /api/fs/search", s.wrap(s.handleSearch))

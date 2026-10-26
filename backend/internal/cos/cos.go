@@ -75,6 +75,14 @@ func (c *Client) Head(ctx context.Context, key string) (*storage.ObjectInfo, err
 	return info, nil
 }
 
+func (c *Client) Get(ctx context.Context, key string) (io.ReadCloser, error) {
+	resp, err := c.client.Object.Get(ctx, key, nil)
+	if err != nil {
+		return nil, err
+	}
+	return resp.Body, nil
+}
+
 func (c *Client) Copy(ctx context.Context, sourceKey, targetKey string) error {
 	source := fmt.Sprintf("%s.cos.%s.myqcloud.com/%s", c.bucket, c.region, sourceKey)
 	_, _, err := c.client.Object.Copy(ctx, targetKey, source, nil)
@@ -194,6 +202,11 @@ func (c *Client) GetURL(ctx context.Context, key string, opts storage.URLOptions
 	}
 	if opts.ContentType != "" {
 		query.Set("response-content-type", opts.ContentType)
+	}
+	// 数据万象的处理参数必须和签名一起带上，否则 COS 会认为签名不匹配。
+	// 例如 Process = "imageMogr2/thumbnail/640x>"。
+	if opts.Process != "" {
+		query.Set(opts.Process, "")
 	}
 
 	var options *cos.PresignedURLOptions

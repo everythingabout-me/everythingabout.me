@@ -33,8 +33,19 @@ alter table fs_jobs add column if not exists op text not null default 'move';
 alter table fs_jobs add column if not exists cancel_requested_at timestamptz;
 
 -- 索引跟着表改名，避免每次迁移都多建一套。
-alter index if exists move_jobs_user_time rename to fs_jobs_user_time;
-alter index if exists move_jobs_active rename to fs_jobs_active;
+-- 索引跟着表改名，避免每次迁移都多建一套。
+-- 008 每次都会把 move_jobs 重新建出来，所以改名要判断目标索引是否已存在。
+do $$
+begin
+  if to_regclass('public.move_jobs_user_time') is not null
+     and to_regclass('public.fs_jobs_user_time') is null then
+    alter index move_jobs_user_time rename to fs_jobs_user_time;
+  end if;
+  if to_regclass('public.move_jobs_active') is not null
+     and to_regclass('public.fs_jobs_active') is null then
+    alter index move_jobs_active rename to fs_jobs_active;
+  end if;
+end $$;
 
 create index if not exists fs_jobs_user_time on fs_jobs (user_id, created_at desc);
 create index if not exists fs_jobs_active on fs_jobs (status) where status in ('pending', 'running');
@@ -44,8 +55,9 @@ create index if not exists fs_jobs_active on fs_jobs (status) where status in ('
 do $$
 begin
   if to_regclass('public.fs_jobs') is not null
-     and to_regclass('public.move_jobs') is not null
-     and not exists (select 1 from move_jobs limit 1) then
-    drop table move_jobs;
+     and to_regclass('public.move_jobs') is not null then
+    if not exists (select 1 from move_jobs limit 1) then
+      drop table move_jobs;
+    end if;
   end if;
 end $$;

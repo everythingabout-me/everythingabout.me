@@ -40,6 +40,9 @@ type URLOptions struct {
 	// DownloadName 填了会通过 response-content-disposition 指定文件名。
 	DownloadName string
 	ContentType  string
+	// Process 是对象存储侧的处理参数（腾讯云数据万象），会一起参与签名。
+	// 例如 "imageMogr2/thumbnail/640x>" 生成等比缩略图，不经过本服务。
+	Process string
 }
 
 // CredentialsJSON 直接返回给浏览器，字段名和 COS JS SDK 期望的一致。
@@ -53,6 +56,8 @@ type Credentials struct {
 
 type Storage interface {
 	Head(ctx context.Context, key string) (*ObjectInfo, error)
+	// Get 读取对象内容。只给受控的小文件用（数据文件解析），大文件别走这里。
+	Get(ctx context.Context, key string) (io.ReadCloser, error)
 	// Copy 是服务端复制，不经过本地带宽。
 	Copy(ctx context.Context, sourceKey, targetKey string) error
 	Remove(ctx context.Context, key string) error

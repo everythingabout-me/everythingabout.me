@@ -23,8 +23,21 @@ create table if not exists nodes (
 
 -- 路径唯一性由 002_users.sql 按用户建立；这里不建全局唯一索引，
 -- 否则多用户出现同名路径后重跑迁移会失败。
-create index if not exists nodes_parent_live
-  on nodes (parent) where deleted_at is null;
+--
+-- 010 已经把 deleted_at 删掉了。为了这套 SQL 可以重复执行（`make migrate` 每次都
+-- 从头跑），依赖 deleted_at 的索引要按列是否存在来决定建不建。
+do $$
+begin
+  if exists (
+    select 1 from information_schema.columns
+     where table_schema = 'public' and table_name = 'nodes' and column_name = 'deleted_at'
+  ) then
+    create index if not exists nodes_parent_live
+      on nodes (parent) where deleted_at is null;
+    create index if not exists nodes_deleted
+      on nodes (deleted_at) where deleted_at is not null;
+  end if;
+end $$;
 
 -- 文件名模糊搜索
 create index if not exists nodes_name_trgm
@@ -33,9 +46,6 @@ create index if not exists nodes_name_trgm
 -- 按标签 / 属性过滤
 create index if not exists nodes_meta_gin
   on nodes using gin (meta jsonb_path_ops);
-
-create index if not exists nodes_deleted
-  on nodes (deleted_at) where deleted_at is not null;
 
 create index if not exists nodes_size on nodes (size);
 

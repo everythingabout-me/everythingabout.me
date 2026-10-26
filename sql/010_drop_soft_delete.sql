@@ -4,7 +4,16 @@
 --   eam purge --days 0
 -- 把对象也删掉。这里只删索引行；对象若留在桶里，reconcile 会把它扫回来。
 
-delete from nodes where deleted_at is not null;
+-- 重跑迁移时 deleted_at 可能已经不在了，先判断再删。
+do $$
+begin
+  if exists (
+    select 1 from information_schema.columns
+     where table_schema = 'public' and table_name = 'nodes' and column_name = 'deleted_at'
+  ) then
+    delete from nodes where deleted_at is not null;
+  end if;
+end $$;
 
 -- 依赖 deleted_at 的索引先拆掉
 drop index if exists nodes_parent_live;

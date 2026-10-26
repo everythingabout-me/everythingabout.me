@@ -41,14 +41,24 @@ alter table nodes
 
 -- 路径唯一性从"全局唯一"改成"每个用户各自唯一"
 drop index if exists nodes_path_live_uniq;
-create unique index if not exists nodes_owner_path_live_uniq
-  on nodes (owner_id, path) where deleted_at is null;
 
--- 还没认领的旧数据（owner_id 为空）保持和改造前一样的全局路径唯一
-create unique index if not exists nodes_legacy_path_uniq
-  on nodes (path) where deleted_at is null and owner_id is null;
+-- deleted_at 在 010 里被删掉了；重跑迁移时按列是否存在决定建不建这些索引。
+do $$
+begin
+  if exists (
+    select 1 from information_schema.columns
+     where table_schema = 'public' and table_name = 'nodes' and column_name = 'deleted_at'
+  ) then
+    create unique index if not exists nodes_owner_path_live_uniq
+      on nodes (owner_id, path) where deleted_at is null;
 
-create index if not exists nodes_owner_parent_live
-  on nodes (owner_id, parent) where deleted_at is null;
+    -- 还没认领的旧数据（owner_id 为空）保持和改造前一样的全局路径唯一
+    create unique index if not exists nodes_legacy_path_uniq
+      on nodes (path) where deleted_at is null and owner_id is null;
+
+    create index if not exists nodes_owner_parent_live
+      on nodes (owner_id, parent) where deleted_at is null;
+  end if;
+end $$;
 
 create index if not exists nodes_owner on nodes (owner_id);

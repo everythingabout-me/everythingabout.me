@@ -349,14 +349,21 @@ func (s *Service) copyOne(ctx context.Context, userID string, row *nodes.Row, ta
 	if len(row.Meta) > 0 {
 		_ = json.Unmarshal(row.Meta, &meta)
 	}
+	var modified *time.Time
+	if row.SourceModifiedAt != nil {
+		if parsed, err := time.Parse(time.RFC3339, *row.SourceModifiedAt); err == nil {
+			modified = &parsed
+		}
+	}
 	_, err = s.nodes.UpsertFile(ctx, nodes.UpsertInput{
-		OwnerID:      userID,
-		Path:         target,
-		Size:         row.Size,
-		Mime:         row.Mime,
-		ETag:         row.ETag,
-		StorageClass: row.StorageClass,
-		Meta:         meta,
+		OwnerID:          userID,
+		Path:             target,
+		Size:             row.Size,
+		Mime:             row.Mime,
+		ETag:             row.ETag,
+		StorageClass:     row.StorageClass,
+		SourceModifiedAt: modified,
+		Meta:             meta,
 	})
 	return err
 }

@@ -31,6 +31,18 @@ type Config struct {
 	UploadPartSize int64
 	COS            COS
 	SES            SES
+	Timeline       Timeline
+}
+
+// Timeline 是内容流后台整理器的配置。
+type Timeline struct {
+	Enabled bool
+	// Workers 是并行处理文件/月份的数量。纯元数据整理很轻，2 个就够。
+	Workers int
+	// MonthBudget 是一个月最多占多少"展示单位"（1 单位 ≈ 72px）。
+	MonthBudget int
+	// Timezone 决定"哪一天"怎么算。照片拍到半夜、跨时区时以这个时区为准。
+	Timezone string
 }
 
 type COS struct {
@@ -107,6 +119,12 @@ func Load() (*Config, error) {
 			TemplateVar:      envOr("SES_TEMPLATE_VAR", "code"),
 			Subject:          envOr("SES_SUBJECT", "Everything About Me 验证码"),
 			ReplyTo:          os.Getenv("SES_REPLY_TO_ADDRESS"),
+		},
+		Timeline: Timeline{
+			Enabled:     os.Getenv("TIMELINE_ENABLED") != "false",
+			Workers:     positiveInt("TIMELINE_WORKERS", 2),
+			MonthBudget: positiveInt("TIMELINE_MONTH_BUDGET", 24),
+			Timezone:    envOr("TIMELINE_TZ", "Asia/Shanghai"),
 		},
 	}
 

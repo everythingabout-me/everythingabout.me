@@ -426,18 +426,25 @@ func (s *Server) handleAPIPutFile(w http.ResponseWriter, r *http.Request) error 
 		storageClass = &info.StorageClass
 	}
 
+	var modified *time.Time
+	if !info.LastModified.IsZero() {
+		modified = &info.LastModified
+	}
+
 	node, err := s.nodes.UpsertFile(r.Context(), nodes.UpsertInput{
-		OwnerID:      p.User.ID,
-		Path:         path,
-		Size:         info.Size,
-		Mime:         &mime,
-		ETag:         etag,
-		StorageClass: storageClass,
-		Meta:         map[string]any{"mime": mime},
+		OwnerID:          p.User.ID,
+		Path:             path,
+		Size:             info.Size,
+		Mime:             &mime,
+		ETag:             etag,
+		StorageClass:     storageClass,
+		SourceModifiedAt: modified,
+		Meta:             map[string]any{"mime": mime},
 	})
 	if err != nil {
 		return err
 	}
+	s.timeline.Notify(p.User.ID)
 
 	status := http.StatusOK
 	if existing == nil {
@@ -485,6 +492,7 @@ func (s *Server) handleAPIDeleteFile(w http.ResponseWriter, r *http.Request) err
 	if count == 0 {
 		return httpx.NotFound("没有可删除的文件")
 	}
+	s.timeline.Notify(p.User.ID)
 	s.recordAudit(r, p, "delete", path, http.StatusNoContent, map[string]any{
 		"count":     count,
 		"recursive": r.URL.Query().Get("recursive") == "1",

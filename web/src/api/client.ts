@@ -48,6 +48,69 @@ export interface SearchResult {
 }
 
 
+export interface StreamThumb {
+  path: string;
+  url?: string;
+  name?: string;
+  video?: boolean;
+  duration_ms?: number;
+}
+
+export interface StreamSeries {
+  metric: string;
+  label: string;
+  unit?: string;
+  days: number[];
+  values: number[];
+  latest: number;
+  min: number;
+  max: number;
+}
+
+export interface StreamItem {
+  type: "moment" | "gap" | "ambient";
+  id?: string;
+  layout?: "single" | "mosaic" | "hero" | "series";
+  title?: string;
+  subtitle?: string;
+  folder?: string;
+  starts_at?: string;
+  ends_at?: string;
+  item_count?: number;
+  more?: number;
+  cover?: StreamThumb;
+  grid?: StreamThumb[];
+  score?: number;
+  label?: string;
+  from?: string;
+  to?: string;
+  series?: StreamSeries[];
+}
+
+export interface StreamPeriod {
+  month: string;
+  file_count: number;
+  moment_count: number;
+  coverage: "ready" | "indexing" | "empty";
+  generated_at?: string;
+  items: StreamItem[];
+}
+
+export interface StreamStatus {
+  enabled: boolean;
+  pending: number;
+  indexed_files: number;
+  earliest_month?: string;
+  latest_month?: string;
+  last_generated?: string;
+}
+
+export interface StreamFeed {
+  periods: StreamPeriod[];
+  next?: string;
+  status: StreamStatus;
+}
+
 export interface AccountSummary {
   user: AuthUser;
   legacyCount: number;
@@ -170,8 +233,8 @@ export const api = {
     return post<UploadSignResult>("/api/fs/upload/sign", { path, size, overwrite });
   },
 
-  async confirmUpload(path: string, mime?: string, sha256?: string): Promise<void> {
-    await post("/api/fs/upload/confirm", { path, mime, sha256 });
+  async confirmUpload(path: string, mime?: string, sha256?: string, modifiedAt?: number): Promise<void> {
+    await post("/api/fs/upload/confirm", { path, mime, sha256, modifiedAt });
   },
 
   async mkdir(path: string): Promise<void> {
@@ -184,6 +247,17 @@ export const api = {
 
   async deletePath(path: string): Promise<void> {
     await post("/api/fs/delete", { path });
+  },
+
+  stream(before?: string, months = 2): Promise<StreamFeed> {
+    const params = new URLSearchParams();
+    if (before) params.set("before", before);
+    params.set("months", String(months));
+    return request<StreamFeed>(`/api/timeline?${params.toString()}`);
+  },
+
+  streamStatus(): Promise<StreamStatus> {
+    return request<StreamStatus>("/api/timeline/status");
   },
 
   /** 302 到 COS 预签名地址；直接当 <a href> 用。 */

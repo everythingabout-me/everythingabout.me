@@ -206,7 +206,7 @@ export function DrivePage() {
           );
         });
 
-        await api.confirmUpload(target, file.type || undefined);
+        await api.confirmUpload(target, file.type || undefined, undefined, file.lastModified);
         done += 1;
       } catch (error) {
         showToast(
@@ -278,10 +278,10 @@ export function DrivePage() {
       <title>Everything About Me</title>
       <header className={styles.topbar}>
         <div className={styles.topbarInner}>
-          <div className={styles.brand}>
+          <Link className={styles.brand} to="/" title="回到首页">
             <BrandMark className={styles.brandMark} />
             <span className={styles.brandText}>Everything About Me</span>
-          </div>
+          </Link>
 
           <div className={styles.topSpacer} />
 

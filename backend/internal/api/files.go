@@ -4,6 +4,7 @@ import (
 	"math"
 	"net/http"
 	"strings"
+	"time"
 
 	"everythingabout.me/backend/internal/httpx"
 	"everythingabout.me/backend/internal/nodes"
@@ -32,6 +33,9 @@ type confirmBody struct {
 	Path   string `json:"path"`
 	Mime   string `json:"mime"`
 	SHA256 string `json:"sha256"`
+	// ModifiedAt 是浏览器端 File.lastModified（毫秒）。上传旧照片时它比
+	// 对象存储的 LastModified（= 今天）更接近真实时间。
+	ModifiedAt int64 `json:"modifiedAt"`
 }
 
 type renameBody struct {
@@ -216,18 +220,31 @@ func (s *Server) handleUploadConfirm(w http.ResponseWriter, r *http.Request) err
 		storageClass = &info.StorageClass
 	}
 
+	var modified *time.Time
+	if body.ModifiedAt > 0 {
+		candidate := time.UnixMilli(body.ModifiedAt)
+		if candidate.Year() >= 1990 && candidate.Before(time.Now().AddDate(0, 0, 2)) {
+			modified = &candidate
+		}
+	}
+	if modified == nil && !info.LastModified.IsZero() {
+		modified = &info.LastModified
+	}
+
 	node, err := s.nodes.UpsertFile(r.Context(), nodes.UpsertInput{
-		OwnerID:      user.ID,
-		Path:         path,
-		Size:         info.Size,
-		Mime:         mime,
-		ETag:         etag,
-		StorageClass: storageClass,
-		Meta:         meta,
+		OwnerID:          user.ID,
+		Path:             path,
+		Size:             info.Size,
+		Mime:             mime,
+		ETag:             etag,
+		StorageClass:     storageClass,
+		SourceModifiedAt: modified,
+		Meta:             meta,
 	})
 	if err != nil {
 		return err
 	}
+	s.timeline.Notify(user.ID)
 	return s.ok(w, map[string]any{"node": node})
 }
 
@@ -382,6 +399,7 @@ func (s *Server) handleRename(w http.ResponseWriter, r *http.Request) error {
 	if err != nil {
 		return err
 	}
+	s.timeline.Notify(user.ID)
 	return s.ok(w, map[string]any{"node": node})
 }
 
@@ -413,6 +431,7 @@ func (s *Server) handleDelete(w http.ResponseWriter, r *http.Request) error {
 	if count == 0 {
 		return httpx.NotFound("没有可删除的文件")
 	}
+	s.timeline.Notify(user.ID)
 	return s.ok(w, map[string]any{"deleted": count})
 }
 

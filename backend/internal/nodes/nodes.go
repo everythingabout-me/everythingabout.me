@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"strings"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 
@@ -17,16 +18,17 @@ import (
 
 // Node 是返回给前端的行形状（和改造前一致）。
 type Node struct {
-	ID        string          `json:"id"`
-	Path      string          `json:"path"`
-	Parent    string          `json:"parent"`
-	Name      string          `json:"name"`
-	IsDir     bool            `json:"is_dir"`
-	Size      int64           `json:"size"`
-	Mime      *string         `json:"mime"`
-	CreatedAt string          `json:"created_at"`
-	UpdatedAt string          `json:"updated_at"`
-	Meta      json.RawMessage `json:"meta"`
+	ID               string          `json:"id"`
+	Path             string          `json:"path"`
+	Parent           string          `json:"parent"`
+	Name             string          `json:"name"`
+	IsDir            bool            `json:"is_dir"`
+	Size             int64           `json:"size"`
+	Mime             *string         `json:"mime"`
+	SourceModifiedAt *string         `json:"source_modified_at"`
+	CreatedAt        string          `json:"created_at"`
+	UpdatedAt        string          `json:"updated_at"`
+	Meta             json.RawMessage `json:"meta"`
 }
 
 // Row 额外带上对象 key，只给服务端用。
@@ -40,6 +42,8 @@ type Row struct {
 const nodeColumns = `id::text, key, path, parent, name, is_dir, size, mime, etag, storage_class,
 	to_char(created_at at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
 	to_char(updated_at at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
+	case when source_modified_at is null then null
+	     else to_char(source_modified_at at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') end,
 	meta`
 
 type Service struct {
@@ -58,7 +62,8 @@ func scanNode(row pgx.Row) (*Row, error) {
 	)
 	err := row.Scan(
 		&node.ID, &node.Key, &node.Path, &node.Parent, &node.Name, &node.IsDir, &node.Size,
-		&node.Mime, &node.ETag, &node.StorageClass, &node.CreatedAt, &node.UpdatedAt, &meta,
+		&node.Mime, &node.ETag, &node.StorageClass, &node.CreatedAt, &node.UpdatedAt,
+		&node.SourceModifiedAt, &meta,
 	)
 	if err != nil {
 		if err == pgx.ErrNoRows {
@@ -155,7 +160,10 @@ type UpsertInput struct {
 	Mime         *string
 	ETag         *string
 	StorageClass *string
-	Meta         map[string]any
+	// SourceModifiedAt 是对象存储侧的最后修改时间。它和 updated_at 不是一回事：
+	// updated_at 是"写进索引"的时间，reconcile 灌历史数据时全是今天。
+	SourceModifiedAt *time.Time
+	Meta             map[string]any
 }
 
 func (s *Service) UpsertFile(ctx context.Context, input UpsertInput) (*Row, error) {
@@ -169,8 +177,9 @@ func (s *Service) UpsertFile(ctx context.Context, input UpsertInput) (*Row, erro
 	}
 
 	return scanNode(s.db.Pool().QueryRow(ctx,
-		`insert into nodes (owner_id, key, path, parent, name, is_dir, size, mime, etag, storage_class, meta)
-		 values ($1::uuid, $2, $3, $4, $5, false, $6, $7, $8, $9, $10::jsonb)
+		`insert into nodes (owner_id, key, path, parent, name, is_dir, size, mime, etag, storage_class,
+		                    source_modified_at, meta)
+		 values ($1::uuid, $2, $3, $4, $5, false, $6, $7, $8, $9, $10, $11::jsonb)
 		 on conflict (owner_id, path)
 		 do update set
 		   key = excluded.key,
@@ -178,6 +187,7 @@ func (s *Service) UpsertFile(ctx context.Context, input UpsertInput) (*Row, erro
 		   mime = excluded.mime,
 		   etag = excluded.etag,
 		   storage_class = excluded.storage_class,
+		   source_modified_at = coalesce(excluded.source_modified_at, nodes.source_modified_at),
 		   updated_at = now(),
 		   meta = nodes.meta || excluded.meta
 		 returning `+nodeColumns,
@@ -190,6 +200,7 @@ func (s *Service) UpsertFile(ctx context.Context, input UpsertInput) (*Row, erro
 		input.Mime,
 		input.ETag,
 		input.StorageClass,
+		input.SourceModifiedAt,
 		string(metaJSON),
 	))
 }

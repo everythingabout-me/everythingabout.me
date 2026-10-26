@@ -3,6 +3,7 @@ import { ApiError, api, type AccountSummary, type AuthUser } from "./api/client"
 import { AuthLayout } from "./layouts/AuthLayout";
 import { AccountPage } from "./pages/AccountPage";
 import { DrivePage } from "./pages/DrivePage";
+import { StreamPage } from "./pages/StreamPage";
 import { LoginPage } from "./pages/LoginPage";
 import { LoadingFallback } from "./pages/LoadingFallback";
 import { RouteError } from "./pages/RouteError";
@@ -16,6 +17,13 @@ async function requireUser(): Promise<AuthUser> {
 export const router = createBrowserRouter([
   {
     path: "/",
+    element: <StreamPage />,
+    loader: async () => ({ user: await requireUser() }),
+    errorElement: <RouteError />,
+    hydrateFallbackElement: <LoadingFallback />,
+  },
+  {
+    path: "/drive",
     element: <DrivePage />,
     loader: async () => ({ user: await requireUser() }),
     errorElement: <RouteError />,

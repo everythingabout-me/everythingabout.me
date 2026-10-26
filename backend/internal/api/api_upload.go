@@ -305,18 +305,25 @@ func (s *Server) handleAPIComplete(w http.ResponseWriter, r *http.Request) error
 		mime = "application/octet-stream"
 	}
 
+	var modified *time.Time
+	if !info.LastModified.IsZero() {
+		modified = &info.LastModified
+	}
+
 	node, err := s.nodes.UpsertFile(r.Context(), nodes.UpsertInput{
-		OwnerID:      p.User.ID,
-		Path:         session.Path,
-		Size:         info.Size,
-		Mime:         &mime,
-		ETag:         etag,
-		StorageClass: storageClass,
-		Meta:         map[string]any{"mime": mime},
+		OwnerID:          p.User.ID,
+		Path:             session.Path,
+		Size:             info.Size,
+		Mime:             &mime,
+		ETag:             etag,
+		StorageClass:     storageClass,
+		SourceModifiedAt: modified,
+		Meta:             map[string]any{"mime": mime},
 	})
 	if err != nil {
 		return err
 	}
+	s.timeline.Notify(p.User.ID)
 
 	if _, err := s.db.Pool().Exec(r.Context(),
 		`update upload_sessions set completed_at = now() where id = $1`, session.ID); err != nil {

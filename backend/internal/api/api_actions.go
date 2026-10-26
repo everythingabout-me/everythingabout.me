@@ -280,18 +280,27 @@ func (s *Server) handleAPICopy(w http.ResponseWriter, r *http.Request) error {
 		return err
 	}
 
+	var modified *time.Time
+	if source.SourceModifiedAt != nil {
+		if parsed, err := time.Parse(time.RFC3339, *source.SourceModifiedAt); err == nil {
+			modified = &parsed
+		}
+	}
+
 	node, err := s.nodes.UpsertFile(r.Context(), nodes.UpsertInput{
-		OwnerID:      p.User.ID,
-		Path:         to,
-		Size:         source.Size,
-		Mime:         source.Mime,
-		ETag:         source.ETag,
-		StorageClass: source.StorageClass,
-		Meta:         sourceMeta(source),
+		OwnerID:          p.User.ID,
+		Path:             to,
+		Size:             source.Size,
+		Mime:             source.Mime,
+		ETag:             source.ETag,
+		StorageClass:     source.StorageClass,
+		SourceModifiedAt: modified,
+		Meta:             sourceMeta(source),
 	})
 	if err != nil {
 		return err
 	}
+	s.timeline.Notify(p.User.ID)
 
 	status := http.StatusCreated
 	if target != nil {

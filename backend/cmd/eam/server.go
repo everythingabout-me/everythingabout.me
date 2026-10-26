@@ -44,16 +44,18 @@ func runServer(args []string) error {
 		return fmt.Errorf("初始化 COS 失败: %w", err)
 	}
 
-	handler := api.New(cfg, db, objectStorage, webui.New(cfg.WebDir)).Handler()
+	apiServer := api.New(cfg, db, objectStorage, webui.New(cfg.WebDir))
 	server := &http.Server{
 		Addr:              cfg.Addr,
-		Handler:           handler,
+		Handler:           apiServer.Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
 		IdleTimeout:       120 * time.Second,
 	}
 
 	shutdownSignal, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+
+	apiServer.StartTimeline(shutdownSignal)
 
 	go func() {
 		<-shutdownSignal.Done()

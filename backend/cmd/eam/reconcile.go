@@ -30,6 +30,7 @@ type scanned struct {
 	size         int64
 	etag         string
 	storageClass string
+	modified     time.Time
 }
 
 // reconcile 把 COS 桶里的对象同步进数据库索引。
@@ -106,6 +107,7 @@ func runReconcile(args []string) error {
 		sizes := make([]string, len(buffer))
 		etags := make([]string, len(buffer))
 		classes := make([]string, len(buffer))
+		modifieds := make([]*time.Time, len(buffer))
 		for i, item := range buffer {
 			owners[i] = ownerID
 			keys[i] = item.key
@@ -116,17 +118,22 @@ func runReconcile(args []string) error {
 			sizes[i] = strconv.FormatInt(item.size, 10)
 			etags[i] = item.etag
 			classes[i] = item.storageClass
+			if !item.modified.IsZero() {
+				modifieds[i] = &buffer[i].modified
+			}
 		}
 
 		tag, err := tx.Exec(ctx,
-			`insert into nodes (owner_id, key, path, parent, name, is_dir, size, etag, storage_class)
+			`insert into nodes (owner_id, key, path, parent, name, is_dir, size, etag,
+			                    storage_class, source_modified_at)
 			 select nullif(owner, '')::uuid, key, path, parent, name,
-			        is_dir::boolean, size::bigint, nullif(etag, ''), nullif(storage_class, '')
+			        is_dir::boolean, size::bigint, nullif(etag, ''), nullif(storage_class, ''),
+			        modified
 			   from unnest($1::text[], $2::text[], $3::text[], $4::text[], $5::text[],
-			               $6::text[], $7::text[], $8::text[], $9::text[])
-			     as t(owner, key, path, parent, name, is_dir, size, etag, storage_class)
+			               $6::text[], $7::text[], $8::text[], $9::text[], $10::timestamptz[])
+			     as t(owner, key, path, parent, name, is_dir, size, etag, storage_class, modified)
 			 on conflict do nothing`,
-			owners, keys, itemPaths, parents, names, dirs, sizes, etags, classes)
+			owners, keys, itemPaths, parents, names, dirs, sizes, etags, classes, modifieds)
 		if err != nil {
 			return err
 		}
@@ -143,18 +150,22 @@ func runReconcile(args []string) error {
 			    set size = s.size,
 			        etag = s.etag,
 			        storage_class = s.storage_class,
+			        source_modified_at = coalesce(s.modified, n.source_modified_at),
 			        updated_at = now()
 			   from (
 			     select key,
 			            size::bigint as size,
 			            nullif(etag, '') as etag,
-			            nullif(storage_class, '') as storage_class
-			       from unnest($1::text[], $2::text[], $3::text[], $4::text[])
-			         as t(key, size, etag, storage_class)
+			            nullif(storage_class, '') as storage_class,
+			            modified
+			       from unnest($1::text[], $2::text[], $3::text[], $4::text[], $5::timestamptz[])
+			         as t(key, size, etag, storage_class, modified)
 			   ) s
 			  where n.key = s.key
-				    and (n.size is distinct from s.size or n.etag is distinct from s.etag)`,
-			keys, sizes, etags, classes); err != nil {
+				    and (n.size is distinct from s.size
+				         or n.etag is distinct from s.etag
+				         or (s.modified is not null and n.source_modified_at is distinct from s.modified))`,
+			keys, sizes, etags, classes, modifieds); err != nil {
 			return err
 		}
 
@@ -170,7 +181,7 @@ func runReconcile(args []string) error {
 		return nil
 	}
 
-	acceptKey := func(key string, size int64, etag, storageClass string) error {
+	acceptKey := func(key string, size int64, etag, storageClass string, modified time.Time) error {
 		if !strings.HasPrefix(key, prefix) {
 			return nil
 		}
@@ -196,6 +207,7 @@ func runReconcile(args []string) error {
 			size:         size,
 			etag:         etag,
 			storageClass: storageClass,
+			modified:     modified,
 		})
 	}
 
@@ -215,7 +227,8 @@ func runReconcile(args []string) error {
 	} else {
 		err := objectStorage.List(ctx, prefix, func(page storage.Page) (bool, error) {
 			for _, object := range page.Objects {
-				if err := acceptKey(object.Key, object.Size, object.ETag, object.StorageClass); err != nil {
+				if err := acceptKey(object.Key, object.Size, object.ETag,
+					object.StorageClass, object.LastModified); err != nil {
 					return false, err
 				}
 			}
@@ -326,8 +339,11 @@ func backfillParents(ctx context.Context, tx pgx.Tx, ownerID string) error {
 	return err
 }
 
-// readInventory 读 COS 清单 CSV，按表头（或默认列序）取 key / size / etag。
-func readInventory(file string, accept func(key string, size int64, etag, storageClass string) error) error {
+// readInventory 读 COS 清单 CSV，按表头（或默认列序）取 key / size / etag / 修改时间。
+func readInventory(
+	file string,
+	accept func(key string, size int64, etag, storageClass string, modified time.Time) error,
+) error {
 	handle, err := os.Open(file)
 	if err != nil {
 		return err
@@ -388,7 +404,8 @@ func readInventory(file string, accept func(key string, size int64, etag, storag
 		size, _ := strconv.ParseInt(pick(row, "size"), 10, 64)
 		if err := accept(key, size,
 			strings.Trim(pick(row, "etag"), `"`),
-			pick(row, "storageclass", "storage_class")); err != nil {
+			pick(row, "storageclass", "storage_class"),
+			parseInventoryTime(pick(row, "lastmodifieddate", "last_modified", "lastmodified"))); err != nil {
 			return err
 		}
 	}
@@ -401,4 +418,25 @@ func pick(row map[string]string, names ...string) string {
 		}
 	}
 	return ""
+}
+
+// parseInventoryTime 兼容 COS 清单里常见的几种时间写法。
+func parseInventoryTime(value string) time.Time {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return time.Time{}
+	}
+	for _, layout := range []string{
+		time.RFC3339Nano,
+		time.RFC3339,
+		"2006-01-02T15:04:05.000Z",
+		"2006-01-02T15:04:05Z",
+		"2006-01-02 15:04:05",
+		"2006-01-02",
+	} {
+		if parsed, err := time.Parse(layout, value); err == nil {
+			return parsed
+		}
+	}
+	return time.Time{}
 }

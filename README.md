@@ -1,7 +1,7 @@
 # everything about me
 
-个人数据基座：**邮箱注册的账号系统 + 文件层**。
-账号、会话、目录树、属性、检索放 Postgres；文件字节放腾讯云 COS。
+个人数据基座：**邮箱注册的账号系统 + 文件层 + 一条自动整理的内容流**。
+账号、会话、目录树、属性、检索、内容流放 Postgres；文件字节放腾讯云 COS。
 
 前后端分离：**Go 后端（net/http） + React 前端（Vite + React Router）**，没有 Next.js。
 
@@ -20,7 +20,7 @@
 | `web/` | React 19 + Vite + React Router（data router / loader）。 |
 | `sql/` | 按文件名顺序执行的建表迁移。 |
 | `email-templates/` | SES 验证码邮件模板参考。 |
-| `docs/` | 设计草案与截图。 |
+| `docs/` | 设计草案与截图。内容流的设计见 [`docs/design/timeline.md`](docs/design/timeline.md)。 |
 
 后端是一个二进制，同时提供 JSON API 和前端构建产物：
 
@@ -66,13 +66,14 @@ key 直接落在路径上（`drive/<用户ID>/Photos/2024/a.jpg`），意味着�
 ## 界面
 
 - 登录 / 注册（合并为一个页面）/ 账户三个页面，跟随系统深浅色
-- 单页文件浏览器：面包屑、相对时间、类型图标、悬停操作
+- `/` 是按时间往下滚的内容流：照片/视频自动聚成卡片、健康数据变成数据带，不出现"事件""时间线"这类概念
+- `/drive` 是文件浏览器：面包屑、相对时间、类型图标、悬停操作
 - 拖拽上传 + COS 直传进度提示；`/` 聚焦搜索，`Esc` 关闭弹层
 - 搜索会同时匹配文件名和完整路径，结果右侧显示所在目录
 - 新建目录是行内输入框，删除有确认弹窗（永久删除）
 - 顶栏右侧显示当前账号，点进 `/account` 改邮箱、设置密码或退出
 - 目录用 URL 的 `?path=` 表示，可以直接分享/刷新到某一层
-- 前端路由：`/`（文件）、`/login`（`?mode=password` 切密码登录）、`/account`
+- 前端路由：`/`（内容流）、`/drive`（文件）、`/login`（`?mode=password` 切密码登录）、`/account`
 
 ## 起步
 
@@ -268,6 +269,9 @@ eam token revoke --email you@example.com --id <令牌 ID>
 | POST | `/api/auth/email/current-code` | 发送改邮箱验证码到**当前邮箱**（需登录，用于身份确认） |
 | POST | `/api/auth/email/code` | 发送改邮箱验证码到**新邮箱**（需登录） |
 | POST | `/api/auth/email` | 修改邮箱（需当前邮箱 + 新邮箱两个验证码） |
+| GET | `/api/timeline?before=&months=` | 读内容流：按有内容的月份倒序分页，含预签名缩略图 |
+| GET | `/api/timeline/status` | 整理进度（未完成任务数、已整理文件数、最早/最新月份） |
+| POST | `/api/timeline/rebuild` | 强制重新整理当前账号（删掉分析结果后从头回填） |
 | GET | `/api/fs/list?path=` | 列当前层（查 Postgres，不查桶） |
 | GET | `/api/fs/search?q=` | 按名称/路径模糊搜索 |
 | POST | `/api/fs/upload/sign` | 拿 STS 临时凭证，浏览器直传 |
@@ -291,6 +295,10 @@ eam token revoke --email you@example.com --id <令牌 ID>
 | `COS_BUCKET` / `COS_REGION` | 桶必须带 APPID |
 | `APP_ENV` | `development`（默认）或 `production`；决定 Secure cookie 和未配 SES 时的行为 |
 | `SESSION_TTL_DAYS` | 登录态有效期，默认 30 天 |
+| `TIMELINE_ENABLED` | 是否启用内容流后台整理，默认 `true`；设为 `false` 只保留读接口 |
+| `TIMELINE_WORKERS` | 后台整理并发数，默认 2 |
+| `TIMELINE_MONTH_BUDGET` | 一个月最多占多少展示单位（1 单位 ≈ 72px），默认 24 |
+| `TIMELINE_TZ` | 把事件时间归到哪一天，默认 `Asia/Shanghai` |
 | `COOKIE_SECURE` | 不设置时生产环境自动加 Secure；本地 http 调试可设 false |
 | `ALLOW_REGISTRATION` | 设为 false 关闭注册；默认开放 |
 | `ADDR` / `PORT` | 监听地址；默认 `:8080`（`ADDR` 优先） |
@@ -343,4 +351,8 @@ go run ./cmd/eam token revoke --email … --id …
 - **旧数据要手动认领**：`eam claim` 是 O(对象数) 的服务端复制；跑之前先 `--dry-run`。
 - **删除账号**只级联数据库记录；COS 里 `drive/<用户ID>/` 的对象需要按前缀自行清理。
 - **前端是纯 SPA**：首屏要等 JS 加载完（约 110KB gzip，COS SDK 按需再加载）；没有 SSR，但也不需要在服务端渲染用户数据。
+- **内容流目前是启发式版本**：只看索引里的路径/大小/类型/时间，没读 EXIF/GPS/画面内容；分析、分组、评分、命名都是接口（`internal/timeline` 里的 `Analyzer` / `Grouper` / `Scorer` / `Narrator`），接多模态或大模型时替换实现即可。健康 CSV 是内置的一个 `AmbientExtractor`。
+- **旧库要补文件时间**：`nodes.source_modified_at` 是这次新加的，老数据需要跑一次 `reconcile` 才会填上；没填之前时间线会退回索引更新时间。
+- **"每日视频"靠启发式识别**：同一目录、跨 ≥7 天、≥7 个视频会被合成一张系列卡；判断不准时可以后续做手动覆盖，或换成模型。
+- **移动/复制目录不会立刻刷新内容流**：后台 sweeper 每 20 分钟扫一次最近变更；急着看可以用 `POST /api/timeline/rebuild`。
 - **`cos-js-sdk-v5` 的 XML 解析依赖有审计告警**：官方 SDK 固定了 `fast-xml-parser@4.5.0`，`npm audit` 会报 critical。它只解析 COS 返回的 XML（走 TLS），目前没有无损升级路径；等官方 SDK 升级后再跟进。
