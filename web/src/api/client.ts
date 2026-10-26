@@ -47,6 +47,7 @@ export interface SearchResult {
   items: Item[];
 }
 
+
 export interface AccountSummary {
   user: AuthUser;
   legacyCount: number;
@@ -165,8 +166,8 @@ export const api = {
     return request<SearchResult>(`/api/fs/search?q=${encodeURIComponent(keyword)}`);
   },
 
-  signUpload(path: string, size: number): Promise<UploadSignResult> {
-    return post<UploadSignResult>("/api/fs/upload/sign", { path, size });
+  signUpload(path: string, size: number, overwrite = false): Promise<UploadSignResult> {
+    return post<UploadSignResult>("/api/fs/upload/sign", { path, size, overwrite });
   },
 
   async confirmUpload(path: string, mime?: string, sha256?: string): Promise<void> {

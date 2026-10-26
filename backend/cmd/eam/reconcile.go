@@ -153,8 +153,7 @@ func runReconcile(args []string) error {
 			         as t(key, size, etag, storage_class)
 			   ) s
 			  where n.key = s.key
-			    and n.deleted_at is null
-			    and (n.size is distinct from s.size or n.etag is distinct from s.etag)`,
+				    and (n.size is distinct from s.size or n.etag is distinct from s.etag)`,
 			keys, sizes, etags, classes); err != nil {
 			return err
 		}
@@ -239,9 +238,8 @@ func runReconcile(args []string) error {
 	var gone int64
 	err = tx.QueryRow(ctx,
 		`with changed as (
-		   update nodes set deleted_at = now(), updated_at = now()
-		    where deleted_at is null
-		      and updated_at < $1
+		   delete from nodes
+		    where updated_at < $1
 		      and owner_id is not distinct from nullif($2, '')::uuid
 		      and key not in (select key from scan_keys)
 		    returning 1
@@ -272,8 +270,7 @@ func backfillParents(ctx context.Context, tx pgx.Tx, ownerID string) error {
 	rows, err := tx.Query(ctx,
 		`select distinct parent
 		   from nodes
-		  where deleted_at is null
-		    and parent <> ''
+		  where parent <> ''
 		    and owner_id is not distinct from nullif($1, '')::uuid`, ownerID)
 	if err != nil {
 		return err

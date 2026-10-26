@@ -128,7 +128,7 @@ func checkDatabase(ctx context.Context, db *store.DB, checks *doctor) {
 		return
 	}
 	if err := pool.QueryRow(ctx,
-		`select count(*)::int from nodes where owner_id is null and deleted_at is null`).Scan(&unowned); err != nil {
+		`select count(*)::int from nodes where owner_id is null`).Scan(&unowned); err != nil {
 		checks.bad("统计无主文件失败", err, "")
 		return
 	}

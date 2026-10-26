@@ -13,7 +13,6 @@ import (
 // 可见文件统一放在 drive/ 前缀下，其余前缀是系统私有区。
 const (
 	DrivePrefix     = "drive/"
-	TrashPrefix     = "_trash/"
 	InventoryPrefix = "_inventory/"
 
 	MaxPathDepth  = 32

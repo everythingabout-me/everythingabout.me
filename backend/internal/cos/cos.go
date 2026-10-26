@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -90,6 +91,43 @@ func (c *Client) PutEmpty(ctx context.Context, key string) error {
 	return err
 }
 
+// sizedReader 让 SDK 能读出长度（progress + 5GB 检查），同时把
+// Content-Length 显式传给 COS，避免退化成 chunked 上传。
+type sizedReader struct {
+	io.Reader
+	size int64
+}
+
+func (r sizedReader) Size() int64 { return r.size }
+
+func (c *Client) Put(
+	ctx context.Context,
+	key string,
+	r io.Reader,
+	size int64,
+	contentType string,
+) (*storage.ObjectInfo, error) {
+	if contentType == "" {
+		contentType = "application/octet-stream"
+	}
+	opt := &cos.ObjectPutOptions{
+		ObjectPutHeaderOptions: &cos.ObjectPutHeaderOptions{
+			ContentLength: size,
+			ContentType:   contentType,
+		},
+	}
+	resp, err := c.client.Object.Put(ctx, key, sizedReader{Reader: r, size: size}, opt)
+	if err != nil {
+		return nil, err
+	}
+	return &storage.ObjectInfo{
+		Key:          key,
+		Size:         size,
+		ETag:         strings.Trim(resp.Header.Get("ETag"), `"`),
+		StorageClass: resp.Header.Get("x-cos-storage-class"),
+	}, nil
+}
+
 func (c *Client) List(ctx context.Context, prefix string, onPage func(storage.Page) (bool, error)) error {
 	marker := ""
 	for {
@@ -171,6 +209,27 @@ func (c *Client) GetURL(ctx context.Context, key string, opts storage.URLOptions
 	return signed.String(), nil
 }
 
+// PutURL 生成上传用的预签名 PUT URL。只签 Host，不签 Content-Type，
+// 这样客户端可以自由发 Content-Type，不会因为多带一个头就签名不匹配。
+func (c *Client) PutURL(ctx context.Context, key string, expiresSeconds int) (string, error) {
+	if expiresSeconds <= 0 {
+		expiresSeconds = 3600
+	}
+	signed, err := c.client.Object.GetPresignedURL(
+		ctx,
+		http.MethodPut,
+		key,
+		c.cred.SecretID,
+		c.cred.SecretKey,
+		time.Duration(expiresSeconds)*time.Second,
+		nil,
+	)
+	if err != nil {
+		return "", err
+	}
+	return signed.String(), nil
+}
+
 var uploadActions = []string{
 	"name/cos:PutObject",
 	"name/cos:PostObject",
@@ -232,4 +291,66 @@ func (c *Client) TemporaryCredentials(
 		StartTime:    response.StartTime,
 		ExpiredTime:  response.ExpiredTime,
 	}, nil
+}
+
+func (c *Client) InitiateMultipart(ctx context.Context, key string) (string, error) {
+	result, _, err := c.client.Object.InitiateMultipartUpload(ctx, key, nil)
+	if err != nil {
+		return "", err
+	}
+	return result.UploadID, nil
+}
+
+// MultipartPartURL 把 partNumber 和 uploadId 放进 query 一起签名。
+func (c *Client) MultipartPartURL(
+	ctx context.Context,
+	key, uploadID string,
+	partNumber, expiresSeconds int,
+) (string, error) {
+	if expiresSeconds <= 0 {
+		expiresSeconds = 3600
+	}
+	query := url.Values{}
+	query.Set("partNumber", strconv.Itoa(partNumber))
+	query.Set("uploadId", uploadID)
+
+	signed, err := c.client.Object.GetPresignedURL(
+		ctx,
+		http.MethodPut,
+		key,
+		c.cred.SecretID,
+		c.cred.SecretKey,
+		time.Duration(expiresSeconds)*time.Second,
+		&cos.PresignedURLOptions{Query: &query},
+	)
+	if err != nil {
+		return "", err
+	}
+	return signed.String(), nil
+}
+
+func (c *Client) CompleteMultipart(
+	ctx context.Context,
+	key, uploadID string,
+	parts []storage.MultipartPart,
+) (*storage.ObjectInfo, error) {
+	opt := &cos.CompleteMultipartUploadOptions{
+		Parts: make([]cos.Object, 0, len(parts)),
+	}
+	for _, part := range parts {
+		opt.Parts = append(opt.Parts, cos.Object{
+			PartNumber: part.PartNumber,
+			ETag:       part.ETag,
+		})
+	}
+	if _, _, err := c.client.Object.CompleteMultipartUpload(ctx, key, uploadID, opt); err != nil {
+		return nil, err
+	}
+	// Complete 的响应不带大小，HEAD 一次拿最终大小和 ETag。
+	return c.Head(ctx, key)
+}
+
+func (c *Client) AbortMultipart(ctx context.Context, key, uploadID string) error {
+	_, err := c.client.Object.AbortMultipartUpload(ctx, key, uploadID)
+	return err
 }

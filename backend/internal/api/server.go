@@ -3,8 +3,10 @@ package api
 
 import (
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
+	"strings"
 	"time"
 
 	"everythingabout.me/backend/internal/auth"
@@ -12,6 +14,7 @@ import (
 	"everythingabout.me/backend/internal/emailcode"
 	"everythingabout.me/backend/internal/httpx"
 	"everythingabout.me/backend/internal/mail"
+	"everythingabout.me/backend/internal/mover"
 	"everythingabout.me/backend/internal/nodes"
 	"everythingabout.me/backend/internal/paths"
 	"everythingabout.me/backend/internal/ratelimit"
@@ -27,12 +30,14 @@ type Server struct {
 	mail    *mail.Sender
 	storage storage.Storage
 	nodes   *nodes.Service
+	mover   *mover.Service
 	limiter *ratelimit.Limiter
 	web     http.Handler
 }
 
 // New 组装依赖。web 是前端构建产物（SPA）的处理器，可以是 nil。
 func New(cfg *config.Config, db *store.DB, objectStorage storage.Storage, web http.Handler) *Server {
+	nodeService := nodes.New(db, objectStorage)
 	return &Server{
 		cfg:     cfg,
 		db:      db,
@@ -40,7 +45,8 @@ func New(cfg *config.Config, db *store.DB, objectStorage storage.Storage, web ht
 		codes:   emailcode.New(db),
 		mail:    mail.New(cfg),
 		storage: objectStorage,
-		nodes:   nodes.New(db, objectStorage),
+		nodes:   nodeService,
+		mover:   mover.New(db, objectStorage, nodeService),
 		limiter: ratelimit.New(),
 		web:     web,
 	}
@@ -77,6 +83,20 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/fs/rename", s.wrap(s.handleRename))
 	mux.HandleFunc("POST /api/fs/delete", s.wrap(s.handleDelete))
 
+	// 对外 API：路径就是功能本身，不带 /v1 或 /api 前缀。
+	mux.HandleFunc("GET /list", s.api(s.handleAPIList))
+	mux.HandleFunc("GET /me", s.api(s.handleAPIMe))
+	mux.HandleFunc("GET /search", s.api(s.handleAPISearch))
+	mux.HandleFunc("POST /move", s.api(s.handleAPIMove))
+	mux.HandleFunc("GET /move/{id}", s.api(s.handleAPIMoveJob))
+	mux.HandleFunc("POST /move/{id}/retry", s.api(s.handleAPIMoveRetry))
+	mux.HandleFunc("POST /upload", s.api(s.handleAPIUpload))
+	mux.HandleFunc("POST /upload/complete", s.api(s.handleAPIComplete))
+	mux.HandleFunc("GET /files/{path...}", s.api(s.handleAPIGetFile))
+	mux.HandleFunc("HEAD /files/{path...}", s.api(s.handleAPIHeadFile))
+	mux.HandleFunc("PUT /files/{path...}", s.api(s.handleAPIPutFile))
+	mux.HandleFunc("DELETE /files/{path...}", s.api(s.handleAPIDeleteFile))
+
 	if s.web != nil {
 		mux.Handle("/", s.web)
 	} else {
@@ -89,7 +109,7 @@ func (s *Server) Handler() http.Handler {
 		})
 	}
 
-	return s.recoverer(s.logger(mux))
+	return s.recoverer(s.logger(s.cors(mux)))
 }
 
 func (s *Server) ok(w http.ResponseWriter, data any) error {
@@ -109,6 +129,69 @@ func (s *Server) wrap(fn handlerFunc) http.HandlerFunc {
 			httpx.WriteError(w, err)
 		}
 	}
+}
+
+// api 是对外 API 的包装：限流 + {"error","message"} 的错误体（不是网页那套 {ok,...}）。
+func (s *Server) api(fn handlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if err := s.limitAPI(w, r); err != nil {
+			writeAPIError(w, err)
+			return
+		}
+		if err := fn(w, r); err != nil {
+			writeAPIError(w, err)
+		}
+	}
+}
+
+const apiRatePerMinute = 600
+
+// limitAPI 按令牌（没有令牌就按 IP）做粗粒度限流，顺带给出 Retry-After。
+func (s *Server) limitAPI(w http.ResponseWriter, r *http.Request) error {
+	key := "ip:" + httpx.ClientIP(r)
+	if header := strings.TrimSpace(r.Header.Get("Authorization")); strings.HasPrefix(header, "Bearer ") {
+		if id, _, ok := auth.ParseToken(strings.TrimPrefix(header, "Bearer ")); ok {
+			key = "tok:" + id
+		}
+	}
+	allowed, retryAfter := s.limiter.Allow("api:"+key, apiRatePerMinute, time.Minute)
+	w.Header().Set("X-RateLimit-Limit", fmt.Sprint(apiRatePerMinute))
+	if !allowed {
+		w.Header().Set("Retry-After", fmt.Sprint(retryAfter))
+		return httpx.TooManyRequests(fmt.Sprintf("请求太频繁，请 %d 秒后再试", retryAfter))
+	}
+	return nil
+}
+
+// isAPIPath 判断是否是对外 API 的路径，用于 CORS 和预检。
+func isAPIPath(path string) bool {
+	switch path {
+	case "/list", "/me", "/move", "/search", "/files", "/upload", "/upload/complete":
+		return true
+	}
+	return strings.HasPrefix(path, "/files/") || strings.HasPrefix(path, "/move/")
+}
+
+func setCORSHeaders(w http.ResponseWriter) {
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Access-Control-Allow-Methods", "GET, HEAD, PUT, DELETE, POST, OPTIONS")
+	w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type, If-Match, If-None-Match")
+	w.Header().Set("Access-Control-Expose-Headers", "ETag, Content-Length, Content-Type")
+	w.Header().Set("Access-Control-Max-Age", "86400")
+}
+
+// cors 只作用于对外 API：允许浏览器跨域带 Bearer 调用，并直接回预检。
+func (s *Server) cors(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if isAPIPath(r.URL.Path) {
+			setCORSHeaders(w)
+			if r.Method == http.MethodOptions {
+				w.WriteHeader(http.StatusNoContent)
+				return
+			}
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 func (s *Server) requireUser(r *http.Request) (*auth.User, error) {

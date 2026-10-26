@@ -24,6 +24,7 @@ type Node struct {
 	IsDir     bool            `json:"is_dir"`
 	Size      int64           `json:"size"`
 	Mime      *string         `json:"mime"`
+	CreatedAt string          `json:"created_at"`
 	UpdatedAt string          `json:"updated_at"`
 	Meta      json.RawMessage `json:"meta"`
 }
@@ -37,6 +38,7 @@ type Row struct {
 }
 
 const nodeColumns = `id::text, key, path, parent, name, is_dir, size, mime, etag, storage_class,
+	to_char(created_at at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
 	to_char(updated_at at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
 	meta`
 
@@ -56,7 +58,7 @@ func scanNode(row pgx.Row) (*Row, error) {
 	)
 	err := row.Scan(
 		&node.ID, &node.Key, &node.Path, &node.Parent, &node.Name, &node.IsDir, &node.Size,
-		&node.Mime, &node.ETag, &node.StorageClass, &node.UpdatedAt, &meta,
+		&node.Mime, &node.ETag, &node.StorageClass, &node.CreatedAt, &node.UpdatedAt, &meta,
 	)
 	if err != nil {
 		if err == pgx.ErrNoRows {
@@ -77,7 +79,6 @@ func (s *Service) List(ctx context.Context, ownerID, path string, limit int) ([]
 		`select `+nodeColumns+`
 		   from nodes
 		  where owner_id = $1::uuid
-		    and deleted_at is null
 		    and parent = $2
 		  order by is_dir desc, lower(name) asc
 		  limit $3`, ownerID, path, limit)
@@ -104,7 +105,6 @@ func (s *Service) Search(ctx context.Context, ownerID, keyword string, limit int
 		`select `+nodeColumns+`
 		   from nodes
 		  where owner_id = $1::uuid
-		    and deleted_at is null
 		    and (name ilike $2 or path ilike $2)
 		  order by is_dir desc, lower(name) asc
 		  limit $3`, ownerID, pattern, limit)
@@ -129,110 +129,19 @@ func (s *Service) Live(ctx context.Context, path, ownerID string) (*Row, error) 
 	return scanNode(s.db.Pool().QueryRow(ctx,
 		`select `+nodeColumns+`
 		   from nodes
-		  where owner_id = $1::uuid and path = $2 and deleted_at is null
+		  where owner_id = $1::uuid and path = $2
 		  limit 1`, ownerID, path))
 }
 
-// moveToTrash 把一条回收站记录的对象挪到 _trash/，并把 DB 里的 key 改过去。
-func (s *Service) moveToTrash(ctx context.Context, id, key string) error {
-	trashKey := paths.TrashPrefix + id
-	// 对象可能已经被手动清掉；这时只改 DB key，避免同名新建被唯一约束挡住
-	exists, err := s.store.Head(ctx, key)
-	if err != nil {
-		return err
-	}
-	if exists != nil {
-		if err := s.store.Copy(ctx, key, trashKey); err != nil {
-			return err
-		}
-	}
-	if _, err := s.db.Pool().Exec(ctx, `update nodes set key = $1 where id = $2::uuid`, trashKey, id); err != nil {
-		return err
-	}
-	// 先改 DB 再删源：删源失败最多留个重复对象，不会把索引指向不存在的 key
-	if exists != nil {
-		return s.store.Remove(ctx, key)
-	}
-	return nil
-}
-
-// EnsureParents 保证祖先目录都有记录（直传进桶时也能自动补全）。
+// EnsureParents 保证祖先目录都有记录（直接写进桶的文件也能自动补全）。
 func (s *Service) EnsureParents(ctx context.Context, path, ownerID string) error {
-	dirs := paths.AncestorsOf(path)
-	if len(dirs) == 0 {
-		return nil
-	}
-
-	// 祖先目录可能在回收站里；先把它们的占位对象挪进 _trash/，
-	// 否则新插入的目录会撞上 nodes.key 的全局唯一约束。
-	rows, err := s.db.Pool().Query(ctx,
-		`select id::text, key from nodes
-		  where owner_id = $1::uuid
-		    and deleted_at is not null
-		    and path = any($2::text[])`, ownerID, dirs)
-	if err != nil {
-		return err
-	}
-	type trashRow struct{ id, key string }
-	var trashed []trashRow
-	for rows.Next() {
-		var item trashRow
-		if err := rows.Scan(&item.id, &item.key); err != nil {
-			rows.Close()
-			return err
-		}
-		trashed = append(trashed, item)
-	}
-	rows.Close()
-	if err := rows.Err(); err != nil {
-		return err
-	}
-	for _, item := range trashed {
-		if err := s.moveToTrash(ctx, item.id, item.key); err != nil {
-			return err
-		}
-	}
-
-	for _, dir := range dirs {
+	for _, dir := range paths.AncestorsOf(path) {
 		if _, err := s.db.Pool().Exec(ctx,
 			`insert into nodes (owner_id, key, path, parent, name, is_dir)
 			 values ($1::uuid, $2, $3, $4, $5, true)
-			 on conflict (owner_id, path) where deleted_at is null do nothing`,
+			 on conflict (owner_id, path) do nothing`,
 			ownerID, paths.DirKeyFor(dir, ownerID), dir, paths.ParentOf(dir), paths.NameOf(dir),
 		); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-// EvictTrashedAt 在回收站里的旧对象占着同一个 key 时，先挪到 _trash/ 再允许覆盖。
-func (s *Service) EvictTrashedAt(ctx context.Context, path, ownerID string, isDir bool) error {
-	key := paths.KeyFor(path, ownerID)
-	if isDir {
-		key = paths.DirKeyFor(path, ownerID)
-	}
-	rows, err := s.db.Pool().Query(ctx,
-		`select id::text, key from nodes where key = $1 and deleted_at is not null`, key)
-	if err != nil {
-		return err
-	}
-	type trashRow struct{ id, key string }
-	var trashed []trashRow
-	for rows.Next() {
-		var item trashRow
-		if err := rows.Scan(&item.id, &item.key); err != nil {
-			rows.Close()
-			return err
-		}
-		trashed = append(trashed, item)
-	}
-	rows.Close()
-	if err := rows.Err(); err != nil {
-		return err
-	}
-	for _, item := range trashed {
-		if err := s.moveToTrash(ctx, item.id, item.key); err != nil {
 			return err
 		}
 	}
@@ -262,7 +171,7 @@ func (s *Service) UpsertFile(ctx context.Context, input UpsertInput) (*Row, erro
 	return scanNode(s.db.Pool().QueryRow(ctx,
 		`insert into nodes (owner_id, key, path, parent, name, is_dir, size, mime, etag, storage_class, meta)
 		 values ($1::uuid, $2, $3, $4, $5, false, $6, $7, $8, $9, $10::jsonb)
-		 on conflict (owner_id, path) where deleted_at is null
+		 on conflict (owner_id, path)
 		 do update set
 		   key = excluded.key,
 		   size = excluded.size,
@@ -285,12 +194,28 @@ func (s *Service) UpsertFile(ctx context.Context, input UpsertInput) (*Row, erro
 	))
 }
 
-// SoftDelete 给整棵子树打删除标记，返回影响行数。
-func (s *Service) SoftDelete(ctx context.Context, path, ownerID string) (int64, error) {
+// Purge 彻底删除一棵子树：对象和索引都删掉，没有回收站。
+func (s *Service) Purge(ctx context.Context, path, ownerID string) (int64, error) {
+	rows, err := s.Subtree(ctx, ownerID, path)
+	if err != nil {
+		return 0, err
+	}
+	for i := range rows {
+		info, err := s.store.Head(ctx, rows[i].Key)
+		if err != nil {
+			return 0, err
+		}
+		if info == nil {
+			continue
+		}
+		if err := s.store.Remove(ctx, rows[i].Key); err != nil {
+			return 0, err
+		}
+	}
+
 	tag, err := s.db.Pool().Exec(ctx,
-		`update nodes set deleted_at = now()
+		`delete from nodes
 		  where owner_id = $1::uuid
-		    and deleted_at is null
 		    and (path = $2 or path like $3)`,
 		ownerID, path, EscapeLike(path)+"/%")
 	if err != nil {
@@ -304,7 +229,7 @@ func (s *Service) CreateDirectory(ctx context.Context, path, ownerID string) (*R
 	return scanNode(s.db.Pool().QueryRow(ctx,
 		`insert into nodes (owner_id, key, path, parent, name, is_dir)
 		 values ($1::uuid, $2, $3, $4, $5, true)
-		 on conflict (owner_id, path) where deleted_at is null do nothing
+		 on conflict (owner_id, path) do nothing
 		 returning `+nodeColumns,
 		ownerID, paths.DirKeyFor(path, ownerID), path, paths.ParentOf(path), paths.NameOf(path),
 	))
@@ -312,12 +237,22 @@ func (s *Service) CreateDirectory(ctx context.Context, path, ownerID string) (*R
 
 // Move 改单条记录的路径（对象复制由调用方完成）。
 func (s *Service) Move(ctx context.Context, id, targetPath, ownerID string) (*Row, error) {
+	return s.MoveNode(ctx, id, targetPath, ownerID, false)
+}
+
+// MoveNode 改一条记录的路径。目录的 key 要带尾斜杠（占位对象约定），
+// 所以不能无脑用 KeyFor。
+func (s *Service) MoveNode(ctx context.Context, id, targetPath, ownerID string, isDir bool) (*Row, error) {
+	key := paths.KeyFor(targetPath, ownerID)
+	if isDir {
+		key = paths.DirKeyFor(targetPath, ownerID)
+	}
 	return scanNode(s.db.Pool().QueryRow(ctx,
 		`update nodes
 		    set key = $1, path = $2, parent = $3, name = $4, updated_at = now()
 		  where id = $5::uuid and owner_id = $6::uuid
 		  returning `+nodeColumns,
-		paths.KeyFor(targetPath, ownerID), targetPath, paths.ParentOf(targetPath),
+		key, targetPath, paths.ParentOf(targetPath),
 		paths.NameOf(targetPath), id, ownerID))
 }
 
@@ -341,4 +276,145 @@ func AssertNotRoot(path string) error {
 		return httpx.BadRequest("不能操作根目录")
 	}
 	return nil
+}
+
+// Cursor 是列目录的 keyset 分页位置：排序键是 (is_dir desc, lower(name), id)。
+type Cursor struct {
+	IsDir bool
+	Name  string // 已经 lower 过的名字
+	ID    string
+}
+
+// ListPage 按 keyset 分页列目录，limit 由调用方给（一般取 pageSize+1 判断还有没有下一页）。
+func (s *Service) ListPage(
+	ctx context.Context,
+	ownerID, path string,
+	limit int,
+	cursor *Cursor,
+) ([]Row, error) {
+	var curDir, curName, curID any
+	if cursor != nil {
+		curDir, curName, curID = cursor.IsDir, cursor.Name, cursor.ID
+	}
+
+	rows, err := s.db.Pool().Query(ctx,
+		`select `+nodeColumns+`
+		   from nodes
+		  where owner_id = $1::uuid
+		    and parent = $2
+		    and ($3::bool is null
+		         or (is_dir = false and $3 = true)
+		         or (is_dir = $3 and (lower(name), id::text) > ($4, $5)))
+		  order by is_dir desc, lower(name) asc, id asc
+		  limit $6`,
+		ownerID, path, curDir, curName, curID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	items := make([]Row, 0, limit)
+	for rows.Next() {
+		item, err := scanNode(rows)
+		if err != nil {
+			return nil, err
+		}
+		items = append(items, *item)
+	}
+	return items, rows.Err()
+}
+
+// Usage 统计一个用户占用的字节数和文件数（不含目录）。
+func (s *Service) Usage(ctx context.Context, ownerID string) (bytes, files int64, err error) {
+	err = s.db.Pool().QueryRow(ctx,
+		`select coalesce(sum(size), 0), count(*)
+		   from nodes
+		  where owner_id = $1::uuid
+		    and is_dir = false`, ownerID).Scan(&bytes, &files)
+	return bytes, files, err
+}
+
+// SearchOptions 是搜索的过滤条件。
+type SearchOptions struct {
+	Keyword string // 匹配文件名和完整路径
+	Prefix  string // 只在这个目录下找
+	Mime    string // 前缀匹配，如 "video/"
+	Kind    string // "" / "file" / "dir"
+}
+
+// SearchPage 按 keyset 分页搜索，排序和 ListPage 一致，游标格式也一致。
+func (s *Service) SearchPage(
+	ctx context.Context,
+	ownerID string,
+	opts SearchOptions,
+	limit int,
+	cursor *Cursor,
+) ([]Row, error) {
+	pattern := "%" + EscapeLike(opts.Keyword) + "%"
+
+	var prefix, prefixLike any
+	if opts.Prefix != "" {
+		prefix = opts.Prefix
+		prefixLike = EscapeLike(opts.Prefix) + "/%"
+	}
+
+	var curDir, curName, curID any
+	if cursor != nil {
+		curDir, curName, curID = cursor.IsDir, cursor.Name, cursor.ID
+	}
+
+	rows, err := s.db.Pool().Query(ctx,
+		`select `+nodeColumns+`
+		   from nodes
+		  where owner_id = $1::uuid
+		    and (name ilike $2 or path ilike $2)
+		    and ($3::text is null or path = $3 or path like $4)
+		    and ($5 = '' or coalesce(mime, '') ilike $5 || '%')
+		    and ($6 = '' or ($6 = 'dir' and is_dir) or ($6 = 'file' and not is_dir))
+		    and ($7::bool is null
+		         or (is_dir = false and $7 = true)
+		         or (is_dir = $7 and (lower(name), id::text) > ($8, $9)))
+		  order by is_dir desc, lower(name) asc, id asc
+		  limit $10`,
+		ownerID, pattern, prefix, prefixLike, opts.Mime, opts.Kind, curDir, curName, curID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	items := make([]Row, 0, limit)
+	for rows.Next() {
+		item, err := scanNode(rows)
+		if err != nil {
+			return nil, err
+		}
+		items = append(items, *item)
+	}
+	return items, rows.Err()
+}
+
+// Subtree 返回一个目录下的全部记录（含它自己），父目录在前。
+// 目录移动用它来逐个搬对象。
+func (s *Service) Subtree(ctx context.Context, ownerID, path string) ([]Row, error) {
+	rows, err := s.db.Pool().Query(ctx,
+		`select `+nodeColumns+`
+		   from nodes
+		  where owner_id = $1::uuid
+		    and (path = $2 or path like $3)
+		  order by length(path) asc, path asc`,
+		ownerID, path, EscapeLike(path)+"/%")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var items []Row
+	for rows.Next() {
+		item, err := scanNode(rows)
+		if err != nil {
+			return nil, err
+		}
+		items = append(items, *item)
+	}
+	return items, rows.Err()
 }

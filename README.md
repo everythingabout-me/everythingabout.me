@@ -47,7 +47,7 @@ make dev
 
 ## 为什么不是"只用 S3"
 
-S3 只能按前缀列举、不能搜索、没有回收站、没有标签。这张 `nodes` 表就是补上这层：
+S3 只能按前缀列举、不能搜索、没有标签。这张 `nodes` 表就是补上这层：
 它是**索引**，不是副本；对象字节永远只在 COS 里。
 
 ## 目录约定
@@ -55,7 +55,6 @@ S3 只能按前缀列举、不能搜索、没有回收站、没有标签。这�
 | 前缀 | 用途 |
 |---|---|
 | `drive/<用户ID>/` | 用户可见文件，key 就是真实路径 |
-| `_trash/` | 被同名新文件顶掉的旧对象 |
 | `_inventory/` | COS 清单输出（可选） |
 
 key 直接落在路径上（`drive/<用户ID>/Photos/2024/a.jpg`），意味着：
@@ -70,7 +69,7 @@ key 直接落在路径上（`drive/<用户ID>/Photos/2024/a.jpg`），意味着�
 - 单页文件浏览器：面包屑、相对时间、类型图标、悬停操作
 - 拖拽上传 + COS 直传进度提示；`/` 聚焦搜索，`Esc` 关闭弹层
 - 搜索会同时匹配文件名和完整路径，结果右侧显示所在目录
-- 新建目录是行内输入框，删除有确认弹窗（进回收站）
+- 新建目录是行内输入框，删除有确认弹窗（永久删除）
 - 顶栏右侧显示当前账号，点进 `/account` 改邮箱、设置密码或退出
 - 目录用 URL 的 `?path=` 表示，可以直接分享/刷新到某一层
 - 前端路由：`/`（文件）、`/login`（`?mode=password` 切密码登录）、`/account`
@@ -191,22 +190,60 @@ go run ./cmd/eam reconcile --owner you@example.com
 go run ./cmd/eam reconcile --owner you@example.com --inventory ./inventory.csv
 ```
 
-`reconcile` 做三件事：补新增、更新变动的（size/etag）、把桶里已消失的标成删除。
+`reconcile` 做三件事：补新增、更新变动的（size/etag）、把桶里已消失的记录删掉。
 它只扫描指定用户的前缀，不会碰别的账号；也不删任何对象——删除权只在你手里。
 
-## 回收站
+## 删除
 
-删除是软删除：`deleted_at` 打标记，对象留在原地。
+删除是永久删除：对象和索引一起删掉，没有回收站。网页上会先弹确认框；
+API 里删目录要显式带 `?recursive=1`，这是防手滑的提醒。
 
-```bash
-go run ./cmd/eam purge --days 30 --dry-run
-go run ./cmd/eam purge --days 30
-```
+> 从旧版本升级：如果库里还有 `deleted_at` 非空的记录，先用旧版本跑一次
+> `eam purge --days 0` 把对象也删掉，再执行 `migrate`。迁移会把这一列彻底去掉。
 
 ## 接口
 
-> 给外部程序（第三方 App、一次性脚本）用的读写接口另有一套设计草案：[docs/api/v1.md](docs/api/v1.md)。
-> 核心是「HTTP 动词 + 文件路径」的最小通用核，WebDAV / S3 作为两扇兼容门。
+### 对外 API（给第三方 App / 脚本 / AI agent）
+
+一套自己的接口：一个 Bearer token，对一棵路径树做增删改查。设计和取舍见
+[docs/api/api.md](docs/api/api.md) 与 [docs/api/flows.md](docs/api/flows.md)。
+
+```bash
+# 先给某个 App 发一个只能碰 Apps/badminton 的令牌
+cd backend && go run ./cmd/eam token create \
+  --email you@example.com --name badminton --prefix Apps/badminton
+
+# 然后就是普通 HTTP
+curl -H "Authorization: Bearer eam_..." https://your-host/list?path=Apps/badminton
+```
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| GET | `/list?path=&limit=&cursor=` | 列目录（keyset 分页） |
+| GET | `/files/<path>` | 302 到预签名下载地址；`?json=1` 拿地址、`?meta=1` 拿元信息 |
+| HEAD | `/files/<path>` | 元信息（长度 / 类型 / ETag / 修改时间） |
+| PUT | `/files/<path>` | 写文件（≤ 32 MiB；默认不覆盖，要覆盖加 `?overwrite=1`） |
+| DELETE | `/files/<path>` | 永久删除（目录需 `?recursive=1`） |
+| POST | `/move` | `{"from","to","overwrite"}` 移动 / 改名；目录返回 202 + 任务 ID |
+| GET | `/move/{id}` | 查询目录移动的进度 |
+| POST | `/move/{id}/retry` | 从失败的地方继续 |
+| GET | `/search?q=&path=&mime=&type=` | 搜文件名和路径 |
+| POST | `/upload` | 建上传会话，返回预签名 PUT 地址（超过阈值自动分片；覆盖需 `overwrite: true`） |
+| POST | `/upload/complete` | 传完确认，校验大小后落索引 |
+| GET | `/me` | 当前账号、令牌权限、用量 |
+
+大文件流程：`POST /upload` 拿地址 → 直接 PUT 到 COS（不经过本服）→ `POST /upload/complete`。
+写操作会记进 `audit_log`；限流是每令牌 600 次/分钟。
+超过阈值的上传自动走分片（每片一个预签名 URL，`complete` 时合并）。
+
+令牌管理：
+
+```bash
+eam token list   --email you@example.com
+eam token revoke --email you@example.com --id <令牌 ID>
+```
+
+### 网页用的接口
 
 所有 `/api/fs/*` 都要求登录，并且只操作当前账号自己的文件（未登录返回 401）。
 接口地址和响应信封（`{ok, data}` / `{ok, error}`）与改造前完全一致。
@@ -231,7 +268,7 @@ go run ./cmd/eam purge --days 30
 | GET | `/api/fs/download?path=` | 302 到预签名 URL（`&json=1` 返回 JSON） |
 | POST | `/api/fs/mkdir` | 建目录（写零字节占位对象） |
 | POST | `/api/fs/rename` | 单文件改名/移动；目录请用 coscli |
-| POST | `/api/fs/delete` | 软删除（子树上所有记录） |
+| POST | `/api/fs/delete` | 永久删除（子树上所有记录） |
 | GET | `/api/health` | 存活探针 |
 
 认证写接口会校验 `Origin`/`Host`，并做了单进程内存限流（验证码发送 30 次/小时/IP、
@@ -251,6 +288,9 @@ go run ./cmd/eam purge --days 30
 | `ALLOW_REGISTRATION` | 设为 false 关闭注册；默认开放 |
 | `ADDR` / `PORT` | 监听地址；默认 `:8080`（`ADDR` 优先） |
 | `WEB_DIR` | 前端构建产物目录；不填时自动找仓库里的 `web/dist` |
+| `USER_QUOTA_BYTES` | 每个账号的存储上限（字节），0 或留空表示不限 |
+| `UPLOAD_MULTIPART_THRESHOLD` | 超过多少字节走分片上传，默认 5 GiB |
+| `UPLOAD_PART_SIZE` | 分片大小，默认 64 MiB（片数超过 1000 会自动放大） |
 | `SES_REGION` | 腾讯云 SES 区域，默认 `ap-guangzhou` |
 | `SES_FROM_EMAIL_ADDRESS` | 已在 SES 验证的发件地址；可带显示名，如 `Everything About Me <noreply@yourdomain.com>` |
 | `SES_TEMPLATE_ID` | 验证码模板 ID |
@@ -267,9 +307,11 @@ go run ./cmd/eam purge --days 30
 cd backend && go run ./cmd/eam --help          # 或 ./bin/eam --help
 go run ./cmd/eam migrate                       # 建表 / 升级
 go run ./cmd/eam doctor [--write]              # 自检（--write 会写一个探针对象再删掉）
-go run ./cmd/eam purge --days 30 [--dry-run]   # 清回收站
 go run ./cmd/eam reconcile --owner … [--inventory …] [--dry-run]
 go run ./cmd/eam claim --email … [--dry-run] [--keep-source]
+go run ./cmd/eam token create --email … --name … [--prefix …] [--write=false]
+go run ./cmd/eam token list   --email …
+go run ./cmd/eam token revoke --email … --id …
 ```
 
 `make` 里也有对应目标：

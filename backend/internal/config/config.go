@@ -23,8 +23,14 @@ type Config struct {
 	SessionTTLDays   int
 	CookieSecure     bool
 	RegistrationOpen bool
-	COS              COS
-	SES              SES
+	// QuotaBytes 是每个账号的存储上限，0 表示不限。
+	QuotaBytes int64
+	// MultipartThreshold 超过这个大小的上传走分片，默认 5 GiB。
+	MultipartThreshold int64
+	// UploadPartSize 是分片大小，默认 64 MiB。
+	UploadPartSize int64
+	COS            COS
+	SES            SES
 }
 
 type COS struct {
@@ -77,12 +83,15 @@ func Load() (*Config, error) {
 	}
 
 	c := &Config{
-		Addr:             addr(),
-		AppEnv:           envOr("APP_ENV", "development"),
-		WebDir:           webDir(),
-		DatabaseURL:      os.Getenv("DATABASE_URL"),
-		SessionTTLDays:   positiveInt("SESSION_TTL_DAYS", 30),
-		RegistrationOpen: os.Getenv("ALLOW_REGISTRATION") != "false",
+		Addr:               addr(),
+		AppEnv:             envOr("APP_ENV", "development"),
+		WebDir:             webDir(),
+		DatabaseURL:        os.Getenv("DATABASE_URL"),
+		SessionTTLDays:     positiveInt("SESSION_TTL_DAYS", 30),
+		RegistrationOpen:   os.Getenv("ALLOW_REGISTRATION") != "false",
+		QuotaBytes:         int64(positiveInt("USER_QUOTA_BYTES", 0)),
+		MultipartThreshold: int64(positiveInt("UPLOAD_MULTIPART_THRESHOLD", 5<<30)),
+		UploadPartSize:     int64(positiveInt("UPLOAD_PART_SIZE", 64<<20)),
 		COS: COS{
 			SecretID:  os.Getenv("COS_SECRET_ID"),
 			SecretKey: os.Getenv("COS_SECRET_KEY"),
@@ -118,7 +127,7 @@ func Load() (*Config, error) {
 	return c, nil
 }
 
-// ValidateCOS 只给真正要访问桶的命令（server / doctor / purge / reconcile / claim）用，
+// ValidateCOS 只给真正要访问桶的命令（server / doctor / reconcile / claim）用，
 // 建表这类纯数据库操作不需要 COS 配置。
 func (c *Config) ValidateCOS() error {
 	for name, value := range map[string]string{

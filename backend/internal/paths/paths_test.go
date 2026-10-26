@@ -114,7 +114,7 @@ func TestOwnerSegmentOf(t *testing.T) {
 	if got := OwnerSegmentOf("drive/Photos/a.jpg"); got != "" {
 		t.Fatalf("普通路径不应该识别出 owner，得到 %q", got)
 	}
-	if got := OwnerSegmentOf("_trash/x"); got != "" {
+	if got := OwnerSegmentOf("_inventory/x"); got != "" {
 		t.Fatalf("非 drive 前缀不应该识别出 owner，得到 %q", got)
 	}
 }

@@ -3,7 +3,6 @@
 //	eam server                      启动 HTTP 服务（默认）
 //	eam migrate                     按文件名顺序执行 sql/*.sql
 //	eam doctor [--write]            自检配置 / 数据库 / COS
-//	eam purge [--days 30] [--dry-run]
 //	eam reconcile [--owner 邮箱] [--inventory 清单.csv] [--dry-run]
 //	eam claim --email 邮箱 [--dry-run] [--keep-source]
 package main
@@ -40,12 +39,12 @@ func main() {
 		err = runMigrate(args)
 	case "doctor":
 		err = runDoctor(args)
-	case "purge":
-		err = runPurge(args)
 	case "reconcile":
 		err = runReconcile(args)
 	case "claim":
 		err = runClaim(args)
+	case "token":
+		err = runToken(args)
 	case "help", "-h", "--help":
 		usage()
 		return
@@ -68,9 +67,11 @@ func usage() {
   eam [server]                     启动 HTTP 服务
   eam migrate                      建表 / 执行 sql/*.sql
   eam doctor [--write]             自检配置、数据库、COS
-  eam purge [--days 30] [--dry-run]
   eam reconcile [--owner 邮箱] [--inventory 清单.csv] [--dry-run]
   eam claim --email 邮箱 [--dry-run] [--keep-source]
+  eam token create --email 邮箱 --name 名字 [--prefix 路径] [--write=false]
+  eam token list   --email 邮箱
+  eam token revoke --email 邮箱 --id 令牌ID
 
 环境变量从进程环境读取；如果当前目录或上两级有 .env，会自动加载。
 常用: DATABASE_URL / COS_* / SES_* / APP_ENV / ADDR / WEB_DIR

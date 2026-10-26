@@ -23,8 +23,9 @@ type pathBody struct {
 }
 
 type signBody struct {
-	Path string  `json:"path"`
-	Size float64 `json:"size"`
+	Path      string  `json:"path"`
+	Size      float64 `json:"size"`
+	Overwrite bool    `json:"overwrite"`
 }
 
 type confirmBody struct {
@@ -137,10 +138,10 @@ func (s *Server) handleUploadSign(w http.ResponseWriter, r *http.Request) error 
 	if existing != nil && existing.IsDir {
 		return httpx.Conflict("同名目录已存在")
 	}
-
-	if err := s.nodes.EvictTrashedAt(r.Context(), path, user.ID, false); err != nil {
-		return err
+	if existing != nil && !body.Overwrite {
+		return httpx.Conflict("文件已存在；要覆盖请带上 overwrite: true")
 	}
+
 	key := paths.KeyFor(path, user.ID)
 	credentials, err := s.storage.TemporaryCredentials(r.Context(), key, 3600)
 	if err != nil {
@@ -300,9 +301,6 @@ func (s *Server) handleMkdir(w http.ResponseWriter, r *http.Request) error {
 	if err := s.nodes.EnsureParents(r.Context(), path, user.ID); err != nil {
 		return err
 	}
-	if err := s.nodes.EvictTrashedAt(r.Context(), path, user.ID, true); err != nil {
-		return err
-	}
 	if err := s.storage.PutEmpty(r.Context(), paths.DirKeyFor(path, user.ID)); err != nil {
 		return err
 	}
@@ -371,9 +369,6 @@ func (s *Server) handleRename(w http.ResponseWriter, r *http.Request) error {
 	if err := s.nodes.EnsureParents(r.Context(), to, user.ID); err != nil {
 		return err
 	}
-	if err := s.nodes.EvictTrashedAt(r.Context(), to, user.ID, false); err != nil {
-		return err
-	}
 
 	targetKey := paths.KeyFor(to, user.ID)
 	if err := s.storage.Copy(r.Context(), source.Key, targetKey); err != nil {
@@ -410,8 +405,8 @@ func (s *Server) handleDelete(w http.ResponseWriter, r *http.Request) error {
 		return err
 	}
 
-	// 软删除：只打标记，对象留在原地；purge 任务负责真正删对象
-	count, err := s.nodes.SoftDelete(r.Context(), path, user.ID)
+	// 永久删除：对象和索引一起删掉。
+	count, err := s.nodes.Purge(r.Context(), path, user.ID)
 	if err != nil {
 		return err
 	}

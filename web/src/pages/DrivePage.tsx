@@ -164,10 +164,14 @@ export function DrivePage() {
     const { default: COS } = await import("cos-js-sdk-v5");
     let done = 0;
     for (const file of list) {
-      const target = joinPath(path, file.name.normalize("NFC"));
+      const name = file.name.normalize("NFC");
+      const target = joinPath(path, name);
+      // 默认不覆盖：同名文件要先确认。
+      const exists = items.some((item) => !item.is_dir && item.name === name);
+      if (exists && !window.confirm(`「${name}」已经存在，覆盖它？`)) continue;
       try {
         showToast(`准备 ${file.name}`, "info", true);
-        const sign = await api.signUpload(target, file.size);
+        const sign = await api.signUpload(target, file.size, exists);
 
         const cos = new COS({
           getAuthorization: (_options, callback) =>
@@ -238,7 +242,7 @@ export function DrivePage() {
     setPendingDelete(null);
     try {
       await api.deletePath(target.path);
-      showToast(`已移入回收站：${target.name}`);
+      showToast(`已删除：${target.name}`);
       await load(path);
     } catch (error) {
       showToast(error instanceof Error ? error.message : "删除失败", "error");
@@ -541,7 +545,7 @@ export function DrivePage() {
           <div className={styles.dialog} onClick={(event) => event.stopPropagation()}>
             <div className={styles.dialogTitle}>删除「{pendingDelete.name}」？</div>
             <p className={styles.dialogText}>
-              {pendingDelete.is_dir ? "目录及其中的全部内容" : "文件"}会移入回收站，30 天后才会真正清除。
+              {pendingDelete.is_dir ? "目录及其中的全部内容" : "文件"}会立即删除，无法恢复。
             </p>
             <div className={styles.dialogActions}>
               <button className={styles.cancelBtn} onClick={() => setPendingDelete(null)}>

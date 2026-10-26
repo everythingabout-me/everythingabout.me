@@ -89,7 +89,7 @@ func (s *Service) CountUsers(ctx context.Context) (int, error) {
 func (s *Service) LegacyNodeCount(ctx context.Context) (int, error) {
 	var count int
 	err := s.db.Pool().QueryRow(ctx,
-		`select count(*) from nodes where owner_id is null and deleted_at is null`).Scan(&count)
+		`select count(*) from nodes where owner_id is null`).Scan(&count)
 	return count, err
 }
 

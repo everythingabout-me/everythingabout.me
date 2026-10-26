@@ -1,0 +1,77 @@
+package api
+
+import (
+	"strings"
+
+	"net/http"
+
+	"everythingabout.me/backend/internal/auth"
+	"everythingabout.me/backend/internal/httpx"
+	"everythingabout.me/backend/internal/nodes"
+	"everythingabout.me/backend/internal/paths"
+)
+
+// scopePrefix 把请求里的 path 收窄到令牌允许的范围：
+// 没给 path 就用令牌自己的前缀，给了但不放行就 403。
+func scopePrefix(p *auth.Principal, requested string) (string, error) {
+	if p.Token != nil && p.Token.Prefix != "" {
+		if requested == "" {
+			return p.Token.Prefix, nil
+		}
+		if !paths.IsInside(requested, p.Token.Prefix) {
+			return "", httpx.Forbidden("这个令牌只能访问 " + p.Token.Prefix)
+		}
+	}
+	return requested, nil
+}
+
+// handleAPISearch 搜索文件名和完整路径，支持 path / mime / type 过滤。
+func (s *Server) handleAPISearch(w http.ResponseWriter, r *http.Request) error {
+	p, err := s.principal(r)
+	if err != nil {
+		return err
+	}
+
+	query := strings.TrimSpace(r.URL.Query().Get("q"))
+	if query == "" {
+		return httpx.BadRequest("q 不能为空")
+	}
+	prefix, err := paths.Normalize(r.URL.Query().Get("path"))
+	if err != nil {
+		return err
+	}
+	scoped, err := scopePrefix(p, prefix)
+	if err != nil {
+		return err
+	}
+	cursor, err := decodeCursor(r.URL.Query().Get("cursor"))
+	if err != nil {
+		return err
+	}
+
+	limit := parseLimit(r.URL.Query().Get("limit"))
+	items, err := s.nodes.SearchPage(r.Context(), p.User.ID, nodes.SearchOptions{
+		Keyword: query,
+		Prefix:  scoped,
+		Mime:    strings.TrimSpace(r.URL.Query().Get("mime")),
+		Kind:    strings.TrimSpace(r.URL.Query().Get("type")),
+	}, limit+1, cursor)
+	if err != nil {
+		return err
+	}
+
+	var next *string
+	if len(items) > limit {
+		items = items[:limit]
+		if len(items) > 0 {
+			encoded := encodeCursor(&items[len(items)-1])
+			next = &encoded
+		}
+	}
+
+	httpx.WriteJSON(w, http.StatusOK, map[string]any{
+		"items":  toAPINodes(items),
+		"cursor": next,
+	})
+	return nil
+}
