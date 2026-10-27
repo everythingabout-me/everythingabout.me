@@ -1,4 +1,4 @@
-import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Suspense, lazy, memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useLoaderData, useNavigate, useSearchParams } from "react-router";
 import { ApiError, api, type AuthUser, type Crumb, type Item } from "../api/client";
 import {
@@ -12,10 +12,17 @@ import {
   UploadIcon,
 } from "../components/icons";
 import { BrandMark } from "../components/BrandMark";
+import { canPreviewFile } from "../components/preview/supported";
 import { filesText, foldersText, resultsText, t } from "../i18n";
 import { formatRelativeTime } from "../i18n/format";
 import { useUploadQueue, type UploadStatus, type UploadTask } from "./useUploadQueue";
 import styles from "./DrivePage.module.css";
+
+/**
+ * 预览器（含 pdfjs、Office 渲染器）是一大坨，只有真的点开文件才下载。
+ * 这条 import 必须留在模块顶层，才能在构建时切出一个独立 chunk。
+ */
+const FilePreview = lazy(() => import("../components/preview/FilePreview"));
 
 function joinPath(dir: string, name: string): string {
   return dir ? `${dir}/${name}` : name;
@@ -97,10 +104,12 @@ const ItemRow = memo(function ItemRow({
   item,
   activeQuery,
   onOpenDir,
+  onPreview,
 }: {
   item: Item;
   activeQuery: boolean;
   onOpenDir: (path: string) => void;
+  onPreview: (item: Item) => void;
 }) {
   return (
     <div className={styles.row}>
@@ -116,6 +125,11 @@ const ItemRow = memo(function ItemRow({
             title={item.name}
           >
             {item.name}
+          </button>
+        ) : canPreviewFile(item.name) ? (
+          /* 能预览的文件点名字直接开弹层；不认识的类型保持原来的新标签下载。 */
+          <button className={styles.name} onClick={() => onPreview(item)} title={item.name}>
+            <span className={styles.nameLink}>{item.name}</span>
           </button>
         ) : (
           <a
@@ -266,6 +280,7 @@ export function DrivePage() {
   const [newName, setNewName] = useState("");
   const [toast, setToast] = useState<{ text: string; kind: "info" | "error" } | null>(null);
   const [dragging, setDragging] = useState(false);
+  const [preview, setPreview] = useState<{ path: string; name: string } | null>(null);
 
   const fileInput = useRef<HTMLInputElement>(null);
   const searchInput = useRef<HTMLInputElement>(null);
@@ -395,6 +410,12 @@ export function DrivePage() {
     (target: string) => items.some((item) => item.path === target),
     [items],
   );
+
+  const openPreview = useCallback((item: Item) => {
+    setPreview({ path: item.path, name: item.name });
+  }, []);
+
+  const closePreview = useCallback(() => setPreview(null), []);
 
   const createFolder = async () => {
     const name = newName.trim().normalize("NFC");
@@ -661,6 +682,7 @@ export function DrivePage() {
                   item={entry.item}
                   activeQuery={Boolean(activeQuery)}
                   onOpenDir={goTo}
+                  onPreview={openPreview}
                 />
               ),
             )}
@@ -714,6 +736,17 @@ export function DrivePage() {
         </div>
       )}
 
+      {preview && (
+        <Suspense
+          fallback={
+            <div className={styles.previewLoading} role="status">
+              {t("preview.loading")}
+            </div>
+          }
+        >
+          <FilePreview path={preview.path} name={preview.name} onClose={closePreview} />
+        </Suspense>
+      )}
     </div>
   );
 }

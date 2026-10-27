@@ -78,6 +78,9 @@ const en = {
   "drive.uploadCompleted": "Upload complete",
   "drive.uploadCompletedMany": "{files} uploaded",
 
+  "preview.loading": "Loading preview…",
+  "preview.open": "Open in new tab",
+
   "auth.titleCode": "Sign in or sign up",
   "auth.titlePassword": "Sign in with password",
   "auth.email": "Email",
@@ -235,6 +238,9 @@ const zh: Record<MessageKey, string> = {
   "drive.overwriteConfirm": "「{name}」已经存在，覆盖它？",
   "drive.uploadCompleted": "上传完成",
   "drive.uploadCompletedMany": "已上传 {files}",
+
+  "preview.loading": "正在加载预览…",
+  "preview.open": "在新标签页打开",
 
   "auth.titleCode": "登录 / 注册",
   "auth.titlePassword": "密码登录",

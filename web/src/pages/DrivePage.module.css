@@ -576,6 +576,21 @@
   color: var(--accent);
 }
 
+/* ---------- 预览 ---------- */
+
+/* 预览器的 chunk 还在下载：先给一格遮罩，别让页面看起来没反应。 */
+.previewLoading {
+  position: fixed;
+  inset: 0;
+  z-index: 90;
+  display: grid;
+  place-items: center;
+  background: color-mix(in srgb, var(--overlay) 40%, transparent);
+  backdrop-filter: blur(6px);
+  color: var(--toast-fg);
+  font-size: 13px;
+}
+
 /* ---------- toast ---------- */
 
 .toast {
