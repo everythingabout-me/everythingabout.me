@@ -1,9 +1,13 @@
-node_modules/
+# 不带斜杠：同时忽略真实目录和 worktree 里指过来的 node_modules 软链
+node_modules
 dist/
 
 # Go
 bin/
 .gocache/
+
+# 任务 worktree（见 AGENTS.md 的 Git 工作流）
+.worktrees/
 
 # 本地环境与缓存
 .env
