@@ -16,13 +16,13 @@ func TestParseToken(t *testing.T) {
 		wantID     string
 		wantSecret string
 	}{
-		{"合法", "eam_" + id + "_" + secret, true, id, secret},
-		{"前后空格", "  eam_" + id + "_" + secret + " ", true, id, secret},
-		{"没有前缀", id + "_" + secret, false, "", ""},
-		{"id 太短", "eam_abc_" + secret, false, "", ""},
-		{"没有 secret", "eam_" + id + "_", false, "", ""},
-		{"没有分隔符", "eam_" + id, false, "", ""},
-		{"空串", "", false, "", ""},
+		{"valid", "eam_" + id + "_" + secret, true, id, secret},
+		{"surrounding spaces", "  eam_" + id + "_" + secret + " ", true, id, secret},
+		{"no prefix", id + "_" + secret, false, "", ""},
+		{"id too short", "eam_abc_" + secret, false, "", ""},
+		{"no secret", "eam_" + id + "_", false, "", ""},
+		{"no separator", "eam_" + id, false, "", ""},
+		{"empty string", "", false, "", ""},
 	}
 
 	for _, tc := range cases {
@@ -42,13 +42,13 @@ func TestHashSecretIsStable(t *testing.T) {
 	first := hashSecret("hello")
 	second := hashSecret("hello")
 	if first != second {
-		t.Fatal("同一个 secret 两次哈希结果不同")
+		t.Fatal("hashing the same secret twice gives different results")
 	}
 	if len(first) != 64 || strings.Contains(first, "hello") {
-		t.Fatalf("哈希形状不对: %q", first)
+		t.Fatalf("unexpected hash shape: %q", first)
 	}
 	if hashSecret("hello") == hashSecret("hello!") {
-		t.Fatal("不同 secret 哈希撞了")
+		t.Fatal("different secrets collided")
 	}
 }
 
@@ -56,28 +56,28 @@ func TestPrincipalScope(t *testing.T) {
 	limited := &Principal{Token: &Token{Prefix: "Apps/badminton", CanRead: true, CanWrite: false}}
 
 	if err := limited.RequireRead("Apps/badminton/a.json"); err != nil {
-		t.Fatalf("前缀内读应该允许: %v", err)
+		t.Fatalf("read inside the prefix should be allowed: %v", err)
 	}
 	if err := limited.RequireRead("Apps/badminton"); err != nil {
-		t.Fatalf("前缀本身应该允许: %v", err)
+		t.Fatalf("the prefix itself should be allowed: %v", err)
 	}
 	if err := limited.RequireRead("Apps/other/a.json"); err == nil {
-		t.Fatal("前缀外读应该被拒绝")
+		t.Fatal("read outside the prefix should be denied")
 	}
 	if err := limited.RequireWrite("Apps/badminton/a.json"); err == nil {
-		t.Fatal("只读令牌写应该被拒绝")
+		t.Fatal("write with a read-only token should be denied")
 	}
 
 	writable := &Principal{Token: &Token{Prefix: "", CanRead: true, CanWrite: true}}
 	if err := writable.RequireWrite("anywhere/x"); err != nil {
-		t.Fatalf("空前缀应该代表整个盘: %v", err)
+		t.Fatalf("an empty prefix means the whole drive: %v", err)
 	}
 
 	full := &Principal{}
 	if err := full.RequireWrite("anywhere/x"); err != nil {
-		t.Fatalf("cookie 会话应该全权限: %v", err)
+		t.Fatalf("a cookie session should have full access: %v", err)
 	}
 	if !full.FullAccess() {
-		t.Fatal("cookie 会话应该 FullAccess")
+		t.Fatal("a cookie session should be FullAccess")
 	}
 }

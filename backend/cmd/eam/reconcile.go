@@ -39,9 +39,9 @@ type scanned struct {
 //  2. 也可以读 COS 清单（Inventory）CSV，避免百万对象全量 List。
 func runReconcile(args []string) error {
 	flags := flag.NewFlagSet("reconcile", flag.ContinueOnError)
-	owner := flags.String("owner", "", "只同步这个邮箱对应的用户前缀")
-	inventory := flags.String("inventory", "", "COS 清单 CSV；不填则实时 List")
-	dryRun := flags.Bool("dry-run", false, "打印结果但不提交")
+	owner := flags.String("owner", "", "only sync the prefix for this user")
+	inventory := flags.String("inventory", "", "COS inventory CSV; lists live when empty")
+	dryRun := flags.Bool("dry-run", false, "print results without committing")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
@@ -57,7 +57,7 @@ func runReconcile(args []string) error {
 	ctx := context.Background()
 	db, err := store.Open(ctx, cfg.DatabaseURL)
 	if err != nil {
-		return fmt.Errorf("连接数据库失败: %w", err)
+		return fmt.Errorf("failed to connect to database: %w", err)
 	}
 	defer db.Close()
 
@@ -66,7 +66,7 @@ func runReconcile(args []string) error {
 		if err := db.Pool().QueryRow(ctx,
 			`select id::text from users where lower(email) = lower($1) limit 1`,
 			strings.TrimSpace(*owner)).Scan(&ownerID); err != nil {
-			return fmt.Errorf("找不到用户 %s，请先在网站上注册", *owner)
+			return fmt.Errorf("user %s not found; sign up on the website first", *owner)
 		}
 	}
 
@@ -213,12 +213,12 @@ func runReconcile(args []string) error {
 
 	scope := prefix
 	if ownerID == "" {
-		scope += "（旧的无主数据）"
+		scope += " (legacy unowned data)"
 	}
 	if *dryRun {
 		scope += " [dry-run]"
 	}
-	fmt.Printf("扫描范围：%s\n", scope)
+	fmt.Printf("scan scope: %s\n", scope)
 
 	if *inventory != "" {
 		if err := readInventory(*inventory, acceptKey); err != nil {
@@ -274,7 +274,7 @@ func runReconcile(args []string) error {
 	if *dryRun {
 		prefixText = "[dry-run] "
 	}
-	fmt.Printf("%s扫描 %d 个对象，新增 %d 条，标记删除 %d 条\n", prefixText, seen, inserted, gone)
+	fmt.Printf("%sscanned %d objects, inserted %d, marked deleted %d\n", prefixText, seen, inserted, gone)
 	return nil
 }
 

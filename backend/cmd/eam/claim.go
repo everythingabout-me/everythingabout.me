@@ -20,14 +20,14 @@ import (
 // 复制对象并改写 key。先跑 --dry-run 看清楚再正式执行。
 func runClaim(args []string) error {
 	flags := flag.NewFlagSet("claim", flag.ContinueOnError)
-	email := flags.String("email", "", "把旧文件认领给这个邮箱")
-	dryRun := flags.Bool("dry-run", false, "只打印，不执行")
-	keepSource := flags.Bool("keep-source", false, "保留旧对象，不删源")
+	email := flags.String("email", "", "assign legacy files to this email")
+	dryRun := flags.Bool("dry-run", false, "print only, apply nothing")
+	keepSource := flags.Bool("keep-source", false, "keep old objects, do not delete sources")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
 	if strings.TrimSpace(*email) == "" {
-		return fmt.Errorf("用法: eam claim --email you@example.com [--dry-run] [--keep-source]")
+		return fmt.Errorf("usage: eam claim --email you@example.com [--dry-run] [--keep-source]")
 	}
 
 	cfg, err := config.Load()
@@ -41,7 +41,7 @@ func runClaim(args []string) error {
 	ctx := context.Background()
 	db, err := store.Open(ctx, cfg.DatabaseURL)
 	if err != nil {
-		return fmt.Errorf("连接数据库失败: %w", err)
+		return fmt.Errorf("failed to connect to database: %w", err)
 	}
 	defer db.Close()
 
@@ -50,7 +50,7 @@ func runClaim(args []string) error {
 		`select id::text, email from users where lower(email) = lower($1) limit 1`,
 		strings.TrimSpace(*email)).Scan(&ownerID, &ownerEmail)
 	if err != nil {
-		return fmt.Errorf("找不到用户 %s，请先在网站上注册", *email)
+		return fmt.Errorf("user %s not found; sign up on the website first", *email)
 	}
 
 	rows, err := db.Pool().Query(ctx,
@@ -82,11 +82,11 @@ func runClaim(args []string) error {
 	}
 
 	if len(items) == 0 {
-		fmt.Println("没有需要认领的旧数据")
+		fmt.Println("no legacy files to claim")
 		return nil
 	}
 
-	fmt.Printf("认领 %d 条记录到 %s（%s）\n", len(items), ownerEmail, ownerID)
+	fmt.Printf("claiming %d records into %s (%s)\n", len(items), ownerEmail, ownerID)
 
 	objectStorage, err := cos.New(cfg.COS)
 	if err != nil {
@@ -108,7 +108,7 @@ func runClaim(args []string) error {
 		source, err := objectStorage.Head(ctx, item.key)
 		if err != nil {
 			failed++
-			log.Printf("  失败 %s: %v", item.key, err)
+			log.Printf("  failed %s: %v", item.key, err)
 			continue
 		}
 		if source == nil {
@@ -116,17 +116,17 @@ func runClaim(args []string) error {
 				// 空目录的占位对象丢了也能补回来
 				if err := objectStorage.PutEmpty(ctx, targetKey); err != nil {
 					failed++
-					log.Printf("  失败 %s: %v", item.key, err)
+					log.Printf("  failed %s: %v", item.key, err)
 					continue
 				}
 			} else {
-				fmt.Printf("  跳过（源对象不存在）: %s\n", item.key)
+				fmt.Printf("  skipped (source object missing): %s\n", item.key)
 				skipped++
 				continue
 			}
 		} else if err := objectStorage.Copy(ctx, item.key, targetKey); err != nil {
 			failed++
-			log.Printf("  失败 %s: %v", item.key, err)
+			log.Printf("  failed %s: %v", item.key, err)
 			continue
 		}
 
@@ -135,23 +135,23 @@ func runClaim(args []string) error {
 			  where id = $3::uuid and owner_id is null`, ownerID, targetKey, item.id)
 		if err != nil {
 			failed++
-			log.Printf("  失败 %s: %v", item.key, err)
+			log.Printf("  failed %s: %v", item.key, err)
 			continue
 		}
 		if tag.RowsAffected() == 0 {
-			fmt.Printf("  跳过（记录已被其他进程认领）: %s\n", item.key)
+			fmt.Printf("  skipped (already claimed by another process): %s\n", item.key)
 			skipped++
 			continue
 		}
 		if source != nil && !*keepSource {
 			// 数据库已经指向新 key 之后再删源，失败顶多留个重复对象，不会丢数据
 			if err := objectStorage.Remove(ctx, item.key); err != nil {
-				log.Printf("  删除源对象失败 %s: %v", item.key, err)
+				log.Printf("  failed to delete source object %s: %v", item.key, err)
 			}
 		}
 		moved++
 		if moved%100 == 0 {
-			fmt.Printf("  已处理 %d/%d\n", moved, len(items))
+			fmt.Printf("  processed %d/%d\n", moved, len(items))
 		}
 	}
 
@@ -159,9 +159,9 @@ func runClaim(args []string) error {
 	if *dryRun {
 		prefix = "[dry-run] "
 	}
-	fmt.Printf("%s完成：迁移 %d，跳过 %d，失败 %d\n", prefix, moved, skipped, failed)
+	fmt.Printf("%sdone: moved %d, skipped %d, failed %d\n", prefix, moved, skipped, failed)
 	if failed > 0 {
-		return fmt.Errorf("%d 条记录迁移失败", failed)
+		return fmt.Errorf("%d records failed to migrate", failed)
 	}
 	return nil
 }

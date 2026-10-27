@@ -35,6 +35,6 @@ func (s *Server) recordAudit(
 		 values ($1::uuid, $2, $3, $4, $5, $6, $7, $8::jsonb)`,
 		p.User.ID, tokenID, action, path, status,
 		httpx.ClientIP(r), r.UserAgent(), string(payload)); err != nil {
-		slog.Warn("audit: 写入失败", "action", action, "path", path, "error", err)
+		slog.Warn("audit: failed to write entry", "action", action, "path", path, "error", err)
 	}
 }

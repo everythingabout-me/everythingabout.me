@@ -20,7 +20,7 @@ const (
 // Start 启动后台整理器。单实例假设；多实例需要把租约换成心跳。
 func (s *Service) Start(ctx context.Context) {
 	if !s.cfg.Enabled {
-		slog.Info("timeline: 未启用")
+		slog.Info("timeline: disabled")
 		return
 	}
 	if !s.started.CompareAndSwap(false, true) {
@@ -33,7 +33,7 @@ func (s *Service) Start(ctx context.Context) {
 	}
 	go s.bootstrap(ctx)
 	go s.sweeper(ctx)
-	slog.Info("timeline: 已启动", "workers", s.cfg.Workers, "budget", s.engine.Budget)
+	slog.Info("timeline: started", "workers", s.cfg.Workers, "budget", s.engine.Budget)
 }
 
 func (s *Service) recoverJobs(ctx context.Context) {
@@ -42,7 +42,7 @@ func (s *Service) recoverJobs(ctx context.Context) {
 		`update timeline_jobs
 		    set status = 'pending', lease_until = null
 		  where status = 'running'`); err != nil {
-		slog.Warn("timeline: 恢复中断任务失败", "error", err)
+		slog.Warn("timeline: failed to recover interrupted jobs", "error", err)
 	}
 }
 
@@ -65,7 +65,7 @@ func (s *Service) bootstrap(ctx context.Context) {
 		    and a.node_id is null
 		  group by n.owner_id
 		 on conflict do nothing`); err != nil {
-		slog.Warn("timeline: 启动回填排队失败", "error", err)
+		slog.Warn("timeline: failed to enqueue startup backfill", "error", err)
 	}
 }
 
@@ -87,7 +87,7 @@ func (s *Service) sweeper(ctx context.Context) {
 				    and is_dir = false
 				    and updated_at > now() - interval '25 minutes'
 				 on conflict do nothing`); err != nil {
-				slog.Warn("timeline: 周期扫描排队失败", "error", err)
+				slog.Warn("timeline: failed to enqueue periodic scan", "error", err)
 			}
 			if _, err := s.db.Pool().Exec(ctx,
 				`insert into timeline_jobs (user_id, kind)
@@ -97,7 +97,7 @@ func (s *Service) sweeper(ctx context.Context) {
 				  where n.owner_id is not null and n.is_dir = false and a.node_id is null
 				  group by n.owner_id
 				 on conflict do nothing`); err != nil {
-				slog.Warn("timeline: 周期回填排队失败", "error", err)
+				slog.Warn("timeline: failed to enqueue periodic backfill", "error", err)
 			}
 		}
 	}
@@ -113,7 +113,7 @@ func (s *Service) worker(ctx context.Context) {
 			if ctx.Err() != nil {
 				return
 			}
-			slog.Warn("timeline: 领取任务失败", "error", err)
+			slog.Warn("timeline: failed to claim job", "error", err)
 			sleep(ctx, 3*time.Second)
 			continue
 		}
@@ -138,7 +138,7 @@ func (s *Service) runJob(parent context.Context, item *job) {
 	case "month":
 		err = s.runMonth(ctx, item)
 	default:
-		err = fmt.Errorf("未知任务类型 %q", item.Kind)
+		err = fmt.Errorf("unknown job kind %q", item.Kind)
 	}
 
 	if err != nil {
@@ -146,7 +146,7 @@ func (s *Service) runJob(parent context.Context, item *job) {
 			// 进程正在退出，把任务留在 running，下次启动会恢复。
 			return
 		}
-		slog.Warn("timeline: 任务失败", "job", item.ID, "kind", item.Kind, "error", err)
+		slog.Warn("timeline: job failed", "job", item.ID, "kind", item.Kind, "error", err)
 		s.failJob(context.Background(), item, err)
 		return
 	}
@@ -202,7 +202,7 @@ func (s *Service) runBackfill(ctx context.Context, item *job) error {
 		return err
 	}
 	if processed > 0 {
-		slog.Info("timeline: 回填完成", "user", item.UserID, "files", processed)
+		slog.Info("timeline: backfill finished", "user", item.UserID, "files", processed)
 	}
 	return nil
 }
@@ -210,7 +210,7 @@ func (s *Service) runBackfill(ctx context.Context, item *job) error {
 func (s *Service) runMonth(ctx context.Context, item *job) error {
 	month, ok := parseMonth(item.Month, s.engine.Location)
 	if !ok {
-		return fmt.Errorf("月份不合法: %q", item.Month)
+		return fmt.Errorf("invalid month: %q", item.Month)
 	}
 	return s.rebuildMonth(ctx, item.UserID, month)
 }
@@ -232,7 +232,7 @@ func (s *Service) processFile(ctx context.Context, file FileInput) error {
 			}
 			samples, err := s.extractAmbient(ctx, file, extractor)
 			if err != nil {
-				slog.Debug("timeline: 数据文件解析失败",
+				slog.Debug("timeline: failed to parse data file",
 					"path", file.Path, "extractor", extractor.Name(), "error", err)
 				break
 			}

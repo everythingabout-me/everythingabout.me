@@ -25,7 +25,7 @@ func TestNormalize(t *testing.T) {
 	for _, tc := range cases {
 		got, err := Normalize(tc.input)
 		if err != nil {
-			t.Fatalf("Normalize(%q) 报错: %v", tc.input, err)
+			t.Fatalf("Normalize(%q) returned an error: %v", tc.input, err)
 		}
 		if got != tc.want {
 			t.Fatalf("Normalize(%q) = %q, want %q", tc.input, got, tc.want)
@@ -45,7 +45,7 @@ func TestNormalizeRejectsBadPaths(t *testing.T) {
 	}
 	for _, input := range cases {
 		if _, err := Normalize(input); err == nil {
-			t.Fatalf("Normalize(%q) 应该报错", input)
+			t.Fatalf("Normalize(%q) should return an error", input)
 		}
 	}
 }
@@ -77,7 +77,7 @@ func TestAncestors(t *testing.T) {
 		}
 	}
 	if len(AncestorsOf("a.jpg")) != 0 {
-		t.Fatal("根目录下的文件不应该有祖先")
+		t.Fatal("a file at the root should have no ancestors")
 	}
 }
 
@@ -102,7 +102,7 @@ func TestKeys(t *testing.T) {
 		t.Fatalf("PathFromKey dir = %q, %v", path, ok)
 	}
 	if _, ok := PathFromKey("drive/other/Photos/a.jpg", owner); ok {
-		t.Fatal("不属于该用户的 key 不应该被接受")
+		t.Fatal("a key owned by another user should be rejected")
 	}
 }
 
@@ -112,9 +112,9 @@ func TestOwnerSegmentOf(t *testing.T) {
 		t.Fatalf("OwnerSegmentOf = %q", got)
 	}
 	if got := OwnerSegmentOf("drive/Photos/a.jpg"); got != "" {
-		t.Fatalf("普通路径不应该识别出 owner，得到 %q", got)
+		t.Fatalf("a plain path should have no owner, got %q", got)
 	}
 	if got := OwnerSegmentOf("_inventory/x"); got != "" {
-		t.Fatalf("非 drive 前缀不应该识别出 owner，得到 %q", got)
+		t.Fatalf("a non-drive prefix should have no owner, got %q", got)
 	}
 }

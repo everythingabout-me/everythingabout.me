@@ -21,7 +21,7 @@ import (
 
 func runServer(args []string) error {
 	if len(args) > 0 {
-		return fmt.Errorf("server 不接受参数: %v", args)
+		return fmt.Errorf("server takes no arguments: %v", args)
 	}
 
 	cfg, err := config.Load()
@@ -35,13 +35,13 @@ func runServer(args []string) error {
 	ctx := context.Background()
 	db, err := store.Open(ctx, cfg.DatabaseURL)
 	if err != nil {
-		return fmt.Errorf("连接数据库失败: %w", err)
+		return fmt.Errorf("failed to connect to database: %w", err)
 	}
 	defer db.Close()
 
 	objectStorage, err := cos.New(cfg.COS)
 	if err != nil {
-		return fmt.Errorf("初始化 COS 失败: %w", err)
+		return fmt.Errorf("failed to initialize COS: %w", err)
 	}
 
 	apiServer := api.New(cfg, db, objectStorage, webui.New(cfg.WebDir))
@@ -59,13 +59,13 @@ func runServer(args []string) error {
 
 	go func() {
 		<-shutdownSignal.Done()
-		slog.Info("正在关闭服务…")
+		slog.Info("shutting down")
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		_ = server.Shutdown(ctx)
 	}()
 
-	slog.Info("服务已启动", "addr", cfg.Addr, "env", cfg.AppEnv, "web", cfg.WebDir)
+	slog.Info("server started", "addr", cfg.Addr, "env", cfg.AppEnv, "web", cfg.WebDir)
 	if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		return err
 	}

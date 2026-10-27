@@ -91,7 +91,7 @@ func (s *Service) recoverStale() {
 		`update fs_jobs
 		    set status = 'failed', error = '服务重启，任务中断', finished_at = now()
 		  where status in ('pending', 'running')`); err != nil {
-		slog.Warn("jobs: 标记中断作业失败", "error", err)
+		slog.Warn("jobs: failed to mark interrupted jobs", "error", err)
 	}
 }
 
@@ -206,9 +206,9 @@ func (s *Service) Retry(ctx context.Context, userID, id string) (*Job, error) {
 	}
 	switch job.Status {
 	case "pending", "running":
-		return job, fmt.Errorf("作业正在跑，不能重试")
+		return job, fmt.Errorf("job is still running; cannot retry")
 	case "done":
-		return job, fmt.Errorf("作业已经完成，不用重试")
+		return job, fmt.Errorf("job already finished; no retry needed")
 	}
 
 	if _, err := s.db.Pool().Exec(ctx,
@@ -234,7 +234,7 @@ func (s *Service) run(id string) {
 
 	job, err := s.jobByID(ctx, id)
 	if err != nil || job == nil {
-		slog.Warn("jobs: 读取作业失败", "job", id, "error", err)
+		slog.Warn("jobs: failed to load job", "job", id, "error", err)
 		return
 	}
 	if job.Status == "done" || job.Status == "cancelled" {
@@ -312,7 +312,7 @@ func (s *Service) moveOne(ctx context.Context, userID string, row *nodes.Row, ta
 			}
 			if err := s.storage.Remove(ctx, row.Key); err != nil {
 				// 旧对象删不掉最多留个孤儿，不能因此把整个作业判失败。
-				slog.Warn("jobs: 删除旧对象失败", "key", row.Key, "error", err)
+				slog.Warn("jobs: failed to delete old object", "key", row.Key, "error", err)
 			}
 		}
 	}
@@ -372,7 +372,7 @@ func (s *Service) cancelRequested(ctx context.Context, id string) bool {
 	var requested bool
 	if err := s.db.Pool().QueryRow(ctx,
 		`select cancel_requested_at is not null from fs_jobs where id = $1`, id).Scan(&requested); err != nil {
-		slog.Warn("jobs: 查询取消标记失败", "job", id, "error", err)
+		slog.Warn("jobs: failed to read cancel flag", "job", id, "error", err)
 		return false
 	}
 	return requested
@@ -383,7 +383,7 @@ func (s *Service) finish(ctx context.Context, id, status string, done int, cause
 		if _, err := s.db.Pool().Exec(ctx,
 			`update fs_jobs set status = 'done', done = $2, finished_at = now() where id = $1`,
 			id, done); err != nil {
-			slog.Warn("jobs: 标记完成失败", "job", id, "error", err)
+			slog.Warn("jobs: failed to mark job done", "job", id, "error", err)
 		}
 		return
 	}
@@ -394,15 +394,15 @@ func (s *Service) finish(ctx context.Context, id, status string, done int, cause
 	if _, err := s.db.Pool().Exec(ctx,
 		`update fs_jobs set status = $3, done = $2, error = nullif($4, ''), finished_at = now()
 		  where id = $1`, id, done, status, message); err != nil {
-		slog.Warn("jobs: 标记结束失败", "job", id, "status", status, "error", err)
+		slog.Warn("jobs: failed to mark job finished", "job", id, "status", status, "error", err)
 	}
 }
 
 func (s *Service) fail(ctx context.Context, id string, cause error) {
-	slog.Warn("jobs: 作业失败", "job", id, "error", cause)
+	slog.Warn("jobs: job failed", "job", id, "error", cause)
 	if _, err := s.db.Pool().Exec(ctx,
 		`update fs_jobs set status = 'failed', error = $2, finished_at = now() where id = $1`,
 		id, cause.Error()); err != nil {
-		slog.Warn("jobs: 标记失败状态失败", "job", id, "error", err)
+		slog.Warn("jobs: failed to mark job failed", "job", id, "error", err)
 	}
 }

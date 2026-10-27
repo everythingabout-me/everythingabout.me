@@ -36,7 +36,7 @@ func (d *doctor) warn(label string) {
 
 func runDoctor(args []string) error {
 	flags := flag.NewFlagSet("doctor", flag.ContinueOnError)
-	writeTest := flags.Bool("write", false, "额外测试一次写入+删除")
+	writeTest := flags.Bool("write", false, "also test write + delete")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
@@ -47,7 +47,7 @@ func runDoctor(args []string) error {
 	}
 	checks := &doctor{}
 
-	fmt.Println("\n配置")
+	fmt.Println("\nconfig")
 	fmt.Printf("  bucket   %s\n", cfg.COS.Bucket)
 	fmt.Printf("  region   %s\n", cfg.COS.Region)
 	fmt.Printf("  database %s\n", credentialRe.ReplaceAllString(cfg.DatabaseURL, "//***@"))
@@ -55,38 +55,38 @@ func runDoctor(args []string) error {
 	ctx := context.Background()
 	db, dbErr := store.Open(ctx, cfg.DatabaseURL)
 
-	fmt.Println("\n数据库")
+	fmt.Println("\ndatabase")
 	if dbErr != nil {
-		checks.bad("连接失败", dbErr, "检查 DATABASE_URL；端口被别的库占用时换一个端口")
+		checks.bad("connection failed", dbErr, "check DATABASE_URL; use another port if it is taken")
 	} else {
 		defer db.Close()
 		checkDatabase(ctx, db, checks)
 	}
 
-	fmt.Println("\n邮件")
+	fmt.Println("\nemail")
 	if cfg.SESConfigured() {
-		checks.ok("腾讯云 SES 已配置", " "+cfg.SES.Region+" · "+cfg.SES.FromEmailAddress)
+		checks.ok("Tencent SES configured", " "+cfg.SES.Region+" · "+cfg.SES.FromEmailAddress)
 	} else if cfg.IsProduction() {
-		checks.bad("腾讯云 SES 未配置",
-			fmt.Errorf("生产环境无法发送验证码"),
-			"填 SES_FROM_EMAIL_ADDRESS / SES_TEMPLATE_ID 等；或在开发环境运行")
+		checks.bad("Tencent SES not configured",
+			fmt.Errorf("cannot send verification codes in production"),
+			"set SES_FROM_EMAIL_ADDRESS / SES_TEMPLATE_ID etc.; or run in development")
 	} else {
-		checks.warn("腾讯云 SES 未配置：开发环境验证码会打印到服务端日志，并在登录页自动填入")
+		checks.warn("Tencent SES not configured: in development the code goes to the server log and is autofilled on the login page")
 	}
 
 	fmt.Println("\nCOS")
 	if err := cfg.ValidateCOS(); err != nil {
-		checks.bad("COS 配置不完整", err, "填 COS_SECRET_ID / COS_SECRET_KEY / COS_BUCKET / COS_REGION")
+		checks.bad("incomplete COS config", err, "set COS_SECRET_ID / COS_SECRET_KEY / COS_BUCKET / COS_REGION")
 	} else {
 		checkCOS(ctx, cfg, checks, *writeTest)
 	}
 
 	if checks.failed == 0 {
-		fmt.Print("\n一切正常。\n\n")
+		fmt.Print("\nAll checks passed.\n\n")
 		return nil
 	}
-	fmt.Printf("\n有 %d 项没通过。\n", checks.failed)
-	return fmt.Errorf("%d 项检查未通过", checks.failed)
+	fmt.Printf("\n%d check(s) failed.\n", checks.failed)
+	return fmt.Errorf("%d check(s) failed", checks.failed)
 }
 
 func checkDatabase(ctx context.Context, db *store.DB, checks *doctor) {
@@ -94,17 +94,17 @@ func checkDatabase(ctx context.Context, db *store.DB, checks *doctor) {
 
 	var nodesTable string
 	if err := pool.QueryRow(ctx, `select coalesce(to_regclass('public.nodes')::text, '')`).Scan(&nodesTable); err != nil {
-		checks.bad("查询 nodes 表失败", err, "")
+		checks.bad("failed to query nodes table", err, "")
 		return
 	}
 	if nodesTable == "" {
-		checks.bad("nodes 表不存在", fmt.Errorf("missing"), "先跑 eam migrate")
+		checks.bad("nodes table is missing", fmt.Errorf("missing"), "run eam migrate first")
 	} else {
 		var count int
 		if err := pool.QueryRow(ctx, `select count(*)::int from nodes`).Scan(&count); err != nil {
-			checks.bad("统计 nodes 失败", err, "")
+			checks.bad("failed to count nodes", err, "")
 		} else {
-			checks.ok("连接正常，nodes 表就绪", fmt.Sprintf(" 当前 %d 条记录", count))
+			checks.ok("connected, nodes table ready", fmt.Sprintf(" %d rows", count))
 		}
 	}
 
@@ -114,72 +114,72 @@ func checkDatabase(ctx context.Context, db *store.DB, checks *doctor) {
 		coalesce(to_regclass('public.sessions')::text, ''),
 		coalesce(to_regclass('public.email_codes')::text, '')`).Scan(&usersTable, &sessionsTable, &codesTable)
 	if err != nil {
-		checks.bad("查询用户相关表失败", err, "")
+		checks.bad("failed to query user tables", err, "")
 		return
 	}
 	if usersTable == "" || sessionsTable == "" || codesTable == "" {
-		checks.bad("users / sessions / email_codes 表不存在", fmt.Errorf("missing"), "先跑 eam migrate")
+		checks.bad("users / sessions / email_codes tables are missing", fmt.Errorf("missing"), "run eam migrate first")
 		return
 	}
 
 	var users, unowned int
 	if err := pool.QueryRow(ctx, `select count(*)::int from users`).Scan(&users); err != nil {
-		checks.bad("统计 users 失败", err, "")
+		checks.bad("failed to count users", err, "")
 		return
 	}
 	if err := pool.QueryRow(ctx,
 		`select count(*)::int from nodes where owner_id is null`).Scan(&unowned); err != nil {
-		checks.bad("统计无主文件失败", err, "")
+		checks.bad("failed to count unowned files", err, "")
 		return
 	}
-	checks.ok("用户表就绪", fmt.Sprintf(" 当前 %d 个账号", users))
+	checks.ok("user tables ready", fmt.Sprintf(" %d accounts", users))
 	if unowned > 0 {
-		checks.warn(fmt.Sprintf("还有 %d 条旧文件没有归属，跑 eam claim --email 你@example.com 认领", unowned))
+		checks.warn(fmt.Sprintf("%d legacy files have no owner; run: eam claim --email you@example.com", unowned))
 	}
 }
 
 func checkCOS(ctx context.Context, cfg *config.Config, checks *doctor, writeTest bool) {
 	objectStorage, err := cos.New(cfg.COS)
 	if err != nil {
-		checks.bad("初始化 COS 客户端失败", err, "")
+		checks.bad("failed to initialize COS client", err, "")
 		return
 	}
 	probe := fmt.Sprintf("drive/__doctor__/probe-%d.txt", time.Now().UnixNano())
 
 	info, err := objectStorage.Head(ctx, probe)
 	if err != nil {
-		checks.bad("headObject 失败", err, "多为桶名缺 APPID、region 填错、或密钥无权限")
+		checks.bad("headObject failed", err, "usually a bucket name without APPID, a wrong region, or a key without permission")
 		return
 	}
 	if info != nil {
-		checks.ok("鉴权与桶可达", " （意外：探针对象存在）")
+		checks.ok("auth OK, bucket reachable", " (unexpected: probe object already exists)")
 	} else {
-		checks.ok("鉴权与桶可达", " （探针对象不存在，符合预期）")
+		checks.ok("auth OK, bucket reachable", " (probe object missing, as expected)")
 	}
 
 	credentials, err := objectStorage.TemporaryCredentials(ctx, probe, 900)
 	if err != nil {
-		checks.bad("STS 签发失败", err, "子账号需要 sts:GetFederationToken 权限，或密钥不是有效的 API 密钥")
+		checks.bad("STS credential issue failed", err, "the sub-account needs sts:GetFederationToken, or the key is not a valid API key")
 	} else {
 		expires := time.Unix(credentials.ExpiredTime, 0).Format(time.DateTime)
-		checks.ok("STS 临时凭证签发成功", " 有效期至 "+expires)
+		checks.ok("STS credentials issued", " valid until "+expires)
 	}
 
 	if !writeTest {
 		return
 	}
 	if err := objectStorage.PutEmpty(ctx, probe); err != nil {
-		checks.bad("写入失败", err, "检查子账号是否有 PutObject / DeleteObject 权限")
+		checks.bad("write failed", err, "check the sub-account has PutObject / DeleteObject permission")
 		return
 	}
 	written, err := objectStorage.Head(ctx, probe)
 	if err != nil || written == nil {
-		checks.bad("读取刚写入的对象失败", err, "")
+		checks.bad("failed to read back the written object", err, "")
 		return
 	}
 	if err := objectStorage.Remove(ctx, probe); err != nil {
-		checks.bad("删除探针对象失败", err, "")
+		checks.bad("failed to delete probe object", err, "")
 		return
 	}
-	checks.ok("写入 / 读取 / 删除", fmt.Sprintf(" 大小 %d 字节", written.Size))
+	checks.ok("write / read / delete", fmt.Sprintf(" %d bytes", written.Size))
 }

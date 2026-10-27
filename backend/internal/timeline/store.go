@@ -261,7 +261,7 @@ func (s *Service) finishJob(ctx context.Context, id int64) {
 		`update timeline_jobs
 		    set status = 'done', lease_until = null, error = null, available_at = now()
 		  where id = $1`, id); err != nil {
-		slog.Warn("timeline: 标记任务完成失败", "job", id, "error", err)
+		slog.Warn("timeline: failed to mark job done", "job", id, "error", err)
 	}
 }
 
@@ -282,7 +282,7 @@ func (s *Service) failJob(ctx context.Context, item *job, cause error) {
 		        available_at = now() + make_interval(secs => $4)
 		  where id = $1`, item.ID, status, cause.Error(), int(backoff.Seconds()))
 	if err != nil {
-		slog.Warn("timeline: 标记任务失败失败", "job", item.ID, "error", err)
+		slog.Warn("timeline: failed to mark job failed", "job", item.ID, "error", err)
 	}
 }
 
@@ -292,7 +292,7 @@ func (s *Service) saveCursor(ctx context.Context, id int64, cursor string) {
 		    set cursor = $2, lease_until = now() + interval '30 minutes'
 		  where id = $1`, id, cursor)
 	if err != nil {
-		slog.Warn("timeline: 保存回填游标失败", "job", id, "error", err)
+		slog.Warn("timeline: failed to save backfill cursor", "job", id, "error", err)
 	}
 }
 
@@ -632,7 +632,7 @@ func (s *Service) signThumb(ctx context.Context, userID string, thumb *Thumb, pr
 		Process:        process,
 	})
 	if err != nil {
-		slog.Warn("timeline: 生成缩略图地址失败", "path", thumb.Path, "error", err)
+		slog.Warn("timeline: failed to sign thumbnail URL", "path", thumb.Path, "error", err)
 		return
 	}
 	thumb.URL = url

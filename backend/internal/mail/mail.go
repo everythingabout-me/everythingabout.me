@@ -40,7 +40,7 @@ func (s *Sender) SendVerificationCode(ctx context.Context, to, code string) (str
 		if s.cfg.IsProduction() {
 			return "", httpx.ServiceUnavailable("邮件服务未配置，暂时无法发送验证码")
 		}
-		log.Printf("[email:dev] 验证码 %s -> %s", code, to)
+		log.Printf("[email:dev] verification code %s -> %s", code, to)
 		return code, nil
 	}
 
@@ -78,7 +78,7 @@ func templateDataJSON(name, code string) (string, error) {
 		name = "code"
 	}
 	if strings.ContainsAny(name, `"\\`) {
-		return "", fmt.Errorf("SES_TEMPLATE_VAR 含有非法字符")
+		return "", fmt.Errorf("SES_TEMPLATE_VAR contains invalid characters")
 	}
 	escaped := strings.NewReplacer(`\`, `\\`, `"`, `\"`).Replace(code)
 	return `{"` + name + `":"` + escaped + `"}`, nil

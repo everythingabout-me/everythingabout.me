@@ -31,7 +31,7 @@ func (s *Service) Notify(userID string) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	if err := s.enqueueScan(ctx, userID); err != nil {
-		slog.Warn("timeline: 排 scan 失败", "user", userID, "error", err)
+		slog.Warn("timeline: failed to enqueue scan", "user", userID, "error", err)
 	}
 }
 
@@ -236,7 +236,7 @@ func (s *Service) rebuildMonth(ctx context.Context, userID string, month time.Ti
 	if err := s.saveSnapshot(ctx, userID, month, payload, fileCount, sourceRev); err != nil {
 		return err
 	}
-	slog.Debug("timeline: 月份已整理",
+	slog.Debug("timeline: month rebuilt",
 		"user", userID, "month", month.Format("2006-01"),
 		"files", fileCount, "candidates", len(candidates), "selected", len(selected))
 	return nil

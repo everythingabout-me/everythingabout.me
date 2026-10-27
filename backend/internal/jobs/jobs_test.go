@@ -17,17 +17,17 @@ func TestNewJobID(t *testing.T) {
 	for _, tc := range cases {
 		id, err := newJobID(tc.op)
 		if err != nil {
-			t.Fatalf("%s 生成失败: %v", tc.op, err)
+			t.Fatalf("%s: generate failed: %v", tc.op, err)
 		}
 		if len(id) != 2+24 || !strings.HasPrefix(id, tc.prefix) {
-			t.Fatalf("%s 形状不对: %q", tc.op, id)
+			t.Fatalf("%s: unexpected shape: %q", tc.op, id)
 		}
 		other, err := newJobID(tc.op)
 		if err != nil {
-			t.Fatalf("%s 生成失败: %v", tc.op, err)
+			t.Fatalf("%s: generate failed: %v", tc.op, err)
 		}
 		if id == other {
-			t.Fatalf("%s 两次生成的 id 相同", tc.op)
+			t.Fatalf("%s: two generated ids are identical", tc.op)
 		}
 	}
 }

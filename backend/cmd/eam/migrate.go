@@ -22,12 +22,12 @@ func findSQLDir() (string, error) {
 			return candidate, nil
 		}
 	}
-	return "", fmt.Errorf("找不到 sql/ 目录，可用 EAM_SQL_DIR 指定")
+	return "", fmt.Errorf("sql/ directory not found; set EAM_SQL_DIR")
 }
 
 func runMigrate(args []string) error {
 	if len(args) > 0 {
-		return fmt.Errorf("migrate 不接受参数: %v", args)
+		return fmt.Errorf("migrate takes no arguments: %v", args)
 	}
 	cfg, err := config.Load()
 	if err != nil {
@@ -50,13 +50,13 @@ func runMigrate(args []string) error {
 	}
 	sort.Strings(files)
 	if len(files) == 0 {
-		return fmt.Errorf("%s 里没有 .sql 文件", dir)
+		return fmt.Errorf("no .sql files in %s", dir)
 	}
 
 	ctx := context.Background()
 	db, err := store.Open(ctx, cfg.DatabaseURL)
 	if err != nil {
-		return fmt.Errorf("连接数据库失败: %w", err)
+		return fmt.Errorf("failed to connect to database: %w", err)
 	}
 	defer db.Close()
 
@@ -74,14 +74,14 @@ func runMigrate(args []string) error {
 		}
 		// 没有参数时 pgx 会走 simple protocol，可以一次执行多条语句
 		if _, err := tx.Exec(ctx, string(content)); err != nil {
-			fmt.Println("✗")
+			fmt.Println("FAIL")
 			return fmt.Errorf("%s: %w", file, err)
 		}
-		fmt.Println("✓")
+		fmt.Println("OK")
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return err
 	}
-	fmt.Printf("\n已执行 %d 个迁移。\n", len(files))
+	fmt.Printf("\napplied %d migrations.\n", len(files))
 	return nil
 }

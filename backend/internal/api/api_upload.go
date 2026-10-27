@@ -286,7 +286,7 @@ func (s *Server) handleAPIComplete(w http.ResponseWriter, r *http.Request) error
 	}
 	if info.Size != session.Size {
 		return httpx.BadRequest(fmt.Sprintf(
-			"大小不一致：会话声明 %d 字节，实际对象 %d 字节", session.Size, info.Size))
+			"size mismatch: session declared %d bytes, object has %d bytes", session.Size, info.Size))
 	}
 
 	if err := s.nodes.EnsureParents(r.Context(), session.Path, p.User.ID); err != nil {
@@ -328,7 +328,7 @@ func (s *Server) handleAPIComplete(w http.ResponseWriter, r *http.Request) error
 	if _, err := s.db.Pool().Exec(r.Context(),
 		`update upload_sessions set completed_at = now() where id = $1`, session.ID); err != nil {
 		// 索引已经写了，这里失败只影响幂等判断，不值得把请求判失败。
-		slog.Warn("upload: 标记会话完成失败", "uploadId", session.ID, "error", err)
+		slog.Warn("upload: failed to mark session complete", "uploadId", session.ID, "error", err)
 	}
 
 	if node.ETag != nil {
@@ -399,7 +399,7 @@ func (s *Server) cancelPendingUploads(ctx context.Context, userID, path string) 
 	for _, item := range list {
 		if item.provider != "" {
 			if err := s.storage.AbortMultipart(ctx, paths.KeyFor(path, userID), item.provider); err != nil {
-				slog.Warn("upload: abort 旧的分片上传失败", "providerUploadId", item.provider, "error", err)
+				slog.Warn("upload: failed to abort previous multipart upload", "providerUploadId", item.provider, "error", err)
 			}
 		}
 	}
@@ -433,7 +433,7 @@ func (s *Server) cleanupExpiredUploads(ctx context.Context) {
 
 	for _, item := range list {
 		if err := s.storage.AbortMultipart(ctx, paths.KeyFor(item.path, item.userID), item.provider); err != nil {
-			slog.Warn("upload: abort 过期分片失败", "uploadId", item.id, "error", err)
+			slog.Warn("upload: failed to abort expired multipart upload", "uploadId", item.id, "error", err)
 		}
 	}
 	_, _ = s.db.Pool().Exec(ctx,

@@ -91,7 +91,7 @@ func Load() (*Config, error) {
 	loadDotEnv()
 
 	if bucket := os.Getenv("COS_BUCKET"); bucket != "" && COSAppID(bucket) == "" {
-		return nil, fmt.Errorf("COS_BUCKET 必须带 APPID，例如 mydata-1250000000")
+		return nil, fmt.Errorf("COS_BUCKET must include the APPID, e.g. mydata-1250000000")
 	}
 
 	c := &Config{
@@ -139,7 +139,7 @@ func Load() (*Config, error) {
 	}
 
 	if c.DatabaseURL == "" {
-		return nil, fmt.Errorf("缺少环境变量 DATABASE_URL")
+		return nil, fmt.Errorf("missing required environment variable DATABASE_URL")
 	}
 
 	return c, nil
@@ -155,7 +155,7 @@ func (c *Config) ValidateCOS() error {
 		"COS_REGION":     c.COS.Region,
 	} {
 		if value == "" {
-			return fmt.Errorf("缺少环境变量 %s", name)
+			return fmt.Errorf("missing required environment variable %s", name)
 		}
 	}
 	return nil

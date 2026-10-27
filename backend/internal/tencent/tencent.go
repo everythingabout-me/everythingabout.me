@@ -115,10 +115,10 @@ func Call(
 		Response json.RawMessage `json:"Response"`
 	}
 	if err := json.Unmarshal(raw, &envelope); err != nil {
-		return fmt.Errorf("腾讯云返回了无法解析的响应（HTTP %d）", resp.StatusCode)
+		return fmt.Errorf("Tencent Cloud returned an unparseable response (HTTP %d)", resp.StatusCode)
 	}
 	if len(envelope.Response) == 0 {
-		return fmt.Errorf("腾讯云返回了空响应（HTTP %d）", resp.StatusCode)
+		return fmt.Errorf("Tencent Cloud returned an empty response (HTTP %d)", resp.StatusCode)
 	}
 
 	var probe struct {
@@ -130,7 +130,7 @@ func Call(
 		RequestID string `json:"RequestId"`
 	}
 	if err := json.Unmarshal(envelope.Response, &probe); err != nil {
-		return fmt.Errorf("腾讯云返回了无法解析的响应（HTTP %d）", resp.StatusCode)
+		return fmt.Errorf("Tencent Cloud returned an unparseable response (HTTP %d)", resp.StatusCode)
 	}
 	if probe.Error != nil {
 		return &APIError{

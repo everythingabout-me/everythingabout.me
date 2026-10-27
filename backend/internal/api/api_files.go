@@ -575,7 +575,7 @@ func (s *Server) handleAPIMove(w http.ResponseWriter, r *http.Request) error {
 	}
 	// 先复制再删源：复制失败时源还在，不会丢数据。
 	if err := s.storage.Remove(r.Context(), source.Key); err != nil {
-		slog.Warn("move: 删除源对象失败", "key", source.Key, "error", err)
+		slog.Warn("move: failed to delete source object", "key", source.Key, "error", err)
 	}
 
 	node, err := s.nodes.Move(r.Context(), source.ID, to, p.User.ID)

@@ -49,31 +49,32 @@ func main() {
 		usage()
 		return
 	default:
-		fmt.Fprintf(os.Stderr, "未知命令 %q\n\n", command)
+		fmt.Fprintf(os.Stderr, "unknown command %q\n\n", command)
 		usage()
 		os.Exit(2)
 	}
 
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "\n错误: %v\n", err)
+		fmt.Fprintf(os.Stderr, "\nerror: %v\n", err)
 		os.Exit(1)
 	}
 }
 
 func usage() {
-	fmt.Fprint(os.Stderr, `Everything About Me 后端
+	fmt.Fprint(os.Stderr, `Everything About Me backend
 
-用法:
-  eam [server]                     启动 HTTP 服务
-  eam migrate                      建表 / 执行 sql/*.sql
-  eam doctor [--write]             自检配置、数据库、COS
-  eam reconcile [--owner 邮箱] [--inventory 清单.csv] [--dry-run]
-  eam claim --email 邮箱 [--dry-run] [--keep-source]
-  eam token create --email 邮箱 --name 名字 [--prefix 路径] [--write=false]
-  eam token list   --email 邮箱
-  eam token revoke --email 邮箱 --id 令牌ID
+usage:
+  eam [server]                     start the HTTP server
+  eam migrate                      create tables / run sql/*.sql
+  eam doctor [--write]             check config, database, COS
+  eam reconcile [--owner email] [--inventory inventory.csv] [--dry-run]
+  eam claim --email email [--dry-run] [--keep-source]
+  eam token create --email email --name name [--prefix path] [--write=false]
+  eam token list   --email email
+  eam token revoke --email email --id token-id
 
-环境变量从进程环境读取；如果当前目录或上两级有 .env，会自动加载。
-常用: DATABASE_URL / COS_* / SES_* / APP_ENV / ADDR / WEB_DIR
+Environment variables come from the process; a .env in the current or the two
+parent directories is loaded automatically.
+Common: DATABASE_URL / COS_* / SES_* / APP_ENV / ADDR / WEB_DIR
 `)
 }

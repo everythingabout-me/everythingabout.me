@@ -20,10 +20,10 @@ import (
 //	eam token revoke --email you@example.com --id 7f3a9c2b1d4e
 func runToken(args []string) error {
 	if len(args) == 0 {
-		return fmt.Errorf(`用法:
-  eam token create --email 邮箱 --name 名字 [--prefix 路径] [--write=false] [--expires 720h]
-  eam token list   --email 邮箱
-  eam token revoke --email 邮箱 --id 令牌ID`)
+		return fmt.Errorf(`usage:
+  eam token create --email email --name name [--prefix path] [--write=false] [--expires 720h]
+  eam token list   --email email
+  eam token revoke --email email --id token-id`)
 	}
 	switch args[0] {
 	case "create":
@@ -33,23 +33,23 @@ func runToken(args []string) error {
 	case "revoke":
 		return runTokenRevoke(args[1:])
 	default:
-		return fmt.Errorf("未知的 token 子命令 %q", args[0])
+		return fmt.Errorf("unknown token subcommand %q", args[0])
 	}
 }
 
 func runTokenCreate(args []string) error {
 	flags := flag.NewFlagSet("token create", flag.ContinueOnError)
-	email := flags.String("email", "", "账号邮箱")
-	name := flags.String("name", "", "令牌名字，如 Obsidian")
-	prefix := flags.String("prefix", "", "只能访问的路径前缀，留空表示整个盘")
-	canRead := flags.Bool("read", true, "允许读")
-	canWrite := flags.Bool("write", true, "允许写")
-	expires := flags.Duration("expires", 0, "有效期，如 720h（默认永不过期）")
+	email := flags.String("email", "", "account email")
+	name := flags.String("name", "", "token name, e.g. Obsidian")
+	prefix := flags.String("prefix", "", "path prefix the token may access; empty means the whole drive")
+	canRead := flags.Bool("read", true, "allow reads")
+	canWrite := flags.Bool("write", true, "allow writes")
+	expires := flags.Duration("expires", 0, "lifetime, e.g. 720h (never expires by default)")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
 	if *email == "" || *name == "" {
-		return fmt.Errorf("--email 和 --name 必填")
+		return fmt.Errorf("--email and --name are required")
 	}
 
 	db, svc, err := openAuthService()
@@ -63,7 +63,7 @@ func runTokenCreate(args []string) error {
 		return err
 	}
 	if user == nil {
-		return fmt.Errorf("找不到账号 %s", *email)
+		return fmt.Errorf("account %s not found", *email)
 	}
 
 	var expiry *time.Time
@@ -84,31 +84,31 @@ func runTokenCreate(args []string) error {
 		return err
 	}
 
-	fmt.Printf("\n令牌已创建（只显示这一次，请立刻保存）：\n\n  %s\n\n", plain)
-	fmt.Printf("  名字: %s\n", token.Name)
+	fmt.Printf("\ntoken created (shown only once, save it now):\n\n  %s\n\n", plain)
+	fmt.Printf("  name:   %s\n", token.Name)
 	if token.Prefix == "" {
-		fmt.Printf("  前缀: 整个盘\n")
+		fmt.Printf("  prefix: whole drive\n")
 	} else {
-		fmt.Printf("  前缀: %s\n", token.Prefix)
+		fmt.Printf("  prefix: %s\n", token.Prefix)
 	}
-	fmt.Printf("  权限: %s\n", permissionText(token.CanRead, token.CanWrite))
+	fmt.Printf("  access: %s\n", permissionText(token.CanRead, token.CanWrite))
 	if token.ExpiresAt == nil {
-		fmt.Printf("  过期: 永不过期\n")
+		fmt.Printf("  expiry: never\n")
 	} else {
-		fmt.Printf("  过期: %s\n", *token.ExpiresAt)
+		fmt.Printf("  expiry: %s\n", *token.ExpiresAt)
 	}
-	fmt.Printf("  ID:   %s（用于 eam token revoke）\n\n", token.ID)
+	fmt.Printf("  ID:     %s (for eam token revoke)\n\n", token.ID)
 	return nil
 }
 
 func runTokenList(args []string) error {
 	flags := flag.NewFlagSet("token list", flag.ContinueOnError)
-	email := flags.String("email", "", "账号邮箱")
+	email := flags.String("email", "", "account email")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
 	if *email == "" {
-		return fmt.Errorf("--email 必填")
+		return fmt.Errorf("--email is required")
 	}
 
 	db, svc, err := openAuthService()
@@ -122,7 +122,7 @@ func runTokenList(args []string) error {
 		return err
 	}
 	if user == nil {
-		return fmt.Errorf("找不到账号 %s", *email)
+		return fmt.Errorf("account %s not found", *email)
 	}
 
 	tokens, err := svc.ListTokens(context.Background(), user.ID)
@@ -130,28 +130,28 @@ func runTokenList(args []string) error {
 		return err
 	}
 	if len(tokens) == 0 {
-		fmt.Println("还没有任何令牌。")
+		fmt.Println("No tokens yet.")
 		return nil
 	}
 
 	writer := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
-	fmt.Fprintln(writer, "ID\t名字\t前缀\t权限\t状态\t最近使用\t过期")
+	fmt.Fprintln(writer, "ID\tNAME\tPREFIX\tACCESS\tSTATUS\tLAST USED\tEXPIRES")
 	for _, token := range tokens {
 		prefix := token.Prefix
 		if prefix == "" {
-			prefix = "(整个盘)"
+			prefix = "(whole drive)"
 		}
 		lastUsed := "-"
 		if token.LastUsedAt != nil {
 			lastUsed = *token.LastUsedAt
 		}
-		expiresAt := "永不"
+		expiresAt := "never"
 		if token.ExpiresAt != nil {
 			expiresAt = *token.ExpiresAt
 		}
-		status := "有效"
+		status := "active"
 		if token.Revoked {
-			status = "已撤销"
+			status = "revoked"
 		}
 		fmt.Fprintf(writer, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
 			token.ID, token.Name, prefix, permissionText(token.CanRead, token.CanWrite),
@@ -162,13 +162,13 @@ func runTokenList(args []string) error {
 
 func runTokenRevoke(args []string) error {
 	flags := flag.NewFlagSet("token revoke", flag.ContinueOnError)
-	email := flags.String("email", "", "账号邮箱")
-	id := flags.String("id", "", "令牌 ID（eam token list 里那一列）")
+	email := flags.String("email", "", "account email")
+	id := flags.String("id", "", "token ID (the column printed by eam token list)")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
 	if *email == "" || *id == "" {
-		return fmt.Errorf("--email 和 --id 必填")
+		return fmt.Errorf("--email and --id are required")
 	}
 
 	db, svc, err := openAuthService()
@@ -182,12 +182,12 @@ func runTokenRevoke(args []string) error {
 		return err
 	}
 	if user == nil {
-		return fmt.Errorf("找不到账号 %s", *email)
+		return fmt.Errorf("account %s not found", *email)
 	}
 	if err := svc.RevokeToken(context.Background(), user.ID, *id); err != nil {
 		return err
 	}
-	fmt.Printf("已撤销令牌 %s。它立刻失效；已经发出去的短期凭证最多再活 2 小时。\n", *id)
+	fmt.Printf("revoked token %s. It stops working immediately; short-lived credentials already issued live at most 2 more hours.\n", *id)
 	return nil
 }
 
@@ -198,7 +198,7 @@ func openAuthService() (*store.DB, *auth.Service, error) {
 	}
 	db, err := store.Open(context.Background(), cfg.DatabaseURL)
 	if err != nil {
-		return nil, nil, fmt.Errorf("连接数据库失败: %w", err)
+		return nil, nil, fmt.Errorf("failed to connect to database: %w", err)
 	}
 	return db, auth.New(db, cfg), nil
 }
@@ -206,12 +206,12 @@ func openAuthService() (*store.DB, *auth.Service, error) {
 func permissionText(read, write bool) string {
 	switch {
 	case read && write:
-		return "读+写"
+		return "read+write"
 	case read:
-		return "只读"
+		return "read-only"
 	case write:
-		return "只写"
+		return "write-only"
 	default:
-		return "无"
+		return "none"
 	}
 }

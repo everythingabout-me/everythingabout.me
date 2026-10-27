@@ -183,7 +183,7 @@ func (c *Client) List(ctx context.Context, prefix string, onPage func(storage.Pa
 		}
 		if next == marker {
 			// 防御性判断：marker 没前进就不要无限循环
-			return errors.New("COS 列举没有前进，可能桶配置异常")
+			return errors.New("COS listing did not advance; bucket configuration looks wrong")
 		}
 		marker = next
 	}

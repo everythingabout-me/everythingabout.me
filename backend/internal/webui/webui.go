@@ -69,7 +69,7 @@ func (h *Handler) serveIndex(w http.ResponseWriter, r *http.Request) {
 	index := filepath.Join(h.root, "index.html")
 	if info, err := os.Stat(index); err != nil || info.IsDir() {
 		http.Error(w,
-			"前端还没有构建：在 web/ 运行 npm run build，或用 npm run dev 启动 Vite。",
+			"frontend is not built: run npm run build in web/, or npm run dev for Vite.",
 			http.StatusServiceUnavailable)
 		return
 	}
