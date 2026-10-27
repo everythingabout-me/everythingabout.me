@@ -1,6 +1,6 @@
 【Everything About Me】验证码
 
-你正在登录或注册 Everything About Me。请在页面中输入下面的验证码：
+你正在登录 Everything About Me。如果这个邮箱还没有账号，验证码会同时帮你完成注册。请在页面中输入下面的验证码：
 
 {{code}}
 
