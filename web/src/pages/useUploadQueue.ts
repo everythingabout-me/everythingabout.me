@@ -1,7 +1,7 @@
 /**
  * 上传队列。
  *
- * 每个文件先变成一条占位任务（排队中），最多两个同时直传 COS。字节通过
+ * 每个文件先变成一条占位任务（排队中），一次只直传一个文件。字节通过
  * STS 临时凭证由浏览器直接传给 COS，服务端只在最后 confirm 一次落索引。
  *
  * 这里刻意不把队列放进 React state 的更新函数里：上传是并发的异步流程，
@@ -11,15 +11,20 @@ import { useCallback, useRef, useState } from "react";
 import { api, type Item } from "../api/client";
 import { t } from "../i18n";
 
-/** 同时进行的上传数。再多也不会更快，只会互相抢带宽。 */
-const MAX_PARALLEL_UPLOADS = 2;
+/**
+ * 同时进行的上传数。
+ *
+ * 一次只传一个文件：两个文件并行只会把带宽对半劈开，总时长不变，反而让
+ * 两个进度条都慢吞吞地爬。串行还让单片吃满带宽，一个传完就是真传完。
+ */
+const MAX_PARALLEL_UPLOADS = 1;
 /**
  * 单个文件内同时上传的分片数。
  *
- * 浏览器对同一个 host 最多 6 条连接，2 个文件 × 3 片正好用满；再多只会让
- * 请求排在队列里，进度反而一顿一顿的。
+ * 浏览器对同一个 host 最多 6 条连接；1 个文件 × 4 片占 4 条，剩下的留给
+ * 列表、sign、confirm 这些请求。再多只会让分片排在队列里，进度一顿一顿的。
  */
-const CHUNK_PARALLEL_LIMIT = 3;
+const CHUNK_PARALLEL_LIMIT = 4;
 /**
  * 分片大小。小于等于它的文件直接单次 putObject，更大的走分片上传。
  *
