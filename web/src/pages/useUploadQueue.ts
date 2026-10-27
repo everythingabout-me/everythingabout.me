@@ -13,8 +13,51 @@ import { t } from "../i18n";
 
 /** 同时进行的上传数。再多也不会更快，只会互相抢带宽。 */
 const MAX_PARALLEL_UPLOADS = 2;
-/** 超过这个大小 COS SDK 会走分片上传。 */
-const SLICE_SIZE = 5 * 1024 * 1024;
+/**
+ * 单个文件内同时上传的分片数。
+ *
+ * 浏览器对同一个 host 最多 6 条连接，2 个文件 × 3 片正好用满；再多只会让
+ * 请求排在队列里，进度反而一顿一顿的。
+ */
+const CHUNK_PARALLEL_LIMIT = 3;
+/**
+ * 分片大小。小于等于它的文件直接单次 putObject，更大的走分片上传。
+ *
+ * 实测到 COS 的 RTT 约 35ms，20–50MB/s 的链路上 64MB 一片要传 1–3 秒：
+ * 每个分片自己的 TCP 窗口能涨起来、请求往返只占零头。5MB 一片时，单片
+ * 只活 100–300ms，基本全程在慢启动里，还要为每片付一次请求开销。
+ * 也不要太大：一片失败（SDK 会重试 2 次）就得重传整个分片。
+ * 48GB 的文件按 64MB 切也只有 768 片，离 COS 的 10000 片上限很远。
+ */
+const SLICE_SIZE = 64 * 1024 * 1024;
+
+/**
+ * 平滑的上传速度。
+ *
+ * SDK 给的 info.speed 是相邻两次进度回调（300ms）之间的瞬时差值，网络稍微
+ * 一抖就在 0 和峰值之间来回跳。这里改用「最近几秒前进的字节 ÷ 实际耗时」，
+ * 而且只用前进过的字节：分片重试失败时 SDK 会把 loaded 往回扣。
+ */
+const SPEED_WINDOW_MS = 3000;
+
+class SpeedMeter {
+  private samples: { at: number; loaded: number }[] = [];
+
+  /** 记一次进度，返回单调的已传字节数和平滑速度（字节/秒）。 */
+  push(rawLoaded: number, now: number): { loaded: number; speed: number } {
+    const last = this.samples[this.samples.length - 1];
+    const loaded = last ? Math.max(last.loaded, rawLoaded) : rawLoaded;
+    if (!last || loaded > last.loaded) this.samples.push({ at: now, loaded });
+
+    const cutoff = now - SPEED_WINDOW_MS;
+    while (this.samples.length > 1 && this.samples[1].at <= cutoff) this.samples.shift();
+
+    const first = this.samples[0];
+    // 用 now 而不是最后一个采样点：卡住不动时速度会自然衰减到 0，而不是冻在旧值。
+    const span = Math.max(now - first.at, 300);
+    return { loaded, speed: ((loaded - first.loaded) / span) * 1000 };
+  }
+}
 
 export type UploadStatus = "queued" | "uploading" | "finalizing" | "failed";
 
@@ -107,6 +150,7 @@ export function useUploadQueue(
   const pumpingRef = useRef(false);
   const pumpRef = useRef<() => void>(() => {});
   const runtimesRef = useRef(new Map<string, UploadRuntime>());
+  const metersRef = useRef(new Map<string, SpeedMeter>());
   const onUploadedRef = useRef(onUploaded);
   onUploadedRef.current = onUploaded;
 
@@ -164,6 +208,7 @@ export function useUploadQueue(
                 Key: sign.key,
                 Body: task.file,
                 SliceSize: SLICE_SIZE,
+                AsyncLimit: CHUNK_PARALLEL_LIMIT,
                 onTaskReady: (taskId) => {
                   runtime.taskId = taskId;
                 },
@@ -173,10 +218,20 @@ export function useUploadQueue(
                 },
                 onProgress: (info) => {
                   if (runtime.canceled) return;
+                  let meter = metersRef.current.get(id);
+                  if (!meter) {
+                    meter = new SpeedMeter();
+                    metersRef.current.set(id, meter);
+                  }
+                  const sample = meter.push(info.loaded, performance.now());
                   update((current) =>
                     current.map((entry) =>
                       entry.id === id && entry.status === "uploading"
-                        ? { ...entry, loaded: info.loaded, speed: info.speed }
+                        ? {
+                            ...entry,
+                            loaded: Math.min(entry.size, sample.loaded),
+                            speed: sample.speed,
+                          }
                         : entry,
                     ),
                   );
@@ -226,6 +281,7 @@ export function useUploadQueue(
         );
       } finally {
         runtimesRef.current.delete(id);
+        metersRef.current.delete(id);
         runningRef.current = Math.max(0, runningRef.current - 1);
         pumpRef.current();
       }
@@ -241,6 +297,8 @@ export function useUploadQueue(
         const next = tasksRef.current.find((task) => task.status === "queued");
         if (!next) break;
         runningRef.current += 1;
+        // 重试会从 0 或上次已传字节重新开始，速度窗口一并清掉。
+        metersRef.current.delete(next.id);
         update((current) =>
           current.map((task) =>
             task.id === next.id
