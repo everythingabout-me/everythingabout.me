@@ -21,9 +21,8 @@ function joinPath(dir: string, name: string): string {
   return dir ? `${dir}/${name}` : name;
 }
 
-function formatSize(bytes: number): string {
-  if (!bytes) return "—";
-  if (bytes < 1024) return `${bytes} B`;
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${Math.max(0, Math.round(bytes))} B`;
   const units = ["KB", "MB", "GB", "TB"];
   let value = bytes / 1024;
   let index = 0;
@@ -32,6 +31,10 @@ function formatSize(bytes: number): string {
     index += 1;
   }
   return `${value.toFixed(value >= 100 || Number.isInteger(value) ? 0 : 1)} ${units[index]}`;
+}
+
+function formatSize(bytes: number): string {
+  return bytes ? formatBytes(bytes) : "—";
 }
 
 function formatSpeed(bytesPerSecond: number): string {
@@ -150,7 +153,6 @@ const UploadRow = memo(function UploadRow({
         ? Math.min(100, Math.round((task.loaded / task.size) * 100))
         : 0;
   const showProgress = task.status === "uploading" || task.status === "finalizing";
-  const hasMetaDetails = task.status === "uploading" || task.status === "failed";
 
   return (
     <div className={`${styles.row} ${styles.uploadRow}`}>
@@ -159,6 +161,7 @@ const UploadRow = memo(function UploadRow({
       </span>
 
       <div className={styles.uploadInfo}>
+        {/* 进度、速度、已传/总量都挤在状态后面，整行只占两行高度。 */}
         <div className={styles.uploadTitle}>
           <span className={styles.name} title={task.name}>
             {task.name}
@@ -166,23 +169,34 @@ const UploadRow = memo(function UploadRow({
           <span className={`${styles.statusBadge} ${uploadStatusClass(task.status)}`}>
             {uploadStatusText(task.status)}
           </span>
-        </div>
 
-        <div className={styles.uploadMeta}>
-          <span className={styles.uploadMetaSize}>{formatSize(task.size)}</span>
-          {hasMetaDetails && (
-            <span className={`${styles.uploadSep} ${styles.uploadMetaLead}`}>·</span>
-          )}
-          {task.status === "uploading" && (
-            <>
+          {task.status === "uploading" ? (
+            <span className={styles.uploadMeta}>
               <span>{percent}%</span>
               <span className={styles.uploadSep}>·</span>
               <span>{formatSpeed(task.speed)}</span>
-            </>
-          )}
-          {task.status === "failed" && (
-            <span className={styles.uploadError} title={task.error}>
-              {task.error}
+              <span className={styles.uploadSep}>·</span>
+              <span>
+                {formatBytes(Math.min(task.loaded, task.size))} / {formatSize(task.size)}
+              </span>
+            </span>
+          ) : (
+            <span className={styles.uploadMeta}>
+              {task.status === "finalizing" && (
+                <>
+                  <span>100%</span>
+                  <span className={styles.uploadSep}>·</span>
+                </>
+              )}
+              <span>{formatSize(task.size)}</span>
+              {task.status === "failed" && (
+                <>
+                  <span className={styles.uploadSep}>·</span>
+                  <span className={styles.uploadError} title={task.error}>
+                    {task.error}
+                  </span>
+                </>
+              )}
             </span>
           )}
         </div>
@@ -205,8 +219,6 @@ const UploadRow = memo(function UploadRow({
           </div>
         )}
       </div>
-
-      <span className={styles.size}>{formatSize(task.size)}</span>
 
       <div className={styles.uploadActions}>
         {task.status === "failed" && (
