@@ -4,13 +4,11 @@ import { ApiError, api, type AuthUser, type Crumb, type Item } from "../api/clie
 import {
   ChevronRightIcon,
   CloseIcon,
-  DownloadIcon,
   FolderIcon,
   GlyphFor,
   PlusIcon,
   RefreshIcon,
   SearchIcon,
-  TrashIcon,
   UploadIcon,
 } from "../components/icons";
 import { BrandMark } from "../components/BrandMark";
@@ -63,7 +61,6 @@ export function DrivePage() {
   const [activeQuery, setActiveQuery] = useState("");
   const [creating, setCreating] = useState(false);
   const [newName, setNewName] = useState("");
-  const [pendingDelete, setPendingDelete] = useState<Item | null>(null);
   const [toast, setToast] = useState<{ text: string; kind: "info" | "error" } | null>(null);
   const [dragging, setDragging] = useState(false);
 
@@ -126,7 +123,6 @@ export function DrivePage() {
         searchInput.current?.focus();
       }
       if (event.key === "Escape") {
-        setPendingDelete(null);
         setCreating(false);
         setToast(null);
       }
@@ -234,19 +230,6 @@ export function DrivePage() {
       await load(path);
     } catch (error) {
       showToast(error instanceof Error ? error.message : "创建失败", "error");
-    }
-  };
-
-  const confirmDelete = async () => {
-    if (!pendingDelete) return;
-    const target = pendingDelete;
-    setPendingDelete(null);
-    try {
-      await api.deletePath(target.path);
-      showToast(`已删除：${target.name}`);
-      await load(path);
-    } catch (error) {
-      showToast(error instanceof Error ? error.message : "删除失败", "error");
     }
   };
 
@@ -473,27 +456,6 @@ export function DrivePage() {
                   {item.is_dir ? "" : formatSize(Number(item.size))}
                 </span>
                 <span className={styles.time}>{formatTime(item.updated_at)}</span>
-
-                <span className={styles.rowActions}>
-                  {!item.is_dir && (
-                    <a
-                      className={styles.ghostBtn}
-                      href={api.downloadHref(item.path)}
-                      title="下载"
-                      aria-label={`下载 ${item.name}`}
-                    >
-                      <DownloadIcon size={14} />
-                    </a>
-                  )}
-                  <button
-                    className={`${styles.ghostBtn} ${styles.dangerBtn}`}
-                    onClick={() => setPendingDelete(item)}
-                    title="删除"
-                    aria-label={`删除 ${item.name}`}
-                  >
-                    <TrashIcon size={14} />
-                  </button>
-                </span>
               </div>
             ))}
 
@@ -548,24 +510,6 @@ export function DrivePage() {
         </div>
       )}
 
-      {pendingDelete && (
-        <div className={styles.backdrop} onClick={() => setPendingDelete(null)}>
-          <div className={styles.dialog} onClick={(event) => event.stopPropagation()}>
-            <div className={styles.dialogTitle}>删除「{pendingDelete.name}」？</div>
-            <p className={styles.dialogText}>
-              {pendingDelete.is_dir ? "目录及其中的全部内容" : "文件"}会立即删除，无法恢复。
-            </p>
-            <div className={styles.dialogActions}>
-              <button className={styles.cancelBtn} onClick={() => setPendingDelete(null)}>
-                取消
-              </button>
-              <button className={styles.confirmBtn} onClick={() => void confirmDelete()}>
-                删除
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
     </div>
   );
 }
