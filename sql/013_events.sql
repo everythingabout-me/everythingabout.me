@@ -77,6 +77,18 @@ create table if not exists event_media (
 create index if not exists event_media_node on event_media (node_id);
 
 -- 事件表上线后，老库里已有的片段要重算一次才会变成事件。
--- 把快照的事实水位清空，后台的 enqueueStaleMonths 会认为所有月份都过期，逐月重算；
+-- 把快照的事实水位清空；服务启动时 bootstrap 也会兜底排一次队列，逐月重算，
 -- 重算过程中会调用 events.PublishAuto 把片段写成 origin='auto' 的事件。
-update timeline_snapshots set source_rev = null;
+--
+-- 只在还没有任何事件时清空：migrate 每次都会重跑所有 SQL，加了这个条件之后，
+-- 已经产生过事件的库再跑 migrate 不会把时间线再重置一遍。
+update timeline_snapshots set source_rev = null
+ where not exists (select 1 from events);
+
+-- 直接排队，不依赖服务重启：migrate 经常是在 dev server 还开着的时候跑的，
+-- 启动时的 bootstrap 那时已经跑过了。worker 会在几秒内领走这些月份。
+insert into timeline_jobs (user_id, kind, month)
+select s.user_id, 'month', s.month
+  from timeline_snapshots s
+ where s.source_rev is null
+on conflict do nothing;

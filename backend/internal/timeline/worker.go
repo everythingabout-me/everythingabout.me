@@ -67,6 +67,21 @@ func (s *Service) bootstrap(ctx context.Context) {
 		 on conflict do nothing`); err != nil {
 		slog.Warn("timeline: failed to enqueue startup backfill", "error", err)
 	}
+
+	// 013 把 events 变成读模型后，老库里的快照 source_rev 会是 null。
+	// 这里直接把那些月份排进队列，不依赖 scan：否则库里没有新文件时，
+	// 时间线会一直空着，直到下一次文件变动才重算。
+	tag, err := s.db.Pool().Exec(ctx,
+		`insert into timeline_jobs (user_id, kind, month)
+		 select s.user_id, 'month', s.month
+		   from timeline_snapshots s
+		  where s.source_rev is null
+		 on conflict do nothing`)
+	if err != nil {
+		slog.Warn("timeline: failed to enqueue startup months", "error", err)
+	} else if tag.RowsAffected() > 0 {
+		slog.Info("timeline: queued months for event backfill", "months", tag.RowsAffected())
+	}
 }
 
 // sweeper 兜底扫描：CLI reconcile、外部 API 写入这类不经过 Notify 的变更，

@@ -111,3 +111,23 @@ func TestCursorRoundTrip(t *testing.T) {
 		t.Fatal("expected an error for a bad cursor")
 	}
 }
+
+// 空页必须序列化成 []，不是 null：前端把 events 当数组用。
+func TestScanEventsEmptyIsNotNil(t *testing.T) {
+	list, err := scanEvents(emptyRows{})
+	if err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	if list == nil {
+		t.Fatal("empty page returned nil, want empty slice")
+	}
+	if len(list) != 0 {
+		t.Fatalf("got %d events, want 0", len(list))
+	}
+}
+
+type emptyRows struct{}
+
+func (emptyRows) Next() bool             { return false }
+func (emptyRows) Scan(dest ...any) error { return nil }
+func (emptyRows) Err() error             { return nil }

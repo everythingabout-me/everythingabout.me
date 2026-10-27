@@ -57,7 +57,7 @@ export function StreamPage() {
     setError(null);
     try {
       const page = await api.events(undefined, 20);
-      setEvents(page.events);
+      setEvents(page.events ?? []);
       nextCursor.current = page.next;
       setHasMore(Boolean(page.next));
       setStatus(page.status);
@@ -79,7 +79,7 @@ export function StreamPage() {
     setLoadingMore(true);
     try {
       const page = await api.events(cursor, 20);
-      setEvents((current) => merge(current, page.events));
+      setEvents((current) => merge(current, page.events ?? []));
       nextCursor.current = page.next;
       setHasMore(Boolean(page.next));
       setStatus(page.status);

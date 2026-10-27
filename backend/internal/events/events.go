@@ -286,7 +286,8 @@ func scanEvents(rows interface {
 	Scan(dest ...any) error
 	Err() error
 }) ([]Event, error) {
-	var list []Event
+	// 空页也要返回 []，不能是 nil：JSON 里 null 会让前端把列表当对象用。
+	list := make([]Event, 0)
 	for rows.Next() {
 		var (
 			ev           Event
