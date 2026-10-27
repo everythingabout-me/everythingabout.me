@@ -254,6 +254,37 @@ var uploadActions = []string{
 	"name/cos:ListParts",
 }
 
+// stsResource 拼 STS 策略里的资源路径。key 必须按 URL 段做百分号编码：
+// STS 会先解码策略里的资源路径再和请求比对，而解码规则把 + 当成空格，
+// 所以文件名里带 + 时（例如 "选手甲+选手乙vsPlayerC+PlayerD.MOV"）策略授权的
+// 对象和真实 key 对不上，直传会被 COS 拒成 403 AccessDenied。
+func stsResource(region, appID, bucket, key string) string {
+	segments := strings.Split(key, "/")
+	for i, segment := range segments {
+		segments[i] = escapeKeySegment(segment)
+	}
+	return fmt.Sprintf("qcs::cos:%s:uid/%s:%s/%s",
+		region, appID, bucket, strings.Join(segments, "/"))
+}
+
+// escapeKeySegment 只保留 RFC 3986 的 unreserved 字符，其余字节（包括
+// 中文的 UTF-8 字节和 + % # ? 等）一律编码成 %XX。
+func escapeKeySegment(segment string) string {
+	var b strings.Builder
+	b.Grow(len(segment))
+	for i := 0; i < len(segment); i++ {
+		c := segment[i]
+		switch {
+		case 'a' <= c && c <= 'z', 'A' <= c && c <= 'Z', '0' <= c && c <= '9',
+			c == '-', c == '_', c == '.', c == '~':
+			b.WriteByte(c)
+		default:
+			fmt.Fprintf(&b, "%%%02X", c)
+		}
+	}
+	return b.String()
+}
+
 type stsCredentialResponse struct {
 	Credentials struct {
 		TmpSecretID  string `json:"TmpSecretId"`
@@ -273,7 +304,7 @@ func (c *Client) TemporaryCredentials(
 		expiresSeconds = 3600
 	}
 
-	resource := fmt.Sprintf("qcs::cos:%s:uid/%s:%s/%s", c.region, c.appID, c.bucket, key)
+	resource := stsResource(c.region, c.appID, c.bucket, key)
 	policy := map[string]any{
 		"version": "2.0",
 		"statement": []any{map[string]any{
