@@ -531,7 +531,7 @@ Content-Type: text/markdown
 
   <content>
 
-Optional query: ?title=...&tags=a,b
+Optional query: ?title=...
 Response: {"path": "Inbox/2026/10/27/....md", "url": "..."}
 
 Full API: Authorization: Bearer abcd2345efgh2345
@@ -547,14 +547,14 @@ Content-Type: text/markdown
 ```
 
 ```json
-201 {"path":"Inbox/2026/10/27/6f3a9c2b1d4e.md","url":"https://…/drive?path=…","title":"…","duplicate":false}
+201 {"path":"Inbox/2026/10/27/关于简单与信任-6f3a9c2b.md","url":"https://…/drive?path=…","title":"…","duplicate":false}
 ```
 
 - 短码是 16 位小写 base32，**不带 `eam_` 前缀**；`Authorization: Bearer <短码>` 也能直接走完整文件 API。
 - 保存链接和用户本人同权：不设前缀、不设能力位、默认不过期。
-- 正文可以是原始 `text/markdown`，也可以是 `{"text","title","tags","source"}` JSON。
-- 文件名由正文的 SHA-256 决定：同一天重复提交同一段内容返回 `200` + `duplicate:true`，不会存两份。
-- 落盘为 `Inbox/YYYY/MM/DD/<hash>.md`，带 `title` / `captured_at` / `source` / `tags` frontmatter。
+- 正文可以是原始 `text/markdown`，也可以是 `{"text","title","source"}` JSON。
+- 文件名由标题 + 正文 SHA-256 决定：同一天重复提交同一段内容返回 `200` + `duplicate:true`，不会存两份。
+- 落盘为 `Inbox/YYYY/MM/DD/<title>-<hash>.md`，**文件里只有正文，没有 frontmatter**；标题、来源、时间写在 `nodes.meta` 里，不塞进 Markdown。
 - 每次保存都写 `audit_log`（action=`capture`），和文件 API 的写操作一样可追溯。
 - 账户页的 `/api/save-links`（cookie 会话）负责创建、列表、撤销；撤销后 `/s/<code>` 立即 404。
 - 短码里的 MAC 由服务端密钥派生；换掉 `COS_SECRET_KEY` 会让已有保存链接失效。

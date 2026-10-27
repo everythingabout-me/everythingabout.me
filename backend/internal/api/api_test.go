@@ -315,18 +315,33 @@ func TestSaveLinkPrompt(t *testing.T) {
 	}
 }
 
-func TestSaveLinkMarkdown(t *testing.T) {
-	now := time.Date(2026, 10, 27, 23, 0, 0, 0, time.UTC)
-	content := renderSaveMarkdown("hello\nworld", `a "quote"`, "Agent", []string{"a", "b"}, now)
-	for _, want := range []string{
-		`title: "a \"quote\""`,
-		`captured_at: "2026-10-27T23:00:00Z"`,
-		`source: "Agent"`,
-		`tags: ["a", "b"]`,
-		"hello\nworld",
-	} {
-		if !strings.Contains(content, want) {
-			t.Errorf("markdown is missing %q:\n%s", want, content)
+func TestSaveFileContent(t *testing.T) {
+	content := saveFileContent("hello\nworld")
+	if content != "hello\nworld\n" {
+		t.Fatalf("content = %q", content)
+	}
+	if strings.HasPrefix(content, "---") {
+		t.Fatal("saved content must not start with frontmatter")
+	}
+	if again := saveFileContent(content); again != content {
+		t.Fatalf("trailing newline should be idempotent: %q != %q", again, content)
+	}
+}
+
+func TestFileSlug(t *testing.T) {
+	cases := []struct {
+		title string
+		want  string
+	}{
+		{"关于简单与信任", "关于简单与信任"},
+		{"Hello world", "Hello-world"},
+		{"a/b:c*d", "a-b-c-d"},
+		{"  --  ", ""},
+		{"", ""},
+	}
+	for _, tc := range cases {
+		if got := fileSlug(tc.title); got != tc.want {
+			t.Errorf("fileSlug(%q) = %q, want %q", tc.title, got, tc.want)
 		}
 	}
 }

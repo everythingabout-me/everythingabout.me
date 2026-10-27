@@ -13,6 +13,7 @@ import (
 	"net/url"
 	"strings"
 	"time"
+	"unicode"
 
 	"everythingabout.me/backend/internal/auth"
 	"everythingabout.me/backend/internal/httpx"
@@ -26,10 +27,9 @@ import (
 const saveLinkMaxBody = 1 << 20 // 1 MiB，纯文本足够
 
 type saveLinkRequest struct {
-	Text   string   `json:"text"`
-	Title  string   `json:"title"`
-	Tags   []string `json:"tags"`
-	Source string   `json:"source"`
+	Text   string `json:"text"`
+	Title  string `json:"title"`
+	Source string `json:"source"`
 }
 
 // handleSaveLinkPage 渲染链接页：agent 默认拿到 Markdown prompt，
@@ -120,9 +120,6 @@ func (s *Server) handleSaveLinkCapture(w http.ResponseWriter, r *http.Request) e
 	if title := strings.TrimSpace(r.URL.Query().Get("title")); title != "" {
 		req.Title = title
 	}
-	if tags := strings.TrimSpace(r.URL.Query().Get("tags")); tags != "" {
-		req.Tags = strings.Split(tags, ",")
-	}
 	if source := strings.TrimSpace(r.URL.Query().Get("source")); source != "" {
 		req.Source = source
 	}
@@ -134,7 +131,6 @@ func (s *Server) handleSaveLinkCapture(w http.ResponseWriter, r *http.Request) e
 	if len([]rune(title)) > 80 {
 		title = string([]rune(title)[:80])
 	}
-	tags := normalizeTags(req.Tags)
 	source := strings.TrimSpace(req.Source)
 	if source == "" {
 		source = p.Token.Name
@@ -145,8 +141,12 @@ func (s *Server) handleSaveLinkCapture(w http.ResponseWriter, r *http.Request) e
 		now = now.In(loc)
 	}
 	hash := sha256.Sum256([]byte(req.Text))
-	name := hex.EncodeToString(hash[:])[:12]
-	path := fmt.Sprintf("Inbox/%s/%s.md", now.Format("2006/01/02"), name)
+	hashName := hex.EncodeToString(hash[:])
+	slug := fileSlug(title)
+	path := fmt.Sprintf("Inbox/%s/%s.md", now.Format("2006/01/02"), hashName[:12])
+	if slug != "" {
+		path = fmt.Sprintf("Inbox/%s/%s-%s.md", now.Format("2006/01/02"), slug, hashName[:8])
+	}
 
 	existing, err := s.nodes.Live(r.Context(), path, p.User.ID)
 	if err != nil {
@@ -160,7 +160,7 @@ func (s *Server) handleSaveLinkCapture(w http.ResponseWriter, r *http.Request) e
 		return nil
 	}
 
-	content := renderSaveMarkdown(req.Text, title, source, tags, now)
+	content := saveFileContent(req.Text)
 	size := int64(len(content))
 	if err := s.checkQuota(r.Context(), p.User.ID, size, nil); err != nil {
 		return err
@@ -197,7 +197,10 @@ func (s *Server) handleSaveLinkCapture(w http.ResponseWriter, r *http.Request) e
 		ETag:             etag,
 		StorageClass:     storageClass,
 		SourceModifiedAt: modified,
-		Meta:             map[string]any{"mime": mime, "sha256": hex.EncodeToString(hash[:])},
+		Meta: map[string]any{
+			"mime": mime, "sha256": hashName, "title": title, "source": source,
+			"captured_at": now.UTC().Format(time.RFC3339),
+		},
 	})
 	if err != nil {
 		return err
@@ -219,23 +222,6 @@ func writeCaptureResult(w http.ResponseWriter, r *http.Request, status int, path
 	})
 }
 
-func normalizeTags(input []string) []string {
-	out := make([]string, 0, len(input))
-	seen := map[string]bool{}
-	for _, tag := range input {
-		tag = strings.TrimSpace(tag)
-		if tag == "" || len([]rune(tag)) > 40 || seen[tag] {
-			continue
-		}
-		seen[tag] = true
-		out = append(out, tag)
-		if len(out) == 10 {
-			break
-		}
-	}
-	return out
-}
-
 func saveLinkTitle(text string) string {
 	for _, line := range strings.Split(text, "\n") {
 		line = strings.TrimSpace(strings.TrimLeft(line, "#"))
@@ -251,34 +237,35 @@ func saveLinkTitle(text string) string {
 	return "Saved note"
 }
 
-func renderSaveMarkdown(text, title, source string, tags []string, now time.Time) string {
-	var buf strings.Builder
-	buf.WriteString("---\n")
-	buf.WriteString("title: " + yamlString(title) + "\n")
-	buf.WriteString("captured_at: " + yamlString(now.UTC().Format(time.RFC3339)) + "\n")
-	buf.WriteString("source: " + yamlString(source) + "\n")
-	if len(tags) > 0 {
-		buf.WriteString("tags: [")
-		for i, tag := range tags {
-			if i > 0 {
-				buf.WriteString(", ")
-			}
-			buf.WriteString(yamlString(tag))
-		}
-		buf.WriteString("]\n")
+// saveFileContent 只保证正文以换行结尾，不添加任何 frontmatter。
+func saveFileContent(text string) string {
+	if strings.HasSuffix(text, "\n") {
+		return text
 	}
-	buf.WriteString("---\n\n")
-	buf.WriteString(text)
-	buf.WriteString("\n")
-	return buf.String()
+	return text + "\n"
 }
 
-func yamlString(value string) string {
-	value = strings.ReplaceAll(value, `\`, `\\`)
-	value = strings.ReplaceAll(value, `"`, `\"`)
-	value = strings.ReplaceAll(value, "\r", " ")
-	value = strings.ReplaceAll(value, "\n", " ")
-	return `"` + value + `"`
+// fileSlug 把标题变成文件名可用的短横线串；中文、字母、数字保留。
+func fileSlug(title string) string {
+	var buf strings.Builder
+	lastDash := false
+	for _, char := range strings.TrimSpace(title) {
+		ok := unicode.IsLetter(char) || unicode.IsDigit(char) || char == '-' || char == '_'
+		if ok {
+			buf.WriteRune(char)
+			lastDash = false
+			continue
+		}
+		if !lastDash && buf.Len() > 0 {
+			buf.WriteByte('-')
+			lastDash = true
+		}
+	}
+	slug := strings.Trim(buf.String(), "-")
+	if len([]rune(slug)) > 48 {
+		slug = strings.TrimRight(string([]rune(slug)[:48]), "-")
+	}
+	return slug
 }
 
 func saveLinkPrompt(base, code string) string {
@@ -292,7 +279,7 @@ Content-Type: text/markdown
 
   <content>
 
-Optional query: ?title=...&tags=a,b
+Optional query: ?title=...
 Response: {"path": "Inbox/2026/10/27/....md", "url": "..."}
 
 Full API: Authorization: Bearer %s
