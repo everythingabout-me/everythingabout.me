@@ -150,6 +150,11 @@ git commit -m "feat(scope): 中文摘要"
 - 测试不过就修；修不动就停下来说明，不要把红色状态提交到 main。
 - **有开放问题时不要提交**（需求不清、需要用户决策、测试失败待定）：保留 worktree + 分支，
   在最后的消息里写清楚停在哪、需要什么。
+- **没收敛就别一版一个 commit。** 用户一句“做吧”可以当需求定稿：第一版实现 + `make test` 通过就提交、
+  合回 main，这没问题。但只要用户接着提修改（换口径、调参数、纠正方向），就说明事情还在动——这时每改一版
+  都提一个 commit，等于把草稿永久写进 main（main 只前进、事后不 squash，想合成一个就得改写历史）。
+  正确做法是改动先留在 worktree 里不提交，继续改到用户说“就这样”，再一次性提交合回；
+  只有判断很确切、后面基本不会动的改动（独立的 bug 修复、纯机械替换）才值得中途提交。
 - 用户说“先不提交 / 先看 diff”时照做。
 
 ### 3. 合回 main
@@ -164,6 +169,8 @@ git -C <主工作区> push origin main          # 有 remote 时
 ```
 
 - 合并必须在主工作区做（main 在那里 checkout），`--ff-only` 保证历史线性；不要产生 merge commit。
+- 分支上已经堆了几版草稿才发现要收敛时：`git -C <主工作区> merge --squash <type>/<slug>` → 在主工作区
+  `git commit`，把草稿压成一个提交进 main。`--squash` 同样不产生 merge commit，历史仍然线性。
 - 主工作区的未提交改动挡住 merge 时：先问用户，不要强来，也不要在脏工作区上 `pull --rebase`。
 - **永远不要** `push --force` 到 main，也不要 `reset --hard` / `clean -fd` 主工作区。
 - 有 remote 且 push 被拒（别人先推了）：`git -C <主工作区> pull --rebase origin main` →
