@@ -2,16 +2,22 @@ import { isRouteErrorResponse, useRouteError } from "react-router";
 import { t } from "../i18n";
 import styles from "../styles/auth.module.css";
 
+/** 路由错误不一定是 Error：也可能是 react-router 的 ErrorResponse 或 loader 抛出的任意值。 */
+function errorMessage(error: unknown): string {
+  if (isRouteErrorResponse(error)) {
+    const status = `${error.status} ${error.statusText}`.trim();
+    const data =
+      typeof error.data === "string" || typeof error.data === "number" ? String(error.data) : "";
+    return data === "" ? status : `${status}: ${data}`;
+  }
+  if (error instanceof Error && error.message !== "") return error.message;
+  if (typeof error === "string" && error !== "") return error;
+  return t("error.unknown");
+}
+
 export function RouteError() {
   const error = useRouteError();
-
-  let message = t("error.unknown");
-  if (isRouteErrorResponse(error)) {
-    message = `${error.status} ${error.statusText}`;
-    if (error.data) message += `: ${String(error.data)}`;
-  } else if (error instanceof Error) {
-    message = error.message;
-  }
+  const message = errorMessage(error);
 
   return (
     <div className={styles.page}>

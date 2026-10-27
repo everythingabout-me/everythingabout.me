@@ -131,7 +131,29 @@ export interface CodeResult {
   devCode?: string;
 }
 
-type Envelope<T> = { ok: true; data: T } | { ok: false; error: string };
+/** 响应不是后端的信封时：多半是后端没起，或 /api 代理指到的端口上跑着别的服务。 */
+function httpError(status: number): ApiError {
+  return new ApiError(
+    `unexpected response from the API (HTTP ${status}); is the backend running?`,
+    status,
+  );
+}
+
+/** 解包信封；形状不对时给出能定位问题的错误，而不是把对象拼成 "[object Object]"。 */
+function unpack<T>(payload: unknown, status: number): T {
+  if (typeof payload !== "object" || payload === null || !("ok" in payload)) {
+    throw httpError(status);
+  }
+  const envelope = payload as { ok?: unknown; data?: unknown; error?: unknown };
+  if (envelope.ok !== true) {
+    const message =
+      typeof envelope.error === "string" && envelope.error !== ""
+        ? envelope.error
+        : `request failed (HTTP ${status})`;
+    throw new ApiError(message, status);
+  }
+  return envelope.data as T;
+}
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(path, {
@@ -142,16 +164,14 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     },
   });
 
-  let payload: Envelope<T>;
+  let payload: unknown;
   try {
-    payload = (await response.json()) as Envelope<T>;
+    payload = await response.json();
   } catch {
-    throw new ApiError(`request failed (HTTP ${response.status})`, response.status);
+    // 后端没起时 Vite 代理会返回 HTML 错误页，这里不能当成信封去读。
+    throw httpError(response.status);
   }
-  if (!payload.ok) {
-    throw new ApiError(payload.error || `request failed (HTTP ${response.status})`, response.status);
-  }
-  return payload.data;
+  return unpack<T>(payload, response.status);
 }
 
 function post<T>(path: string, body?: unknown): Promise<T> {
