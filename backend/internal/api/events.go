@@ -139,6 +139,13 @@ func (s *Server) handleAPICreateEvent(w http.ResponseWriter, r *http.Request) er
 	if created {
 		status = http.StatusCreated
 	}
+	action := "event.update"
+	if created {
+		action = "event.create"
+	}
+	s.recordAudit(r, p, action, "", status, map[string]any{
+		"event": ev.ID, "external_id": req.ExternalID, "type": req.Type,
+	})
 	httpx.WriteJSON(w, status, map[string]any{
 		"id":      ev.ID,
 		"state":   "published",
@@ -162,6 +169,7 @@ func (s *Server) handleAPIDeleteEvent(w http.ResponseWriter, r *http.Request) er
 	if err := s.eventsSvc.DetachApp(r.Context(), p.User.ID, p.Token.ID, r.PathValue("id")); err != nil {
 		return err
 	}
+	s.recordAudit(r, p, "event.delete", "", http.StatusOK, map[string]any{"event": r.PathValue("id")})
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{"state": "detached"})
 	return nil
 }

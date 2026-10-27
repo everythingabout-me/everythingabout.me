@@ -81,3 +81,54 @@ func TestPrincipalScope(t *testing.T) {
 		t.Fatal("a cookie session should be FullAccess")
 	}
 }
+
+func TestSaveLinkCode(t *testing.T) {
+	service := &Service{linkKey: []byte("test-key")}
+	userID := "7f3a9c2b-0000-0000-0000-000000000000"
+	linkID := "abcd2345"
+
+	code := service.saveLinkCode(userID, linkID)
+	if len(code) != saveLinkLen {
+		t.Fatalf("code length = %d, want %d", len(code), saveLinkLen)
+	}
+	if code[:saveLinkIDLen] != linkID {
+		t.Fatalf("code should start with the link id: %q", code)
+	}
+
+	gotID, gotMAC, ok := parseSaveLinkCode(code)
+	if !ok {
+		t.Fatalf("generated code should parse: %q", code)
+	}
+	if gotID != linkID || gotMAC != code[saveLinkIDLen:] {
+		t.Fatalf("parsed (%q, %q), want (%q, %q)", gotID, gotMAC, linkID, code[saveLinkIDLen:])
+	}
+	if again := service.saveLinkCode(userID, linkID); again != code {
+		t.Fatalf("code should be deterministic: %q != %q", again, code)
+	}
+	if other := service.saveLinkCode(userID, "abcd2346"); other == code {
+		t.Fatal("different link ids should produce different codes")
+	}
+}
+
+func TestParseSaveLinkCode(t *testing.T) {
+	cases := []struct {
+		name string
+		code string
+		ok   bool
+	}{
+		{"valid", "abcd2345efgh2345", true},
+		{"uppercase is normalized", "ABCD2345EFGH2345", true},
+		{"from a bearer token", "eam_abcd2345efgh_6789", false},
+		{"too short", "abcd", false},
+		{"invalid character", "abcd2345efgh6780", false},
+		{"empty", "", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, _, ok := parseSaveLinkCode(tc.code)
+			if ok != tc.ok {
+				t.Fatalf("ok = %v, want %v", ok, tc.ok)
+			}
+		})
+	}
+}

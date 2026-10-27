@@ -108,9 +108,30 @@ export interface EventPage {
   status: StreamStatus;
 }
 
+export interface SaveLink {
+  id: string;
+  name: string;
+  code: string;
+  path: string;
+  createdAt: string;
+  lastUsedAt: string | null;
+  revoked: boolean;
+}
+
+export interface ActivityItem {
+  action: string;
+  path: string;
+  status: number;
+  source: string;
+  title: string;
+  createdAt: string;
+}
+
 export interface AccountSummary {
   user: AuthUser;
   legacyCount: number;
+  saveLinks: SaveLink[];
+  activity: ActivityItem[];
 }
 
 export interface UploadSignResult {
@@ -189,6 +210,14 @@ export const api = {
 
   async account(): Promise<AccountSummary> {
     return request<AccountSummary>("/api/account");
+  },
+
+  createSaveLink(): Promise<{ link: SaveLink }> {
+    return post<{ link: SaveLink }>("/api/save-links");
+  },
+
+  async revokeSaveLink(id: string): Promise<void> {
+    await request(`/api/save-links/${encodeURIComponent(id)}`, { method: "DELETE" });
   },
 
   sendCode(email: string): Promise<CodeResult> {

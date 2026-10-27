@@ -691,3 +691,125 @@
     padding: 24px;
   }
 }
+
+/* ---------- 保存链接 ---------- */
+
+.saveLinksHead {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.saveLinksHead .ghostBtn {
+  margin-top: 1px;
+}
+
+.linkList {
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+  margin-top: 16px;
+}
+
+.linkRow {
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--bg);
+}
+
+.linkUrl {
+  display: block;
+  font-size: 12px;
+  line-height: 1.55;
+  color: var(--text-2);
+  word-break: break-all;
+}
+
+.linkMeta {
+  margin: 5px 0 0;
+  font-size: 11.5px;
+  color: var(--text-3);
+}
+
+.linkActions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 9px;
+}
+
+.linkActions .removeBtn {
+  margin: 0;
+  padding: 0 10px;
+  height: 32px;
+  border-radius: 999px;
+  font-size: 12px;
+}
+
+@media (max-width: 560px) {
+  .saveLinksHead {
+    flex-direction: column;
+    gap: 10px;
+  }
+}
+
+/* ---------- 最近活动 ---------- */
+
+.activityList {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  margin: 14px 0 0;
+  padding: 0;
+  list-style: none;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  overflow: hidden;
+}
+
+.activityRow {
+  display: grid;
+  grid-template-columns: 96px minmax(0, 1fr) auto;
+  gap: 12px;
+  align-items: baseline;
+  padding: 10px 13px;
+  font-size: 12.5px;
+}
+
+.activityRow + .activityRow {
+  border-top: 1px solid var(--border);
+}
+
+.activityAction {
+  color: var(--text-2);
+  white-space: nowrap;
+}
+
+.activityPath {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11.5px;
+}
+
+.activityMeta {
+  color: var(--text-3);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+@media (max-width: 560px) {
+  .activityRow {
+    grid-template-columns: 1fr;
+    gap: 3px;
+  }
+
+  .activityMeta {
+    white-space: normal;
+  }
+}

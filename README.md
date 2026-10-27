@@ -242,6 +242,7 @@ curl -H "Authorization: Bearer eam_..." https://your-host/list?path=Apps/badmint
 | GET | `/upload/{id}` | 查到哪了（已收到的分片），断了接着传 |
 | POST | `/upload/complete` | 传完确认，校验大小后落索引 |
 | GET | `/me` | 当前账号、令牌权限、用量 |
+| GET/POST | `/s/<code>` | 给 agent 的保存链接：GET 出 token+prompt，POST 存正文 |
 
 大文件流程：`POST /upload` 拿地址 → 直接 PUT 到 COS（不经过本服）→ `POST /upload/complete`。
 写操作会记进 `audit_log`；限流是每令牌 600 次/分钟。
@@ -250,6 +251,17 @@ curl -H "Authorization: Bearer eam_..." https://your-host/list?path=Apps/badmint
 长操作统一用标准的 `Prefer: respond-async[, wait=N]`：服务端做完就回 `200`，
 没做完回 `202` + `Location`（指向动作自己的 `/{id}`），客户端一行分支即可。
 对外没有“任务”这个概念，也没有对象 `id`——路径就是身份。
+
+保存链接（给 agent）：
+
+```text
+https://your-host/s/abcd2345efgh2345
+```
+
+这条 URL 本身就是 token 和说明书。agent 打开它拿到 prompt，往同一个 URL POST 正文，
+就会存成 `Inbox/YYYY/MM/DD/<hash>.md`。账户页可以生成多条、看最近使用、随时撤销；
+撤销后链接立即失效。短码不带 `eam_` 前缀，也可以直接作为 Bearer token 调用完整文件 API。
+账户页的“最近活动”会按时间列出谁在什么时候改了哪个路径；保存链接和事件投稿都记进 `audit_log`。
 
 令牌管理：
 

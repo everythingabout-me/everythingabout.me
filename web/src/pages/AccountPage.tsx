@@ -9,7 +9,12 @@ export function AccountPage() {
   return (
     <>
       <title>{t("meta.accountTitle")}</title>
-      <AccountPanel user={summary.user} legacyCount={summary.legacyCount} />
+      <AccountPanel
+        user={summary.user}
+        legacyCount={summary.legacyCount}
+        saveLinks={summary.saveLinks}
+        activity={summary.activity}
+      />
     </>
   );
 }

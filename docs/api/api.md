@@ -508,6 +508,57 @@ GET    /events/{id}          → 单条完整 JSON
 
 没有 `PATCH`：重推就是更新。
 
+### 4.14 保存链接（给 agent）
+
+连接不需要先"配对"：用户把一条 URL 发给 agent，URL 本身就是凭证和说明书。
+
+```http
+GET /s/abcd2345efgh2345
+```
+
+- `Accept: text/markdown`（或 `curl` 默认）返回给 agent 的 prompt：token、POST 地址、正文格式、返回形状。
+- 浏览器打开返回一页说明。
+- `?format=json` 返回 `{token, url, save, prompt, ...}`，给不能读 prompt 的 App。
+
+```markdown
+# everythingabout.me
+
+Connected to this drive.
+
+Token: abcd2345efgh2345
+Save: POST https://everythingabout.me/s/abcd2345efgh2345
+Content-Type: text/markdown
+
+  <content>
+
+Optional query: ?title=...&tags=a,b
+Response: {"path": "Inbox/2026/10/27/....md", "url": "..."}
+
+Full API: Authorization: Bearer abcd2345efgh2345
+```
+
+保存就是往同一个 URL POST 正文：
+
+```http
+POST /s/abcd2345efgh2345
+Content-Type: text/markdown
+
+今天聊出来的那段……
+```
+
+```json
+201 {"path":"Inbox/2026/10/27/6f3a9c2b1d4e.md","url":"https://…/drive?path=…","title":"…","duplicate":false}
+```
+
+- 短码是 16 位小写 base32，**不带 `eam_` 前缀**；`Authorization: Bearer <短码>` 也能直接走完整文件 API。
+- 保存链接和用户本人同权：不设前缀、不设能力位、默认不过期。
+- 正文可以是原始 `text/markdown`，也可以是 `{"text","title","tags","source"}` JSON。
+- 文件名由正文的 SHA-256 决定：同一天重复提交同一段内容返回 `200` + `duplicate:true`，不会存两份。
+- 落盘为 `Inbox/YYYY/MM/DD/<hash>.md`，带 `title` / `captured_at` / `source` / `tags` frontmatter。
+- 每次保存都写 `audit_log`（action=`capture`），和文件 API 的写操作一样可追溯。
+- 账户页的 `/api/save-links`（cookie 会话）负责创建、列表、撤销；撤销后 `/s/<code>` 立即 404。
+- 短码里的 MAC 由服务端密钥派生；换掉 `COS_SECRET_KEY` 会让已有保存链接失效。
+
 ---
 
 ## 5. 服务端偷偷做的事
@@ -518,7 +569,7 @@ GET    /events/{id}          → 单条完整 JSON
 |---|---|
 | 对象 key 就是真实路径 | 用任何 S3 工具都能直接看到 |
 | 维护目录索引 | 就是列得出来 |
-| 计算 sha256、记审计 | 看不见 |
+| 计算 sha256、记审计 | 账户页的“最近活动”里能看到 |
 | 读时修复（桶里有、索引没有） | 第一次 HEAD/GET 就自动补上 |
 
 分享、配额、账号管理都在**网页**上，不进这份 API。
@@ -557,6 +608,7 @@ GET    /events/{id}          → 单条完整 JSON
 | P4 | 真分片（> 5 GiB） | ✅ |
 | P5 | `mkdir`、`copy`、`Prefer: respond-async` + cancel、`/upload/{id}` 续传、`/capabilities` | ✅ |
 | P6 | —（明确不做版本历史、回收站、`id`、`/tasks`） | — |
+| P7 | 保存链接 `/s/<code>`、账户页链接与最近活动 | ✅ |
 
 已实现的细节：
 
@@ -575,6 +627,7 @@ GET    /events/{id}          → 单条完整 JSON
 - 审计：写操作记进 `audit_log`（action / path / status / ip / token / detail），写失败只打日志。
 - 分片上传：超过阈值自动切片，每片一个预签名 URL；`complete` 时把 `{partNumber, etag}` 交给 COS 合并。
 - 错误体：`{"error":"not_found","message":"..."}`，HTTP 状态码同步给；`message` 统一是英文（小写、无句号），`error` 是稳定的机器可读码。
+- 保存链接：16 位 base32 短码，GET 出 prompt、POST 存正文；按正文 hash 去重，落 `Inbox/` 下的 Markdown。
 
 网页用的 `/api/fs/*` 照旧，不动。对外 API 在 `backend/internal/api/api_*.go`，
 认证在 `backend/internal/auth/token.go`，作业在 `backend/internal/jobs`。

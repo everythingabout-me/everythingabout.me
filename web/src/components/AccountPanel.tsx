@@ -1,12 +1,24 @@
 import { useState } from "react";
 import { useNavigate } from "react-router";
-import { api, type AuthUser } from "../api/client";
+import { api, type ActivityItem, type AuthUser, type SaveLink } from "../api/client";
 import { legacyFilesText, t } from "../i18n";
 import { ChangeEmailForm } from "./ChangeEmailForm";
 import { PasswordForm } from "./PasswordForm";
+import { SaveLinks } from "./SaveLinks";
+import { ActivityList } from "./ActivityList";
 import styles from "../styles/auth.module.css";
 
-export function AccountPanel({ user, legacyCount }: { user: AuthUser; legacyCount: number }) {
+export function AccountPanel({
+  user,
+  legacyCount,
+  saveLinks,
+  activity,
+}: {
+  user: AuthUser;
+  legacyCount: number;
+  saveLinks: SaveLink[];
+  activity: ActivityItem[];
+}) {
   const navigate = useNavigate();
   const [email, setEmail] = useState(user.email);
   const [hasPassword, setHasPassword] = useState(user.hasPassword);
@@ -45,6 +57,12 @@ export function AccountPanel({ user, legacyCount }: { user: AuthUser; legacyCoun
           <dd className={styles.metaValue}>{createdAt}</dd>
         </div>
       </dl>
+
+      <div className={styles.divider} />
+      <SaveLinks initial={saveLinks} />
+
+      <div className={styles.divider} />
+      <ActivityList items={activity} />
 
       <div className={styles.divider} />
       <ChangeEmailForm currentEmail={email} onChanged={setEmail} />

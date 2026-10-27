@@ -302,12 +302,21 @@ func (s *Service) Authenticate(ctx context.Context, r *http.Request) (*Principal
 		if !ok {
 			return nil, httpx.Unauthorized("the Authorization header only supports Bearer")
 		}
-		token, err := s.VerifyToken(ctx, strings.TrimSpace(plain))
+		plain = strings.TrimSpace(plain)
+		token, err := s.VerifyToken(ctx, plain)
 		if err != nil {
 			return nil, err
 		}
 		if token == nil {
-			return nil, httpx.Unauthorized("token is invalid, expired, or revoked")
+			// 不是 eam_ 前缀的普通 token，再试一次保存链接的短码。
+			link, err := s.VerifySaveLink(ctx, plain)
+			if err != nil {
+				return nil, err
+			}
+			if link == nil {
+				return nil, httpx.Unauthorized("token is invalid, expired, or revoked")
+			}
+			return link, nil
 		}
 		row, err := s.FindUserByID(ctx, token.userID)
 		if err != nil {

@@ -1,10 +1,12 @@
 package api
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -61,7 +63,7 @@ func TestIsAPIPath(t *testing.T) {
 	yes := []string{
 		"/capabilities", "/list", "/me", "/mkdir", "/move", "/copy", "/search",
 		"/files", "/files/a/b", "/upload", "/upload/complete", "/upload/u_1",
-		"/move/m_1", "/copy/c_1", "/copy/c_1/cancel",
+		"/move/m_1", "/copy/c_1", "/copy/c_1/cancel", "/s/abcd2345efgh2345",
 	}
 	no := []string{"/", "/api/fs/list", "/filesx", "/login", "/capabilitiesx"}
 
@@ -293,5 +295,59 @@ func TestWriteJobResult(t *testing.T) {
 func TestHandlerRegistersRoutes(t *testing.T) {
 	if handler := (&Server{}).Handler(); handler == nil {
 		t.Fatal("Handler returned nil")
+	}
+}
+
+func TestSaveLinkPrompt(t *testing.T) {
+	prompt := saveLinkPrompt("https://everythingabout.me", "abcd2345efgh2345")
+	for _, want := range []string{
+		"Token: abcd2345efgh2345",
+		"Save: POST https://everythingabout.me/s/abcd2345efgh2345",
+		"Content-Type: text/markdown",
+		"Authorization: Bearer abcd2345efgh2345",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Errorf("prompt is missing %q:\n%s", want, prompt)
+		}
+	}
+	if strings.Contains(prompt, "confirmation") {
+		t.Errorf("prompt should not tell the agent what to confirm:\n%s", prompt)
+	}
+}
+
+func TestSaveLinkMarkdown(t *testing.T) {
+	now := time.Date(2026, 10, 27, 23, 0, 0, 0, time.UTC)
+	content := renderSaveMarkdown("hello\nworld", `a "quote"`, "Agent", []string{"a", "b"}, now)
+	for _, want := range []string{
+		`title: "a \"quote\""`,
+		`captured_at: "2026-10-27T23:00:00Z"`,
+		`source: "Agent"`,
+		`tags: ["a", "b"]`,
+		"hello\nworld",
+	} {
+		if !strings.Contains(content, want) {
+			t.Errorf("markdown is missing %q:\n%s", want, content)
+		}
+	}
+}
+
+func TestSaveLinkHTML(t *testing.T) {
+	var buf bytes.Buffer
+	err := saveLinkTemplate.Execute(&buf, map[string]any{
+		"Code":      "abcd2345efgh2345",
+		"URL":       "https://everythingabout.me/s/abcd2345efgh2345",
+		"Prompt":    saveLinkPrompt("https://everythingabout.me", "abcd2345efgh2345"),
+		"LastUsed":  nil,
+		"CreatedAt": "2026-10-27T23:00:00Z",
+	})
+	if err != nil {
+		t.Fatalf("render failed: %v", err)
+	}
+	body := buf.String()
+	if !strings.Contains(body, "保存链接") || !strings.Contains(body, "abcd2345efgh2345") {
+		t.Fatalf("unexpected html: %s", body)
+	}
+	if strings.Contains(body, "<content>") {
+		t.Fatal("prompt should be escaped in the html page")
 	}
 }

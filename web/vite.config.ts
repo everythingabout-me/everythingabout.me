@@ -14,6 +14,11 @@ export default defineConfig({
         target: "http://127.0.0.1:8080",
         changeOrigin: false,
       },
+      // 保存链接是服务端渲染的页面，开发时也要走 Go，而不是 Vite 的 SPA 兜底。
+      "/s": {
+        target: "http://127.0.0.1:8080",
+        changeOrigin: false,
+      },
     },
   },
   build: {

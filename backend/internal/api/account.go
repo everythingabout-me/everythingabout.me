@@ -60,7 +60,17 @@ func (s *Server) handleAccount(w http.ResponseWriter, r *http.Request) error {
 	if err != nil {
 		return err
 	}
-	return s.ok(w, map[string]any{"user": user, "legacyCount": legacyCount})
+	links, err := s.auth.ListSaveLinks(r.Context(), user.ID)
+	if err != nil {
+		return err
+	}
+	activity, err := s.recentActivity(r.Context(), user.ID, 20)
+	if err != nil {
+		return err
+	}
+	return s.ok(w, map[string]any{
+		"user": user, "legacyCount": legacyCount, "saveLinks": links, "activity": activity,
+	})
 }
 
 /** 登录 / 注册共用的验证码发送接口 */

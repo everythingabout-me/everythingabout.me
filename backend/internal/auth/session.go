@@ -18,10 +18,18 @@ const SessionCookie = "eam_session"
 type Service struct {
 	db  *store.DB
 	cfg *config.Config
+	// linkKey 只用于派生保存链接里的 MAC。它不落库，改了之后旧链接会失效。
+	linkKey []byte
 }
 
 func New(db *store.DB, cfg *config.Config) *Service {
-	return &Service{db: db, cfg: cfg}
+	// 复用部署时已经存在的密钥做派生；没有 COS 密钥的纯数据库命令用库地址兜底。
+	seed := cfg.COS.SecretKey
+	if seed == "" {
+		seed = cfg.DatabaseURL
+	}
+	sum := sha256.Sum256([]byte("eam/save-link/v1:" + seed))
+	return &Service{db: db, cfg: cfg, linkKey: sum[:]}
 }
 
 func hashToken(token string) string {

@@ -87,6 +87,10 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/auth/email", s.wrap(s.handleChangeEmail))
 	mux.HandleFunc("GET /api/account", s.wrap(s.handleAccount))
 
+	mux.HandleFunc("GET /api/save-links", s.wrap(s.handleListSaveLinks))
+	mux.HandleFunc("POST /api/save-links", s.wrap(s.handleCreateSaveLink))
+	mux.HandleFunc("DELETE /api/save-links/{id}", s.wrap(s.handleRevokeSaveLink))
+
 	mux.HandleFunc("GET /api/timeline", s.wrap(s.handleTimeline))
 	mux.HandleFunc("GET /api/timeline/status", s.wrap(s.handleTimelineStatus))
 	mux.HandleFunc("POST /api/timeline/rebuild", s.wrap(s.handleTimelineRebuild))
@@ -128,6 +132,10 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("HEAD /files/{path...}", s.api(s.handleAPIHeadFile))
 	mux.HandleFunc("PUT /files/{path...}", s.api(s.handleAPIPutFile))
 	mux.HandleFunc("DELETE /files/{path...}", s.api(s.handleAPIDeleteFile))
+
+	// 保存链接：URL 本身就是凭证，GET 出说明，POST 存正文。
+	mux.HandleFunc("GET /s/{code}", s.wrap(s.handleSaveLinkPage))
+	mux.HandleFunc("POST /s/{code}", s.api(s.handleSaveLinkCapture))
 
 	if s.web != nil {
 		mux.Handle("/", s.web)
@@ -181,6 +189,10 @@ const apiRatePerMinute = 600
 // limitAPI 按令牌（没有令牌就按 IP）做粗粒度限流，顺带给出 Retry-After。
 func (s *Server) limitAPI(w http.ResponseWriter, r *http.Request) error {
 	key := "ip:" + httpx.ClientIP(r)
+	if code := strings.TrimPrefix(r.URL.Path, "/s/"); code != r.URL.Path && code != "" {
+		// 保存链接没有 Authorization 头，按 URL 里的短码区分调用方。
+		key = "link:" + code
+	}
 	if header := strings.TrimSpace(r.Header.Get("Authorization")); strings.HasPrefix(header, "Bearer ") {
 		if id, _, ok := auth.ParseToken(strings.TrimPrefix(header, "Bearer ")); ok {
 			key = "tok:" + id
@@ -202,7 +214,7 @@ func isAPIPath(path string) bool {
 		"/search", "/files", "/upload", "/upload/complete", "/events":
 		return true
 	}
-	for _, prefix := range []string{"/files/", "/move/", "/copy/", "/upload/", "/events/"} {
+	for _, prefix := range []string{"/files/", "/move/", "/copy/", "/upload/", "/events/", "/s/"} {
 		if strings.HasPrefix(path, prefix) {
 			return true
 		}
