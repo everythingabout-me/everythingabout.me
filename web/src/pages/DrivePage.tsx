@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useLoaderData, useNavigate, useSearchParams } from "react-router";
 import { ApiError, api, type AuthUser, type Crumb, type Item } from "../api/client";
 import {
@@ -14,6 +14,7 @@ import {
 import { BrandMark } from "../components/BrandMark";
 import { filesText, foldersText, resultsText, t } from "../i18n";
 import { formatRelativeTime } from "../i18n/format";
+import { useUploadQueue, type UploadStatus, type UploadTask } from "./useUploadQueue";
 import styles from "./DrivePage.module.css";
 
 function joinPath(dir: string, name: string): string {
@@ -33,6 +34,206 @@ function formatSize(bytes: number): string {
   return `${value.toFixed(value >= 100 || Number.isInteger(value) ? 0 : 1)} ${units[index]}`;
 }
 
+function formatSpeed(bytesPerSecond: number): string {
+  if (!Number.isFinite(bytesPerSecond) || bytesPerSecond <= 0) return "0 B/s";
+  return `${formatSize(bytesPerSecond)}/s`;
+}
+
+/** 和后端一致：目录在前，其余按名字小写排序。 */
+function compareNames(a: string, b: string): number {
+  const left = a.toLowerCase();
+  const right = b.toLowerCase();
+  if (left === right) return a < b ? -1 : a > b ? 1 : 0;
+  return left < right ? -1 : 1;
+}
+
+function compareItems(a: Item, b: Item): number {
+  if (a.is_dir !== b.is_dir) return a.is_dir ? -1 : 1;
+  return compareNames(a.name, b.name);
+}
+
+type RowEntry =
+  | { kind: "item"; key: string; item: Item }
+  | { kind: "upload"; key: string; task: UploadTask };
+
+function compareEntries(a: RowEntry, b: RowEntry): number {
+  const aDir = a.kind === "item" && a.item.is_dir;
+  const bDir = b.kind === "item" && b.item.is_dir;
+  if (aDir !== bDir) return aDir ? -1 : 1;
+  return compareNames(
+    a.kind === "item" ? a.item.name : a.task.name,
+    b.kind === "item" ? b.item.name : b.task.name,
+  );
+}
+
+function uploadStatusText(status: UploadStatus): string {
+  switch (status) {
+    case "queued":
+      return t("drive.queued");
+    case "uploading":
+      return t("drive.uploading");
+    case "finalizing":
+      return t("drive.finishing");
+    case "failed":
+      return t("drive.failed");
+  }
+}
+
+function uploadStatusClass(status: UploadStatus): string {
+  switch (status) {
+    case "queued":
+      return styles.statusQueued;
+    case "failed":
+      return styles.statusFailed;
+    default:
+      return styles.statusActive;
+  }
+}
+
+const ItemRow = memo(function ItemRow({
+  item,
+  activeQuery,
+  onOpenDir,
+}: {
+  item: Item;
+  activeQuery: boolean;
+  onOpenDir: (path: string) => void;
+}) {
+  return (
+    <div className={styles.row}>
+      <span className={styles.glyph}>
+        <GlyphFor name={item.name} mime={item.mime} isDir={item.is_dir} />
+      </span>
+
+      <div className={styles.nameCell}>
+        {item.is_dir ? (
+          <button
+            className={`${styles.name} ${styles.nameDir}`}
+            onClick={() => onOpenDir(item.path)}
+            title={item.name}
+          >
+            {item.name}
+          </button>
+        ) : (
+          <a
+            className={styles.name}
+            href={api.downloadHref(item.path)}
+            target="_blank"
+            rel="noreferrer"
+            title={item.name}
+          >
+            <span className={styles.nameLink}>{item.name}</span>
+          </a>
+        )}
+        {activeQuery && item.parent && <span className={styles.pathHint}>{item.parent}</span>}
+      </div>
+
+      <span className={styles.size}>{item.is_dir ? "" : formatSize(Number(item.size))}</span>
+      <span className={styles.time}>{formatRelativeTime(item.updated_at)}</span>
+    </div>
+  );
+});
+
+const UploadRow = memo(function UploadRow({
+  task,
+  onCancel,
+  onRetry,
+}: {
+  task: UploadTask;
+  onCancel: (id: string) => void;
+  onRetry: (id: string) => void;
+}) {
+  const percent =
+    task.status === "finalizing"
+      ? 100
+      : task.size > 0
+        ? Math.min(100, Math.round((task.loaded / task.size) * 100))
+        : 0;
+  const showProgress = task.status === "uploading" || task.status === "finalizing";
+  const hasMetaDetails = task.status === "uploading" || task.status === "failed";
+
+  return (
+    <div className={`${styles.row} ${styles.uploadRow}`}>
+      <span className={styles.glyph}>
+        <GlyphFor name={task.name} mime={task.file.type || null} isDir={false} />
+      </span>
+
+      <div className={styles.uploadInfo}>
+        <div className={styles.uploadTitle}>
+          <span className={styles.name} title={task.name}>
+            {task.name}
+          </span>
+          <span className={`${styles.statusBadge} ${uploadStatusClass(task.status)}`}>
+            {uploadStatusText(task.status)}
+          </span>
+        </div>
+
+        <div className={styles.uploadMeta}>
+          <span className={styles.uploadMetaSize}>{formatSize(task.size)}</span>
+          {hasMetaDetails && (
+            <span className={`${styles.uploadSep} ${styles.uploadMetaLead}`}>·</span>
+          )}
+          {task.status === "uploading" && (
+            <>
+              <span>{percent}%</span>
+              <span className={styles.uploadSep}>·</span>
+              <span>{formatSpeed(task.speed)}</span>
+            </>
+          )}
+          {task.status === "failed" && (
+            <span className={styles.uploadError} title={task.error}>
+              {task.error}
+            </span>
+          )}
+        </div>
+
+        {showProgress && (
+          <div
+            className={styles.progressTrack}
+            role="progressbar"
+            aria-label={task.name}
+            aria-valuemin={0}
+            aria-valuemax={100}
+            aria-valuenow={percent}
+          >
+            <div
+              className={`${styles.progressFill} ${
+                task.status === "finalizing" ? styles.progressFillFinishing : ""
+              }`}
+              style={{ width: `${percent}%` }}
+            />
+          </div>
+        )}
+      </div>
+
+      <span className={styles.size}>{formatSize(task.size)}</span>
+
+      <div className={styles.uploadActions}>
+        {task.status === "failed" && (
+          <button
+            className={styles.textBtn}
+            onClick={() => onRetry(task.id)}
+            title={t("drive.retryUpload")}
+          >
+            {t("common.retry")}
+          </button>
+        )}
+        {task.status !== "finalizing" && (
+          <button
+            className={`${styles.ghostBtn} ${styles.cancelUpload}`}
+            onClick={() => onCancel(task.id)}
+            title={t("drive.cancelUpload")}
+            aria-label={t("drive.cancelUpload")}
+          >
+            <CloseIcon size={13} />
+          </button>
+        )}
+      </div>
+    </div>
+  );
+});
+
+
 /** 根面包屑由前端命名，后端返回的「全部文件」只作为 API 数据。 */
 function crumbName(crumb: Crumb): string {
   return crumb.path === "" ? t("drive.root") : crumb.name;
@@ -47,7 +248,6 @@ export function DrivePage() {
   const [items, setItems] = useState<Item[]>([]);
   const [crumbTrail, setCrumbTrail] = useState<Crumb[]>([]);
   const [loading, setLoading] = useState(true);
-  const [busy, setBusy] = useState(false);
   const [query, setQuery] = useState("");
   const [activeQuery, setActiveQuery] = useState("");
   const [creating, setCreating] = useState(false);
@@ -59,6 +259,10 @@ export function DrivePage() {
   const searchInput = useRef<HTMLInputElement>(null);
   const toastTimer = useRef<number | null>(null);
   const dragDepth = useRef(0);
+  const completedUploads = useRef(0);
+  // 上传回调是异步的，完成时可能已经切到别的目录或搜索结果里了。
+  const listingRef = useRef({ path, searching: false });
+  listingRef.current = { path, searching: Boolean(activeQuery) };
 
   const showToast = useCallback(
     (text: string, kind: "info" | "error" = "info", sticky = false) => {
@@ -95,6 +299,37 @@ export function DrivePage() {
   useEffect(() => {
     void load(path);
   }, [path, load]);
+
+  /** 一个文件 confirm 成功后，用服务端返回的节点直接替换掉占位行。 */
+  const handleUploaded = useCallback((task: UploadTask, item: Item) => {
+    completedUploads.current += 1;
+    if (listingRef.current.path !== task.dir || listingRef.current.searching) return;
+    setItems((current) => {
+      const next = current.filter((existing) => existing.path !== item.path);
+      next.push(item);
+      next.sort(compareItems);
+      return next;
+    });
+  }, []);
+
+  const {
+    tasks: uploads,
+    enqueue,
+    cancel: cancelUpload,
+    retry: retryUpload,
+  } = useUploadQueue(handleUploaded);
+
+  // 整批传完后给一句总结，占位行可能在列表很靠下的位置。
+  useEffect(() => {
+    if (uploads.length > 0 || completedUploads.current === 0) return;
+    const count = completedUploads.current;
+    completedUploads.current = 0;
+    showToast(
+      count === 1
+        ? t("drive.uploadCompleted")
+        : t("drive.uploadCompletedMany", { files: filesText(count) }),
+    );
+  }, [uploads.length, showToast]);
 
   const goTo = useCallback(
     (target: string) => {
@@ -144,77 +379,10 @@ export function DrivePage() {
     }
   };
 
-  const upload = async (files: FileList | File[] | null) => {
-    const list = files ? Array.from(files) : [];
-    if (!list.length) return;
-    setBusy(true);
-    // COS SDK 只有上传时才需要，按需加载，首屏小很多
-    const { default: COS } = await import("cos-js-sdk-v5");
-    let done = 0;
-    for (const file of list) {
-      const name = file.name.normalize("NFC");
-      const target = joinPath(path, name);
-      // 默认不覆盖：同名文件要先确认。
-      const exists = items.some((item) => !item.is_dir && item.name === name);
-      if (exists && !window.confirm(t("drive.overwriteConfirm", { name }))) continue;
-      try {
-        showToast(t("drive.preparing", { name: file.name }), "info", true);
-        const sign = await api.signUpload(target, file.size, exists);
-
-        const cos = new COS({
-          getAuthorization: (_options, callback) =>
-            callback({
-              TmpSecretId: sign.credentials.tmpSecretId,
-              TmpSecretKey: sign.credentials.tmpSecretKey,
-              SecurityToken: sign.credentials.sessionToken,
-              StartTime: sign.credentials.startTime,
-              ExpiredTime: sign.credentials.expiredTime,
-            }),
-        });
-
-        await new Promise<void>((resolve, reject) => {
-          cos.uploadFile(
-            {
-              Bucket: sign.bucket,
-              Region: sign.region,
-              Key: sign.key,
-              Body: file,
-              SliceSize: 5 * 1024 * 1024,
-              onProgress: (info: { percent: number }) =>
-                showToast(
-                  `${list.length > 1 ? `${done + 1}/${list.length} · ` : ""}${file.name} ${Math.round(
-                    info.percent * 100,
-                  )}%`,
-                  "info",
-                  true,
-                ),
-            },
-            (error) => (error ? reject(error) : resolve()),
-          );
-        });
-
-        await api.confirmUpload(target, file.type || undefined, undefined, file.lastModified);
-        done += 1;
-      } catch (error) {
-        showToast(
-          `${file.name}: ${t("drive.uploadFailed", {
-            error: error instanceof Error ? error.message : t("error.unknown"),
-          })}`,
-          "error",
-        );
-      }
-    }
-    setBusy(false);
-    if (fileInput.current) fileInput.current.value = "";
-    if (done) {
-      showToast(
-        done === 1
-          ? t("drive.uploadCompleted")
-          : t("drive.uploadCompletedMany", { files: filesText(done) }),
-      );
-    }
-    await load(path);
-  };
+  const itemExists = useCallback(
+    (target: string) => items.some((item) => item.path === target),
+    [items],
+  );
 
   const createFolder = async () => {
     const name = newName.trim().normalize("NFC");
@@ -232,9 +400,38 @@ export function DrivePage() {
     }
   };
 
-  const totalSize = items.reduce((sum, item) => (item.is_dir ? sum : sum + Number(item.size)), 0);
-  const fileCount = items.filter((item) => !item.is_dir).length;
-  const folderCount = items.filter((item) => item.is_dir).length;
+  // 上传中的占位行和真文件放同一条列表里，按同样的规则排序：
+  // 传完之后真文件正好落在占位行原来的位置，不会跳。
+  const { entries, visibleUploads, visibleItems } = useMemo(() => {
+    const uploading = uploads.filter((task) => task.dir === path);
+    const pendingPaths = new Set(uploading.map((task) => task.path));
+    // 覆盖同名文件时，旧文件先藏起来，只留占位行；目录不受影响。
+    const baseItems = items.filter(
+      (item) => item.is_dir || !pendingPaths.has(item.path),
+    );
+    const list: RowEntry[] = [
+      ...baseItems.map<RowEntry>((item) => ({
+        kind: "item",
+        key: `item:${item.id}`,
+        item,
+      })),
+      ...uploading.map<RowEntry>((task) => ({
+        kind: "upload",
+        key: `upload:${task.id}`,
+        task,
+      })),
+    ];
+    if (!activeQuery) list.sort(compareEntries);
+    return { entries: list, visibleUploads: uploading, visibleItems: baseItems };
+  }, [activeQuery, items, path, uploads]);
+
+  const totalSize = visibleItems.reduce(
+    (sum, item) => (item.is_dir ? sum : sum + Number(item.size)),
+    0,
+  );
+  const fileCount = visibleItems.filter((item) => !item.is_dir).length;
+  const folderCount = visibleItems.filter((item) => item.is_dir).length;
+  const activeUploadCount = visibleUploads.filter((task) => task.status !== "failed").length;
   const currentCrumb = crumbTrail[crumbTrail.length - 1];
   const parentCrumbs = crumbTrail.slice(0, -1);
   const currentName = currentCrumb ? crumbName(currentCrumb) : t("drive.root");
@@ -243,7 +440,7 @@ export function DrivePage() {
     event.preventDefault();
     dragDepth.current = 0;
     setDragging(false);
-    void upload(event.dataTransfer.files);
+    enqueue(event.dataTransfer.files, path, itemExists);
   };
 
   return (
@@ -305,13 +502,12 @@ export function DrivePage() {
             <span className={styles.accountEmail}>{user.email}</span>
           </Link>
 
-          <button
-            className={styles.primaryBtn}
-            onClick={() => fileInput.current?.click()}
-            disabled={busy}
-          >
+          <button className={styles.primaryBtn} onClick={() => fileInput.current?.click()}>
             <UploadIcon size={14} />
-            {busy ? t("drive.uploading") : t("drive.upload")}
+            {t("drive.upload")}
+            {activeUploadCount > 0 && (
+              <span className={styles.uploadBadge}>{activeUploadCount}</span>
+            )}
           </button>
 
           <input
@@ -319,7 +515,11 @@ export function DrivePage() {
             type="file"
             multiple
             hidden
-            onChange={(event) => void upload(event.target.files)}
+            onChange={(event) => {
+              const files = Array.from(event.target.files ?? []);
+              event.target.value = "";
+              enqueue(files, path, itemExists);
+            }}
           />
         </div>
       </header>
@@ -413,56 +613,47 @@ export function DrivePage() {
             </div>
           )}
 
-          {loading &&
-            Array.from({ length: 4 }).map((_, index) => (
-              <div key={index} className={styles.skeletonRow}>
-                <div className={styles.skBar} style={{ width: 16, height: 16, borderRadius: 4 }} />
-                <div className={styles.skBar} style={{ width: `${38 + index * 11}%` }} />
-                <div className={styles.skBar} />
-                <div className={styles.skBar} />
-              </div>
-            ))}
+          {loading && (
+            <>
+              {visibleUploads.map((task) => (
+                <UploadRow
+                  key={task.id}
+                  task={task}
+                  onCancel={cancelUpload}
+                  onRetry={retryUpload}
+                />
+              ))}
+              {Array.from({ length: 4 }).map((_, index) => (
+                <div key={index} className={styles.skeletonRow}>
+                  <div className={styles.skBar} style={{ width: 16, height: 16, borderRadius: 4 }} />
+                  <div className={styles.skBar} style={{ width: `${38 + index * 11}%` }} />
+                  <div className={styles.skBar} />
+                  <div className={styles.skBar} />
+                </div>
+              ))}
+            </>
+          )}
 
           {!loading &&
-            items.map((item) => (
-              <div key={item.id} className={styles.row}>
-                <span className={styles.glyph}>
-                  <GlyphFor name={item.name} mime={item.mime} isDir={item.is_dir} />
-                </span>
+            entries.map((entry) =>
+              entry.kind === "upload" ? (
+                <UploadRow
+                  key={entry.key}
+                  task={entry.task}
+                  onCancel={cancelUpload}
+                  onRetry={retryUpload}
+                />
+              ) : (
+                <ItemRow
+                  key={entry.key}
+                  item={entry.item}
+                  activeQuery={Boolean(activeQuery)}
+                  onOpenDir={goTo}
+                />
+              ),
+            )}
 
-                <div className={styles.nameCell}>
-                  {item.is_dir ? (
-                    <button
-                      className={`${styles.name} ${styles.nameDir}`}
-                      onClick={() => goTo(item.path)}
-                      title={item.name}
-                    >
-                      {item.name}
-                    </button>
-                  ) : (
-                    <a
-                      className={styles.name}
-                      href={api.downloadHref(item.path)}
-                      target="_blank"
-                      rel="noreferrer"
-                      title={item.name}
-                    >
-                      <span className={styles.nameLink}>{item.name}</span>
-                    </a>
-                  )}
-                  {activeQuery && item.parent && (
-                    <span className={styles.pathHint}>{item.parent}</span>
-                  )}
-                </div>
-
-                <span className={styles.size}>
-                  {item.is_dir ? "" : formatSize(Number(item.size))}
-                </span>
-                <span className={styles.time}>{formatRelativeTime(item.updated_at)}</span>
-              </div>
-            ))}
-
-          {!loading && items.length === 0 && (
+          {!loading && entries.length === 0 && (
             <div className={styles.empty}>
               <span className={styles.emptyIcon}>
                 {activeQuery ? <SearchIcon size={20} /> : <FolderIcon size={20} />}
@@ -477,7 +668,7 @@ export function DrivePage() {
           )}
         </section>
 
-        {!loading && items.length > 0 && (fileCount > 0 || totalSize > 0) && (
+        {!loading && visibleItems.length > 0 && (fileCount > 0 || totalSize > 0) && (
           <footer className={styles.footer}>
             {fileCount > 0 && <span>{filesText(fileCount)}</span>}
             {fileCount > 0 && totalSize > 0 && <span>·</span>}

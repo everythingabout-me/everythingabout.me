@@ -230,8 +230,20 @@ export const api = {
     return post<UploadSignResult>("/api/fs/upload/sign", { path, size, overwrite });
   },
 
-  async confirmUpload(path: string, mime?: string, sha256?: string, modifiedAt?: number): Promise<void> {
-    await post("/api/fs/upload/confirm", { path, mime, sha256, modifiedAt });
+  /** 传完字节后让服务端校验对象并落索引；返回新文件节点，可直接插进列表。 */
+  async confirmUpload(
+    path: string,
+    mime?: string,
+    sha256?: string,
+    modifiedAt?: number,
+  ): Promise<Item> {
+    const data = await post<{ node: Item }>("/api/fs/upload/confirm", {
+      path,
+      mime,
+      sha256,
+      modifiedAt,
+    });
+    return data.node;
   },
 
   async mkdir(path: string): Promise<void> {
