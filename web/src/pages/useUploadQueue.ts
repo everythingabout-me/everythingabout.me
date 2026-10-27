@@ -23,27 +23,48 @@ const MAX_PARALLEL_UPLOADS = 1;
  *
  * 浏览器对同一个 host 最多 6 条连接；1 个文件 × 4 片占 4 条，剩下的留给
  * 列表、sign、confirm 这些请求。再多只会让分片排在队列里，进度一顿一顿的。
+ * 分片是 Blob 视图不复制字节，4 × 64MB 同时在飞也不占额外内存。
  */
 const CHUNK_PARALLEL_LIMIT = 4;
+
+const MB = 1024 * 1024;
 /**
- * 分片大小，同时也是「切不切」的门槛：小于等于它的文件直接单次 putObject，
- * 更大的按它切片（16–32MB 两片、32–48MB 三片、48–64MB 四片，正好一轮并发）。
+ * 切片大小的下限，同时也是「切不切」的门槛：小于等于它的文件直接单次
+ * putObject。
  *
  * 16MB 以下不切：分片上传要先付三次往返——ListMultipartUploads 探续传、
- * InitiateMultipartUpload、最后 CompleteMultipartUpload，RTT 35ms 时约 100ms。
+ * InitiateMultipartUpload、最后 CompleteMultipartUpload，RTT 35ms 时约 100ms；
  * 而 16MB 单流在国内链路上 0.3–1s 就传完了，多开连接省下的慢启动还不够贴
  * 这笔开销。
- *
- * 切片按固定 16MB 走，而不是「按文件大小平分 N 份」：平分会让大文件的单片
- * 涨到几百 MB，一片失败（SDK 重试 2 次）就要整片重传，4 路里有一路在重传时
- * 流水就空了。固定 16MB 配 4 片并发，单片拿到的是 4 路分摊后的带宽，寿命
- * 和以前 64MB 单流相当（约 1–3 秒），重传代价却只有四分之一。
- *
- * 64MB 以内分片数不超过 4，正好一次全发出去，不存在排队；再大就一片接一片
- * 补位。48GB 按 16MB 切是 3072 片，离 COS 的 10000 片上限还有余量；真到
- * 160GB 以上，SDK 会自己把切片调大（MaxPartNumber 保护）。
  */
-const SLICE_SIZE = 16 * 1024 * 1024;
+const MIN_SLICE_SIZE = 16 * MB;
+/**
+ * 切片大小的上限。大文件一律 64MB 一片，不再切碎。
+ *
+ * 每片都是一次请求（再加上传前的签名和 XML 头），切太碎 request overhead
+ * 会顶上来：48GB 按 16MB 切要 3072 次，按 64MB 只有 768 次。而 4 路并发下
+ * 64MB 一片在 20–50MB/s 的链路上要传 1–3 秒，本身够跑出 TCP 窗口；再大也
+ * 不合适——一片失败（SDK 会重试 2 次）就得重传整片。
+ */
+const MAX_SLICE_SIZE = 64 * MB;
+
+/**
+ * 按文件大小挑切片：尽量均分成 4 片，单片夹在 16–64MB 之间。
+ *
+ *   ≤16MB     单次 putObject，不切
+ *   16–64MB   16MB 一片（2–4 片，正好塞满一轮并发）
+ *   64–256MB  均分 4 片，每片 16–64MB
+ *   >256MB    64MB 一片，4 片并发滚动补位
+ *
+ * 均分成 4 片是为了不留下很小的尾巴：65MB 直接按 64MB 切会切出 64MB + 1MB，
+ * 1MB 那一片白占一条连接，而大块只跑单流。上限 64MB 则是不让大文件的请求数
+ * 失控。SDK 的判定是 size > SliceSize 才切片，所以返回 MIN_SLICE_SIZE 时
+ * ≤16MB 的文件自然走单次 PUT。
+ */
+function sliceSizeFor(size: number): number {
+  const even = Math.ceil(size / CHUNK_PARALLEL_LIMIT / MB) * MB;
+  return Math.min(MAX_SLICE_SIZE, Math.max(MIN_SLICE_SIZE, even));
+}
 
 /**
  * 平滑的上传速度。
@@ -221,7 +242,7 @@ export function useUploadQueue(
                 Region: sign.region,
                 Key: sign.key,
                 Body: task.file,
-                SliceSize: SLICE_SIZE,
+                SliceSize: sliceSizeFor(task.size),
                 AsyncLimit: CHUNK_PARALLEL_LIMIT,
                 onTaskReady: (taskId) => {
                   runtime.taskId = taskId;
