@@ -437,3 +437,257 @@
     gap: 4px;
   }
 }
+
+/* ============================================================
+   视觉系统 · 暖白 / 浅蓝 / 深蓝
+   ============================================================ */
+
+.header {
+  max-width: 920px;
+  padding: 20px 24px;
+}
+
+.brand {
+  gap: 9px;
+  font-size: 14px;
+  font-weight: 600;
+  letter-spacing: 0;
+}
+
+.brandMark {
+  width: 21px;
+  height: 21px;
+}
+
+.loadingMark {
+  width: 32px;
+  height: 32px;
+}
+
+.main {
+  padding: 26px 24px 64px;
+}
+
+.authStack {
+  gap: 13px;
+}
+
+.card {
+  width: min(100%, 420px);
+  padding: 34px;
+  border-radius: 14px;
+  box-shadow: var(--shadow-soft);
+}
+
+.cardWide {
+  width: min(100%, 600px);
+}
+
+.eyebrow {
+  margin-bottom: 10px;
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  color: var(--text-3);
+}
+
+.title {
+  font-size: 22px;
+  font-weight: 600;
+  letter-spacing: 0;
+  line-height: 1.35;
+}
+
+.subtitle {
+  margin: 7px 0 0;
+  font-size: 12.5px;
+  line-height: 1.65;
+}
+
+.form {
+  gap: 14px;
+  margin-top: 22px;
+}
+
+.field {
+  gap: 6px;
+}
+
+.label {
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.input {
+  height: 44px;
+  border-radius: 10px;
+  font-size: 14px;
+}
+
+.input:focus {
+  border-color: var(--blue);
+  background: var(--surface);
+  box-shadow: 0 0 0 4px var(--ring);
+}
+
+.codeBtn {
+  height: 44px;
+  border-radius: 10px;
+  border-color: var(--border-strong);
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.codeBtn:hover:not(:disabled) {
+  background: var(--hover);
+  border-color: var(--border-strong);
+  color: var(--text);
+}
+
+.fieldHint {
+  font-size: 11.5px;
+}
+
+.submit {
+  height: 44px;
+  border-radius: 10px;
+  background: var(--blue);
+  color: var(--btn-fg);
+  font-size: 14px;
+  font-weight: 600;
+  box-shadow: none;
+  transition: filter 0.14s ease, opacity 0.14s ease;
+}
+
+.submit:hover:not(:disabled) {
+  transform: none;
+  filter: brightness(0.94);
+  box-shadow: none;
+}
+
+.submit:active:not(:disabled) {
+  transform: none;
+  filter: brightness(0.88);
+}
+
+.submit:disabled {
+  opacity: 0.4;
+}
+
+.error {
+  border-radius: 8px;
+  font-size: 12.5px;
+}
+
+.success {
+  border-radius: 8px;
+  background: var(--blue-light);
+  color: var(--blue-ink);
+  font-size: 12.5px;
+}
+
+.pageSwitch {
+  padding: 0;
+  border-radius: 0;
+  color: var(--blue-ink);
+  font-size: 12.5px;
+  font-weight: 500;
+}
+
+.pageSwitch:hover {
+  background: none;
+  color: var(--blue-ink);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+.hint {
+  font-size: 11.5px;
+}
+
+.ghostBtn {
+  height: 36px;
+  padding: 0 13px;
+  border-radius: 10px;
+  border-color: var(--border-strong);
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.ghostBtn:hover:not(:disabled) {
+  border-color: var(--border-strong);
+  background: var(--hover);
+  color: var(--text);
+}
+
+.metaList {
+  border-radius: 10px;
+}
+
+.metaRow {
+  padding: 10px 13px;
+}
+
+.metaLabel {
+  font-size: 12px;
+}
+
+.metaValue {
+  font-size: 12.5px;
+}
+
+.sectionTitle {
+  font-size: 15px;
+  font-weight: 600;
+  letter-spacing: 0;
+  line-height: 1.4;
+}
+
+.sectionHint {
+  font-size: 12.5px;
+  line-height: 1.6;
+}
+
+.cardWide .form {
+  gap: 12px;
+  margin-top: 14px;
+}
+
+.cardWide .form .submit {
+  align-self: flex-start;
+  width: auto;
+  height: 36px;
+  margin-top: 4px;
+  padding: 0 14px;
+  font-size: 13px;
+}
+
+.footnote {
+  font-size: 12px;
+}
+
+.removeBtn {
+  padding: 3px 8px;
+  border-radius: 6px;
+  color: var(--danger);
+  font-size: 12.5px;
+  font-weight: 500;
+}
+
+.removeBtn:hover {
+  background: var(--danger-soft);
+}
+
+@media (max-width: 560px) {
+  .header {
+    padding: 16px 18px;
+  }
+
+  .main {
+    padding: 20px 16px 48px;
+  }
+
+  .card {
+    padding: 24px;
+  }
+}

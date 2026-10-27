@@ -1,0 +1,1043 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="light">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="icon" type="image/svg+xml" href="favicon.svg">
+<title>视觉系统 — Everything About Me</title>
+<style>
+  :root {
+    --font-ui: -apple-system, BlinkMacSystemFont, "SF Pro Text", "SF Pro Display", "Segoe UI",
+      "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans SC",
+      "Hiragino Kaku Gothic ProN", "Yu Gothic", "Apple SD Gothic Neo", "Malgun Gothic",
+      "Noto Sans JP", "Noto Sans KR", "Helvetica Neue", Arial, sans-serif;
+    --font-mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+
+    --bg: #faf8f4;
+    --bg-top: #fcfaf6;
+    --surface: #fffdfb;
+    --hover: #f3f0ea;
+    --border: #e8e3da;
+    --border-strong: #d6cec2;
+    --text: #1a1714;
+    --text2: #615b52;
+    --text3: #786f65;
+
+    --blue-light: #eaf6fe;
+    --blue: #13a7f5;
+    --blue-ink: #0b7bc4;
+    --ring: rgba(19, 167, 245, 0.18);
+    --btn-fg: #ffffff;
+
+    --danger: #b4483f;
+    --danger-soft: #fbedec;
+    --danger-fg: #ffffff;
+    --logo-coral: #fd605e;
+
+    --shadow-card: 0 1px 2px rgba(26, 23, 20, 0.04), 0 14px 34px -28px rgba(26, 23, 20, 0.24);
+    --shadow-pop: 0 2px 6px rgba(26, 23, 20, 0.07), 0 24px 60px -30px rgba(26, 23, 20, 0.42);
+
+    --radius-xs: 6px;
+    --radius-sm: 8px;
+    --radius-md: 10px;
+    --radius-lg: 14px;
+    --radius-xl: 18px;
+    color-scheme: light;
+  }
+  html[data-theme="dark"] {
+    --bg: #0f0e0c;
+    --bg-top: #131210;
+    --surface: #161412;
+    --hover: #1d1a17;
+    --border: #2a2621;
+    --border-strong: #3a342d;
+    --text: #f2eee8;
+    --text2: #ada59a;
+    --text3: #948c80;
+
+    --blue-light: #122633;
+    --blue: #4cb8f5;
+    --blue-ink: #8fd4ff;
+    --ring: rgba(76, 184, 245, 0.2);
+    --btn-fg: #06141c;
+
+    --danger: #e8847c;
+    --danger-soft: #2a1715;
+    --danger-fg: #1a0f0e;
+
+    --shadow-card: 0 1px 2px rgba(0, 0, 0, 0.4), 0 16px 36px -30px rgba(0, 0, 0, 0.8);
+    --shadow-pop: 0 2px 6px rgba(0, 0, 0, 0.5), 0 30px 70px -34px rgba(0, 0, 0, 0.9);
+    color-scheme: dark;
+  }
+
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; }
+  html { scroll-behavior: smooth; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--font-ui);
+    font-size: 14px;
+    font-weight: 400;
+    line-height: 1.65;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    font-optical-sizing: auto;
+    text-rendering: optimizeLegibility;
+  }
+  button, input { font: inherit; color: inherit; }
+  button { cursor: pointer; background: none; border: 0; padding: 0; }
+  a { color: inherit; text-decoration: none; }
+  .sprite { position: absolute; width: 0; height: 0; overflow: hidden; }
+
+  /* ---------- 顶栏 ---------- */
+  .top {
+    position: sticky;
+    top: 0;
+    z-index: 30;
+    height: 64px;
+    background: color-mix(in srgb, var(--surface) 84%, transparent);
+    border-bottom: 1px solid var(--border);
+    backdrop-filter: saturate(150%) blur(16px);
+  }
+  .top-inner {
+    display: flex;
+    align-items: center;
+    gap: 22px;
+    width: min(100%, 1180px);
+    height: 100%;
+    margin: 0 auto;
+    padding: 0 30px;
+  }
+  .brand { display: inline-flex; align-items: center; gap: 9px; font-size: 14px; font-weight: 600; white-space: nowrap; }
+  .brand .mark { width: 21px; height: 21px; display: block; }
+  .brand em { font-style: normal; color: var(--text3); font-weight: 400; }
+  .top-nav { display: flex; align-items: center; gap: 2px; }
+  .top-nav a {
+    padding: 6px 9px;
+    border-radius: 6px;
+    color: var(--text2);
+    font-size: 12.5px;
+    font-weight: 500;
+  }
+  .top-nav a:hover { background: var(--hover); color: var(--text); }
+  .top-spacer { flex: 1; }
+  .top-link { color: var(--blue-ink); font-size: 12.5px; font-weight: 500; }
+  .top-link:hover { text-decoration: underline; text-underline-offset: 3px; }
+  .theme {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    height: 30px;
+    padding: 0 11px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    background: var(--surface);
+    color: var(--text2);
+    font-size: 12px;
+  }
+  .theme:hover { border-color: var(--border-strong); color: var(--text); }
+  .theme svg { width: 12px; height: 12px; }
+
+  /* ---------- 布局 ---------- */
+  .shell {
+    display: grid;
+    grid-template-columns: 168px minmax(0, 1fr);
+    gap: 48px;
+    width: min(100%, 1180px);
+    margin: 0 auto;
+    padding: 44px 30px 72px;
+  }
+  .side { position: relative; }
+  .side-inner { position: sticky; top: 96px; }
+  .side-label {
+    margin: 0 0 14px;
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--text3);
+  }
+  .side nav { display: flex; flex-direction: column; gap: 1px; }
+  .side nav a {
+    padding: 5px 8px;
+    border-radius: 5px;
+    color: var(--text2);
+    font-size: 12.5px;
+    font-weight: 500;
+  }
+  .side nav a:hover { background: var(--hover); color: var(--text); }
+  .side nav a.active { background: var(--blue-light); color: var(--blue-ink); }
+  .side-note { margin: 22px 0 0; font-size: 11.5px; line-height: 1.65; color: var(--text3); }
+
+  .main { min-width: 0; }
+  .intro { padding-bottom: 36px; border-bottom: 1px solid var(--border); }
+  .kicker {
+    display: flex;
+    align-items: center;
+    gap: 9px;
+    margin: 0 0 14px;
+    font-size: 10.5px;
+    font-weight: 600;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--text3);
+  }
+  .kicker::before { content: ""; width: 16px; height: 1px; background: var(--text3); }
+  .intro h1 { margin: 0; font-size: 28px; line-height: 1.25; font-weight: 600; letter-spacing: 0; }
+  .intro .lede { max-width: 700px; margin: 14px 0 0; font-size: 14px; line-height: 1.75; color: var(--text2); }
+  .intro .lede b { color: var(--text); font-weight: 600; }
+  .intro .meta { display: flex; flex-wrap: wrap; gap: 6px 18px; margin: 16px 0 0; font-size: 11.5px; color: var(--text3); font-variant-numeric: tabular-nums; }
+  .intro .meta span { display: inline-flex; align-items: center; gap: 7px; }
+  .intro .meta i { width: 4px; height: 4px; border-radius: 50%; background: currentColor; opacity: 0.55; }
+  .intro .meta a { color: var(--blue-ink); font-weight: 500; }
+  .intro .meta a:hover { text-decoration: underline; text-underline-offset: 3px; }
+
+  .section { padding-top: 38px; }
+  .section + .section { border-top: 1px solid var(--border); margin-top: 38px; }
+  .section-head { display: flex; align-items: baseline; gap: 10px; margin-bottom: 8px; }
+  .section-head .num { font-size: 10px; font-weight: 600; letter-spacing: 0.08em; color: var(--text3); font-variant-numeric: tabular-nums; }
+  .section-head h2 { margin: 0; font-size: 22px; line-height: 1.35; font-weight: 600; letter-spacing: 0; }
+  .section-head .sub { font-size: 12.5px; color: var(--text3); }
+  .prose { max-width: 760px; margin: 0 0 18px; font-size: 14px; line-height: 1.75; color: var(--text2); }
+  .prose b { color: var(--text); font-weight: 600; }
+  .prose code, .inline-code {
+    padding: 1px 5px;
+    border-radius: 4px;
+    background: var(--hover);
+    color: var(--text);
+    font-family: var(--font-mono);
+    font-size: 12px;
+  }
+  h3 { margin: 22px 0 10px; font-size: 15px; line-height: 1.4; font-weight: 600; }
+  h4 { margin: 0 0 6px; font-size: 13px; font-weight: 600; }
+  p { margin: 0 0 10px; }
+
+  .code {
+    margin: 0 0 18px;
+    padding: 13px 15px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    background: var(--surface);
+    color: var(--text);
+    font-family: var(--font-mono);
+    font-size: 11.5px;
+    line-height: 1.7;
+    overflow-x: auto;
+    white-space: pre;
+  }
+  .code .c { color: var(--text3); }
+
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+  .card {
+    padding: 18px 20px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-lg);
+    background: var(--surface);
+  }
+  .card h3 { margin-top: 0; }
+  .card p:last-child { margin-bottom: 0; }
+  .card .small { font-size: 12px; line-height: 1.65; color: var(--text2); }
+
+  .table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+  .table th, .table td { padding: 8px 10px; border-bottom: 1px solid var(--border); text-align: left; vertical-align: top; }
+  .table tr:last-child td { border-bottom: 0; }
+  .table th { font-size: 11px; font-weight: 500; color: var(--text3); letter-spacing: 0; }
+  .table td:first-child { color: var(--text2); }
+  .table code { font-family: var(--font-mono); font-size: 11.5px; }
+
+  .callout {
+    margin: 14px 0;
+    padding: 14px 16px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    background: var(--surface);
+    font-size: 12.5px;
+    line-height: 1.7;
+    color: var(--text2);
+  }
+  .callout b { color: var(--text); font-weight: 600; }
+  .callout ul { margin: 8px 0 0; padding-left: 18px; }
+  .callout li + li { margin-top: 4px; }
+
+  .specimen {
+    overflow: hidden;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-lg);
+    background: var(--surface);
+  }
+  .specimen-row { display: grid; grid-template-columns: 76px minmax(0, 1fr); gap: 16px; padding: 18px 20px; }
+  .specimen-row + .specimen-row { border-top: 1px solid var(--border); }
+  .specimen-row .label { font-size: 11px; font-weight: 500; color: var(--text3); padding-top: 6px; }
+  .display { margin: 0; font-size: 28px; line-height: 1.25; font-weight: 600; letter-spacing: 0; }
+  .specimen-row .body { margin: 6px 0 0; font-size: 14px; line-height: 1.65; color: var(--text2); }
+  .specimen-row .nums { font-variant-numeric: tabular-nums; }
+
+  .scale { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+  .scale th, .scale td { padding: 10px 10px; border-bottom: 1px solid var(--border); text-align: left; vertical-align: middle; }
+  .scale tr:last-child td { border-bottom: 0; }
+  .scale th { font-size: 11px; font-weight: 500; color: var(--text3); }
+  .scale td:first-child { font-family: var(--font-mono); font-size: 11px; color: var(--text2); white-space: nowrap; }
+  .scale .sample { color: var(--text); }
+  .scale .t-display { font-size: 28px; font-weight: 600; line-height: 1.25; }
+  .scale .t-h1 { font-size: 22px; font-weight: 600; line-height: 1.35; }
+  .scale .t-h2 { font-size: 17px; font-weight: 600; line-height: 1.4; }
+  .scale .t-h3 { font-size: 15px; font-weight: 600; line-height: 1.4; }
+  .scale .t-body { font-size: 14px; line-height: 1.65; }
+  .scale .t-strong { font-size: 14px; line-height: 1.65; font-weight: 600; }
+  .scale .t-secondary { font-size: 12.5px; line-height: 1.6; color: var(--text2); }
+  .scale .t-label { font-size: 12px; line-height: 1.4; font-weight: 500; }
+  .scale .t-caption { font-size: 11.5px; line-height: 1.5; color: var(--text3); }
+  .scale .t-button { font-size: 13px; line-height: 1.2; font-weight: 600; }
+  .scale .t-code { font-family: var(--font-mono); font-size: 12px; line-height: 1.6; }
+
+  .note { margin: 12px 0 0; font-size: 12px; line-height: 1.65; color: var(--text3); }
+  .note b { color: var(--text2); font-weight: 500; }
+
+  /* ---------- 颜色 ---------- */
+  .swatch-group + .swatch-group { margin-top: 22px; }
+  .swatch-group h3 { margin: 0 0 10px; }
+  .swatches { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; }
+  .swatch { min-width: 0; }
+  .swatch .chip {
+    display: block;
+    height: 50px;
+    border-radius: var(--radius-sm);
+    border: 1px solid var(--border);
+    background: var(--c);
+  }
+  .swatch b { display: block; margin-top: 7px; font-size: 12px; font-weight: 600; }
+  .swatch code { display: block; font-family: var(--font-mono); font-size: 10.5px; color: var(--text3); }
+  .swatch span { display: block; margin-top: 2px; font-size: 11px; color: var(--text3); line-height: 1.45; }
+  .dark-table { margin-top: 20px; }
+  .dark-table table { width: 100%; border-collapse: collapse; font-size: 12px; }
+  .dark-table th, .dark-table td { padding: 7px 10px; border-bottom: 1px solid var(--border); text-align: left; }
+  .dark-table th { font-weight: 500; color: var(--text3); font-size: 11px; }
+  .dark-table tr:last-child td { border-bottom: 0; }
+  .dark-table code { font-family: var(--font-mono); font-size: 11px; }
+
+  /* ---------- 按钮 ---------- */
+  .btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    height: 36px;
+    padding: 0 15px;
+    border: 1px solid transparent;
+    border-radius: var(--radius-md);
+    font-size: 13px;
+    font-weight: 600;
+    line-height: 1;
+    white-space: nowrap;
+    transition: background 0.14s ease, border-color 0.14s ease, color 0.14s ease, filter 0.14s ease;
+  }
+  .btn .ic { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
+  .btn--primary { background: var(--blue); color: var(--btn-fg); }
+  .btn--primary:hover { filter: brightness(0.94); }
+  .btn--primary:active { filter: brightness(0.88); }
+  .btn--secondary { background: var(--surface); border-color: var(--border-strong); color: var(--text); font-weight: 500; }
+  .btn--secondary:hover { background: var(--hover); }
+  .btn--secondary:active { background: var(--border); }
+  .btn--critical { background: var(--danger); color: var(--danger-fg); }
+  .btn--critical:hover { filter: brightness(0.94); }
+  .btn--critical:active { filter: brightness(0.88); }
+  .btn--critical-text { color: var(--danger); font-weight: 500; }
+  .btn--critical-text:hover { background: var(--danger-soft); }
+  .btn--ghost { background: transparent; color: var(--text2); font-weight: 500; }
+  .btn--ghost:hover { background: var(--hover); color: var(--text); }
+  .btn--link { background: transparent; color: var(--blue-ink); font-weight: 500; padding: 0; height: auto; border-radius: 0; }
+  .btn--link:hover { text-decoration: underline; text-underline-offset: 3px; }
+  .btn--sm { height: 30px; padding: 0 11px; border-radius: var(--radius-sm); font-size: 12px; }
+  .btn--lg { height: 44px; padding: 0 18px; border-radius: var(--radius-md); font-size: 14px; }
+  .btn--icon { width: 30px; height: 30px; padding: 0; border-radius: var(--radius-sm); color: var(--text2); background: transparent; }
+  .btn--icon:hover { background: var(--hover); color: var(--text); }
+  .btn--icon .ic { width: 16px; height: 16px; }
+  .btn:disabled, .btn.is-disabled { opacity: 0.4; cursor: default; filter: none; }
+  .btn:focus-visible, .btn.is-focus {
+    outline: 2px solid var(--blue);
+    outline-offset: 2px;
+  }
+  .btn--critical:focus-visible, .btn--critical.is-focus { outline-color: var(--danger); }
+
+  .btn-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); border: 1px solid var(--border); border-radius: var(--radius-lg); overflow: hidden; background: var(--surface); }
+  .btn-cell { padding: 18px 20px; min-height: 128px; }
+  .btn-cell:nth-child(3n+2), .btn-cell:nth-child(3n+3) { border-left: 1px solid var(--border); }
+  .btn-cell:nth-child(n+4) { border-top: 1px solid var(--border); }
+  .btn-cell .kind { display: block; margin-bottom: 10px; font-size: 11px; font-weight: 500; color: var(--text3); }
+  .btn-cell p { margin: 9px 0 0; font-size: 11.5px; line-height: 1.6; color: var(--text3); }
+  .btn-cell .row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+
+  .states { display: grid; gap: 10px; margin-top: 12px; }
+  .state-row { display: grid; grid-template-columns: 68px 1fr; align-items: center; gap: 12px; }
+  .state-row .lbl { font-size: 11px; font-weight: 500; color: var(--text3); }
+  .state-row .row { display: flex; flex-wrap: wrap; gap: 8px; }
+
+  .dialog-wrap {
+    display: flex;
+    justify-content: center;
+    padding: 22px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-lg);
+    background: var(--bg);
+  }
+  .dialog {
+    width: min(100%, 360px);
+    padding: 22px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-xl);
+    background: var(--surface);
+    box-shadow: var(--shadow-pop);
+  }
+  .dialog h4 { margin: 0; font-size: 15px; font-weight: 600; }
+  .dialog p { margin: 7px 0 18px; font-size: 12.5px; line-height: 1.65; color: var(--text2); }
+  .dialog-actions { display: flex; justify-content: flex-end; gap: 8px; }
+
+  /* ---------- 图标 ---------- */
+  .ic {
+    fill: none;
+    stroke: currentColor;
+    stroke-width: 1.5;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+  }
+  .icons-grid { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 10px; }
+  .icon-cell {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 6px;
+    padding: 12px 6px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    background: var(--surface);
+    color: var(--text2);
+  }
+  .icon-cell span { font-size: 9.5px; color: var(--text3); }
+  .icon-cell .ic { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
+  .icon-cell.big .ic { width: 20px; height: 20px; }
+  .icon-demos { display: flex; flex-wrap: wrap; gap: 26px; align-items: flex-start; margin-top: 16px; }
+  .icon-demo { display: flex; flex-direction: column; align-items: center; gap: 8px; }
+  .icon-demo > span { font-size: 10.5px; color: var(--text3); }
+  .tile {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 28px;
+    height: 28px;
+    border-radius: var(--radius-sm);
+    background: var(--blue-light);
+    color: var(--blue-ink);
+  }
+  .tile .ic { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
+  .tile.lg { width: 36px; height: 36px; border-radius: var(--radius-md); }
+  .tile.lg .ic { width: 20px; height: 20px; }
+
+  /* ---------- 表单 ---------- */
+  .form-card { width: min(100%, 400px); padding: 24px; border: 1px solid var(--border); border-radius: var(--radius-lg); background: var(--surface); }
+  .form-card .title { margin: 0; font-size: 22px; line-height: 1.35; font-weight: 600; }
+  .form-card .sub { margin: 7px 0 0; font-size: 12.5px; line-height: 1.65; color: var(--text2); }
+  .field { display: flex; flex-direction: column; gap: 6px; margin-top: 14px; }
+  .field .label { font-size: 12px; font-weight: 500; color: var(--text2); }
+  .input {
+    width: 100%;
+    height: 44px;
+    padding: 0 14px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius-md);
+    background: var(--surface);
+    color: var(--text);
+    font-size: 14px;
+    outline: none;
+    transition: border-color 0.14s ease, box-shadow 0.14s ease;
+  }
+  .input::placeholder { color: var(--text3); }
+  .input:hover { border-color: var(--border-strong); }
+  .input:focus, .input.is-focus { border-color: var(--blue); box-shadow: 0 0 0 4px var(--ring); }
+  .input.is-error { border-color: var(--danger); }
+  .input:disabled { background: var(--hover); color: var(--text3); cursor: default; }
+  .input-row { display: flex; align-items: center; gap: 8px; }
+  .input-row .input { flex: 1; min-width: 0; }
+  .input-row .btn { height: 44px; }
+  .hint { margin: 0; font-size: 11.5px; line-height: 1.5; color: var(--text3); }
+  .error { margin: 0; font-size: 11.5px; line-height: 1.5; color: var(--danger); }
+  .form-card .submit { width: 100%; margin-top: 16px; }
+  .form-foot { display: flex; justify-content: center; margin-top: 14px; }
+  .search-demo { position: relative; display: flex; align-items: center; width: 250px; }
+  .search-demo .ic { position: absolute; left: 11px; width: 14px; height: 14px; color: var(--blue-ink); fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
+  .search-demo .input { height: 36px; padding-left: 32px; border-radius: var(--radius-md); font-size: 13px; }
+  .form-split { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 18px; align-items: start; }
+
+  /* ---------- 表面 ---------- */
+  .radii { display: flex; flex-wrap: wrap; gap: 14px; }
+  .radius { display: flex; flex-direction: column; align-items: center; gap: 7px; }
+  .radius .box { width: 56px; height: 56px; border: 1px solid var(--border-strong); background: var(--surface); }
+  .radius span { font-size: 10.5px; color: var(--text3); }
+  .spacing { display: flex; flex-wrap: wrap; gap: 8px 14px; margin-top: 14px; }
+  .spacing div { display: flex; align-items: center; gap: 6px; font-size: 10.5px; color: var(--text3); }
+  .spacing i { display: block; height: 8px; border-radius: 2px; background: var(--blue-light); }
+  .surface-cards { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin-top: 16px; }
+  .surface-demo { padding: 20px; border: 1px solid var(--border); border-radius: var(--radius-lg); background: var(--surface); }
+  .surface-demo.pop { border-radius: var(--radius-xl); box-shadow: var(--shadow-pop); }
+  .surface-demo .small { margin: 4px 0 0; font-size: 11.5px; color: var(--text3); }
+
+  .foot { display: flex; justify-content: space-between; gap: 20px; padding: 22px 0 40px; border-top: 1px solid var(--border); font-size: 11.5px; color: var(--text3); }
+  .foot b { color: var(--text2); font-weight: 500; }
+
+  @media (max-width: 960px) {
+    .top-inner { padding: 0 18px; gap: 12px; }
+    .top-nav { display: none; }
+    .shell { grid-template-columns: 1fr; gap: 0; padding: 28px 18px 56px; }
+    .side { display: none; }
+    .grid2, .form-split, .surface-cards { grid-template-columns: 1fr; }
+    .swatches { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .btn-grid { grid-template-columns: 1fr; }
+    .btn-cell:nth-child(n) { border-left: 0; }
+    .btn-cell + .btn-cell { border-top: 1px solid var(--border); }
+    .icons-grid { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+    .specimen-row { grid-template-columns: 1fr; gap: 4px; }
+    .foot { flex-direction: column; }
+  }
+</style>
+</head>
+<body>
+
+<svg class="sprite" aria-hidden="true" xmlns="http://www.w3.org/2000/svg">
+  <symbol id="mark" viewBox="0 0 1024 1024">
+    <defs><clipPath id="mark-disc"><circle cx="512" cy="512" r="448"/></clipPath></defs>
+    <g clip-path="url(#mark-disc)">
+      <circle cx="512" cy="512" r="448" fill="#FD605E"/>
+      <path d="M0 429H239V595H421V429H603V595H785V429H1024V1024H0Z" fill="#13A7F5"/>
+      <path d="M0 429H239V595H421V429H603V595H785V429H1024" fill="none" stroke="#FFFFFF" stroke-width="24" stroke-linejoin="miter" stroke-miterlimit="4" stroke-linecap="butt"/>
+    </g>
+  </symbol>
+  <symbol id="i-folder" viewBox="0 0 16 16"><path d="M1.75 4.25c0-.55.45-1 1-1h3.1c.27 0 .52.1.71.3l.94.94c.19.2.44.3.71.3h4.99c.55 0 1 .45 1 1v6.96c0 .55-.45 1-1 1H2.75c-.55 0-1-.45-1-1V4.25Z"/></symbol>
+  <symbol id="i-file" viewBox="0 0 16 16"><path d="M3.5 2.25h5.19c.27 0 .52.1.71.3l2.8 2.79c.19.2.3.44.3.71v7.7c0 .55-.45 1-1 1h-8c-.55 0-1-.45-1-1V3.25c0-.55.45-1 1-1Z"/><path d="M8.5 2.5v2.75c0 .41.34.75.75.75h2.75"/></symbol>
+  <symbol id="i-image" viewBox="0 0 16 16"><rect x="2.25" y="3" width="11.5" height="10" rx="1.25"/><circle cx="5.75" cy="6.25" r="1"/><path d="m3 11.5 2.8-2.6c.3-.28.75-.28 1.05 0l2.15 2M9.4 10.2l1.2-1.1c.3-.28.76-.28 1.06 0l1.84 1.7"/></symbol>
+  <symbol id="i-pdf" viewBox="0 0 16 16"><path d="M3.5 2.25h5.19c.27 0 .52.1.71.3l2.8 2.79c.19.2.3.44.3.71v7.7c0 .55-.45 1-1 1h-8c-.55 0-1-.45-1-1V3.25c0-.55.45-1 1-1Z"/><path d="M5.25 11.5V9M5.25 9h.9a.85.85 0 0 1 0 1.7h-.9M8 11.5V9h.75a1.25 1.25 0 0 1 0 2.5H8Z"/></symbol>
+  <symbol id="i-archive" viewBox="0 0 16 16"><rect x="2.25" y="3" width="11.5" height="10" rx="1.25"/><path d="M2.25 6.25h11.5M7 8.5h2"/></symbol>
+  <symbol id="i-code" viewBox="0 0 16 16"><path d="m6 5.5-3 2.75L6 11M10 5.5l3 2.75L10 11"/></symbol>
+  <symbol id="i-search" viewBox="0 0 16 16"><circle cx="7.25" cy="7.25" r="4"/><path d="m10.4 10.4 2.6 2.6"/></symbol>
+  <symbol id="i-upload" viewBox="0 0 16 16"><path d="M8 10.5V2.75M5.25 5.5 8 2.75l2.75 2.75M2.75 10.5v1.75c0 .55.45 1 1 1h8.5c.55 0 1-.45 1-1V10.5"/></symbol>
+  <symbol id="i-plus" viewBox="0 0 16 16"><path d="M8 3.25v9.5M3.25 8h9.5"/></symbol>
+  <symbol id="i-refresh" viewBox="0 0 16 16"><path d="M13.25 8a5.25 5.25 0 1 1-1.6-3.78"/><path d="M13.5 2.75v3.1h-3.1"/></symbol>
+  <symbol id="i-download" viewBox="0 0 16 16"><path d="M8 2.75v7.75M5.25 7.75 8 10.5l2.75-2.75M2.75 11.75v.5c0 .55.45 1 1 1h8.5c.55 0 1-.45 1-1v-.5"/></symbol>
+  <symbol id="i-trash" viewBox="0 0 16 16"><path d="M2.75 4.25h10.5M6.25 4.25V3c0-.41.34-.75.75-.75h2c.41 0 .75.34.75.75v1.25M4 4.25l.6 8.55c.03.4.36.7.75.7h5.3c.39 0 .72-.3.75-.7L12 4.25"/></symbol>
+  <symbol id="i-sun" viewBox="0 0 16 16"><circle cx="8" cy="8" r="2.75"/><path d="M8 1.5v1.25M8 13.25v1.25M1.5 8h1.25M13.25 8h1.25M3.4 3.4l.9.9M11.7 11.7l.9.9M12.6 3.4l-.9.9M4.3 11.7l-.9.9"/></symbol>
+  <symbol id="i-moon" viewBox="0 0 16 16"><path d="M13.2 9.6A5.75 5.75 0 0 1 6.4 2.8a5.75 5.75 0 1 0 6.8 6.8Z"/></symbol>
+</svg>
+
+<header class="top">
+  <div class="top-inner">
+    <a class="brand" href="index.html">
+      <svg class="mark"><use href="#mark"/></svg>
+      <span>Everything About Me</span>
+      <em>视觉系统</em>
+    </a>
+    <nav class="top-nav">
+      <a href="#type">字体</a>
+      <a href="#color">颜色</a>
+      <a href="#buttons">按钮</a>
+      <a href="#icons">图标</a>
+      <a href="#forms">表单</a>
+      <a href="#surface">表面</a>
+    </nav>
+    <span class="top-spacer"></span>
+    <a class="top-link" href="index.html">A/B 预览 →</a>
+    <button class="theme" id="themeBtn" type="button">
+      <svg id="themeIcon"><use href="#i-moon"/></svg>
+      <span id="themeText">深色</span>
+    </button>
+  </div>
+</header>
+
+<div class="shell">
+  <aside class="side">
+    <div class="side-inner">
+      <p class="side-label">UI System</p>
+      <nav>
+        <a href="#type">01 字体</a>
+        <a href="#color">02 颜色</a>
+        <a href="#buttons">03 按钮</a>
+        <a href="#icons">04 图标</a>
+        <a href="#forms">05 表单</a>
+        <a href="#surface">06 表面</a>
+      </nav>
+      <p class="side-note">已落地：B 暖白（920 / 58 / 页面标题）。<br>A 素白是同一套组件的冷色 preset。</p>
+    </div>
+  </aside>
+
+  <main class="main">
+    <header class="intro">
+      <p class="kicker">EAM / UI System · 01</p>
+      <h1>一套界面，多语言。</h1>
+      <p class="lede">
+        从 logo 出发，但只把蓝用在功能上。字体、字号、按钮、图标、圆角和间距都收敛成一套 token；
+        B 暖白已经落地，A 素白是同一套组件的冷色 preset。先把规则定下来，再谈页面。
+      </p>
+      <p class="meta">
+        <span><i></i>System font stack</span>
+        <span><i></i>400 / 500 / 600</span>
+        <span><i></i>Primary / Secondary / Critical</span>
+        <span><i></i>16px icon grid</span>
+        <span><a href="index.html">在页面里看 →</a></span>
+      </p>
+    </header>
+
+    <!-- 01 字体 -->
+    <section class="section" id="type">
+      <div class="section-head"><span class="num">01</span><h2>字体</h2><span class="sub">系统字体栈，逐字回退</span></div>
+      <p class="prose">
+        苹果不是用一款字体覆盖中英文，而是<b>让系统按字符挑字体</b>：拉丁走 SF Pro，中文走 PingFang SC；日文 Hiragino，韩文 Apple SD Gothic Neo。
+        网页里用 <code>-apple-system</code> 就能拿到这条路径。我们跟着这个做法，选一个<b>字体栈</b>，而不是一款单体字体。
+      </p>
+
+      <pre class="code"><span class="c">/* 拉丁优先，中文字体放在后面；浏览器逐字回退 */</span>
+--font-ui:
+  -apple-system, BlinkMacSystemFont,
+  "SF Pro Text", "SF Pro Display", "Segoe UI",
+  "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei",
+  "Noto Sans SC", "Hiragino Kaku Gothic ProN", "Yu Gothic",
+  "Apple SD Gothic Neo", "Malgun Gothic", "Noto Sans JP", "Noto Sans KR",
+  "Helvetica Neue", Arial, sans-serif;
+
+<span class="c">/* 只有代码、路径用等宽 */</span>
+--font-mono:
+  ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, monospace;</pre>
+
+      <div class="grid2">
+        <div class="card">
+          <h3>各平台实际用到什么</h3>
+          <table class="table">
+            <thead><tr><th>平台</th><th>拉丁</th><th>中文</th></tr></thead>
+            <tbody>
+              <tr><td>macOS / iOS</td><td>SF Pro Text / Display</td><td>PingFang SC</td></tr>
+              <tr><td>Windows</td><td>Segoe UI</td><td>Microsoft YaHei</td></tr>
+              <tr><td>Android / Linux</td><td>Roboto / Noto Sans</td><td>Noto Sans CJK</td></tr>
+              <tr><td>旧环境兜底</td><td>Helvetica / Arial</td><td>系统中文字体</td></tr>
+            </tbody>
+          </table>
+          <p class="note">字体栈的顺序就是回退顺序：<b>不要把中文字体放在 -apple-system 前面</b>，否则 Mac 上的拉丁也会先用中文字体。</p>
+        </div>
+        <div class="card">
+          <h3>为什么这样选</h3>
+          <div class="small">
+            <p><b>系统字体最贴合平台。</b>中文在 macOS 上就是苹方，在 Windows 上就是雅黑；不需要加载几 MB 的 CJK webfont，也没有 FOUT。</p>
+            <p><b>不用单一 webfont 覆盖全部语言。</b>Noto Sans SC 全量很大，首屏代价高，而且中文渲染不如系统字体贴合平台。</p>
+            <p><b>可选：</b>如果希望 Windows / Android 的拉丁也接近 SF，可在 <code>-apple-system</code> 之后加自托管的 Inter；中文继续走系统。Mac 仍然是 SF。</p>
+          </div>
+        </div>
+      </div>
+
+      <h3>中英文混排</h3>
+      <div class="specimen">
+        <div class="specimen-row">
+          <span class="label">中文</span>
+          <div>
+            <p class="display">全部文件</p>
+            <p class="body">照片、文档、备份——所有证据都在这里，按你的方式被记住。</p>
+          </div>
+        </div>
+        <div class="specimen-row">
+          <span class="label">English</span>
+          <div>
+            <p class="display">Everything About Me</p>
+            <p class="body">All your files, in one place. Built to last.</p>
+          </div>
+        </div>
+        <div class="specimen-row">
+          <span class="label">Mixed</span>
+          <div>
+            <p class="body">2024-05-西湖.jpg · 4.2 MB · 2 小时前</p>
+            <p class="body nums">1,284 files · 12.4 MB · 2026-09-12</p>
+          </div>
+        </div>
+      </div>
+      <p class="note">
+        中文不做负字距；标题行高 1.25–1.4，正文 1.65。数字统一 <b>tabular-nums</b>，方便文件大小/时间对齐。
+        字重只用 400 / 500 / 600；不要用 650 / 700 让浏览器合成。
+      </p>
+
+      <h3>字号层级</h3>
+      <table class="scale">
+        <thead><tr><th>Token</th><th>Size / Line</th><th>Weight</th><th>用途</th><th>Sample</th></tr></thead>
+        <tbody>
+          <tr><td>display</td><td>28 / 1.25</td><td>600</td><td>大标题 / 空态</td><td class="sample t-display">全部文件</td></tr>
+          <tr><td>title-1</td><td>22 / 1.35</td><td>600</td><td>页面、卡片标题</td><td class="sample t-h1">登录 / 注册</td></tr>
+          <tr><td>title-2</td><td>17 / 1.4</td><td>600</td><td>区块标题</td><td class="sample t-h2">修改邮箱</td></tr>
+          <tr><td>title-3</td><td>15 / 1.4</td><td>600</td><td>小标题</td><td class="sample t-h3">登录密码（可选）</td></tr>
+          <tr><td>body</td><td>14 / 1.65</td><td>400</td><td>正文</td><td class="sample t-body">邮箱就是你的唯一标识</td></tr>
+          <tr><td>body-strong</td><td>14 / 1.65</td><td>600</td><td>正文强调</td><td class="sample t-strong">邮箱就是你的唯一标识</td></tr>
+          <tr><td>secondary</td><td>12.5 / 1.6</td><td>400</td><td>辅助说明</td><td class="sample t-secondary">验证码已发送，请查收邮箱</td></tr>
+          <tr><td>label</td><td>12 / 1.4</td><td>500</td><td>表单标签</td><td class="sample t-label">邮箱</td></tr>
+          <tr><td>eyebrow</td><td>10.5 / 1.4</td><td>600</td><td>英文小标签 · .08em</td><td class="sample t-caption">SIGN IN</td></tr>
+          <tr><td>caption</td><td>11.5 / 1.5</td><td>400</td><td>时间 / 提示</td><td class="sample t-caption">2 小时前</td></tr>
+          <tr><td>button</td><td>13 / 1.2</td><td>600</td><td>按钮</td><td class="sample t-button">上传</td></tr>
+          <tr><td>code</td><td>12 / 1.6</td><td>400</td><td>路径 / 代码</td><td class="sample t-code">drive/&lt;用户ID&gt;/</td></tr>
+        </tbody>
+      </table>
+    </section>
+
+    <!-- 02 颜色 -->
+    <section class="section" id="color">
+      <div class="section-head"><span class="num">02</span><h2>颜色</h2><span class="sub">中性打底，一族蓝做功能</span></div>
+      <p class="prose">
+        界面只有三种颜色角色：<b>中性</b>承载内容，<b>蓝</b>表示可操作，<b>砖红</b>表示不可逆。珊瑚是 logo 专属，不进入组件。
+      </p>
+      <p class="note" style="margin:-8px 0 18px">色板按 Light 值展示；深色对应值见下方表格。</p>
+
+      <div class="swatch-group">
+        <h3>中性 · Neutral</h3>
+        <div class="swatches">
+          <div class="swatch"><span class="chip" style="--c:#FAF8F4"></span><b>Paper</b><code>#FAF8F4</code><span>页面底</span></div>
+          <div class="swatch"><span class="chip" style="--c:#FFFDFB"></span><b>Surface</b><code>#FFFDFB</code><span>卡片 / 列表</span></div>
+          <div class="swatch"><span class="chip" style="--c:#F3F0EA"></span><b>Hover</b><code>#F3F0EA</code><span>悬停 / 次级底</span></div>
+          <div class="swatch"><span class="chip" style="--c:#E8E3DA"></span><b>Line</b><code>#E8E3DA</code><span>1px 分隔</span></div>
+          <div class="swatch"><span class="chip" style="--c:#D6CEC2"></span><b>Line strong</b><code>#D6CEC2</code><span>输入 / 次级按钮边</span></div>
+          <div class="swatch"><span class="chip" style="--c:#1A1714"></span><b>Ink</b><code>#1A1714</code><span>正文 / 标题</span></div>
+          <div class="swatch"><span class="chip" style="--c:#615B52"></span><b>Ink 2</b><code>#615B52</code><span>辅助文字</span></div>
+          <div class="swatch"><span class="chip" style="--c:#786F65"></span><b>Ink 3</b><code>#786F65</code><span>时间 / 次要</span></div>
+        </div>
+      </div>
+
+      <div class="swatch-group">
+        <h3>蓝 · Blue</h3>
+        <div class="swatches">
+          <div class="swatch"><span class="chip" style="--c:#EAF6FE"></span><b>Blue light</b><code>#EAF6FE</code><span>图标底 / 悬停</span></div>
+          <div class="swatch"><span class="chip" style="--c:#13A7F5"></span><b>Blue</b><code>#13A7F5</code><span>主按钮 / logo</span></div>
+          <div class="swatch"><span class="chip" style="--c:#0B7BC4"></span><b>Blue ink</b><code>#0B7BC4</code><span>图标线 / 链接 / 焦点</span></div>
+          <div class="swatch"><span class="chip" style="--c:rgba(19,167,245,.18)"></span><b>Ring</b><code>rgba(19,167,245,.18)</code><span>输入焦点光圈</span></div>
+        </div>
+      </div>
+
+      <div class="swatch-group">
+        <h3>功能 · Functional</h3>
+        <div class="swatches">
+          <div class="swatch"><span class="chip" style="--c:#B4483F"></span><b>Danger</b><code>#B4483F</code><span>不可逆操作</span></div>
+          <div class="swatch"><span class="chip" style="--c:#FBEDEC"></span><b>Danger soft</b><code>#FBEDEC</code><span>危险悬停底</span></div>
+          <div class="swatch"><span class="chip" style="--c:#FD605E"></span><b>Coral</b><code>#FD605E</code><span>仅 logo，不进 UI</span></div>
+          <div class="swatch"><span class="chip" style="--c:#FFFFFF"></span><b>On color</b><code>#FFFFFF</code><span>主按钮文字</span></div>
+        </div>
+      </div>
+
+      <div class="dark-table">
+        <h3>深色值</h3>
+        <table>
+          <thead><tr><th>角色</th><th>Light</th><th>Dark</th></tr></thead>
+          <tbody>
+            <tr><td>Paper / Surface</td><td><code>#FAF8F4 / #FFFDFB</code></td><td><code>#0F0E0C / #161412</code></td></tr>
+            <tr><td>Ink / Ink 2 / Ink 3</td><td><code>#1A1714 / #615B52 / #786F65</code></td><td><code>#F2EEE8 / #ADA59A / #948C80</code></td></tr>
+            <tr><td>Blue / Blue ink / Blue light</td><td><code>#13A7F5 / #0B7BC4 / #EAF6FE</code></td><td><code>#4CB8F5 / #8FD4FF / #122633</code></td></tr>
+            <tr><td>Danger / soft</td><td><code>#B4483F / #FBEDEC</code></td><td><code>#E8847C / #2A1715</code></td></tr>
+            <tr><td>主按钮文字</td><td><code>#FFFFFF</code></td><td><code>#06141C</code></td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p class="note">深色不是另一套颜色：角色不变，只换值。主按钮在深色里用亮蓝 + 深字，避免白字压亮蓝。</p>
+    </section>
+
+    <!-- 03 按钮 -->
+    <section class="section" id="buttons">
+      <div class="section-head"><span class="num">03</span><h2>按钮</h2><span class="sub">一个主行动，一个危险确认</span></div>
+      <p class="prose">
+        默认按钮是 36px 高、10px 圆角、13 / 600；小号 30 / 8 / 12，大号 44 / 10 / 14。主按钮只有蓝，危险按钮只有砖红；次级、幽灵、链接都不上色。
+      </p>
+
+      <div class="btn-grid">
+        <div class="btn-cell">
+          <span class="kind">Primary · 主行动</span>
+          <div class="row">
+            <button class="btn btn--primary" type="button"><svg class="ic"><use href="#i-upload"/></svg>上传</button>
+            <button class="btn btn--primary btn--lg" type="button">继续</button>
+          </div>
+          <p>每个视图最多一个。上传、继续、保存。蓝底白字；深色下亮蓝 + 深字。</p>
+        </div>
+        <div class="btn-cell">
+          <span class="kind">Secondary · 次级</span>
+          <div class="row">
+            <button class="btn btn--secondary" type="button">发送验证码</button>
+            <button class="btn btn--secondary" type="button">退出登录</button>
+          </div>
+          <p>替代动作、输入旁的小操作。白底、1px 边框、墨色字；hover 只换底色。</p>
+        </div>
+        <div class="btn-cell">
+          <span class="kind">Critical · 不可逆</span>
+          <div class="row">
+            <button class="btn btn--critical" type="button">删除</button>
+            <button class="btn btn--critical-text" type="button">移除密码</button>
+          </div>
+          <p>只在确认弹窗里用实心；行内删除、移除密码用文字按钮。不要用珊瑚红。</p>
+        </div>
+        <div class="btn-cell">
+          <span class="kind">Ghost · 图标 / 轻操作</span>
+          <div class="row">
+            <button class="btn btn--icon" type="button" aria-label="刷新"><svg class="ic"><use href="#i-refresh"/></svg></button>
+            <button class="btn btn--icon" type="button" aria-label="新建目录"><svg class="ic"><use href="#i-plus"/></svg></button>
+            <button class="btn btn--ghost" type="button">取消</button>
+          </div>
+          <p>图标按钮 30×30、8px 圆角；默认灰，悬停墨色。</p>
+        </div>
+        <div class="btn-cell">
+          <span class="kind">Link · 文本跳转</span>
+          <div class="row">
+            <button class="btn btn--link" type="button">用密码登录</button>
+          </div>
+          <p>页面切换、补充入口。Blue ink；hover 加下划线。不拿它做主要动作。</p>
+        </div>
+        <div class="btn-cell">
+          <span class="kind">Sizes</span>
+          <div class="row">
+            <button class="btn btn--secondary btn--sm" type="button">取消</button>
+            <button class="btn btn--secondary" type="button">默认 36</button>
+            <button class="btn btn--secondary btn--lg" type="button">表单 44</button>
+          </div>
+          <p>30 / 36 / 44。表单提交用 44；输入框旁的发送验证码也跟输入同高。</p>
+        </div>
+      </div>
+
+      <h3>状态</h3>
+      <div class="states">
+        <div class="state-row"><span class="lbl">Primary</span><div class="row">
+          <button class="btn btn--primary" type="button">默认</button>
+          <button class="btn btn--primary is-hover" type="button">Hover</button>
+          <button class="btn btn--primary is-focus" type="button">Focus</button>
+          <button class="btn btn--primary" type="button" disabled>Disabled</button>
+        </div></div>
+        <div class="state-row"><span class="lbl">Secondary</span><div class="row">
+          <button class="btn btn--secondary" type="button">默认</button>
+          <button class="btn btn--secondary is-hover" type="button">Hover</button>
+          <button class="btn btn--secondary is-focus" type="button">Focus</button>
+          <button class="btn btn--secondary" type="button" disabled>Disabled</button>
+        </div></div>
+        <div class="state-row"><span class="lbl">Critical</span><div class="row">
+          <button class="btn btn--critical" type="button">默认</button>
+          <button class="btn btn--critical is-hover" type="button">Hover</button>
+          <button class="btn btn--critical is-focus" type="button">Focus</button>
+          <button class="btn btn--critical" type="button" disabled>Disabled</button>
+        </div></div>
+      </div>
+
+      <h3>危险确认在上下文里</h3>
+      <div class="dialog-wrap">
+        <div class="dialog">
+          <h4>删除「2024-05-西湖.jpg」？</h4>
+          <p>会从 COS 里永久删除，无法恢复。</p>
+          <div class="dialog-actions">
+            <button class="btn btn--secondary btn--sm" type="button">取消</button>
+            <button class="btn btn--critical btn--sm" type="button">删除</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="callout">
+        <b>规则</b>
+        <ul>
+          <li>主按钮不承担品牌装饰；它只表示“这一步继续”。一个视图一个。</li>
+          <li>次级按钮永远中性；不要出现蓝色次级、红色次级。</li>
+          <li>危险动作先问一句；确认按钮才用实心砖红，取消永远是次级。</li>
+          <li>没有渐变、没有硬阴影、没有两色按钮；焦点用 2px 外描边。</li>
+        </ul>
+      </div>
+    </section>
+
+    <!-- 04 图标 -->
+    <section class="section" id="icons">
+      <div class="section-head"><span class="num">04</span><h2>图标</h2><span class="sub">16px 网格，1.5px 线</span></div>
+      <p class="prose">
+        一套自定义线性图标：16×16 网格、1.5px 描边、圆头圆角、currentColor、无填充。常用 16px，密集处 14px，空态 20px。
+      </p>
+
+      <div class="icons-grid">
+        <div class="icon-cell"><svg class="ic"><use href="#i-folder"/></svg><span>folder</span></div>
+        <div class="icon-cell"><svg class="ic"><use href="#i-file"/></svg><span>file</span></div>
+        <div class="icon-cell"><svg class="ic"><use href="#i-image"/></svg><span>image</span></div>
+        <div class="icon-cell"><svg class="ic"><use href="#i-pdf"/></svg><span>pdf</span></div>
+        <div class="icon-cell"><svg class="ic"><use href="#i-archive"/></svg><span>archive</span></div>
+        <div class="icon-cell"><svg class="ic"><use href="#i-code"/></svg><span>code</span></div>
+        <div class="icon-cell"><svg class="ic"><use href="#i-search"/></svg><span>search</span></div>
+        <div class="icon-cell"><svg class="ic"><use href="#i-upload"/></svg><span>upload</span></div>
+        <div class="icon-cell"><svg class="ic"><use href="#i-plus"/></svg><span>plus</span></div>
+        <div class="icon-cell"><svg class="ic"><use href="#i-refresh"/></svg><span>refresh</span></div>
+        <div class="icon-cell"><svg class="ic"><use href="#i-download"/></svg><span>download</span></div>
+        <div class="icon-cell"><svg class="ic"><use href="#i-trash"/></svg><span>trash</span></div>
+      </div>
+
+      <div class="icon-demos">
+        <div class="icon-demo"><span class="tile"><svg class="ic"><use href="#i-folder"/></svg></span><span>28 图标底</span></div>
+        <div class="icon-demo"><span class="tile lg"><svg class="ic"><use href="#i-folder"/></svg></span><span>36 空态</span></div>
+        <div class="icon-demo"><button class="btn btn--icon" type="button" aria-label="刷新"><svg class="ic"><use href="#i-refresh"/></svg></button><span>30 图标按钮</span></div>
+        <div class="icon-demo"><svg class="ic" style="width:20px;height:20px;stroke:currentColor;color:var(--text2)"><use href="#i-folder"/></svg><span>20 / 空态</span></div>
+      </div>
+
+      <div class="callout">
+        <b>规则</b>
+        <ul>
+          <li>文件类型不按类型上色：所有 glyph 都是同一块浅蓝底 + 同一个深蓝线，只靠形状区分。</li>
+          <li>默认 <code>--text-2</code>；可交互 / 悬停 <code>--blue-ink</code>；只有删除的悬停用 <code>--danger</code>。</li>
+          <li>不混用其他图标库；不用 emoji；不用多色图标；图标按钮必须有 aria-label。</li>
+          <li>默认 30×30；密集行内（文件行操作）用 26×26，图标 14px。</li>
+        </ul>
+      </div>
+    </section>
+
+    <!-- 05 表单 -->
+    <section class="section" id="forms">
+      <div class="section-head"><span class="num">05</span><h2>表单</h2><span class="sub">一条底线，一个焦点</span></div>
+      <p class="prose">
+        标签 12 / 500；输入 44 高、10px 圆角；焦点是蓝边 + 浅蓝光圈；错误用砖红边和一行说明。输入旁的小按钮与输入同高。
+      </p>
+
+      <div class="form-split">
+        <div class="form-card">
+          <p class="title">登录 / 注册</p>
+          <p class="sub">用邮箱验证码进入你的个人数据基座。</p>
+          <div class="field">
+            <span class="label">邮箱</span>
+            <div class="input-row">
+              <input class="input" value="you@example.com" readonly aria-label="邮箱">
+              <button class="btn btn--secondary" type="button">发送验证码</button>
+            </div>
+          </div>
+          <div class="field">
+            <span class="label">验证码</span>
+            <input class="input is-focus" value="824196" readonly aria-label="验证码">
+            <p class="hint">验证码已发送，请查收邮箱（10 分钟内有效）</p>
+          </div>
+          <button class="btn btn--primary btn--lg submit" type="button">继续</button>
+          <div class="form-foot"><a class="btn btn--link" href="#" onclick="return false">用密码登录</a></div>
+        </div>
+
+        <div>
+          <div class="form-card">
+            <span class="label">搜索</span>
+            <div class="search-demo" style="margin-top:8px">
+              <svg class="ic"><use href="#i-search"/></svg>
+              <input class="input" placeholder="搜索文件与路径" readonly aria-label="搜索">
+            </div>
+            <div class="field">
+              <span class="label">错误状态</span>
+              <input class="input is-error" value="not-an-email" readonly aria-label="错误示例">
+              <p class="error">邮箱格式不正确</p>
+            </div>
+            <div class="field">
+              <span class="label">禁用</span>
+              <input class="input" value="不可编辑" disabled aria-label="禁用示例">
+            </div>
+          </div>
+          <p class="note">输入框不加阴影；焦点用 4px 浅蓝光圈。错误只改边和一行说明，不铺红底。</p>
+        </div>
+      </div>
+    </section>
+
+    <!-- 06 表面 -->
+    <section class="section" id="surface">
+      <div class="section-head"><span class="num">06</span><h2>表面</h2><span class="sub">圆角、间距、阴影</span></div>
+      <p class="prose">
+        圆角是一套固定阶梯：6 标签、8 图标/小控件、10 按钮/输入、14 卡片/面板、18 弹窗。阴影只用来分层，不做硬阴影。
+      </p>
+
+      <div class="radii">
+        <div class="radius"><span class="box" style="border-radius:6px"></span><span>6 · chip</span></div>
+        <div class="radius"><span class="box" style="border-radius:8px"></span><span>8 · icon</span></div>
+        <div class="radius"><span class="box" style="border-radius:10px"></span><span>10 · button</span></div>
+        <div class="radius"><span class="box" style="border-radius:14px"></span><span>14 · card</span></div>
+        <div class="radius"><span class="box" style="border-radius:18px"></span><span>18 · dialog</span></div>
+      </div>
+
+      <h3>间距</h3>
+      <div class="spacing">
+        <div><i style="width:4px"></i>4</div>
+        <div><i style="width:8px"></i>8</div>
+        <div><i style="width:12px"></i>12</div>
+        <div><i style="width:16px"></i>16</div>
+        <div><i style="width:20px"></i>20</div>
+        <div><i style="width:24px"></i>24</div>
+        <div><i style="width:32px"></i>32</div>
+        <div><i style="width:40px"></i>40</div>
+        <div><i style="width:48px"></i>48</div>
+        <div><i style="width:64px"></i>64</div>
+      </div>
+
+      <div class="surface-cards">
+        <div class="surface-demo">
+          <h4>Card</h4>
+          <p class="small">14px 圆角；1px 线；很轻的投影。列表、登录卡、账户卡都用这一层。</p>
+        </div>
+        <div class="surface-demo pop">
+          <h4>Popover / Dialog</h4>
+          <p class="small">18px 圆角；更强的投影。只给弹窗、菜单、toast。</p>
+        </div>
+      </div>
+
+      <h3>页面</h3>
+      <table class="table">
+        <tbody>
+          <tr><td>内容宽</td><td>920px（B）· 880px（A preset）</td></tr>
+          <tr><td>顶栏</td><td>64px（B）· 62px（A preset）；底部 1px 线</td></tr>
+          <tr><td>列表行</td><td>58px（B）· 52px（A preset）；左右 14px / 20px</td></tr>
+          <tr><td>时间线</td><td>顶栏 920px · 阅读列 760px（时间线首页）</td></tr>
+          <tr><td>面板</td><td>14px 圆角；1px 线；轻投影</td></tr>
+          <tr><td>表单卡</td><td>420px（登录）· 600px（账户）；14px 圆角</td></tr>
+        </tbody>
+      </table>
+
+      <div class="callout">
+        <b>A preset 只改三件事</b>
+        <ul>
+          <li>底色从暖白 `#FAF8F4` 换到冷白 `#F6F7F7`。</li>
+          <li>内容 920 → 880，行高 58 → 52，标题从页面标题回到面包屑。</li>
+          <li>组件、字号、按钮、图标、圆角全部不动；不是第二套设计系统。</li>
+        </ul>
+      </div>
+    </section>
+  </main>
+</div>
+
+<footer class="foot" style="width:min(100%,1180px);margin:0 auto;padding-left:30px;padding-right:30px;">
+  <span><b>Everything About Me</b> · UI System</span>
+  <span>字体栈 · 400/500/600 · 浅蓝图标 · 深蓝主按钮 · 砖红危险</span>
+</footer>
+
+<script>
+  (function () {
+    var btn = document.getElementById('themeBtn');
+    var text = document.getElementById('themeText');
+    var icon = document.getElementById('themeIcon').querySelector('use');
+    function sync() {
+      var dark = document.documentElement.dataset.theme === 'dark';
+      text.textContent = dark ? '浅色' : '深色';
+      icon.setAttribute('href', dark ? '#i-sun' : '#i-moon');
+    }
+    var forced = new URLSearchParams(location.search).get('theme');
+    if (forced === 'dark' || forced === 'light') {
+      document.documentElement.dataset.theme = forced;
+    } else {
+      try {
+        var saved = localStorage.getItem('eam-system-theme');
+        if (saved === 'dark' || saved === 'light') document.documentElement.dataset.theme = saved;
+      } catch (e) {}
+    }
+    sync();
+    btn.addEventListener('click', function () {
+      var next = document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark';
+      document.documentElement.dataset.theme = next;
+      try { localStorage.setItem('eam-system-theme', next); } catch (e) {}
+      sync();
+    });
+
+    var links = Array.prototype.slice.call(document.querySelectorAll('.side nav a'));
+    var sections = links.map(function (a) { return document.querySelector(a.getAttribute('href')); }).filter(Boolean);
+    if ('IntersectionObserver' in window && sections.length) {
+      var observer = new IntersectionObserver(function (entries) {
+        entries.forEach(function (entry) {
+          if (!entry.isIntersecting) return;
+          var id = '#' + entry.target.id;
+          links.forEach(function (a) { a.classList.toggle('active', a.getAttribute('href') === id); });
+        });
+      }, { rootMargin: '-15% 0px -70% 0px' });
+      sections.forEach(function (el) { observer.observe(el); });
+    }
+  })();
+</script>
+</body>
+</html>

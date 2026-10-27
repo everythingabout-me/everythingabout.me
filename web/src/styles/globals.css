@@ -1,65 +1,97 @@
 :root {
-  /* 主色：黑白灰；薄荷只做点缀 */
-  --bg: #f6f7f7;
-  --surface: #ffffff;
-  --hover: #f1f3f2;
-  --border: #e8eae9;
-  --border-strong: #d6dbd9;
-  --text: #161a19;
-  --text-2: #5b6462;
-  --text-3: #929b98;
+  /* 纸 / 面 */
+  --bg: #faf8f4;
+  --bg-top: #fcfaf6;
+  --surface: #fffdfb;
+  --hover: #f3f0ea;
+  --border: #e8e3da;
+  --border-strong: #d6cec2;
 
-  /* 点缀色：只用于图标、悬停、聚焦、强调 */
-  --accent: #1fa98a;
-  --accent-light: #4fcfb0;
-  --accent-deep: #15836a;
-  --accent-soft: #eaf8f3;
-  --accent-tint: #f4fbf8;
+  /* 文字 */
+  --text: #1a1714;
+  --text-2: #615b52;
+  --text-3: #786f65;
 
-  --danger: #d24f45;
-  --danger-soft: #fdeceb;
+  /* 蓝：浅蓝做图标底，深蓝做主按钮 / 图标线 */
+  --blue: #13a7f5;
+  --blue-ink: #0b7bc4;
+  --blue-light: #eaf6fe;
+  --ring: rgba(19, 167, 245, 0.18);
 
-  --btn-from: #26ab8c;
-  --btn-to: #127a63;
+  /* 危险：低饱和砖红，只给不可逆操作 */
+  --danger: #b4483f;
+  --danger-soft: #fbedec;
+  --danger-fg: #ffffff;
+
+  /* 兼容旧语义：旧的 --accent* 现在都映射到蓝 */
+  --accent: var(--blue-ink);
+  --accent-light: var(--blue);
+  --accent-deep: var(--blue-ink);
+  --accent-soft: var(--blue-light);
+  --accent-tint: var(--blue-light);
+
+  /* 主按钮 */
+  --btn-bg: var(--blue);
   --btn-fg: #ffffff;
+  --btn-from: var(--blue);
+  --btn-to: var(--blue);
 
-  --toast-bg: #171b1a;
-  --toast-fg: #f4f7f6;
-  --overlay: #101615;
-  --shadow-pop: 0 1px 2px rgba(18, 24, 22, 0.06), 0 16px 36px -20px rgba(18, 24, 22, 0.22);
-  --shadow-soft: 0 1px 2px rgba(18, 24, 22, 0.04), 0 10px 30px -24px rgba(18, 24, 22, 0.18);
+  --toast-bg: #1a1714;
+  --toast-fg: #fffdfb;
+  --overlay: #120f0c;
+
+  --shadow-pop: 0 1px 2px rgba(26, 23, 20, 0.07), 0 24px 60px -30px rgba(26, 23, 20, 0.42);
+  --shadow-soft: 0 1px 2px rgba(26, 23, 20, 0.04), 0 14px 34px -28px rgba(26, 23, 20, 0.24);
+
+  --font-ui: -apple-system, BlinkMacSystemFont, "SF Pro Text", "SF Pro Display", "Segoe UI",
+    "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans SC",
+    "Hiragino Kaku Gothic ProN", "Yu Gothic", "Apple SD Gothic Neo", "Malgun Gothic",
+    "Noto Sans JP", "Noto Sans KR", "Helvetica Neue", Arial, sans-serif;
+  --font-mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+
   color-scheme: light;
 }
 
 @media (prefers-color-scheme: dark) {
   :root {
-    --bg: #0d0f0e;
-    --surface: #141716;
-    --hover: #1a1e1c;
-    --border: #232826;
-    --border-strong: #313836;
-    --text: #ecefed;
-    --text-2: #9aa3a0;
-    --text-3: #737c79;
+    --bg: #0f0e0c;
+    --bg-top: #131210;
+    --surface: #161412;
+    --hover: #1d1a17;
+    --border: #2a2621;
+    --border-strong: #3a342d;
 
-    --accent: #4fd0b2;
-    --accent-light: #6fe0c6;
-    --accent-deep: #7ce5cd;
-    --accent-soft: #14241f;
-    --accent-tint: #101d19;
+    --text: #f2eee8;
+    --text-2: #ada59a;
+    --text-3: #948c80;
 
-    --danger: #f28076;
-    --danger-soft: #241614;
+    --blue: #4cb8f5;
+    --blue-ink: #8fd4ff;
+    --blue-light: #122633;
+    --ring: rgba(76, 184, 245, 0.2);
 
-    --btn-from: #6fe0c6;
-    --btn-to: #3ec5a6;
-    --btn-fg: #06231c;
-  
-    --toast-bg: #1a1f1d;
-    --toast-fg: #eef2f0;
+    --danger: #e8847c;
+    --danger-soft: #2a1715;
+    --danger-fg: #1a0f0e;
+
+    --accent: var(--blue-ink);
+    --accent-light: var(--blue);
+    --accent-deep: var(--blue-ink);
+    --accent-soft: var(--blue-light);
+    --accent-tint: var(--blue-light);
+
+    --btn-bg: var(--blue);
+    --btn-fg: #06141c;
+    --btn-from: var(--blue);
+    --btn-to: var(--blue);
+
+    --toast-bg: #1d1a17;
+    --toast-fg: #f2eee8;
     --overlay: #000000;
-    --shadow-pop: 0 1px 2px rgba(0, 0, 0, 0.5), 0 20px 44px -24px rgba(0, 0, 0, 0.85);
-    --shadow-soft: 0 1px 2px rgba(0, 0, 0, 0.4), 0 12px 32px -24px rgba(0, 0, 0, 0.75);
+
+    --shadow-pop: 0 1px 2px rgba(0, 0, 0, 0.5), 0 30px 70px -34px rgba(0, 0, 0, 0.9);
+    --shadow-soft: 0 1px 2px rgba(0, 0, 0, 0.4), 0 16px 36px -30px rgba(0, 0, 0, 0.8);
+
     color-scheme: dark;
   }
 }
@@ -77,22 +109,22 @@ body {
 
 body {
   background: var(--bg);
-  background-image: linear-gradient(
-    180deg,
-    color-mix(in srgb, var(--surface) 85%, var(--bg)) 0,
-    transparent 320px
-  );
+  background-image: linear-gradient(180deg, var(--bg-top) 0, transparent 320px);
   color: var(--text);
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
-    "Hiragino Sans GB", "Microsoft YaHei", "Helvetica Neue", sans-serif;
+  font-family: var(--font-ui);
   font-size: 14px;
-  line-height: 1.5;
+  font-weight: 400;
+  line-height: 1.65;
   -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  font-optical-sizing: auto;
   text-rendering: optimizeLegibility;
 }
 
 button,
-input {
+input,
+textarea,
+select {
   font: inherit;
   color: inherit;
 }
@@ -110,11 +142,15 @@ a {
 }
 
 code {
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-family: var(--font-mono);
+}
+
+::selection {
+  background: var(--blue-light);
+  color: var(--text);
 }
 
 :focus-visible {
-  outline: 2px solid color-mix(in srgb, var(--accent) 60%, transparent);
+  outline: 2px solid var(--blue);
   outline-offset: 2px;
-  border-radius: 8px;
 }

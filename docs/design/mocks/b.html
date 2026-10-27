@@ -1,0 +1,453 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="light">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="icon" type="image/svg+xml" href="favicon.svg">
+<link rel="stylesheet" href="plain.css?v=8">
+<title>视觉方向 · 朴素版 — Everything About Me</title>
+<script>
+  (function () {
+    var q = new URLSearchParams(location.search);
+    if (q.get('view')) document.documentElement.dataset.view = q.get('view');
+    var forced = q.get('theme');
+    if (forced === 'dark' || forced === 'light') {
+      document.documentElement.dataset.theme = forced;
+    } else {
+      try {
+        var saved = localStorage.getItem('eam-mock-theme');
+        if (saved === 'dark' || saved === 'light') document.documentElement.dataset.theme = saved;
+      } catch (e) {}
+    }
+  })();
+</script>
+</head>
+<body class="v-b">
+
+<svg class="sprite" aria-hidden="true" xmlns="http://www.w3.org/2000/svg">
+  <symbol id="mark" viewBox="0 0 1024 1024">
+    <defs><clipPath id="mark-disc"><circle cx="512" cy="512" r="448"/></clipPath></defs>
+    <g clip-path="url(#mark-disc)">
+      <circle cx="512" cy="512" r="448" fill="#FD605E"/>
+      <path d="M0 429H239V595H421V429H603V595H785V429H1024V1024H0Z" fill="#13A7F5"/>
+      <path d="M0 429H239V595H421V429H603V595H785V429H1024" fill="none" stroke="#FFFFFF" stroke-width="24" stroke-linejoin="miter" stroke-miterlimit="4" stroke-linecap="butt"/>
+    </g>
+  </symbol>
+  <symbol id="i-folder" viewBox="0 0 16 16"><path d="M1.75 4.25c0-.55.45-1 1-1h3.1c.27 0 .52.1.71.3l.94.94c.19.2.44.3.71.3h4.99c.55 0 1 .45 1 1v6.96c0 .55-.45 1-1 1H2.75c-.55 0-1-.45-1-1V4.25Z"/></symbol>
+  <symbol id="i-file" viewBox="0 0 16 16"><path d="M3.5 2.25h5.19c.27 0 .52.1.71.3l2.8 2.79c.19.2.3.44.3.71v7.7c0 .55-.45 1-1 1h-8c-.55 0-1-.45-1-1V3.25c0-.55.45-1 1-1Z"/><path d="M8.5 2.5v2.75c0 .41.34.75.75.75h2.75"/></symbol>
+  <symbol id="i-image" viewBox="0 0 16 16"><rect x="2.25" y="3" width="11.5" height="10" rx="1.25"/><circle cx="5.75" cy="6.25" r="1"/><path d="m3 11.5 2.8-2.6c.3-.28.75-.28 1.05 0l2.15 2M9.4 10.2l1.2-1.1c.3-.28.76-.28 1.06 0l1.84 1.7"/></symbol>
+  <symbol id="i-video" viewBox="0 0 16 16"><rect x="2.25" y="3.75" width="8" height="8.5" rx="1.25"/><path d="m10.25 7.6 3.1-1.8c.27-.16.6.04.6.35v3.7c0 .31-.33.51-.6.35l-3.1-1.8V7.6Z"/></symbol>
+  <symbol id="i-audio" viewBox="0 0 16 16"><path d="M6.25 11V4.5l5.5-1.25v6.5"/><circle cx="4.75" cy="11.25" r="1.5"/><circle cx="10.25" cy="9.75" r="1.5"/></symbol>
+  <symbol id="i-pdf" viewBox="0 0 16 16"><path d="M3.5 2.25h5.19c.27 0 .52.1.71.3l2.8 2.79c.19.2.3.44.3.71v7.7c0 .55-.45 1-1 1h-8c-.55 0-1-.45-1-1V3.25c0-.55.45-1 1-1Z"/><path d="M5.25 11.5V9M5.25 9h.9a.85.85 0 0 1 0 1.7h-.9M8 11.5V9h.75a1.25 1.25 0 0 1 0 2.5H8Z"/></symbol>
+  <symbol id="i-archive" viewBox="0 0 16 16"><rect x="2.25" y="3" width="11.5" height="10" rx="1.25"/><path d="M2.25 6.25h11.5M7 8.5h2"/></symbol>
+  <symbol id="i-code" viewBox="0 0 16 16"><path d="m6 5.5-3 2.75L6 11M10 5.5l3 2.75L10 11"/></symbol>
+  <symbol id="i-search" viewBox="0 0 16 16"><circle cx="7.25" cy="7.25" r="4"/><path d="m10.4 10.4 2.6 2.6"/></symbol>
+  <symbol id="i-upload" viewBox="0 0 16 16"><path d="M8 10.5V2.75M5.25 5.5 8 2.75l2.75 2.75M2.75 10.5v1.75c0 .55.45 1 1 1h8.5c.55 0 1-.45 1-1V10.5"/></symbol>
+  <symbol id="i-plus" viewBox="0 0 16 16"><path d="M8 3.25v9.5M3.25 8h9.5"/></symbol>
+  <symbol id="i-refresh" viewBox="0 0 16 16"><path d="M13.25 8a5.25 5.25 0 1 1-1.6-3.78"/><path d="M13.5 2.75v3.1h-3.1"/></symbol>
+  <symbol id="i-download" viewBox="0 0 16 16"><path d="M8 2.75v7.75M5.25 7.75 8 10.5l2.75-2.75M2.75 11.75v.5c0 .55.45 1 1 1h8.5c.55 0 1-.45 1-1v-.5"/></symbol>
+  <symbol id="i-trash" viewBox="0 0 16 16"><path d="M2.75 4.25h10.5M6.25 4.25V3c0-.41.34-.75.75-.75h2c.41 0 .75.34.75.75v1.25M4 4.25l.6 8.55c.03.4.36.7.75.7h5.3c.39 0 .72-.3.75-.7L12 4.25"/></symbol>
+  <symbol id="i-sun" viewBox="0 0 16 16"><circle cx="8" cy="8" r="2.75"/><path d="M8 1.5v1.25M8 13.25v1.25M1.5 8h1.25M13.25 8h1.25M3.4 3.4l.9.9M11.7 11.7l.9.9M12.6 3.4l-.9.9M4.3 11.7l-.9.9"/></symbol>
+  <symbol id="i-moon" viewBox="0 0 16 16"><path d="M13.2 9.6A5.75 5.75 0 0 1 6.4 2.8a5.75 5.75 0 1 0 6.8 6.8Z"/></symbol>
+</svg>
+
+<header class="rv-bar">
+  <a class="rv-home" href="index.html">
+    <svg class="mark"><use href="#mark"/></svg>
+    <span>EAM · 视觉方向</span>
+  </a>
+  <span class="rv-sep"></span>
+  <span class="rv-ver only-a">A</span>
+  <span class="rv-ver only-b">B</span>
+  <span class="rv-name only-a">素白 · Plain</span>
+  <span class="rv-name only-b">暖白 · Warm</span>
+  <div class="rv-spacer"></div>
+  <nav class="rv-tabs" aria-label="切换方案">
+    <a class="tab-a" href="a.html">A 素白</a>
+    <a class="tab-b" href="b.html">B 暖白</a>
+    <a href="system.html">系统</a>
+  </nav>
+  <button class="rv-theme" id="themeBtn" type="button">
+    <svg id="themeIcon"><use href="#i-moon"/></svg>
+    <span id="themeText">深色</span>
+  </button>
+</header>
+
+<div class="rv-wrap">
+  <header class="rv-intro">
+    <div class="copy-a">
+      <p class="rv-kicker">Plain / A · Cool</p>
+      <h1>素白 <span>Plain</span></h1>
+      <p class="rv-lede">
+        上一版把两色铺满了，这次收回来。黑色主按钮有点重，换成 logo 的蓝：<b>浅蓝做图标底，深蓝（logo 的 #13A7F5）做上传 / 继续 / 保存</b>。
+        珊瑚仍然只留在 logo，红色只给删除；页面其余部分保持黑白灰。
+      </p>
+      <p class="rv-meta">
+        <span><i></i>浅蓝图标</span>
+        <span><i></i>深蓝主按钮</span>
+        <span><i></i>珊瑚只在 logo</span>
+        <span><i></i>880px / 52px 行高</span>
+      </p>
+    </div>
+    <div class="copy-b">
+      <p class="rv-kicker">Plain / B · Warm</p>
+      <h1>暖白 <span>Warm</span></h1>
+      <p class="rv-lede">
+        同一套浅蓝 / 深蓝，只把底色换成暖白、留白放大、标题升一级。默认按钮仍是 logo 蓝，图标仍是浅蓝底；区别只在温度和密度，<b>不再增加第二种颜色</b>。
+      </p>
+      <p class="rv-meta">
+        <span><i></i>浅蓝图标</span>
+        <span><i></i>深蓝主按钮</span>
+        <span><i></i>珊瑚只在 logo</span>
+        <span><i></i>920px / 58px 行高</span>
+      </p>
+    </div>
+  </header>
+
+  <main class="rv-main">
+    <!-- 01 文件 -->
+    <section class="rv-stage stage-drive">
+      <div class="rv-stagehead">
+        <span class="num">01</span>
+        <h2>文件</h2>
+        <p>只用一族蓝：浅蓝做图标，深蓝做主按钮；不铺底、不做双色装饰</p>
+      </div>
+
+      <div class="frame">
+        <div class="frame-cap">
+          <span><b>everythingabout.me</b> /drive</span>
+          <span>1280 × 760</span>
+        </div>
+
+        <div class="app">
+          <header class="topbar">
+            <div class="topbar-inner">
+              <div class="brand">
+                <svg class="mark"><use href="#mark"/></svg>
+                <span>Everything About Me</span>
+              </div>
+              <div class="spacer"></div>
+              <div class="search">
+                <svg class="ic"><use href="#i-search"/></svg>
+                <input placeholder="搜索" readonly aria-label="搜索">
+                <kbd>/</kbd>
+              </div>
+              <div class="account">
+                <span class="avatar">Y</span>
+                <span>you@example.com</span>
+              </div>
+              <button class="btn-primary" type="button">
+                <svg class="ic"><use href="#i-upload"/></svg>
+                上传
+              </button>
+            </div>
+          </header>
+
+          <main class="main">
+            <div class="head-a">
+              <nav class="crumbs" aria-label="路径">
+                <button class="crumb current" type="button">全部文件</button>
+              </nav>
+              <div class="spacer"></div>
+              <button class="icon-btn" type="button" title="新建目录" aria-label="新建目录"><svg class="ic"><use href="#i-plus"/></svg></button>
+              <button class="icon-btn" type="button" title="刷新" aria-label="刷新"><svg class="ic"><use href="#i-refresh"/></svg></button>
+            </div>
+
+            <div class="head-b">
+              <div>
+                <h1 class="page-title">全部文件</h1>
+                <p class="stats">6 个目录 · 4 个文件 · 12.4 MB</p>
+              </div>
+              <div class="head-actions">
+                <button class="icon-btn" type="button" title="新建目录" aria-label="新建目录"><svg class="ic"><use href="#i-plus"/></svg></button>
+                <button class="icon-btn" type="button" title="刷新" aria-label="刷新"><svg class="ic"><use href="#i-refresh"/></svg></button>
+              </div>
+            </div>
+
+            <section class="panel">
+              <div class="row">
+                <span class="glyph"><svg class="ic"><use href="#i-folder"/></svg></span>
+                <span class="name dir">Photos</span>
+                <span class="size"></span>
+                <span class="time">2 小时前</span>
+                <span class="row-actions"></span>
+              </div>
+              <div class="row">
+                <span class="glyph"><svg class="ic"><use href="#i-folder"/></svg></span>
+                <span class="name dir">Documents</span>
+                <span class="size"></span>
+                <span class="time">3 天前</span>
+                <span class="row-actions"></span>
+              </div>
+              <div class="row">
+                <span class="glyph"><svg class="ic"><use href="#i-folder"/></svg></span>
+                <span class="name dir">Projects</span>
+                <span class="size"></span>
+                <span class="time">1 天前</span>
+                <span class="row-actions"></span>
+              </div>
+              <div class="row">
+                <span class="glyph"><svg class="ic"><use href="#i-folder"/></svg></span>
+                <span class="name dir">照片备份</span>
+                <span class="size"></span>
+                <span class="time">5 天前</span>
+                <span class="row-actions"></span>
+              </div>
+              <div class="row force">
+                <span class="glyph"><svg class="ic"><use href="#i-image"/></svg></span>
+                <span class="name file">2024-05-西湖.jpg</span>
+                <span class="size">4.2 MB</span>
+                <span class="time">2 小时前</span>
+                <span class="row-actions">
+                  <span class="mini"><svg class="ic"><use href="#i-download"/></svg></span>
+                  <span class="mini danger"><svg class="ic"><use href="#i-trash"/></svg></span>
+                </span>
+              </div>
+              <div class="row">
+                <span class="glyph"><svg class="ic"><use href="#i-pdf"/></svg></span>
+                <span class="name file">年度总结.pdf</span>
+                <span class="size">1.8 MB</span>
+                <span class="time">3 天前</span>
+                <span class="row-actions">
+                  <span class="mini"><svg class="ic"><use href="#i-download"/></svg></span>
+                  <span class="mini danger"><svg class="ic"><use href="#i-trash"/></svg></span>
+                </span>
+              </div>
+              <div class="row">
+                <span class="glyph"><svg class="ic"><use href="#i-archive"/></svg></span>
+                <span class="name file">archive-2025.zip</span>
+                <span class="size">6.4 MB</span>
+                <span class="time">2026-09-12</span>
+                <span class="row-actions">
+                  <span class="mini"><svg class="ic"><use href="#i-download"/></svg></span>
+                  <span class="mini danger"><svg class="ic"><use href="#i-trash"/></svg></span>
+                </span>
+              </div>
+              <div class="row">
+                <span class="glyph"><svg class="ic"><use href="#i-code"/></svg></span>
+                <span class="name file">notes.md</span>
+                <span class="size">12 KB</span>
+                <span class="time">5 天前</span>
+                <span class="row-actions">
+                  <span class="mini"><svg class="ic"><use href="#i-download"/></svg></span>
+                  <span class="mini danger"><svg class="ic"><use href="#i-trash"/></svg></span>
+                </span>
+              </div>
+            </section>
+
+            <footer class="footer">
+              <span>4 个目录</span><i></i><span>4 个文件</span><i></i><span>12.4 MB</span>
+            </footer>
+          </main>
+        </div>
+      </div>
+
+      <div class="rv-notes">
+        <div class="rv-note">
+          <b>主按钮从黑换成 logo 蓝</b>
+          <p>上传、继续、保存都用同一个 #13A7F5；不再出现大块黑色。深色模式自动换成亮蓝 + 深字。</p>
+        </div>
+        <div class="rv-note">
+          <b>图标统一浅蓝底</b>
+          <p>所有 glyph 用同一块浅蓝底 + 同一个深蓝线，只靠形状区分文件夹、图片、PDF、压缩包；仍然不按类型上色。</p>
+        </div>
+        <div class="rv-note">
+          <b>珊瑚只留在 logo</b>
+          <p>界面里不出现珊瑚红；删除 / 移除密码才用低饱和砖红 #B4483F。蓝只做功能色，不做底纹、不做边框。</p>
+        </div>
+      </div>
+    </section>
+
+    <!-- 02 登录 / 账户 -->
+    <section class="rv-stage stage-auth">
+      <div class="rv-stagehead">
+        <span class="num">02</span>
+        <h2>登录 / 账户</h2>
+        <p>卡片只差温度和留白；主按钮同样是 logo 蓝</p>
+      </div>
+
+      <div class="rv-duo">
+        <div class="frame">
+          <div class="frame-cap">
+            <span><b>everythingabout.me</b> /login</span>
+            <span>1280 × 900</span>
+          </div>
+          <div class="auth-app">
+            <header class="auth-head">
+              <div class="brand">
+                <svg class="mark"><use href="#mark"/></svg>
+                <span>Everything About Me</span>
+              </div>
+            </header>
+            <main class="auth-main">
+              <div class="auth-stack">
+                <section class="card">
+                  <div class="eyebrow">Sign in</div>
+                  <h1 class="title">登录 / 注册</h1>
+                  <p class="subtitle">用邮箱验证码进入你的个人数据基座。</p>
+                  <form class="form" onsubmit="return false">
+                    <div class="field">
+                      <span class="label">邮箱</span>
+                      <div class="input-row">
+                        <input class="input" value="you@example.com" readonly aria-label="邮箱">
+                        <button class="code-btn" type="button">发送验证码</button>
+                      </div>
+                    </div>
+                    <div class="field">
+                      <span class="label">验证码</span>
+                      <input class="input focus-demo" value="824196" readonly aria-label="验证码">
+                      <p class="hint">验证码已发送，请查收邮箱（10 分钟内有效）</p>
+                    </div>
+                    <button class="submit" type="button">继续</button>
+                  </form>
+                </section>
+                <a class="page-switch" href="#" onclick="return false">用密码登录</a>
+              </div>
+            </main>
+          </div>
+        </div>
+
+        <div class="frame">
+          <div class="frame-cap">
+            <span><b>everythingabout.me</b> /account</span>
+            <span>1280 × 900</span>
+          </div>
+          <div class="auth-app">
+            <header class="auth-head">
+              <div class="brand">
+                <svg class="mark"><use href="#mark"/></svg>
+                <span>Everything About Me</span>
+              </div>
+            </header>
+            <main class="auth-main">
+              <section class="card wide">
+                <div class="card-head">
+                  <div>
+                    <h1 class="title">账户</h1>
+                    <p class="subtitle">邮箱就是你的唯一标识；默认用验证码登录，密码可选。</p>
+                  </div>
+                  <button class="ghost" type="button">退出登录</button>
+                </div>
+
+                <dl class="meta">
+                  <div class="meta-row"><dt>登录邮箱</dt><dd>you@example.com</dd></div>
+                  <div class="meta-row"><dt>注册时间</dt><dd>2026-03-14</dd></div>
+                </dl>
+
+                <div class="divider"></div>
+                <h2 class="section-title">修改邮箱</h2>
+                <p class="section-hint">需要同时验证当前邮箱和新邮箱，两个验证码都填对才会生效。</p>
+                <form class="form compact" onsubmit="return false">
+                  <div class="field">
+                    <span class="label">当前邮箱</span>
+                    <div class="input-row">
+                      <input class="input" value="you@example.com" readonly aria-label="当前邮箱">
+                      <button class="code-btn" type="button">发送验证码</button>
+                    </div>
+                  </div>
+                  <div class="field">
+                    <span class="label">新邮箱</span>
+                    <div class="input-row">
+                      <input class="input" placeholder="new@example.com" readonly aria-label="新邮箱">
+                      <button class="code-btn" type="button">发送验证码</button>
+                    </div>
+                  </div>
+                  <button class="save" type="button">保存新邮箱</button>
+                </form>
+
+                <div class="divider"></div>
+                <h2 class="section-title">登录密码（可选）</h2>
+                <p class="section-hint">已设置密码，可以用密码登录；也可以移除，只保留邮箱验证码。</p>
+                <form class="form compact" onsubmit="return false">
+                  <button class="save" type="button">修改密码</button>
+                  <button class="danger-link" type="button">移除密码</button>
+                </form>
+              </section>
+            </main>
+          </div>
+        </div>
+      </div>
+
+      <div class="rv-notes">
+        <div class="rv-note">
+          <b>登录页的按钮也是 logo 蓝</b>
+          <p>没有彩色 eyebrow、没有渐变、没有大色块。输入焦点用一层很淡的浅蓝光圈；蓝色只出现在主按钮和图标上。</p>
+        </div>
+        <div class="rv-note">
+          <b>账户页的红色只给「移除密码」</b>
+          <p>保存、修改都是 logo 蓝；只有不可逆的移除用低饱和砖红。它不承担品牌表达，只承担警告。</p>
+        </div>
+        <div class="rv-note">
+          <b>A 与 B 的差别只在温度</b>
+          <p><span class="only-a">A：冷白、紧凑、面包屑；最接近现在的网站。</span><span class="only-b">B：暖白、更松、标题升一级；蓝色系统与 A 完全一样。</span></p>
+        </div>
+      </div>
+    </section>
+
+    <!-- 03 颜色预算 -->
+    <section class="rv-stage stage-budget">
+      <div class="rv-stagehead">
+        <span class="num">03</span>
+        <h2>颜色预算</h2>
+        <p>浅蓝只做图标，深蓝只做主动作；珊瑚不出界面</p>
+      </div>
+
+      <div class="budget">
+        <div class="b-item">
+          <span class="b-label">常驻 · 1</span>
+          <div class="b-logo"><img src="favicon.svg" alt=""><span>logo</span></div>
+          <p>珊瑚和天蓝只在标记里相遇。界面里不出现珊瑚红，也不会拿 logo 做底纹。</p>
+        </div>
+        <div class="b-item">
+          <span class="b-label">功能 · 2</span>
+          <div class="b-controls">
+            <span class="b-tile"><svg class="ic"><use href="#i-folder"/></svg></span>
+            <span class="b-mini">上传</span>
+          </div>
+          <p>浅蓝只做图标底，深蓝只做主动作；不做渐变，也不铺满整个界面。</p>
+        </div>
+        <div class="b-item">
+          <span class="b-label">不可逆 · 3</span>
+          <button class="b-danger" type="button">删除</button>
+          <p>删除、移除密码用低饱和砖红；主按钮不用红，也不拿红色或第二种蓝做装饰。</p>
+        </div>
+      </div>
+
+      <div class="neutrals">
+        <span class="nchip" style="--c:var(--bg)"><i></i>纸</span>
+        <span class="nchip" style="--c:var(--surface)"><i></i>面</span>
+        <span class="nchip" style="--c:var(--blue-light)"><i></i>浅蓝</span>
+        <span class="nchip" style="--c:var(--blue)"><i></i>logo 蓝</span>
+        <span class="nchip" style="--c:var(--ink)"><i></i>墨</span>
+        <span class="nchip" style="--c:var(--danger)"><i></i>删除红</span>
+      </div>
+    </section>
+  </main>
+
+  <footer class="rv-foot">
+    <span><b>Everything About Me</b> · 朴素版视觉方向</span>
+    <span>浅蓝图标 · 深蓝主按钮 · 珊瑚只在 logo · 两版都支持深浅色</span>
+  </footer>
+</div>
+
+<script>
+  (function () {
+    var btn = document.getElementById('themeBtn');
+    var text = document.getElementById('themeText');
+    var icon = document.getElementById('themeIcon').querySelector('use');
+    function sync() {
+      var dark = document.documentElement.dataset.theme === 'dark';
+      text.textContent = dark ? '浅色' : '深色';
+      icon.setAttribute('href', dark ? '#i-sun' : '#i-moon');
+    }
+    sync();
+    btn.addEventListener('click', function () {
+      var next = document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark';
+      document.documentElement.dataset.theme = next;
+      try { localStorage.setItem('eam-mock-theme', next); } catch (e) {}
+      sync();
+    });
+  })();
+</script>
+</body>
+</html>

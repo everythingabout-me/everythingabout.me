@@ -1,0 +1,33 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024" role="img" aria-labelledby="me-circle-title me-circle-desc">
+  <title id="me-circle-title">ME — stepped circle mark</title>
+  <desc id="me-circle-desc">A red and blue disc split by one centred white stepped line. Perfectly mirrored left to right; all five vertical feet read as equal width; the seam is centred.</desc>
+
+  <!--
+    Canvas 1024 × 1024 · disc r=448 at (512,512).
+    Brand palette: #FD605E red / #13A7F5 blue / #FFFFFF seam.
+    Seam centreline: y = 512 ± 83, stroke 24.
+    Vertical seams: x = 512 ± 91 and 512 ± 273 (evenly spaced 182 apart).
+    All five feet read as equal width: 158 visible inside the 24 stroke.
+    The two outer runs are 167 on the centreline (the disc clips them), so their
+    visible width matches the three inner runs (182 centreline) exactly.
+    Area split is ≈47.7 / 52.3; the seam itself is centred and mirrored.
+  -->
+  <defs>
+    <clipPath id="me-circle-clip">
+      <circle cx="512" cy="512" r="448"/>
+    </clipPath>
+  </defs>
+
+  <g clip-path="url(#me-circle-clip)">
+    <!-- red: the whole disc -->
+    <circle cx="512" cy="512" r="448" fill="#FD605E"/>
+
+    <!-- blue: everything under the stepped seam -->
+    <path d="M0 429H239V595H421V429H603V595H785V429H1024V1024H0Z" fill="#13A7F5"/>
+
+    <!-- white seam, centred on the same step line -->
+    <path d="M0 429H239V595H421V429H603V595H785V429H1024"
+          fill="none" stroke="#FFFFFF" stroke-width="24"
+          stroke-linejoin="miter" stroke-miterlimit="4" stroke-linecap="butt"/>
+  </g>
+</svg>

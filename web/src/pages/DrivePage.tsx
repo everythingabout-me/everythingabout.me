@@ -30,7 +30,7 @@ function formatSize(bytes: number): string {
     value /= 1024;
     index += 1;
   }
-  return `${value.toFixed(value >= 10 ? 0 : 1)} ${units[index]}`;
+  return `${value.toFixed(value >= 100 || Number.isInteger(value) ? 0 : 1)} ${units[index]}`;
 }
 
 function formatTime(iso: string): string {
@@ -252,6 +252,9 @@ export function DrivePage() {
 
   const totalSize = items.reduce((sum, item) => (item.is_dir ? sum : sum + Number(item.size)), 0);
   const fileCount = items.filter((item) => !item.is_dir).length;
+  const folderCount = items.filter((item) => item.is_dir).length;
+  const currentCrumb = crumbTrail[crumbTrail.length - 1];
+  const parentCrumbs = crumbTrail.slice(0, -1);
 
   const onDrop = (event: React.DragEvent) => {
     event.preventDefault();
@@ -292,7 +295,7 @@ export function DrivePage() {
             <input
               ref={searchInput}
               className={styles.searchInput}
-              placeholder="搜索"
+              placeholder="搜索文件与路径"
               value={query}
               onChange={(event) => {
                 setQuery(event.target.value);
@@ -339,62 +342,66 @@ export function DrivePage() {
       </header>
 
       <main className={styles.main}>
-        <div className={styles.toolbar}>
-          {activeQuery ? (
-            <div className={styles.resultNote}>
-              <span>
-                “{activeQuery}” · {items.length} 个结果
-              </span>
-              <button className={styles.clearBtn} onClick={() => void load(path)}>
-                清除
-              </button>
-            </div>
-          ) : (
-            <nav className={styles.crumbs} aria-label="路径">
-              {crumbTrail.map((crumb, index) => {
-                const last = index === crumbTrail.length - 1;
-                return (
-                  <span key={crumb.path || "root"} style={{ display: "contents" }}>
-                    {index > 0 && (
-                      <span className={styles.sep}>
-                        <ChevronRightIcon size={12} />
+        <div className={styles.masthead}>
+          <div className={styles.mastheadMain}>
+            {activeQuery ? (
+              <>
+                <h1 className={styles.pageTitle}>搜索结果</h1>
+                <p className={styles.stats}>
+                  “{activeQuery}” · {items.length} 个结果
+                  <button className={styles.clearLink} onClick={() => void load(path)}>
+                    清除
+                  </button>
+                </p>
+              </>
+            ) : (
+              <>
+                {parentCrumbs.length > 0 && (
+                  <nav className={styles.breadcrumbs} aria-label="路径">
+                    {parentCrumbs.map((crumb, index) => (
+                      <span key={crumb.path || "root"} style={{ display: "contents" }}>
+                        {index > 0 && (
+                          <span className={styles.breadcrumbSep}>
+                            <ChevronRightIcon size={12} />
+                          </span>
+                        )}
+                        <button className={styles.crumbLink} onClick={() => goTo(crumb.path)}>
+                          {crumb.name}
+                        </button>
                       </span>
-                    )}
-                    <button
-                      className={`${styles.crumb} ${last ? styles.crumbCurrent : ""}`}
-                      onClick={() => goTo(crumb.path)}
-                      aria-current={last ? "page" : undefined}
-                    >
-                      {crumb.name}
-                    </button>
-                  </span>
-                );
-              })}
-            </nav>
-          )}
+                    ))}
+                  </nav>
+                )}
+                <h1 className={styles.pageTitle}>{currentCrumb?.name ?? "全部文件"}</h1>
+                <p className={styles.stats}>
+                  {folderCount} 个目录 · {fileCount} 个文件
+                  {totalSize > 0 && <span> · {formatSize(totalSize)}</span>}
+                </p>
+              </>
+            )}
+          </div>
 
-          <div className={styles.toolSpacer} />
-
-          <button
-            className={styles.ghostBtn}
-            onClick={() => {
-              setCreating(true);
-              setNewName("");
-            }}
-            title="新建目录"
-            aria-label="新建目录"
-            disabled={Boolean(activeQuery)}
-          >
-            <PlusIcon />
-          </button>
-          <button
-            className={styles.ghostBtn}
-            onClick={() => void load(path)}
-            title="刷新"
-            aria-label="刷新"
-          >
-            <RefreshIcon />
-          </button>
+          <div className={styles.mastheadActions}>
+            <button
+              className={styles.secondaryBtn}
+              onClick={() => {
+                setCreating(true);
+                setNewName("");
+              }}
+              disabled={Boolean(activeQuery)}
+            >
+              <PlusIcon size={14} />
+              新建目录
+            </button>
+            <button
+              className={styles.ghostBtn}
+              onClick={() => void load(path)}
+              title="刷新"
+              aria-label="刷新"
+            >
+              <RefreshIcon size={16} />
+            </button>
+          </div>
         </div>
 
         <section className={styles.panel} aria-busy={loading}>
@@ -475,7 +482,7 @@ export function DrivePage() {
                       title="下载"
                       aria-label={`下载 ${item.name}`}
                     >
-                      <DownloadIcon size={15} />
+                      <DownloadIcon size={14} />
                     </a>
                   )}
                   <button
@@ -484,7 +491,7 @@ export function DrivePage() {
                     title="删除"
                     aria-label={`删除 ${item.name}`}
                   >
-                    <TrashIcon size={15} />
+                    <TrashIcon size={14} />
                   </button>
                 </span>
               </div>
@@ -493,7 +500,7 @@ export function DrivePage() {
           {!loading && items.length === 0 && (
             <div className={styles.empty}>
               <span className={styles.emptyIcon}>
-                {activeQuery ? <SearchIcon size={18} /> : <FolderIcon size={18} />}
+                {activeQuery ? <SearchIcon size={20} /> : <FolderIcon size={20} />}
               </span>
               <span className={styles.emptyTitle}>
                 {activeQuery ? "没有找到匹配的文件" : "这里还空着"}
@@ -519,7 +526,7 @@ export function DrivePage() {
       {dragging && (
         <div className={styles.dropOverlay}>
           <div className={styles.dropInner}>
-            <UploadIcon size={22} />
+            <UploadIcon size={20} />
             <span>松开即可上传到「{path ? crumbTrail[crumbTrail.length - 1]?.name : "全部文件"}」</span>
           </div>
         </div>
