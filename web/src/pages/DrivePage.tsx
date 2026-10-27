@@ -92,7 +92,7 @@ export function DrivePage() {
           navigate("/login", { replace: true });
           return;
         }
-        showToast(error instanceof Error ? error.message : "加载失败", "error");
+        showToast(error instanceof Error ? error.message : "failed to load", "error");
       } finally {
         setLoading(false);
       }
@@ -147,7 +147,7 @@ export function DrivePage() {
         navigate("/login", { replace: true });
         return;
       }
-      showToast(error instanceof Error ? error.message : "搜索失败", "error");
+      showToast(error instanceof Error ? error.message : "search failed", "error");
     } finally {
       setLoading(false);
     }
@@ -206,7 +206,7 @@ export function DrivePage() {
         done += 1;
       } catch (error) {
         showToast(
-          `${file.name} 上传失败：${error instanceof Error ? error.message : "未知错误"}`,
+          `${file.name}: upload failed: ${error instanceof Error ? error.message : "unknown error"}`,
           "error",
         );
       }
@@ -229,7 +229,7 @@ export function DrivePage() {
       setNewName("");
       await load(path);
     } catch (error) {
-      showToast(error instanceof Error ? error.message : "创建失败", "error");
+      showToast(error instanceof Error ? error.message : "failed to create", "error");
     }
   };
 

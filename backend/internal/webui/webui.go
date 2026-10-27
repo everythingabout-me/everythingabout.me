@@ -27,7 +27,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if strings.HasPrefix(r.URL.Path, "/api/") {
 		httpx.WriteJSON(w, http.StatusNotFound, map[string]any{
 			"ok":    false,
-			"error": "接口不存在",
+			"error": "no such API endpoint",
 		})
 		return
 	}

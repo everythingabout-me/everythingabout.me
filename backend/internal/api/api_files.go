@@ -111,7 +111,7 @@ func codeForStatus(status int) string {
 func writeAPIError(w http.ResponseWriter, err error) {
 	status := http.StatusInternalServerError
 	code := "internal"
-	message := "服务器内部错误"
+	message := "internal server error"
 
 	var apiErr *httpx.Error
 	var pathErr *paths.Error
@@ -151,11 +151,11 @@ func decodeCursor(raw string) (*nodes.Cursor, error) {
 	}
 	data, err := base64.RawURLEncoding.DecodeString(raw)
 	if err != nil {
-		return nil, httpx.BadRequest("cursor 不合法")
+		return nil, httpx.BadRequest("invalid cursor")
 	}
 	var payload cursorPayload
 	if err := json.Unmarshal(data, &payload); err != nil || payload.ID == "" {
-		return nil, httpx.BadRequest("cursor 不合法")
+		return nil, httpx.BadRequest("invalid cursor")
 	}
 	return &nodes.Cursor{IsDir: payload.IsDir, Name: payload.Name, ID: payload.ID}, nil
 }
@@ -260,7 +260,7 @@ func filePath(r *http.Request) (string, error) {
 		return "", err
 	}
 	if path == "" {
-		return "", httpx.BadRequest("路径不能为空")
+		return "", httpx.BadRequest("path cannot be empty")
 	}
 	return path, nil
 }
@@ -283,16 +283,16 @@ func (s *Server) handleAPIGetFile(w http.ResponseWriter, r *http.Request) error 
 		return err
 	}
 	if node == nil {
-		return httpx.NotFound("文件不存在")
+		return httpx.NotFound("file not found")
 	}
 	if node.IsDir {
-		return httpx.BadRequest("这是目录，请用 /list")
+		return httpx.BadRequest("this is a directory; use /list")
 	}
 
 	query := r.URL.Query()
 	if query.Get("meta") == "1" {
 		// 同一个东西两个入口是 API 最容易长出来的脂肪，已经砍掉。
-		return httpx.BadRequest("?meta=1 已移除，元信息请用 HEAD /files/<path>")
+		return httpx.BadRequest("?meta=1 was removed; use HEAD /files/<path> for metadata")
 	}
 
 	url, err := s.storage.GetURL(r.Context(), node.Key, storage.URLOptions{
@@ -333,7 +333,7 @@ func (s *Server) handleAPIHeadFile(w http.ResponseWriter, r *http.Request) error
 		return err
 	}
 	if node == nil {
-		return httpx.NotFound("文件不存在")
+		return httpx.NotFound("file not found")
 	}
 
 	w.Header().Set("Content-Length", strconv.FormatInt(node.Size, 10))
@@ -367,11 +367,11 @@ func (s *Server) handleAPIPutFile(w http.ResponseWriter, r *http.Request) error 
 
 	size := r.ContentLength
 	if size < 0 {
-		return httpx.NewError(http.StatusLengthRequired, "PUT 需要 Content-Length；大文件请用 POST /upload")
+		return httpx.NewError(http.StatusLengthRequired, "PUT requires Content-Length; use POST /upload for large files")
 	}
 	if size > apiMaxPutSize {
 		return httpx.NewError(http.StatusRequestEntityTooLarge,
-			"超过 32MiB，请用 POST /upload 拿预签名地址直接传 COS")
+			"exceeds 32MiB; use POST /upload to get a presigned URL and upload to COS directly")
 	}
 
 	existing, err := s.nodes.Live(r.Context(), path, p.User.ID)
@@ -379,22 +379,22 @@ func (s *Server) handleAPIPutFile(w http.ResponseWriter, r *http.Request) error 
 		return err
 	}
 	if existing != nil && existing.IsDir {
-		return httpx.Conflict("同名目录已存在")
+		return httpx.Conflict("a directory with the same name already exists")
 	}
 
 	// 默认不覆盖：要么显式 ?overwrite=1，要么带匹配的 If-Match。
 	overwrite := r.URL.Query().Get("overwrite") == "1"
 	match := strings.TrimSpace(r.Header.Get("If-Match"))
 	if strings.TrimSpace(r.Header.Get("If-None-Match")) == "*" && existing != nil {
-		return httpx.NewError(http.StatusPreconditionFailed, "文件已存在")
+		return httpx.NewError(http.StatusPreconditionFailed, "file already exists")
 	}
 	if match != "" {
 		want := strings.Trim(match, `"`)
 		if existing == nil || existing.ETag == nil || *existing.ETag != want {
-			return httpx.NewError(http.StatusPreconditionFailed, "文件已变化，ETag 不匹配")
+			return httpx.NewError(http.StatusPreconditionFailed, "file changed; ETag mismatch")
 		}
 	} else if existing != nil && !overwrite {
-		return httpx.Conflict("文件已存在；要覆盖请加 ?overwrite=1（或带 If-Match）")
+		return httpx.Conflict("file already exists; add ?overwrite=1 (or send If-Match) to overwrite")
 	}
 
 	if err := s.checkQuota(r.Context(), p.User.ID, size, existing); err != nil {
@@ -479,10 +479,10 @@ func (s *Server) handleAPIDeleteFile(w http.ResponseWriter, r *http.Request) err
 		return err
 	}
 	if node == nil {
-		return httpx.NotFound("文件不存在")
+		return httpx.NotFound("file not found")
 	}
 	if node.IsDir && r.URL.Query().Get("recursive") != "1" {
-		return httpx.Conflict("删除目录需要加 ?recursive=1")
+		return httpx.Conflict("deleting a directory requires ?recursive=1")
 	}
 
 	count, err := s.nodes.Purge(r.Context(), path, p.User.ID)
@@ -490,7 +490,7 @@ func (s *Server) handleAPIDeleteFile(w http.ResponseWriter, r *http.Request) err
 		return err
 	}
 	if count == 0 {
-		return httpx.NotFound("没有可删除的文件")
+		return httpx.NotFound("nothing to delete")
 	}
 	s.timeline.Notify(p.User.ID)
 	s.recordAudit(r, p, "delete", path, http.StatusNoContent, map[string]any{
@@ -532,7 +532,7 @@ func (s *Server) handleAPIMove(w http.ResponseWriter, r *http.Request) error {
 		return err
 	}
 	if source == nil {
-		return httpx.NotFound("源文件不存在")
+		return httpx.NotFound("source file not found")
 	}
 	target, err := s.nodes.Live(r.Context(), to, p.User.ID)
 	if err != nil {
@@ -541,7 +541,7 @@ func (s *Server) handleAPIMove(w http.ResponseWriter, r *http.Request) error {
 
 	if source.IsDir {
 		if target != nil {
-			return httpx.Conflict("目标路径已存在")
+			return httpx.Conflict("target path already exists")
 		}
 		job, err := s.runJob(r, jobs.OpMove, p.User.ID, from, to, pref)
 		if err != nil {
@@ -554,10 +554,10 @@ func (s *Server) handleAPIMove(w http.ResponseWriter, r *http.Request) error {
 
 	if target != nil {
 		if !body.Overwrite {
-			return httpx.Conflict("目标路径已存在")
+			return httpx.Conflict("target path already exists")
 		}
 		if target.IsDir {
-			return httpx.Conflict("目标是一个目录")
+			return httpx.Conflict("target is a directory")
 		}
 		// 覆盖 = 把目标彻底删掉，没有回收站可言。
 		if _, err := s.nodes.Purge(r.Context(), to, p.User.ID); err != nil {
@@ -604,7 +604,7 @@ func (s *Server) checkQuota(ctx context.Context, userID string, incoming int64, 
 	total := used - old + incoming
 	if total > quota {
 		return httpx.NewError(http.StatusInsufficientStorage,
-			fmt.Sprintf("空间不够：需要 %d 字节，配额 %d 字节", total, quota))
+			fmt.Sprintf("not enough space: need %d bytes, quota is %d bytes", total, quota))
 	}
 	return nil
 }

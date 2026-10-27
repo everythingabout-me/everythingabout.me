@@ -149,10 +149,10 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   try {
     payload = (await response.json()) as Envelope<T>;
   } catch {
-    throw new ApiError(`请求失败（HTTP ${response.status}）`, response.status);
+    throw new ApiError(`request failed (HTTP ${response.status})`, response.status);
   }
   if (!payload.ok) {
-    throw new ApiError(payload.error || `请求失败（HTTP ${response.status}）`, response.status);
+    throw new ApiError(payload.error || `request failed (HTTP ${response.status})`, response.status);
   }
   return payload.data;
 }

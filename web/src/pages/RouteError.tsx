@@ -4,10 +4,10 @@ import styles from "../styles/auth.module.css";
 export function RouteError() {
   const error = useRouteError();
 
-  let message = "未知错误";
+  let message = "unknown error";
   if (isRouteErrorResponse(error)) {
     message = `${error.status} ${error.statusText}`;
-    if (error.data) message += `：${String(error.data)}`;
+    if (error.data) message += `: ${String(error.data)}`;
   } else if (error instanceof Error) {
     message = error.message;
   }

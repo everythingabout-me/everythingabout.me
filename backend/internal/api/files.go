@@ -126,13 +126,13 @@ func (s *Server) handleUploadSign(w http.ResponseWriter, r *http.Request) error 
 		return err
 	}
 	if path == "" {
-		return httpx.BadRequest("路径不能为空")
+		return httpx.BadRequest("path cannot be empty")
 	}
 	if math.IsNaN(body.Size) || math.IsInf(body.Size, 0) || body.Size <= 0 {
-		return httpx.BadRequest("文件大小不合法")
+		return httpx.BadRequest("invalid file size")
 	}
 	if body.Size > float64(maxFileSize) {
-		return httpx.NewError(http.StatusRequestEntityTooLarge, "单个文件超过 48GB")
+		return httpx.NewError(http.StatusRequestEntityTooLarge, "a single file is limited to 48GB")
 	}
 
 	existing, err := s.nodes.Live(r.Context(), path, user.ID)
@@ -140,10 +140,10 @@ func (s *Server) handleUploadSign(w http.ResponseWriter, r *http.Request) error 
 		return err
 	}
 	if existing != nil && existing.IsDir {
-		return httpx.Conflict("同名目录已存在")
+		return httpx.Conflict("a directory with the same name already exists")
 	}
 	if existing != nil && !body.Overwrite {
-		return httpx.Conflict("文件已存在；要覆盖请带上 overwrite: true")
+		return httpx.Conflict("file already exists; send overwrite: true to overwrite")
 	}
 
 	key := paths.KeyFor(path, user.ID)
@@ -177,7 +177,7 @@ func (s *Server) handleUploadConfirm(w http.ResponseWriter, r *http.Request) err
 		return err
 	}
 	if path == "" {
-		return httpx.BadRequest("路径不能为空")
+		return httpx.BadRequest("path cannot be empty")
 	}
 
 	existing, err := s.nodes.Live(r.Context(), path, user.ID)
@@ -185,7 +185,7 @@ func (s *Server) handleUploadConfirm(w http.ResponseWriter, r *http.Request) err
 		return err
 	}
 	if existing != nil && existing.IsDir {
-		return httpx.Conflict("同名目录已存在")
+		return httpx.Conflict("a directory with the same name already exists")
 	}
 
 	// HeadObject 校验后落库
@@ -194,7 +194,7 @@ func (s *Server) handleUploadConfirm(w http.ResponseWriter, r *http.Request) err
 		return err
 	}
 	if info == nil {
-		return httpx.BadRequest("对象不存在，上传可能未完成")
+		return httpx.BadRequest("object not found; the upload may not be complete")
 	}
 
 	if err := s.nodes.EnsureParents(r.Context(), path, user.ID); err != nil {
@@ -265,7 +265,7 @@ func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
 			return err
 		}
 		if node == nil || node.IsDir {
-			return httpx.NotFound("文件不存在")
+			return httpx.NotFound("file not found")
 		}
 
 		url, err := s.storage.GetURL(r.Context(), node.Key, storage.URLOptions{
@@ -304,7 +304,7 @@ func (s *Server) handleMkdir(w http.ResponseWriter, r *http.Request) error {
 		return err
 	}
 	if path == "" {
-		return httpx.BadRequest("目录路径不能为空")
+		return httpx.BadRequest("directory path cannot be empty")
 	}
 
 	existing, err := s.nodes.Live(r.Context(), path, user.ID)
@@ -312,7 +312,7 @@ func (s *Server) handleMkdir(w http.ResponseWriter, r *http.Request) error {
 		return err
 	}
 	if existing != nil {
-		return httpx.Conflict("同名文件或目录已存在")
+		return httpx.Conflict("an item with the same name already exists")
 	}
 
 	if err := s.nodes.EnsureParents(r.Context(), path, user.ID); err != nil {
@@ -360,7 +360,7 @@ func (s *Server) handleRename(w http.ResponseWriter, r *http.Request) error {
 		return err
 	}
 	if from == to {
-		return httpx.BadRequest("路径没有变化")
+		return httpx.BadRequest("path did not change")
 	}
 
 	source, err := s.nodes.Live(r.Context(), from, user.ID)
@@ -368,11 +368,11 @@ func (s *Server) handleRename(w http.ResponseWriter, r *http.Request) error {
 		return err
 	}
 	if source == nil {
-		return httpx.NotFound("源文件不存在")
+		return httpx.NotFound("source file not found")
 	}
 	if source.IsDir {
 		return httpx.BadRequest(
-			"目录重命名需要对每个对象做服务端复制，TB 级目录会很慢。请用 coscli 改名后再跑 reconcile。")
+			"renaming a directory copies every object server-side, which is slow at TB scale. Use coscli to rename, then run reconcile.")
 	}
 
 	collision, err := s.nodes.Live(r.Context(), to, user.ID)
@@ -380,7 +380,7 @@ func (s *Server) handleRename(w http.ResponseWriter, r *http.Request) error {
 		return err
 	}
 	if collision != nil {
-		return httpx.Conflict("目标路径已存在")
+		return httpx.Conflict("target path already exists")
 	}
 
 	if err := s.nodes.EnsureParents(r.Context(), to, user.ID); err != nil {
@@ -429,7 +429,7 @@ func (s *Server) handleDelete(w http.ResponseWriter, r *http.Request) error {
 		return err
 	}
 	if count == 0 {
-		return httpx.NotFound("没有可删除的文件")
+		return httpx.NotFound("nothing to delete")
 	}
 	s.timeline.Notify(user.ID)
 	return s.ok(w, map[string]any{"deleted": count})

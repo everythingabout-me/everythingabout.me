@@ -44,7 +44,7 @@ export function AuthForm({ initialMode = "code" }: { initialMode?: Mode }) {
       }
       setCooldown(60);
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "验证码发送失败");
+      setError(caught instanceof Error ? caught.message : "failed to send the code");
     } finally {
       setSendingCode(false);
     }
@@ -73,7 +73,7 @@ export function AuthForm({ initialMode = "code" }: { initialMode?: Mode }) {
       // 登录态是 httpOnly cookie；跳回 / 时由 loader 重新确认
       navigate("/", { replace: true });
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "操作失败");
+      setError(caught instanceof Error ? caught.message : "operation failed");
       setBusy(false);
     }
   }

@@ -38,7 +38,7 @@ export function PasswordForm({
       setConfirm("");
       setNotice(hasPassword ? "密码已更新。" : "密码已设置，现在也可以用密码登录。");
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "保存失败");
+      setError(caught instanceof Error ? caught.message : "save failed");
     } finally {
       setBusy(false);
     }
@@ -61,7 +61,7 @@ export function PasswordForm({
       setConfirm("");
       setNotice("密码已移除，之后请用邮箱验证码登录。");
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "移除失败");
+      setError(caught instanceof Error ? caught.message : "remove failed");
     } finally {
       setBusy(false);
     }

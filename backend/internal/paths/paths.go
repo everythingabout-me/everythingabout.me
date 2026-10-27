@@ -40,20 +40,20 @@ func Normalize(input string) (string, error) {
 			continue
 		}
 		if segment == ".." {
-			return "", pathError("路径不能包含 ..")
+			return "", pathError("path cannot contain '..'")
 		}
 		if utf8.RuneCountInString(segment) > MaxNameLength {
-			return "", pathError("单级名称过长")
+			return "", pathError("a path segment is too long")
 		}
 		for _, r := range segment {
 			if r <= 0x1f || r == 0x7f {
-				return "", pathError("路径包含控制字符")
+				return "", pathError("path contains control characters")
 			}
 		}
 		segments = append(segments, segment)
 	}
 	if len(segments) > MaxPathDepth {
-		return "", pathError("目录层级过深")
+		return "", pathError("path is nested too deeply")
 	}
 	return strings.Join(segments, "/"), nil
 }

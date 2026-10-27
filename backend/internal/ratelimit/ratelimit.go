@@ -67,7 +67,7 @@ func (l *Limiter) Allow(key string, limit int, window time.Duration) (bool, int)
 func (l *Limiter) Enforce(key string, limit int, window time.Duration) error {
 	ok, retryAfter := l.Allow(key, limit, window)
 	if !ok {
-		return httpx.TooManyRequests(fmt.Sprintf("操作太频繁，请 %d 秒后再试", retryAfter))
+		return httpx.TooManyRequests(fmt.Sprintf("too many requests; retry in %d seconds", retryAfter))
 	}
 	return nil
 }

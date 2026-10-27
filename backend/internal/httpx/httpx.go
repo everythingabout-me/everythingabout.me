@@ -83,11 +83,11 @@ func AssertSameOrigin(r *http.Request) error {
 	}
 	parsed, err := url.Parse(origin)
 	if err != nil || parsed.Host == "" {
-		return Forbidden("请求来源不合法")
+		return Forbidden("invalid request origin")
 	}
 	requestHost := forwardedHost(r)
 	if requestHost != "" && !strings.EqualFold(parsed.Host, requestHost) {
-		return Forbidden("跨站请求被拒绝")
+		return Forbidden("cross-site request rejected")
 	}
 	return nil
 }
@@ -106,11 +106,11 @@ func ReadJSON[T any](r *http.Request) (T, error) {
 	var value T
 	decoder := json.NewDecoder(io.LimitReader(r.Body, 1<<20))
 	if err := decoder.Decode(&value); err != nil {
-		return value, BadRequest("请求体不是合法 JSON")
+		return value, BadRequest("request body is not valid JSON")
 	}
 	var trailing any
 	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
-		return value, BadRequest("请求体不是合法 JSON")
+		return value, BadRequest("request body is not valid JSON")
 	}
 	return value, nil
 }

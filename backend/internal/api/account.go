@@ -69,7 +69,7 @@ func (s *Server) handleSendCode(w http.ResponseWriter, r *http.Request) error {
 		return err
 	}
 	if s.cfg.IsProduction() && !s.mail.Configured() {
-		return httpx.ServiceUnavailable("邮件服务未配置，暂时无法发送验证码")
+		return httpx.ServiceUnavailable("email service is not configured; cannot send verification codes")
 	}
 
 	ip := httpx.ClientIP(r)
@@ -91,7 +91,7 @@ func (s *Server) handleSendCode(w http.ResponseWriter, r *http.Request) error {
 		return err
 	}
 	if existing == nil && !s.cfg.RegistrationOpen {
-		return httpx.Forbidden("注册已关闭")
+		return httpx.Forbidden("sign-up is closed")
 	}
 
 	if err := s.limiter.Enforce("signin-code:email:"+email, 5, hour); err != nil {
@@ -151,7 +151,7 @@ func (s *Server) handleVerifyCode(w http.ResponseWriter, r *http.Request) error 
 	}
 	existing := user != nil
 	if user == nil && !s.cfg.RegistrationOpen {
-		return httpx.Forbidden("注册已关闭")
+		return httpx.Forbidden("sign-up is closed")
 	}
 
 	// 兼容旧流程发出去的 register 验证码
@@ -172,7 +172,7 @@ func (s *Server) handleVerifyCode(w http.ResponseWriter, r *http.Request) error 
 		}
 	}
 	if user == nil {
-		return httpx.Internal("创建账号失败，请重试")
+		return httpx.Internal("failed to create account; please retry")
 	}
 
 	if err := s.auth.TouchLastLogin(r.Context(), user.ID); err != nil {
@@ -203,10 +203,10 @@ func (s *Server) handlePasswordLogin(w http.ResponseWriter, r *http.Request) err
 	}
 	password := body.Password
 	if password == "" {
-		return httpx.BadRequest("请输入密码")
+		return httpx.BadRequest("password is required")
 	}
 	if len(password) > 128 {
-		return httpx.Unauthorized("邮箱或密码不正确")
+		return httpx.Unauthorized("incorrect email or password")
 	}
 	if err := s.limiter.Enforce("login:"+ip+":"+email, 10, quarter); err != nil {
 		return err
@@ -218,13 +218,13 @@ func (s *Server) handlePasswordLogin(w http.ResponseWriter, r *http.Request) err
 	}
 	if user == nil {
 		auth.BurnPasswordCheck(password)
-		return httpx.Unauthorized("邮箱或密码不正确")
+		return httpx.Unauthorized("incorrect email or password")
 	}
 	if user.PasswordHash == nil {
-		return httpx.Unauthorized("这个账号还没有设置密码，请用邮箱验证码登录")
+		return httpx.Unauthorized("this account has no password; sign in with an email code")
 	}
 	if !auth.VerifyPassword(password, *user.PasswordHash) {
-		return httpx.Unauthorized("邮箱或密码不正确")
+		return httpx.Unauthorized("incorrect email or password")
 	}
 
 	if err := s.auth.TouchLastLogin(r.Context(), user.ID); err != nil {
@@ -284,16 +284,16 @@ func (s *Server) handleSetPassword(w http.ResponseWriter, r *http.Request) error
 		return err
 	}
 	if row == nil {
-		return httpx.Unauthorized("请先登录")
+		return httpx.Unauthorized("not signed in")
 	}
 
 	if row.PasswordHash != nil {
 		if body.CurrentPassword == "" {
-			return httpx.BadRequest("请输入当前密码")
+			return httpx.BadRequest("current password is required")
 		}
 		if len(body.CurrentPassword) > 128 ||
 			!auth.VerifyPassword(body.CurrentPassword, *row.PasswordHash) {
-			return httpx.Unauthorized("当前密码不正确")
+			return httpx.Unauthorized("current password is incorrect")
 		}
 	}
 
@@ -326,10 +326,10 @@ func (s *Server) handleRemovePassword(w http.ResponseWriter, r *http.Request) er
 		return err
 	}
 	if row == nil {
-		return httpx.Unauthorized("请先登录")
+		return httpx.Unauthorized("not signed in")
 	}
 	if row.PasswordHash == nil {
-		return httpx.BadRequest("这个账号还没有设置密码")
+		return httpx.BadRequest("this account has no password set")
 	}
 
 	body, err := httpx.ReadJSON[passwordBody](r)
@@ -337,11 +337,11 @@ func (s *Server) handleRemovePassword(w http.ResponseWriter, r *http.Request) er
 		return err
 	}
 	if body.CurrentPassword == "" {
-		return httpx.BadRequest("请输入当前密码")
+		return httpx.BadRequest("current password is required")
 	}
 	if len(body.CurrentPassword) > 128 ||
 		!auth.VerifyPassword(body.CurrentPassword, *row.PasswordHash) {
-		return httpx.Unauthorized("当前密码不正确")
+		return httpx.Unauthorized("current password is incorrect")
 	}
 
 	updated, err := s.auth.SetUserPassword(r.Context(), row.ID, nil)
@@ -361,7 +361,7 @@ func (s *Server) handleCurrentEmailCode(w http.ResponseWriter, r *http.Request) 
 		return err
 	}
 	if s.cfg.IsProduction() && !s.mail.Configured() {
-		return httpx.ServiceUnavailable("邮件服务未配置，暂时无法发送验证码")
+		return httpx.ServiceUnavailable("email service is not configured; cannot send verification codes")
 	}
 
 	ip := httpx.ClientIP(r)
@@ -404,7 +404,7 @@ func (s *Server) handleNewEmailCode(w http.ResponseWriter, r *http.Request) erro
 		return err
 	}
 	if s.cfg.IsProduction() && !s.mail.Configured() {
-		return httpx.ServiceUnavailable("邮件服务未配置，暂时无法发送验证码")
+		return httpx.ServiceUnavailable("email service is not configured; cannot send verification codes")
 	}
 
 	ip := httpx.ClientIP(r)
@@ -424,14 +424,14 @@ func (s *Server) handleNewEmailCode(w http.ResponseWriter, r *http.Request) erro
 		return err
 	}
 	if email == current.Email {
-		return httpx.BadRequest("新邮箱和当前邮箱相同")
+		return httpx.BadRequest("the new email is the same as the current one")
 	}
 	existing, err := s.auth.FindUserByEmail(r.Context(), email)
 	if err != nil {
 		return err
 	}
 	if existing != nil {
-		return httpx.Conflict("这个邮箱已被其他账户使用")
+		return httpx.Conflict("this email is already used by another account")
 	}
 
 	if err := s.limiter.Enforce("email-change-code:email:"+email, 5, hour); err != nil {
@@ -481,30 +481,30 @@ func (s *Server) handleChangeEmail(w http.ResponseWriter, r *http.Request) error
 	oldCode := strings.TrimSpace(body.OldCode)
 	code := strings.TrimSpace(body.Code)
 	if !isSixDigits(oldCode) {
-		return httpx.BadRequest("请输入当前邮箱验证码")
+		return httpx.BadRequest("current email verification code is required")
 	}
 	if !isSixDigits(code) {
-		return httpx.BadRequest("请输入新邮箱验证码")
+		return httpx.BadRequest("new email verification code is required")
 	}
 	if email == current.Email {
-		return httpx.BadRequest("新邮箱和当前邮箱相同")
+		return httpx.BadRequest("the new email is the same as the current one")
 	}
 	existing, err := s.auth.FindUserByEmail(r.Context(), email)
 	if err != nil {
 		return err
 	}
 	if existing != nil {
-		return httpx.Conflict("这个邮箱已被其他账户使用")
+		return httpx.Conflict("this email is already used by another account")
 	}
 
 	// 先都验证通过，再一起消费：不会因为其中一个填错而把另一个作废
 	oldID, err := s.codes.VerifyLatest(r.Context(), current.Email, []string{"change_email_old"}, oldCode)
 	if err != nil {
-		return labelCodeError(err, "当前邮箱")
+		return labelCodeError(err, "current email")
 	}
 	newID, err := s.codes.VerifyLatest(r.Context(), email, []string{"change_email"}, code)
 	if err != nil {
-		return labelCodeError(err, "新邮箱")
+		return labelCodeError(err, "new email")
 	}
 	if err := s.codes.ConsumeByID(r.Context(), oldID); err != nil {
 		return err
@@ -516,7 +516,7 @@ func (s *Server) handleChangeEmail(w http.ResponseWriter, r *http.Request) error
 	updated, err := s.auth.UpdateUserEmail(r.Context(), current.ID, email)
 	if err != nil {
 		if auth.IsUniqueViolation(err) {
-			return httpx.Conflict("这个邮箱已被其他账户使用")
+			return httpx.Conflict("this email is already used by another account")
 		}
 		return err
 	}
@@ -537,8 +537,8 @@ func isSixDigits(value string) bool {
 
 func labelCodeError(err error, label string) error {
 	var apiErr *httpx.Error
-	if errors.As(err, &apiErr) && apiErr.Message == "验证码不正确" {
-		return httpx.BadRequest(label + "验证码不正确")
+	if errors.As(err, &apiErr) && apiErr == emailcode.ErrIncorrect {
+		return httpx.BadRequest(label + ": incorrect verification code")
 	}
 	return err
 }

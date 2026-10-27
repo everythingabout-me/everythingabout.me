@@ -284,7 +284,7 @@ func EscapeLike(value string) string {
 // AssertNotRoot 检查路径不是根目录。
 func AssertNotRoot(path string) error {
 	if path == "" {
-		return httpx.BadRequest("不能操作根目录")
+		return httpx.BadRequest("the root directory cannot be modified")
 	}
 	return nil
 }

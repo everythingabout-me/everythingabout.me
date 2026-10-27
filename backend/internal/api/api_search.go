@@ -19,7 +19,7 @@ func scopePrefix(p *auth.Principal, requested string) (string, error) {
 			return p.Token.Prefix, nil
 		}
 		if !paths.IsInside(requested, p.Token.Prefix) {
-			return "", httpx.Forbidden("这个令牌只能访问 " + p.Token.Prefix)
+			return "", httpx.Forbidden("this token can only access " + p.Token.Prefix)
 		}
 	}
 	return requested, nil
@@ -34,7 +34,7 @@ func (s *Server) handleAPISearch(w http.ResponseWriter, r *http.Request) error {
 
 	query := strings.TrimSpace(r.URL.Query().Get("q"))
 	if query == "" {
-		return httpx.BadRequest("q 不能为空")
+		return httpx.BadRequest("q cannot be empty")
 	}
 	prefix, err := paths.Normalize(r.URL.Query().Get("path"))
 	if err != nil {

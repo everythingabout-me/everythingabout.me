@@ -66,7 +66,7 @@ GET  /files/<path>    → 302 到下载地址
 | 路径 | 逻辑路径，不带前导 `/`，按段 percent-encode（`/` 不编码） |
 | 时间 | ISO-8601 UTC，`2026-10-24T02:11:07Z` |
 | 分页 | `cursor` 是不透明字符串，`limit` 默认 1000、上限 5000 |
-| 错误 | `{"error":"not_found","message":"..."}` + 正确的 HTTP 状态码 |
+| 错误 | `{"error":"not_found","message":"..."}` + 正确的 HTTP 状态码；`message` 是英文短句，可直接展示或记日志 |
 | 字符 | UTF-8；服务端统一 NFC |
 | 大小 | 单次 `PUT` ≤ 32 MiB；更大的走 `/upload` |
 | 异步 | 任何改状态的请求都可以带 `Prefer: respond-async[, wait=N]`，见 §4.12 |
@@ -505,7 +505,7 @@ if resp.status_code == 202:
 - 限流：每个令牌（没有令牌按 IP）600 次/分钟，超限返回 `429` + `Retry-After`、`X-RateLimit-Limit`。
 - 审计：写操作记进 `audit_log`（action / path / status / ip / token / detail），写失败只打日志。
 - 分片上传：超过阈值自动切片，每片一个预签名 URL；`complete` 时把 `{partNumber, etag}` 交给 COS 合并。
-- 错误体：`{"error":"not_found","message":"..."}`，HTTP 状态码同步给。
+- 错误体：`{"error":"not_found","message":"..."}`，HTTP 状态码同步给；`message` 统一是英文（小写、无句号），`error` 是稳定的机器可读码。
 
 网页用的 `/api/fs/*` 照旧，不动。对外 API 在 `backend/internal/api/api_*.go`，
 认证在 `backend/internal/auth/token.go`，作业在 `backend/internal/jobs`。

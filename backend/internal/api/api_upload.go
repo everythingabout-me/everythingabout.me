@@ -101,7 +101,7 @@ func (s *Server) handleAPIUpload(w http.ResponseWriter, r *http.Request) error {
 		return err
 	}
 	if path == "" {
-		return httpx.BadRequest("路径不能为空")
+		return httpx.BadRequest("path cannot be empty")
 	}
 	if err := p.RequireWrite(path); err != nil {
 		return err
@@ -110,10 +110,10 @@ func (s *Server) handleAPIUpload(w http.ResponseWriter, r *http.Request) error {
 		return err
 	}
 	if body.Size <= 0 {
-		return httpx.BadRequest("文件大小不合法")
+		return httpx.BadRequest("invalid file size")
 	}
 	if body.Size > uploadMaxObject {
-		return httpx.NewError(http.StatusRequestEntityTooLarge, "单个对象上限 5 TiB")
+		return httpx.NewError(http.StatusRequestEntityTooLarge, "a single object is limited to 5 TiB")
 	}
 
 	mime := strings.TrimSpace(body.Mime)
@@ -126,10 +126,10 @@ func (s *Server) handleAPIUpload(w http.ResponseWriter, r *http.Request) error {
 		return err
 	}
 	if existing != nil && existing.IsDir {
-		return httpx.Conflict("同名目录已存在")
+		return httpx.Conflict("a directory with the same name already exists")
 	}
 	if existing != nil && !body.Overwrite {
-		return httpx.Conflict("文件已存在；要覆盖请在请求体里加 overwrite: true")
+		return httpx.Conflict("file already exists; set overwrite: true in the request body to overwrite")
 	}
 	if err := s.checkQuota(r.Context(), p.User.ID, body.Size, existing); err != nil {
 		return err
@@ -239,7 +239,7 @@ func (s *Server) handleAPIComplete(w http.ResponseWriter, r *http.Request) error
 		return err
 	}
 	if strings.TrimSpace(body.UploadID) == "" {
-		return httpx.BadRequest("uploadId 不能为空")
+		return httpx.BadRequest("uploadId cannot be empty")
 	}
 
 	session, err := s.loadUploadSession(r.Context(), body.UploadID)
@@ -248,16 +248,16 @@ func (s *Server) handleAPIComplete(w http.ResponseWriter, r *http.Request) error
 	}
 	// 别人的会话也返回 404，不泄露存在性。
 	if session == nil || session.UserID != p.User.ID {
-		return httpx.NotFound("上传会话不存在")
+		return httpx.NotFound("upload session not found")
 	}
 	if session.Completed {
-		return httpx.Conflict("这次上传已经完成过了")
+		return httpx.Conflict("this upload already finished")
 	}
 	if session.Cancelled {
-		return httpx.Conflict("这次上传已被同一路径的新上传取代")
+		return httpx.Conflict("this upload was superseded by a newer upload to the same path")
 	}
 	if time.Now().After(session.ExpiresAt) {
-		return httpx.NewError(http.StatusGone, "上传会话已过期，请重新发起")
+		return httpx.NewError(http.StatusGone, "upload session expired; start a new one")
 	}
 	if err := p.RequireWrite(session.Path); err != nil {
 		return err
@@ -282,7 +282,7 @@ func (s *Server) handleAPIComplete(w http.ResponseWriter, r *http.Request) error
 		}
 	}
 	if info == nil {
-		return httpx.BadRequest("对象不存在，上传可能还没完成")
+		return httpx.BadRequest("object not found; the upload may not be finished")
 	}
 	if info.Size != session.Size {
 		return httpx.BadRequest(fmt.Sprintf(
@@ -353,17 +353,17 @@ func completeParts(raw []struct {
 	ETag       string `json:"etag"`
 }) ([]storage.MultipartPart, error) {
 	if len(raw) == 0 {
-		return nil, httpx.BadRequest("分片上传需要 parts（每个分片的 partNumber 和 etag）")
+		return nil, httpx.BadRequest("multipart upload requires parts (partNumber and etag for each part)")
 	}
 	parts := make([]storage.MultipartPart, 0, len(raw))
 	seen := make(map[int]bool, len(raw))
 	for _, part := range raw {
 		etag := strings.Trim(strings.TrimSpace(part.ETag), `"`)
 		if part.PartNumber <= 0 || etag == "" {
-			return nil, httpx.BadRequest("parts 里有不合法的分片")
+			return nil, httpx.BadRequest("parts contains an invalid part")
 		}
 		if seen[part.PartNumber] {
-			return nil, httpx.BadRequest("parts 里有重复的分片号")
+			return nil, httpx.BadRequest("parts contains duplicate part numbers")
 		}
 		seen[part.PartNumber] = true
 		parts = append(parts, storage.MultipartPart{PartNumber: part.PartNumber, ETag: etag})
@@ -480,7 +480,7 @@ func (s *Server) handleAPIUploadStatus(w http.ResponseWriter, r *http.Request) e
 	}
 	// 别人的会话也返回 404，不泄露存在性。
 	if session == nil || session.UserID != p.User.ID {
-		return httpx.NotFound("上传会话不存在")
+		return httpx.NotFound("upload session not found")
 	}
 	if err := p.RequireWrite(session.Path); err != nil {
 		return err

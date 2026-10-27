@@ -129,7 +129,7 @@ func (s *Server) assertParentDirs(ctx context.Context, userID, path string) erro
 			return err
 		}
 		if node != nil && !node.IsDir {
-			return httpx.Conflict("父路径 " + dir + " 是一个文件")
+			return httpx.Conflict("parent path " + dir + " is a file")
 		}
 	}
 	return nil
@@ -155,7 +155,7 @@ func (s *Server) handleAPIMkdir(w http.ResponseWriter, r *http.Request) error {
 		return err
 	}
 	if path == "" {
-		return httpx.BadRequest("目录路径不能为空")
+		return httpx.BadRequest("directory path cannot be empty")
 	}
 	if err := p.RequireWrite(path); err != nil {
 		return err
@@ -170,7 +170,7 @@ func (s *Server) handleAPIMkdir(w http.ResponseWriter, r *http.Request) error {
 	}
 	if existing != nil {
 		if !existing.IsDir {
-			return httpx.Conflict("同名文件已存在")
+			return httpx.Conflict("a file with the same name already exists")
 		}
 		// 已经在了就是幂等的：agent 重试不该收到 409。
 		httpx.WriteJSON(w, http.StatusOK, toAPINode(existing))
@@ -196,7 +196,7 @@ func (s *Server) handleAPIMkdir(w http.ResponseWriter, r *http.Request) error {
 		}
 	}
 	if node == nil {
-		return httpx.Internal("目录创建失败")
+		return httpx.Internal("failed to create the directory")
 	}
 
 	s.recordAudit(r, p, "mkdir", path, http.StatusCreated, nil)
@@ -235,7 +235,7 @@ func (s *Server) handleAPICopy(w http.ResponseWriter, r *http.Request) error {
 		return err
 	}
 	if source == nil {
-		return httpx.NotFound("源文件不存在")
+		return httpx.NotFound("source file not found")
 	}
 
 	target, err := s.nodes.Live(r.Context(), to, p.User.ID)
@@ -245,7 +245,7 @@ func (s *Server) handleAPICopy(w http.ResponseWriter, r *http.Request) error {
 
 	if source.IsDir {
 		if target != nil {
-			return httpx.Conflict("目标路径已存在")
+			return httpx.Conflict("target path already exists")
 		}
 		job, err := s.runJob(r, jobs.OpCopy, p.User.ID, from, to, pref)
 		if err != nil {
@@ -258,10 +258,10 @@ func (s *Server) handleAPICopy(w http.ResponseWriter, r *http.Request) error {
 
 	if target != nil {
 		if target.IsDir {
-			return httpx.Conflict("目标是一个目录")
+			return httpx.Conflict("target is a directory")
 		}
 		if !body.Overwrite {
-			return httpx.Conflict("目标路径已存在")
+			return httpx.Conflict("target path already exists")
 		}
 		// 覆盖 = 把目标彻底删掉，没有回收站可言。
 		if _, err := s.nodes.Purge(r.Context(), to, p.User.ID); err != nil {
@@ -328,7 +328,7 @@ func sourceAndTarget(rawFrom, rawTo string, p *auth.Principal) (string, string, 
 		return "", "", err
 	}
 	if from == to {
-		return "", "", httpx.BadRequest("路径没有变化")
+		return "", "", httpx.BadRequest("path did not change")
 	}
 	if err := p.RequireWrite(from); err != nil {
 		return "", "", err
@@ -340,7 +340,7 @@ func sourceAndTarget(rawFrom, rawTo string, p *auth.Principal) (string, string, 
 		return "", "", err
 	}
 	if paths.IsInside(to, from) {
-		return "", "", httpx.BadRequest("目标不能在自己的子路径里")
+		return "", "", httpx.BadRequest("target cannot be inside the source")
 	}
 	return from, to, nil
 }

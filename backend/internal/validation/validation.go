@@ -17,26 +17,26 @@ var (
 func NormalizeEmail(value string) (string, error) {
 	email := strings.ToLower(strings.TrimSpace(value))
 	if email == "" {
-		return "", httpx.BadRequest("请输入邮箱")
+		return "", httpx.BadRequest("email is required")
 	}
 	if len(email) > 254 {
-		return "", httpx.BadRequest("邮箱过长")
+		return "", httpx.BadRequest("email is too long")
 	}
 	if !emailRe.MatchString(email) {
-		return "", httpx.BadRequest("邮箱格式不正确")
+		return "", httpx.BadRequest("invalid email address")
 	}
 	return email, nil
 }
 
 func Password(value string) (string, error) {
 	if value == "" {
-		return "", httpx.BadRequest("请输入密码")
+		return "", httpx.BadRequest("password is required")
 	}
 	if len(value) < 8 {
-		return "", httpx.BadRequest("密码至少 8 位")
+		return "", httpx.BadRequest("password must be at least 8 characters")
 	}
 	if len(value) > 128 {
-		return "", httpx.BadRequest("密码最长 128 位")
+		return "", httpx.BadRequest("password must be at most 128 characters")
 	}
 	return value, nil
 }
@@ -45,7 +45,7 @@ func Password(value string) (string, error) {
 func VerificationCode(value string) (string, error) {
 	code := strings.TrimSpace(value)
 	if !codeRe.MatchString(code) {
-		return "", httpx.BadRequest("请输入 6 位验证码")
+		return "", httpx.BadRequest("a 6-digit verification code is required")
 	}
 	return code, nil
 }

@@ -82,7 +82,7 @@ export function StreamPage() {
         navigate("/login", { replace: true });
         return;
       }
-      setError(cause instanceof Error ? cause.message : "加载失败");
+      setError(cause instanceof Error ? cause.message : "failed to load");
     } finally {
       setLoading(false);
     }
@@ -104,7 +104,7 @@ export function StreamPage() {
         navigate("/login", { replace: true });
         return;
       }
-      setError(cause instanceof Error ? cause.message : "加载失败");
+      setError(cause instanceof Error ? cause.message : "failed to load");
     } finally {
       loadingMoreRef.current = false;
       setLoadingMore(false);

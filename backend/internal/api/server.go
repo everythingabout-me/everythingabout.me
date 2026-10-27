@@ -179,7 +179,7 @@ func (s *Server) limitAPI(w http.ResponseWriter, r *http.Request) error {
 	w.Header().Set("X-RateLimit-Limit", fmt.Sprint(apiRatePerMinute))
 	if !allowed {
 		w.Header().Set("Retry-After", fmt.Sprint(retryAfter))
-		return httpx.TooManyRequests(fmt.Sprintf("请求太频繁，请 %d 秒后再试", retryAfter))
+		return httpx.TooManyRequests(fmt.Sprintf("too many requests; retry in %d seconds", retryAfter))
 	}
 	return nil
 }
@@ -264,7 +264,7 @@ func (s *Server) recoverer(next http.Handler) http.Handler {
 		defer func() {
 			if recovered := recover(); recovered != nil {
 				slog.Error("panic", "path", r.URL.Path, "panic", recovered)
-				httpx.WriteError(w, httpx.Internal("服务器内部错误"))
+				httpx.WriteError(w, httpx.Internal("internal server error"))
 			}
 		}()
 		next.ServeHTTP(w, r)

@@ -38,7 +38,7 @@ type sendEmailResponse struct {
 func (s *Sender) SendVerificationCode(ctx context.Context, to, code string) (string, error) {
 	if !s.Configured() {
 		if s.cfg.IsProduction() {
-			return "", httpx.ServiceUnavailable("邮件服务未配置，暂时无法发送验证码")
+			return "", httpx.ServiceUnavailable("email service is not configured; cannot send verification codes")
 		}
 		log.Printf("[email:dev] verification code %s -> %s", code, to)
 		return code, nil
@@ -67,7 +67,7 @@ func (s *Sender) SendVerificationCode(ctx context.Context, to, code string) (str
 	var out sendEmailResponse
 	if err := tencent.Call(ctx, s.cred, "ses", "2020-10-02", s.cfg.SES.Region, "SendEmail", payload, &out); err != nil {
 		log.Printf("[email] SES SendEmail failed: %v", err)
-		return "", httpx.BadGateway("验证码邮件发送失败：" + err.Error())
+		return "", httpx.BadGateway("failed to send the verification email: " + err.Error())
 	}
 	return "", nil
 }

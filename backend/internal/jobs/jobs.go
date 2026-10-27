@@ -89,7 +89,7 @@ func (s *Service) recoverStale() {
 	defer cancel()
 	if _, err := s.db.Pool().Exec(ctx,
 		`update fs_jobs
-		    set status = 'failed', error = '服务重启，任务中断', finished_at = now()
+		    set status = 'failed', error = 'server restarted; job interrupted', finished_at = now()
 		  where status in ('pending', 'running')`); err != nil {
 		slog.Warn("jobs: failed to mark interrupted jobs", "error", err)
 	}

@@ -21,6 +21,10 @@ const (
 	maxAttempts = 5
 )
 
+// ErrIncorrect 表示验证码不匹配。调用方靠它换一句带上下文的话，
+// 而不是去比字符串。
+var ErrIncorrect = httpx.BadRequest("incorrect verification code")
+
 type Service struct {
 	db *store.DB
 }
@@ -99,7 +103,7 @@ func (s *Service) VerifyLatest(ctx context.Context, email string, purposes []str
 		  limit 1`, email, purposes,
 	).Scan(&id, &codeHash, &attempts, &expiresAt)
 	if err == pgx.ErrNoRows {
-		return "", httpx.BadRequest("验证码已失效，请重新发送")
+		return "", httpx.BadRequest("verification code is no longer valid; request a new one")
 	}
 	if err != nil {
 		return "", err
@@ -107,16 +111,16 @@ func (s *Service) VerifyLatest(ctx context.Context, email string, purposes []str
 
 	if !expiresAt.After(time.Now()) {
 		_, _ = s.db.Pool().Exec(ctx, `update email_codes set consumed_at = now() where id = $1::uuid`, id)
-		return "", httpx.BadRequest("验证码已过期，请重新发送")
+		return "", httpx.BadRequest("verification code expired; request a new one")
 	}
 	if attempts >= maxAttempts {
 		_, _ = s.db.Pool().Exec(ctx, `update email_codes set consumed_at = now() where id = $1::uuid`, id)
-		return "", httpx.TooManyRequests("验证码尝试次数过多，请重新发送")
+		return "", httpx.TooManyRequests("too many verification attempts; request a new code")
 	}
 	if !auth.VerifyPassword(code, codeHash) {
 		_, _ = s.db.Pool().Exec(ctx,
 			`update email_codes set attempts = attempts + 1 where id = $1::uuid`, id)
-		return "", httpx.BadRequest("验证码不正确")
+		return "", ErrIncorrect
 	}
 	return id, nil
 }
@@ -130,7 +134,7 @@ func (s *Service) ConsumeByID(ctx context.Context, id string) error {
 		return err
 	}
 	if tag.RowsAffected() == 0 {
-		return httpx.BadRequest("验证码已失效，请重新发送")
+		return httpx.BadRequest("verification code is no longer valid; request a new one")
 	}
 	return nil
 }

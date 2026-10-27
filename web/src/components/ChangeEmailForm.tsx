@@ -51,7 +51,7 @@ export function ChangeEmailForm({
       setOldNotice(codeNotice(result.devCode, "current"));
       setOldCooldown(60);
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "验证码发送失败");
+      setError(caught instanceof Error ? caught.message : "failed to send the code");
     } finally {
       setOldSending(false);
     }
@@ -72,7 +72,7 @@ export function ChangeEmailForm({
       setNewNotice(codeNotice(result.devCode, "new"));
       setNewCooldown(60);
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "验证码发送失败");
+      setError(caught instanceof Error ? caught.message : "failed to send the code");
     } finally {
       setNewSending(false);
     }
@@ -105,7 +105,7 @@ export function ChangeEmailForm({
       setNewCooldown(0);
       setSuccess("邮箱已更新，下次登录请使用新邮箱。");
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "修改失败");
+      setError(caught instanceof Error ? caught.message : "update failed");
     } finally {
       setBusy(false);
     }

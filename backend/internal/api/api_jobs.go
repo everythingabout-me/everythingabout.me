@@ -20,7 +20,7 @@ func (s *Server) findJob(r *http.Request, op jobs.Op) (*auth.Principal, *jobs.Jo
 		return nil, nil, err
 	}
 	if job == nil || job.Op != op {
-		return nil, nil, httpx.NotFound("没有这个操作记录")
+		return nil, nil, httpx.NotFound("no such operation")
 	}
 	if err := p.RequireRead(job.From); err != nil {
 		return nil, nil, err
@@ -55,7 +55,7 @@ func (s *Server) jobCancel(op jobs.Op) handlerFunc {
 			return err
 		}
 		if updated == nil {
-			return httpx.NotFound("没有这个操作记录")
+			return httpx.NotFound("no such operation")
 		}
 		s.recordAudit(r, p, "cancel", job.From, http.StatusOK, map[string]any{
 			"job": job.ID, "op": string(op),
@@ -74,16 +74,16 @@ func (s *Server) jobRetry(op jobs.Op) handlerFunc {
 		}
 		switch job.Status {
 		case "pending", "running":
-			return httpx.Conflict("这个操作还在跑，不用重试")
+			return httpx.Conflict("this operation is still running; no retry needed")
 		case "done":
-			return httpx.Conflict("这个操作已经完成了")
+			return httpx.Conflict("this operation already finished")
 		}
 		updated, err := s.jobs.Retry(r.Context(), p.User.ID, job.ID)
 		if err != nil {
 			return err
 		}
 		if updated == nil {
-			return httpx.NotFound("没有这个操作记录")
+			return httpx.NotFound("no such operation")
 		}
 		w.Header().Set("Location", "/"+string(op)+"/"+updated.ID)
 		s.recordAudit(r, p, "retry", job.From, http.StatusAccepted, map[string]any{

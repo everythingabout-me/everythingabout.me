@@ -94,7 +94,7 @@ func (s *Service) RequireUser(ctx context.Context, r *http.Request) (*User, erro
 		return nil, err
 	}
 	if user == nil {
-		return nil, httpx.Unauthorized("请先登录")
+		return nil, httpx.Unauthorized("not signed in")
 	}
 	return user, nil
 }

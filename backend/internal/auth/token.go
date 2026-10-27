@@ -54,10 +54,10 @@ func (p *Principal) RequireRead(path string) error {
 		return nil
 	}
 	if !p.Token.CanRead {
-		return httpx.Forbidden("这个令牌没有读权限")
+		return httpx.Forbidden("this token has no read permission")
 	}
 	if !paths.IsInside(path, p.Token.Prefix) {
-		return httpx.Forbidden("这个令牌只能访问 " + p.Token.Prefix)
+		return httpx.Forbidden("this token can only access " + p.Token.Prefix)
 	}
 	return nil
 }
@@ -79,10 +79,10 @@ func (p *Principal) RequireWrite(path string) error {
 		return nil
 	}
 	if !p.Token.CanWrite {
-		return httpx.Forbidden("这个令牌是只读的")
+		return httpx.Forbidden("this token is read-only")
 	}
 	if !paths.IsInside(path, p.Token.Prefix) {
-		return httpx.Forbidden("这个令牌只能写 " + p.Token.Prefix)
+		return httpx.Forbidden("this token can only write " + p.Token.Prefix)
 	}
 	return nil
 }
@@ -128,13 +128,13 @@ type NewTokenInput struct {
 func (s *Service) CreateToken(ctx context.Context, input NewTokenInput) (string, *Token, error) {
 	name := strings.TrimSpace(input.Name)
 	if name == "" {
-		return "", nil, httpx.BadRequest("令牌名字不能为空")
+		return "", nil, httpx.BadRequest("token name cannot be empty")
 	}
 	if len(name) > 80 {
-		return "", nil, httpx.BadRequest("令牌名字过长")
+		return "", nil, httpx.BadRequest("token name is too long")
 	}
 	if !input.CanRead && !input.CanWrite {
-		return "", nil, httpx.BadRequest("至少要给一个读或写权限")
+		return "", nil, httpx.BadRequest("at least one read or write permission is required")
 	}
 
 	prefix, err := paths.Normalize(input.Prefix)
@@ -228,7 +228,7 @@ func (s *Service) RevokeToken(ctx context.Context, userID, tokenID string) error
 		return err
 	}
 	if tag.RowsAffected() == 0 {
-		return httpx.NotFound("没有找到这个令牌")
+		return httpx.NotFound("token not found")
 	}
 	return nil
 }
@@ -286,21 +286,21 @@ func (s *Service) Authenticate(ctx context.Context, r *http.Request) (*Principal
 	if header := strings.TrimSpace(r.Header.Get("Authorization")); header != "" {
 		plain, ok := strings.CutPrefix(header, "Bearer ")
 		if !ok {
-			return nil, httpx.Unauthorized("Authorization 头只支持 Bearer")
+			return nil, httpx.Unauthorized("the Authorization header only supports Bearer")
 		}
 		token, err := s.VerifyToken(ctx, strings.TrimSpace(plain))
 		if err != nil {
 			return nil, err
 		}
 		if token == nil {
-			return nil, httpx.Unauthorized("令牌无效、已过期或已撤销")
+			return nil, httpx.Unauthorized("token is invalid, expired, or revoked")
 		}
 		row, err := s.FindUserByID(ctx, token.userID)
 		if err != nil {
 			return nil, err
 		}
 		if row == nil {
-			return nil, httpx.Unauthorized("令牌对应的账号不存在")
+			return nil, httpx.Unauthorized("the account behind this token does not exist")
 		}
 		return &Principal{User: ToUser(row), Token: token}, nil
 	}
@@ -310,7 +310,7 @@ func (s *Service) Authenticate(ctx context.Context, r *http.Request) (*Principal
 		return nil, err
 	}
 	if user == nil {
-		return nil, httpx.Unauthorized("请先登录")
+		return nil, httpx.Unauthorized("not signed in")
 	}
 	return &Principal{User: user}, nil
 }
