@@ -23,47 +23,65 @@ const MAX_PARALLEL_UPLOADS = 1;
  *
  * 浏览器对同一个 host 最多 6 条连接；1 个文件 × 4 片占 4 条，剩下的留给
  * 列表、sign、confirm 这些请求。再多只会让分片排在队列里，进度一顿一顿的。
- * 分片是 Blob 视图不复制字节，4 × 64MB 同时在飞也不占额外内存。
+ * 分片是 Blob 视图不复制字节，4 × 128MB 同时在飞也不占额外内存。
  */
 const CHUNK_PARALLEL_LIMIT = 4;
 
 const MB = 1024 * 1024;
 /**
- * 切片大小的下限，同时也是「切不切」的门槛：小于等于它的文件直接单次
- * putObject。
+ * 单片下限。比这更小的片基本活在 TCP 慢启动里，还要单独付一次请求往返和
+ * 签名，净亏；所以文件切不出 ≥16MB 的片时不切。
  *
- * 16MB 以下不切：分片上传要先付三次往返——ListMultipartUploads 探续传、
- * InitiateMultipartUpload、最后 CompleteMultipartUpload，RTT 35ms 时约 100ms；
- * 而 16MB 单流在国内链路上 0.3–1s 就传完了，多开连接省下的慢启动还不够贴
- * 这笔开销。
+ * 另外分片上传本身要先付三次往返——ListMultipartUploads 探续传、
+ * InitiateMultipartUpload、最后 CompleteMultipartUpload，RTT 35ms 时约 100ms。
+ * 32MB 单流在国内链路上 0.3–1s 就传完了，拆成两片 8–16MB 反而更慢。
  */
 const MIN_SLICE_SIZE = 16 * MB;
 /**
- * 切片大小的上限。大文件一律 64MB 一片，不再切碎。
- *
- * 每片都是一次请求（再加上传前的签名和 XML 头），切太碎 request overhead
- * 会顶上来：48GB 按 16MB 切要 3072 次，按 64MB 只有 768 次。而 4 路并发下
- * 64MB 一片在 20–50MB/s 的链路上要传 1–3 秒，本身够跑出 TCP 窗口；再大也
- * 不合适——一片失败（SDK 会重试 2 次）就得重传整片。
+ * 单片上限。一片失败（SDK 会重试 2 次）要重传整片，128MB 已是能接受的粒度；
+ * 4 × 128MB 就是 512MB 同时在飞（Blob 视图，不复制字节，不占额外内存）。
  */
-const MAX_SLICE_SIZE = 64 * MB;
+const MAX_SLICE_SIZE = 128 * MB;
 
 /**
- * 按文件大小挑切片：尽量均分成 4 片，单片夹在 16–64MB 之间。
+ * 片数：先保证每片 ≥16MB，最多一轮 4 片；512MB 以上一轮装不下就加轮数，
+ * 每轮仍是 4 片。
  *
- *   ≤16MB     单次 putObject，不切
- *   16–64MB   16MB 一片（2–4 片，正好塞满一轮并发）
- *   64–256MB  均分 4 片，每片 16–64MB
- *   >256MB    64MB 一片，4 片并发滚动补位
+ *   片数 = min(4, ⌊size / 16MB⌋)          size ≤ 512MB
+ *   片数 = 4 × ⌈size / 512MB⌉             size > 512MB
  *
- * 均分成 4 片是为了不留下很小的尾巴：65MB 直接按 64MB 切会切出 64MB + 1MB，
- * 1MB 那一片白占一条连接，而大块只跑单流。上限 64MB 则是不让大文件的请求数
- * 失控。SDK 的判定是 size > SliceSize 才切片，所以返回 MIN_SLICE_SIZE 时
- * ≤16MB 的文件自然走单次 PUT。
+ * 为什么片数取 4 的整数倍：固定 128MB 切片时 600MB 会切成 128×4 + 88，最后
+ * 那 88MB 只有一条连接在跑，等于最后一段时间只用 1/4 带宽。按 4 的倍数均分
+ * （600MB → 8 × 75MB）每条连接的工作量和 128×4 + 22×4 完全一样，但每轮都
+ * 是满的，也没有 22MB 这种刚起步就结束的碎尾。
+ */
+function partCountFor(size: number): number {
+  const perRound = MAX_SLICE_SIZE * CHUNK_PARALLEL_LIMIT;
+  if (size <= perRound) {
+    return Math.min(CHUNK_PARALLEL_LIMIT, Math.floor(size / MIN_SLICE_SIZE));
+  }
+  return CHUNK_PARALLEL_LIMIT * Math.ceil(size / perRound);
+}
+
+/**
+ * 按文件大小挑切片大小。
+ *
+ *   ≤32MB      不切，单次 putObject（两片只有 8–16MB，低于下限）
+ *   32–48MB    2 片
+ *   48–64MB    3 片
+ *   64MB–512MB 4 片（单片 16–128MB）
+ *   512MB–1GB  8 片（两轮 × 4）
+ *   1GB 以上   每多 512MB 加一轮
+ *
+ * 48GB 是 384 片、96 轮，离 COS 的 10000 片上限还很远。想更细就调小
+ * MAX_SLICE_SIZE；想让 32MB 以下也并发，就把 MIN_SLICE_SIZE 降到 8MB。
+ * SDK 的判定是 size > SliceSize 才切片，所以返回等于 size 时自然走单次 PUT。
  */
 function sliceSizeFor(size: number): number {
-  const even = Math.ceil(size / CHUNK_PARALLEL_LIMIT / MB) * MB;
-  return Math.min(MAX_SLICE_SIZE, Math.max(MIN_SLICE_SIZE, even));
+  const parts = partCountFor(size);
+  if (parts <= 1) return Math.max(size, MIN_SLICE_SIZE);
+  // 按字节向上取整，保证 ⌈size / 单片⌉ 不超过算好的片数。
+  return Math.ceil(size / parts);
 }
 
 /**
