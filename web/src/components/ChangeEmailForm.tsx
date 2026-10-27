@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { api } from "../api/client";
+import { t } from "../i18n";
 import styles from "../styles/auth.module.css";
 
 export function ChangeEmailForm({
@@ -35,10 +36,14 @@ export function ChangeEmailForm({
   }, [newCooldown]);
 
   function codeNotice(devCode: string | undefined, target: "current" | "new") {
-    const where = target === "current" ? "当前邮箱" : "新邮箱";
+    const where = t(
+      target === "current"
+        ? "account.changeEmail.currentWhere"
+        : "account.changeEmail.newWhere",
+    );
     return devCode
-      ? `开发模式：${where}验证码 ${devCode} 已自动填入`
-      : `验证码已发送到${where}（10 分钟内有效）`;
+      ? t("account.changeEmail.devCode", { where, code: devCode })
+      : t("account.changeEmail.sentCode", { where });
   }
 
   async function sendOldCode() {
@@ -51,7 +56,7 @@ export function ChangeEmailForm({
       setOldNotice(codeNotice(result.devCode, "current"));
       setOldCooldown(60);
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "failed to send the code");
+      setError(caught instanceof Error ? caught.message : t("error.sendCodeFailed"));
     } finally {
       setOldSending(false);
     }
@@ -61,7 +66,7 @@ export function ChangeEmailForm({
     setError(null);
     setSuccess(null);
     if (!newEmail.trim()) {
-      setError("请先填写新邮箱");
+      setError(t("account.changeEmail.newEmailRequired"));
       return;
     }
 
@@ -72,7 +77,7 @@ export function ChangeEmailForm({
       setNewNotice(codeNotice(result.devCode, "new"));
       setNewCooldown(60);
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "failed to send the code");
+      setError(caught instanceof Error ? caught.message : t("error.sendCodeFailed"));
     } finally {
       setNewSending(false);
     }
@@ -84,11 +89,11 @@ export function ChangeEmailForm({
     setSuccess(null);
 
     if (!/^\d{6}$/.test(oldCode.trim())) {
-      setError("请输入当前邮箱验证码");
+      setError(t("account.changeEmail.currentCodeRequired"));
       return;
     }
     if (!/^\d{6}$/.test(newCode.trim())) {
-      setError("请输入新邮箱验证码");
+      setError(t("account.changeEmail.newCodeRequired"));
       return;
     }
 
@@ -103,9 +108,9 @@ export function ChangeEmailForm({
       setNewNotice(null);
       setOldCooldown(0);
       setNewCooldown(0);
-      setSuccess("邮箱已更新，下次登录请使用新邮箱。");
+      setSuccess(t("account.changeEmail.success"));
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "update failed");
+      setError(caught instanceof Error ? caught.message : t("error.updateFailed"));
     } finally {
       setBusy(false);
     }
@@ -113,15 +118,13 @@ export function ChangeEmailForm({
 
   return (
     <section>
-      <h2 className={styles.sectionTitle}>修改邮箱</h2>
-      <p className={styles.sectionHint}>
-        需要同时验证当前邮箱和新邮箱，两个验证码都填对才会生效。
-      </p>
+      <h2 className={styles.sectionTitle}>{t("account.changeEmail.title")}</h2>
+      <p className={styles.sectionHint}>{t("account.changeEmail.hint")}</p>
 
       <form className={styles.form} onSubmit={submit}>
         <div className={styles.field}>
           <label className={styles.label} htmlFor="current-email-display">
-            当前邮箱
+            {t("account.changeEmail.currentEmail")}
           </label>
           <div className={styles.inputRow}>
             <input
@@ -137,14 +140,18 @@ export function ChangeEmailForm({
               onClick={() => void sendOldCode()}
               disabled={oldSending || oldCooldown > 0}
             >
-              {oldSending ? "发送中…" : oldCooldown > 0 ? `${oldCooldown}s` : "发送验证码"}
+              {oldSending
+                ? t("auth.sending")
+                : oldCooldown > 0
+                  ? `${oldCooldown}s`
+                  : t("auth.sendCode")}
             </button>
           </div>
         </div>
 
         <div className={styles.field}>
           <label className={styles.label} htmlFor="old-code">
-            当前邮箱验证码
+            {t("account.changeEmail.currentCode")}
           </label>
           <input
             id="old-code"
@@ -155,7 +162,7 @@ export function ChangeEmailForm({
             autoComplete="one-time-code"
             pattern="[0-9]{6}"
             maxLength={6}
-            placeholder="6 位数字"
+            placeholder={t("account.changeEmail.digits")}
             value={oldCode}
             onChange={(event) => {
               setOldCode(event.target.value.replace(/\D/g, "").slice(0, 6));
@@ -169,7 +176,7 @@ export function ChangeEmailForm({
 
         <div className={styles.field}>
           <label className={styles.label} htmlFor="new-email">
-            新邮箱
+            {t("account.changeEmail.newEmail")}
           </label>
           <div className={styles.inputRow}>
             <input
@@ -196,14 +203,18 @@ export function ChangeEmailForm({
               onClick={() => void sendNewCode()}
               disabled={newSending || newCooldown > 0 || !newEmail.trim()}
             >
-              {newSending ? "发送中…" : newCooldown > 0 ? `${newCooldown}s` : "发送验证码"}
+              {newSending
+                ? t("auth.sending")
+                : newCooldown > 0
+                  ? `${newCooldown}s`
+                  : t("auth.sendCode")}
             </button>
           </div>
         </div>
 
         <div className={styles.field}>
           <label className={styles.label} htmlFor="new-code">
-            新邮箱验证码
+            {t("account.changeEmail.newCode")}
           </label>
           <input
             id="new-code"
@@ -214,7 +225,7 @@ export function ChangeEmailForm({
             autoComplete="one-time-code"
             pattern="[0-9]{6}"
             maxLength={6}
-            placeholder="6 位数字"
+            placeholder={t("account.changeEmail.digits")}
             value={newCode}
             onChange={(event) => {
               setNewCode(event.target.value.replace(/\D/g, "").slice(0, 6));
@@ -234,7 +245,7 @@ export function ChangeEmailForm({
         {success && <p className={styles.success}>{success}</p>}
 
         <button className={styles.submit} type="submit" disabled={busy}>
-          {busy ? "保存中…" : "保存新邮箱"}
+          {busy ? t("account.changeEmail.saving") : t("account.changeEmail.save")}
         </button>
       </form>
     </section>

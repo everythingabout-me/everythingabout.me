@@ -13,6 +13,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"everythingabout.me/backend/internal/config"
+	"everythingabout.me/backend/internal/events"
 	"everythingabout.me/backend/internal/paths"
 	"everythingabout.me/backend/internal/storage"
 	"everythingabout.me/backend/internal/store"
@@ -24,6 +25,7 @@ type Service struct {
 	storage storage.Storage
 	engine  *Engine
 	cfg     config.Timeline
+	events  *events.Service
 	started atomic.Bool
 }
 

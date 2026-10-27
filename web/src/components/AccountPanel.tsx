@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { useNavigate } from "react-router";
 import { api, type AuthUser } from "../api/client";
+import { legacyFilesText, t } from "../i18n";
 import { ChangeEmailForm } from "./ChangeEmailForm";
 import { PasswordForm } from "./PasswordForm";
 import styles from "../styles/auth.module.css";
@@ -26,21 +27,21 @@ export function AccountPanel({ user, legacyCount }: { user: AuthUser; legacyCoun
     <section className={`${styles.card} ${styles.cardWide}`}>
       <div className={styles.cardHead}>
         <div>
-          <h1 className={styles.title}>账户</h1>
-          <p className={styles.subtitle}>邮箱就是你的唯一标识；默认用验证码登录，密码可选。</p>
+          <h1 className={styles.title}>{t("account.title")}</h1>
+          <p className={styles.subtitle}>{t("account.subtitle")}</p>
         </div>
         <button className={styles.ghostBtn} onClick={() => void logout()} disabled={busy}>
-          退出登录
+          {t("account.signOut")}
         </button>
       </div>
 
       <dl className={styles.metaList}>
         <div className={styles.metaRow}>
-          <dt className={styles.metaLabel}>登录邮箱</dt>
+          <dt className={styles.metaLabel}>{t("account.emailLabel")}</dt>
           <dd className={styles.metaValue}>{email}</dd>
         </div>
         <div className={styles.metaRow}>
-          <dt className={styles.metaLabel}>注册时间</dt>
+          <dt className={styles.metaLabel}>{t("account.joinedLabel")}</dt>
           <dd className={styles.metaValue}>{createdAt}</dd>
         </div>
       </dl>
@@ -55,11 +56,12 @@ export function AccountPanel({ user, legacyCount }: { user: AuthUser; legacyCoun
         <>
           <div className={styles.divider} />
           <p className={styles.footnote}>
-            检测到 {legacyCount} 个旧文件还没有归属。在服务器上运行：
+            {t("account.legacyHint", { files: legacyFilesText(legacyCount) })}
+            {t("account.legacyRun")}
             <code className={styles.command}>
               eam claim --email {email}
             </code>
-            即可把它们认领到这个账号。
+            {t("account.legacyClaim")}
           </p>
         </>
       )}

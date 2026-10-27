@@ -65,8 +65,9 @@ key 直接落在路径上（`drive/<用户ID>/Photos/2024/a.jpg`），意味着�
 
 ## 界面
 
+- **中英双语**：跟随系统/浏览器的首选语言自动选择（`zh` → 中文，其余 → 英文），没有语言设置入口；内容流的月份、卡片副标题和相对时间也会跟着变
 - 登录 / 注册（合并为一个页面）/ 账户三个页面，跟随系统深浅色
-- `/` 是按时间往下滚的内容流：照片/视频自动聚成卡片、健康数据变成数据带，不出现"事件""时间线"这类概念
+- `/` 是一条扁平的事件流：一张卡就是一个事件（照片 / 一句话 / 一组数字 / 应用自己的 HTML），没有年、月标题，也没有统计数字
 - `/drive` 是文件浏览器：面包屑、相对时间、类型图标、悬停操作
 - 拖拽上传 + COS 直传进度提示；`/` 聚焦搜索，`Esc` 关闭弹层
 - 搜索会同时匹配文件名和完整路径，结果右侧显示所在目录
@@ -269,7 +270,8 @@ eam token revoke --email you@example.com --id <令牌 ID>
 | POST | `/api/auth/email/current-code` | 发送改邮箱验证码到**当前邮箱**（需登录，用于身份确认） |
 | POST | `/api/auth/email/code` | 发送改邮箱验证码到**新邮箱**（需登录） |
 | POST | `/api/auth/email` | 修改邮箱（需当前邮箱 + 新邮箱两个验证码） |
-| GET | `/api/timeline?before=&months=` | 读内容流：按有内容的月份倒序分页，含预签名缩略图 |
+| GET | `/api/timeline?cursor=&limit=` | 读时间线：扁平事件流，按时间倒序 keyset 分页，含预签名缩略图 |
+| DELETE | `/api/events/{id}` | 删除一条事件（墓碑，防复活） |
 | GET | `/api/timeline/status` | 整理进度（未完成任务数、已整理文件数、最早/最新月份） |
 | POST | `/api/timeline/rebuild` | 强制重新整理当前账号（删掉分析结果后从头回填） |
 | GET | `/api/fs/list?path=` | 列当前层（查 Postgres，不查桶） |
@@ -295,7 +297,7 @@ eam token revoke --email you@example.com --id <令牌 ID>
 | `COS_BUCKET` / `COS_REGION` | 桶必须带 APPID |
 | `APP_ENV` | `development`（默认）或 `production`；决定 Secure cookie 和未配 SES 时的行为 |
 | `SESSION_TTL_DAYS` | 登录态有效期，默认 30 天 |
-| `TIMELINE_ENABLED` | 是否启用内容流后台整理，默认 `true`；设为 `false` 只保留读接口 |
+| `TIMELINE_ENABLED` | 是否启用事件的后台整理（把照片聚成事件），默认 `true`；设为 `false` 只保留读接口 |
 | `TIMELINE_WORKERS` | 后台整理并发数，默认 2 |
 | `TIMELINE_MONTH_BUDGET` | 一个月最多占多少展示单位（1 单位 ≈ 72px），默认 24 |
 | `TIMELINE_TZ` | 把事件时间归到哪一天，默认 `Asia/Shanghai` |
@@ -351,8 +353,11 @@ go run ./cmd/eam token revoke --email … --id …
 - **旧数据要手动认领**：`eam claim` 是 O(对象数) 的服务端复制；跑之前先 `--dry-run`。
 - **删除账号**只级联数据库记录；COS 里 `drive/<用户ID>/` 的对象需要按前缀自行清理。
 - **前端是纯 SPA**：首屏要等 JS 加载完（约 110KB gzip，COS SDK 按需再加载）；没有 SSR，但也不需要在服务端渲染用户数据。
-- **内容流目前是启发式版本**：只看索引里的路径/大小/类型/时间，没读 EXIF/GPS/画面内容；分析、分组、评分、命名都是接口（`internal/timeline` 里的 `Analyzer` / `Grouper` / `Scorer` / `Narrator`），接多模态或大模型时替换实现即可。健康 CSV 是内置的一个 `AmbientExtractor`。
+- **自动事件目前是启发式版本**：只看索引里的路径/大小/类型/时间，没读 EXIF/GPS/画面内容；分析、分组、评分、命名都是接口（`internal/timeline` 里的 `Analyzer` / `Grouper` / `Scorer` / `Narrator`），接多模态或大模型时替换实现即可。健康 CSV 是内置的一个 `AmbientExtractor`。
+- **事件的结构见 [`docs/design/events.md`](docs/design/events.md)**：一条事件 = 时间 + 一张卡（`photo` / `note` / `metric` / `html`）+ 可选详情链接；三方应用用带 `can_events` 的 token 通过 `POST /events` 投稿。
 - **旧库要补文件时间**：`nodes.source_modified_at` 是这次新加的，老数据需要跑一次 `reconcile` 才会填上；没填之前时间线会退回索引更新时间。
 - **"每日视频"靠启发式识别**：同一目录、跨 ≥7 天、≥7 个视频会被合成一张系列卡；判断不准时可以后续做手动覆盖，或换成模型。
-- **移动/复制目录不会立刻刷新内容流**：后台 sweeper 每 20 分钟扫一次最近变更；急着看可以用 `POST /api/timeline/rebuild`。
+- **移动/复制目录不会立刻刷新时间线**：后台 sweeper 每 20 分钟扫一次最近变更；急着看可以用 `POST /api/timeline/rebuild`。
+- **事件还没有站内编辑器**：现在只有自动（照片会话）和三方投稿两种来源；手写事件、健康变化卡、合并都还没做。
+- **升级到事件模型要跑一次迁移**：`sql/013_events.sql` 会建 `events` / `event_media`，并把已有月快照标记为过期；后台会在下一次 sweeper（或 `POST /api/timeline/rebuild`）把每个月的片段重算成事件。迁移之前时间线是空的。
 - **`cos-js-sdk-v5` 的 XML 解析依赖有审计告警**：官方 SDK 固定了 `fast-xml-parser@4.5.0`，`npm audit` 会报 critical。它只解析 COS 返回的 XML（走 TLS），目前没有无损升级路径；等官方 SDK 升级后再跟进。

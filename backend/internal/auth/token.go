@@ -31,6 +31,7 @@ type Token struct {
 	Prefix     string  `json:"prefix"`
 	CanRead    bool    `json:"read"`
 	CanWrite   bool    `json:"write"`
+	CanEvents  bool    `json:"events"`
 	CreatedAt  string  `json:"createdAt"`
 	LastUsedAt *string `json:"lastUsedAt"`
 	ExpiresAt  *string `json:"expiresAt"`
@@ -72,6 +73,18 @@ func (p *Principal) CanWrite(path string) bool {
 		return false
 	}
 	return paths.IsInside(path, p.Token.Prefix)
+}
+
+// RequireEvents 判断这个身份能不能读写事件。
+// 事件和文件是两个能力位：应用可能只投稿，不碰文件。
+func (p *Principal) RequireEvents() error {
+	if p.FullAccess() {
+		return nil
+	}
+	if !p.Token.CanEvents {
+		return httpx.Forbidden("this token cannot write events")
+	}
+	return nil
 }
 
 func (p *Principal) RequireWrite(path string) error {
@@ -116,12 +129,13 @@ func newTokenID() (string, error) {
 
 // NewTokenInput 是创建令牌的入参。
 type NewTokenInput struct {
-	UserID   string
-	Name     string
-	Prefix   string
-	CanRead  bool
-	CanWrite bool
-	Expiry   *time.Time
+	UserID    string
+	Name      string
+	Prefix    string
+	CanRead   bool
+	CanWrite  bool
+	CanEvents bool
+	Expiry    *time.Time
 }
 
 // CreateToken 生成令牌并落库，返回明文（只此一次）和展示用的形状。
@@ -133,8 +147,8 @@ func (s *Service) CreateToken(ctx context.Context, input NewTokenInput) (string,
 	if len(name) > 80 {
 		return "", nil, httpx.BadRequest("token name is too long")
 	}
-	if !input.CanRead && !input.CanWrite {
-		return "", nil, httpx.BadRequest("at least one read or write permission is required")
+	if !input.CanRead && !input.CanWrite && !input.CanEvents {
+		return "", nil, httpx.BadRequest("at least one of read, write or events is required")
 	}
 
 	prefix, err := paths.Normalize(input.Prefix)
@@ -162,14 +176,14 @@ func (s *Service) CreateToken(ctx context.Context, input NewTokenInput) (string,
 		expires  *string
 	)
 	err = s.db.Pool().QueryRow(ctx,
-		`insert into api_tokens (token_id, token_hash, user_id, name, prefix, can_read, can_write, expires_at)
-		 values ($1, $2, $3::uuid, $4, $5, $6, $7, $8)
-		 returning token_id, name, prefix, can_read, can_write,
+		`insert into api_tokens (token_id, token_hash, user_id, name, prefix, can_read, can_write, can_events, expires_at)
+		 values ($1, $2, $3::uuid, $4, $5, $6, $7, $8, $9)
+		 returning token_id, name, prefix, can_read, can_write, can_events,
 		           `+isoUTC("created_at")+`,
 		           case when last_used_at is null then null else `+isoUTC("last_used_at")+` end,
 		           case when expires_at is null then null else `+isoUTC("expires_at")+` end`,
-		id, hashSecret(secret), input.UserID, name, prefix, input.CanRead, input.CanWrite, expiresAt).
-		Scan(&token.ID, &token.Name, &token.Prefix, &token.CanRead, &token.CanWrite,
+		id, hashSecret(secret), input.UserID, name, prefix, input.CanRead, input.CanWrite, input.CanEvents, expiresAt).
+		Scan(&token.ID, &token.Name, &token.Prefix, &token.CanRead, &token.CanWrite, &token.CanEvents,
 			&token.CreatedAt, &lastUsed, &expires)
 	if err != nil {
 		return "", nil, err
@@ -184,7 +198,7 @@ func (s *Service) CreateToken(ctx context.Context, input NewTokenInput) (string,
 // ListTokens 返回某个用户的所有令牌（含已撤销的，便于审计）。
 func (s *Service) ListTokens(ctx context.Context, userID string) ([]Token, error) {
 	rows, err := s.db.Pool().Query(ctx,
-		`select token_id, name, prefix, can_read, can_write,
+		`select token_id, name, prefix, can_read, can_write, can_events,
 		        `+isoUTC("created_at")+`,
 		        case when last_used_at is null then null else `+isoUTC("last_used_at")+` end,
 		        case when expires_at is null then null else `+isoUTC("expires_at")+` end,
@@ -206,7 +220,7 @@ func (s *Service) ListTokens(ctx context.Context, userID string) ([]Token, error
 			revoked  bool
 		)
 		if err := rows.Scan(&token.ID, &token.Name, &token.Prefix,
-			&token.CanRead, &token.CanWrite, &token.CreatedAt,
+			&token.CanRead, &token.CanWrite, &token.CanEvents, &token.CreatedAt,
 			&lastUsed, &expires, &revoked); err != nil {
 			return nil, err
 		}
@@ -247,7 +261,7 @@ func (s *Service) VerifyToken(ctx context.Context, plain string) (*Token, error)
 		expires  *string
 	)
 	err := s.db.Pool().QueryRow(ctx,
-		`select user_id::text, token_id, name, prefix, can_read, can_write,
+		`select user_id::text, token_id, name, prefix, can_read, can_write, can_events,
 		        `+isoUTC("created_at")+`,
 		        case when last_used_at is null then null else `+isoUTC("last_used_at")+` end,
 		        case when expires_at is null then null else `+isoUTC("expires_at")+` end,
@@ -258,7 +272,7 @@ func (s *Service) VerifyToken(ctx context.Context, plain string) (*Token, error)
 		    and (expires_at is null or expires_at > now())
 		  limit 1`, id).
 		Scan(&token.userID, &token.ID, &token.Name, &token.Prefix,
-			&token.CanRead, &token.CanWrite, &token.CreatedAt,
+			&token.CanRead, &token.CanWrite, &token.CanEvents, &token.CreatedAt,
 			&lastUsed, &expires, &hash)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {

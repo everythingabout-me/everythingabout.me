@@ -12,6 +12,8 @@ import {
   UploadIcon,
 } from "../components/icons";
 import { BrandMark } from "../components/BrandMark";
+import { filesText, foldersText, resultsText, t } from "../i18n";
+import { formatRelativeTime } from "../i18n/format";
 import styles from "./DrivePage.module.css";
 
 function joinPath(dir: string, name: string): string {
@@ -31,20 +33,9 @@ function formatSize(bytes: number): string {
   return `${value.toFixed(value >= 100 || Number.isInteger(value) ? 0 : 1)} ${units[index]}`;
 }
 
-function formatTime(iso: string): string {
-  const then = new Date(iso).getTime();
-  const diff = Date.now() - then;
-  const minute = 60_000;
-  const hour = 60 * minute;
-  const day = 24 * hour;
-  if (diff < minute) return "刚刚";
-  if (diff < hour) return `${Math.floor(diff / minute)} 分钟前`;
-  if (diff < day) return `${Math.floor(diff / hour)} 小时前`;
-  if (diff < 7 * day) return `${Math.floor(diff / day)} 天前`;
-  const date = new Date(iso);
-  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(
-    date.getDate(),
-  ).padStart(2, "0")}`;
+/** 根面包屑由前端命名，后端返回的「全部文件」只作为 API 数据。 */
+function crumbName(crumb: Crumb): string {
+  return crumb.path === "" ? t("drive.root") : crumb.name;
 }
 
 export function DrivePage() {
@@ -54,7 +45,7 @@ export function DrivePage() {
   const path = searchParams.get("path") ?? "";
 
   const [items, setItems] = useState<Item[]>([]);
-  const [crumbTrail, setCrumbTrail] = useState<Crumb[]>([{ name: "全部文件", path: "" }]);
+  const [crumbTrail, setCrumbTrail] = useState<Crumb[]>([]);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [query, setQuery] = useState("");
@@ -92,7 +83,7 @@ export function DrivePage() {
           navigate("/login", { replace: true });
           return;
         }
-        showToast(error instanceof Error ? error.message : "failed to load", "error");
+        showToast(error instanceof Error ? error.message : t("error.loadFailed"), "error");
       } finally {
         setLoading(false);
       }
@@ -147,7 +138,7 @@ export function DrivePage() {
         navigate("/login", { replace: true });
         return;
       }
-      showToast(error instanceof Error ? error.message : "search failed", "error");
+      showToast(error instanceof Error ? error.message : t("error.searchFailed"), "error");
     } finally {
       setLoading(false);
     }
@@ -165,9 +156,9 @@ export function DrivePage() {
       const target = joinPath(path, name);
       // 默认不覆盖：同名文件要先确认。
       const exists = items.some((item) => !item.is_dir && item.name === name);
-      if (exists && !window.confirm(`「${name}」已经存在，覆盖它？`)) continue;
+      if (exists && !window.confirm(t("drive.overwriteConfirm", { name }))) continue;
       try {
-        showToast(`准备 ${file.name}`, "info", true);
+        showToast(t("drive.preparing", { name: file.name }), "info", true);
         const sign = await api.signUpload(target, file.size, exists);
 
         const cos = new COS({
@@ -206,14 +197,22 @@ export function DrivePage() {
         done += 1;
       } catch (error) {
         showToast(
-          `${file.name}: upload failed: ${error instanceof Error ? error.message : "unknown error"}`,
+          `${file.name}: ${t("drive.uploadFailed", {
+            error: error instanceof Error ? error.message : t("error.unknown"),
+          })}`,
           "error",
         );
       }
     }
     setBusy(false);
     if (fileInput.current) fileInput.current.value = "";
-    if (done) showToast(done === 1 ? "上传完成" : `已上传 ${done} 个文件`);
+    if (done) {
+      showToast(
+        done === 1
+          ? t("drive.uploadCompleted")
+          : t("drive.uploadCompletedMany", { files: filesText(done) }),
+      );
+    }
     await load(path);
   };
 
@@ -229,7 +228,7 @@ export function DrivePage() {
       setNewName("");
       await load(path);
     } catch (error) {
-      showToast(error instanceof Error ? error.message : "failed to create", "error");
+      showToast(error instanceof Error ? error.message : t("error.saveFailed"), "error");
     }
   };
 
@@ -238,6 +237,7 @@ export function DrivePage() {
   const folderCount = items.filter((item) => item.is_dir).length;
   const currentCrumb = crumbTrail[crumbTrail.length - 1];
   const parentCrumbs = crumbTrail.slice(0, -1);
+  const currentName = currentCrumb ? crumbName(currentCrumb) : t("drive.root");
 
   const onDrop = (event: React.DragEvent) => {
     event.preventDefault();
@@ -261,12 +261,12 @@ export function DrivePage() {
       }}
       onDrop={onDrop}
     >
-      <title>Everything About Me</title>
+      <title>{t("app.name")}</title>
       <header className={styles.topbar}>
         <div className={styles.topbarInner}>
-          <Link className={styles.brand} to="/" title="回到首页">
+          <Link className={styles.brand} to="/" title={t("nav.home")}>
             <BrandMark className={styles.brandMark} />
-            <span className={styles.brandText}>Everything About Me</span>
+            <span className={styles.brandText}>{t("app.name")}</span>
           </Link>
 
           <div className={styles.topSpacer} />
@@ -278,7 +278,7 @@ export function DrivePage() {
             <input
               ref={searchInput}
               className={styles.searchInput}
-              placeholder="搜索文件与路径"
+              placeholder={t("drive.searchPlaceholder")}
               value={query}
               onChange={(event) => {
                 setQuery(event.target.value);
@@ -298,8 +298,8 @@ export function DrivePage() {
           <Link
             className={styles.accountBtn}
             to="/account"
-            title="账户设置"
-            aria-label={`账户设置：${user.email}`}
+            title={t("nav.accountSettings")}
+            aria-label={t("nav.accountSettingsFor", { email: user.email })}
           >
             <span className={styles.avatar}>{user.email.slice(0, 1).toUpperCase()}</span>
             <span className={styles.accountEmail}>{user.email}</span>
@@ -311,7 +311,7 @@ export function DrivePage() {
             disabled={busy}
           >
             <UploadIcon size={14} />
-            {busy ? "上传中" : "上传"}
+            {busy ? t("drive.uploading") : t("drive.upload")}
           </button>
 
           <input
@@ -329,18 +329,21 @@ export function DrivePage() {
           <div className={styles.mastheadMain}>
             {activeQuery ? (
               <>
-                <h1 className={styles.pageTitle}>搜索结果</h1>
+                <h1 className={styles.pageTitle}>{t("drive.results")}</h1>
                 <p className={styles.stats}>
-                  “{activeQuery}” · {items.length} 个结果
+                  {t("drive.resultsFor", {
+                    query: activeQuery,
+                    results: resultsText(items.length),
+                  })}
                   <button className={styles.clearLink} onClick={() => void load(path)}>
-                    清除
+                    {t("drive.clear")}
                   </button>
                 </p>
               </>
             ) : (
               <>
                 {parentCrumbs.length > 0 && (
-                  <nav className={styles.breadcrumbs} aria-label="路径">
+                  <nav className={styles.breadcrumbs} aria-label={t("drive.pathLabel")}>
                     {parentCrumbs.map((crumb, index) => (
                       <span key={crumb.path || "root"} style={{ display: "contents" }}>
                         {index > 0 && (
@@ -349,15 +352,15 @@ export function DrivePage() {
                           </span>
                         )}
                         <button className={styles.crumbLink} onClick={() => goTo(crumb.path)}>
-                          {crumb.name}
+                          {crumbName(crumb)}
                         </button>
                       </span>
                     ))}
                   </nav>
                 )}
-                <h1 className={styles.pageTitle}>{currentCrumb?.name ?? "全部文件"}</h1>
+                <h1 className={styles.pageTitle}>{currentName}</h1>
                 <p className={styles.stats}>
-                  {folderCount} 个目录 · {fileCount} 个文件
+                  {foldersText(folderCount)} · {filesText(fileCount)}
                   {totalSize > 0 && <span> · {formatSize(totalSize)}</span>}
                 </p>
               </>
@@ -374,13 +377,13 @@ export function DrivePage() {
               disabled={Boolean(activeQuery)}
             >
               <PlusIcon size={14} />
-              新建目录
+              {t("drive.newFolder")}
             </button>
             <button
               className={styles.ghostBtn}
               onClick={() => void load(path)}
-              title="刷新"
-              aria-label="刷新"
+              title={t("common.refresh")}
+              aria-label={t("common.refresh")}
             >
               <RefreshIcon size={16} />
             </button>
@@ -393,7 +396,7 @@ export function DrivePage() {
               <input
                 className={styles.newInput}
                 autoFocus
-                placeholder="目录名称，回车确认"
+                placeholder={t("drive.newFolderPlaceholder")}
                 value={newName}
                 onChange={(event) => setNewName(event.target.value)}
                 onKeyDown={(event) => {
@@ -402,10 +405,10 @@ export function DrivePage() {
                 }}
               />
               <button className={styles.textBtn} onClick={() => void createFolder()}>
-                创建
+                {t("drive.create")}
               </button>
               <button className={styles.textBtn} onClick={() => setCreating(false)}>
-                取消
+                {t("common.cancel")}
               </button>
             </div>
           )}
@@ -455,7 +458,7 @@ export function DrivePage() {
                 <span className={styles.size}>
                   {item.is_dir ? "" : formatSize(Number(item.size))}
                 </span>
-                <span className={styles.time}>{formatTime(item.updated_at)}</span>
+                <span className={styles.time}>{formatRelativeTime(item.updated_at)}</span>
               </div>
             ))}
 
@@ -465,12 +468,10 @@ export function DrivePage() {
                 {activeQuery ? <SearchIcon size={20} /> : <FolderIcon size={20} />}
               </span>
               <span className={styles.emptyTitle}>
-                {activeQuery ? "没有找到匹配的文件" : "这里还空着"}
+                {activeQuery ? t("drive.emptySearchTitle") : t("drive.emptyFolderTitle")}
               </span>
               {activeQuery && (
-                <span className={styles.emptyText}>
-                  换个关键词试试，搜索会匹配文件名和完整路径。
-                </span>
+                <span className={styles.emptyText}>{t("drive.emptySearchHint")}</span>
               )}
             </div>
           )}
@@ -478,7 +479,7 @@ export function DrivePage() {
 
         {!loading && items.length > 0 && (fileCount > 0 || totalSize > 0) && (
           <footer className={styles.footer}>
-            {fileCount > 0 && <span>{fileCount} 个文件</span>}
+            {fileCount > 0 && <span>{filesText(fileCount)}</span>}
             {fileCount > 0 && totalSize > 0 && <span>·</span>}
             {totalSize > 0 && <span>{formatSize(totalSize)}</span>}
           </footer>
@@ -489,7 +490,7 @@ export function DrivePage() {
         <div className={styles.dropOverlay}>
           <div className={styles.dropInner}>
             <UploadIcon size={20} />
-            <span>松开即可上传到「{path ? crumbTrail[crumbTrail.length - 1]?.name : "全部文件"}」</span>
+            <span>{t("drive.dropToUpload", { target: currentName })}</span>
           </div>
         </div>
       )}
@@ -502,7 +503,7 @@ export function DrivePage() {
               className={styles.ghostBtn}
               style={{ width: 20, height: 20, color: "inherit" }}
               onClick={() => setToast(null)}
-              aria-label="关闭"
+              aria-label={t("common.close")}
             >
               <CloseIcon size={12} />
             </button>

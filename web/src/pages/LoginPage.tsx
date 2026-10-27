@@ -1,5 +1,6 @@
 import { Link, useSearchParams } from "react-router";
 import { AuthForm } from "../components/AuthForm";
+import { t } from "../i18n";
 import styles from "../styles/auth.module.css";
 
 export function LoginPage() {
@@ -8,10 +9,12 @@ export function LoginPage() {
 
   return (
     <div className={styles.authStack}>
-      <title>{passwordMode ? "密码登录" : "登录 / 注册"} · Everything About Me</title>
+      <title>{t(passwordMode ? "meta.loginPasswordTitle" : "meta.loginCodeTitle")}</title>
       <section className={styles.card}>
-        <div className={styles.eyebrow}>Sign in</div>
-        <h1 className={styles.title}>{passwordMode ? "密码登录" : "登录 / 注册"}</h1>
+        <div className={styles.eyebrow}>{t("auth.signInEyebrow")}</div>
+        <h1 className={styles.title}>
+          {t(passwordMode ? "auth.titlePassword" : "auth.titleCode")}
+        </h1>
         <AuthForm initialMode={passwordMode ? "password" : "code"} />
       </section>
 
@@ -19,7 +22,7 @@ export function LoginPage() {
         className={styles.pageSwitch}
         to={passwordMode ? "/login" : "/login?mode=password"}
       >
-        {passwordMode ? "改用邮箱验证码登录" : "用密码登录"}
+        {t(passwordMode ? "auth.switchToCode" : "auth.switchToPassword")}
       </Link>
     </div>
   );

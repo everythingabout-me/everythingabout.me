@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { api } from "../api/client";
+import { t } from "../i18n";
 import styles from "../styles/auth.module.css";
 
 export function PasswordForm({
@@ -22,7 +23,7 @@ export function PasswordForm({
     setNotice(null);
 
     if (newPassword !== confirm) {
-      setError("两次输入的密码不一致");
+      setError(t("account.password.mismatch"));
       return;
     }
 
@@ -36,9 +37,11 @@ export function PasswordForm({
       setCurrentPassword("");
       setNewPassword("");
       setConfirm("");
-      setNotice(hasPassword ? "密码已更新。" : "密码已设置，现在也可以用密码登录。");
+      setNotice(
+        hasPassword ? t("account.password.updated") : t("account.password.setDone"),
+      );
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "save failed");
+      setError(caught instanceof Error ? caught.message : t("error.saveFailed"));
     } finally {
       setBusy(false);
     }
@@ -48,7 +51,7 @@ export function PasswordForm({
     setError(null);
     setNotice(null);
     if (!currentPassword) {
-      setError("请先填写当前密码");
+      setError(t("account.password.currentRequired"));
       return;
     }
 
@@ -59,9 +62,9 @@ export function PasswordForm({
       setCurrentPassword("");
       setNewPassword("");
       setConfirm("");
-      setNotice("密码已移除，之后请用邮箱验证码登录。");
+      setNotice(t("account.password.removed"));
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "remove failed");
+      setError(caught instanceof Error ? caught.message : t("error.removeFailed"));
     } finally {
       setBusy(false);
     }
@@ -69,18 +72,20 @@ export function PasswordForm({
 
   return (
     <section>
-      <h2 className={styles.sectionTitle}>{hasPassword ? "登录密码" : "登录密码（可选）"}</h2>
+      <h2 className={styles.sectionTitle}>
+        {hasPassword ? t("account.password.title") : t("account.password.titleOptional")}
+      </h2>
       <p className={styles.sectionHint}>
         {hasPassword
-          ? "已设置密码，可以用密码登录；也可以移除，只保留邮箱验证码。"
-          : "当前只用邮箱验证码登录。设置密码后，也可以选择用密码登录。"}
+          ? t("account.password.hint")
+          : t("account.password.hintOptional")}
       </p>
 
       <form className={styles.form} onSubmit={submit}>
         {hasPassword && (
           <div className={styles.field}>
             <label className={styles.label} htmlFor="current-password">
-              当前密码
+              {t("account.password.current")}
             </label>
             <input
               id="current-password"
@@ -88,7 +93,7 @@ export function PasswordForm({
               type="password"
               name="currentPassword"
               autoComplete="current-password"
-              placeholder="确认是你本人"
+              placeholder={t("account.password.currentPlaceholder")}
               value={currentPassword}
               onChange={(event) => setCurrentPassword(event.target.value)}
               required
@@ -98,7 +103,7 @@ export function PasswordForm({
 
         <div className={styles.field}>
           <label className={styles.label} htmlFor="new-password">
-            新密码
+            {t("account.password.new")}
           </label>
           <input
             id="new-password"
@@ -106,7 +111,7 @@ export function PasswordForm({
             type="password"
             name="password"
             autoComplete="new-password"
-            placeholder="至少 8 位"
+            placeholder={t("account.password.newPlaceholder")}
             value={newPassword}
             onChange={(event) => setNewPassword(event.target.value)}
             minLength={8}
@@ -116,7 +121,7 @@ export function PasswordForm({
 
         <div className={styles.field}>
           <label className={styles.label} htmlFor="confirm-password">
-            确认新密码
+            {t("account.password.confirm")}
           </label>
           <input
             id="confirm-password"
@@ -124,7 +129,7 @@ export function PasswordForm({
             type="password"
             name="confirm"
             autoComplete="new-password"
-            placeholder="再输入一次"
+            placeholder={t("account.password.confirmPlaceholder")}
             value={confirm}
             onChange={(event) => setConfirm(event.target.value)}
             minLength={8}
@@ -140,7 +145,11 @@ export function PasswordForm({
         {notice && <p className={styles.success}>{notice}</p>}
 
         <button className={styles.submit} type="submit" disabled={busy}>
-          {busy ? "保存中…" : hasPassword ? "更新密码" : "设置密码"}
+          {busy
+            ? t("account.password.save")
+            : hasPassword
+              ? t("account.password.update")
+              : t("account.password.set")}
         </button>
 
         {hasPassword && (
@@ -150,7 +159,7 @@ export function PasswordForm({
             onClick={() => void removePassword()}
             disabled={busy}
           >
-            移除密码
+            {t("account.password.remove")}
           </button>
         )}
       </form>

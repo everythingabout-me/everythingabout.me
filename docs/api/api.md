@@ -439,6 +439,75 @@ if resp.status_code == 202:
 - 202 的响应体和 `GET /<动作>/{id}` 的响应体**同形**，一个解析器。
 - 进度地址永远是"它自己的动作路径 + id"，没有 `/tasks`、没有队列名、没有 `type` 字段。
 
+### 4.13 事件（时间线）
+
+文件 API 之外的第二类东西。**一个事件 = 一段时间 + 一张卡 + 一个可选的详情链接**，
+设计见 [`docs/design/events.md`](../design/events.md)。
+
+事件不是文件：文件用路径当身份，事件有 `id`；对外稳定句柄是你自己的 `external_id`。
+
+令牌需要 `can_events` 能力位：
+
+```bash
+eam token create --email you@example.com --name Strava --prefix Apps/strava --events
+```
+
+#### 创建 / 更新（幂等）
+
+```http
+POST /events
+
+{
+  "external_id": "run-8921",
+  "starts_at": "2025-08-03T07:12:00Z",
+  "ends_at":   "2025-08-03T08:02:00Z",
+  "tz": "Asia/Shanghai",
+  "precision": "minute",
+  "title": "晨跑 · 北岸",
+  "detail_url": "https://www.strava.com/activities/8921",
+  "type": "metric",
+  "payload": {
+    "metrics": [
+      {"label": "距离", "value": "12.4", "unit": "km"},
+      {"label": "配速", "value": "5'02\"", "unit": "/km"}
+    ],
+    "body": "出门时 24 度。"
+  }
+}
+```
+
+```json
+201 { "id": "0f1c…", "state": "published", "created": true }
+```
+
+- 同一个 `(token, external_id)` 再来一次是**整体替换**，返回 `200` + `created:false`；
+- 用户删掉的事件再推 → `410 gone`，请停止重试；
+- 媒体写路径（`payload.media: ["Apps/strava/2025/0803/a.jpg"]`），必须在 token 的前缀内，
+  先通过文件 API 上传；`photo` 最多 4 张，不做外链图片；
+- `tz` 缺省用服务端配置的 `TIMELINE_TZ`（默认 `Asia/Shanghai`）。
+
+四种 `type` 与 payload：
+
+| type | payload | 限额 |
+|---|---|---|
+| `photo` | `media[1–4]` + 可选 `body` / `meta` | 标题 80 字，正文 500 字 |
+| `note` | `body` + 可选 `meta` | 同上 |
+| `metric` | `metrics[1–3]` + 可选 `body` | label / value 必填 |
+| `html` | `html` + `height` | html ≤ 32 KB，height 40–640 |
+
+`html` 卡片由我们放在 `sandbox` iframe 里渲染（脚本禁用、CSP 限制），并注入设计 token
+`--eam-bg` / `--eam-surface` / `--eam-text` / `--eam-text2` / `--eam-text3` / `--eam-line` / `--eam-accent`。
+
+#### 删除 / 读取
+
+```http
+DELETE /events/{id}          → {"state":"detached"}   内容保留，外链清空
+GET    /events?from=&to=     → 对账：你自己写过的事件（含 external_id）
+GET    /events/{id}          → 单条完整 JSON
+```
+
+没有 `PATCH`：重推就是更新。
+
 ---
 
 ## 5. 服务端偷偷做的事

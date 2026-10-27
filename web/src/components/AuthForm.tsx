@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router";
 import { api } from "../api/client";
+import { t } from "../i18n";
 import styles from "../styles/auth.module.css";
 
 type Mode = "code" | "password";
@@ -25,7 +26,7 @@ export function AuthForm({ initialMode = "code" }: { initialMode?: Mode }) {
 
   async function sendCode() {
     if (!email.trim()) {
-      setError("请先填写邮箱");
+      setError(t("auth.emailRequired"));
       return;
     }
 
@@ -37,14 +38,14 @@ export function AuthForm({ initialMode = "code" }: { initialMode?: Mode }) {
       const minutes = Math.round((result.expiresIn ?? 600) / 60);
       if (result.devCode) {
         setCode(result.devCode);
-        setCodeNotice(`开发模式：验证码 ${result.devCode} 已自动填入`);
+        setCodeNotice(t("auth.devCodeNotice", { code: result.devCode }));
       } else {
         setCode("");
-        setCodeNotice(`验证码已发送，请查收邮箱（${minutes} 分钟内有效）`);
+        setCodeNotice(t("auth.codeSentNotice", { minutes }));
       }
       setCooldown(60);
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "failed to send the code");
+      setError(caught instanceof Error ? caught.message : t("error.sendCodeFailed"));
     } finally {
       setSendingCode(false);
     }
@@ -55,11 +56,11 @@ export function AuthForm({ initialMode = "code" }: { initialMode?: Mode }) {
     setError(null);
 
     if (mode === "code" && !/^\d{6}$/.test(code.trim())) {
-      setError("请输入 6 位验证码");
+      setError(t("auth.codeRequired"));
       return;
     }
     if (mode === "password" && !password) {
-      setError("请输入密码");
+      setError(t("auth.passwordRequired"));
       return;
     }
 
@@ -73,7 +74,7 @@ export function AuthForm({ initialMode = "code" }: { initialMode?: Mode }) {
       // 登录态是 httpOnly cookie；跳回 / 时由 loader 重新确认
       navigate("/", { replace: true });
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "operation failed");
+      setError(caught instanceof Error ? caught.message : t("error.operationFailed"));
       setBusy(false);
     }
   }
@@ -82,7 +83,7 @@ export function AuthForm({ initialMode = "code" }: { initialMode?: Mode }) {
     <form className={styles.form} onSubmit={onSubmit}>
       <div className={styles.field}>
         <label className={styles.label} htmlFor="signin-email">
-          邮箱
+          {t("auth.email")}
         </label>
         <div className={styles.inputRow}>
           <input
@@ -113,7 +114,11 @@ export function AuthForm({ initialMode = "code" }: { initialMode?: Mode }) {
               onClick={() => void sendCode()}
               disabled={sendingCode || cooldown > 0 || !email.trim()}
             >
-              {sendingCode ? "发送中…" : cooldown > 0 ? `${cooldown}s` : "发送验证码"}
+              {sendingCode
+                ? t("auth.sending")
+                : cooldown > 0
+                  ? `${cooldown}s`
+                  : t("auth.sendCode")}
             </button>
           )}
         </div>
@@ -122,7 +127,7 @@ export function AuthForm({ initialMode = "code" }: { initialMode?: Mode }) {
       {mode === "code" ? (
         <div className={styles.field}>
           <label className={styles.label} htmlFor="signin-code">
-            验证码
+            {t("auth.code")}
           </label>
           <input
             id="signin-code"
@@ -133,7 +138,7 @@ export function AuthForm({ initialMode = "code" }: { initialMode?: Mode }) {
             autoComplete="one-time-code"
             pattern="[0-9]{6}"
             maxLength={6}
-            placeholder="6 位数字"
+            placeholder={t("auth.codePlaceholder")}
             value={code}
             onChange={(event) => setCode(event.target.value.replace(/\D/g, "").slice(0, 6))}
             required
@@ -143,7 +148,7 @@ export function AuthForm({ initialMode = "code" }: { initialMode?: Mode }) {
       ) : (
         <div className={styles.field}>
           <label className={styles.label} htmlFor="signin-password">
-            密码
+            {t("auth.password")}
           </label>
           <input
             id="signin-password"
@@ -151,7 +156,7 @@ export function AuthForm({ initialMode = "code" }: { initialMode?: Mode }) {
             type="password"
             name="password"
             autoComplete="current-password"
-            placeholder="输入密码"
+            placeholder={t("auth.passwordPlaceholder")}
             value={password}
             onChange={(event) => setPassword(event.target.value)}
             required
@@ -166,7 +171,7 @@ export function AuthForm({ initialMode = "code" }: { initialMode?: Mode }) {
       )}
 
       <button className={styles.submit} type="submit" disabled={busy}>
-        {busy ? "请稍候…" : mode === "code" ? "继续" : "登录"}
+        {busy ? t("auth.pleaseWait") : mode === "code" ? t("auth.continue") : t("auth.signIn")}
       </button>
     </form>
   );

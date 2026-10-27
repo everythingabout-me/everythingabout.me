@@ -16,6 +16,21 @@ python3 -m http.server 4173 --bind 127.0.0.1
 - `a.html` — A 素白；`b.html` — B 暖白
 - 右上角都能切深色；也支持 `?theme=dark`、`?view=app` / `?view=auth`
 
+## 时间轴（事件卡 · 可点稿）
+
+`timeline.html` — 时间轴只有一层：**事件卡**，从上往下的扁平列表。合成数据。
+
+- 没有年 / 月标题、没有「N 个文件 / N 个事件」的统计、没有年带和密度条；每张卡自带完整日期
+- 一条事件 = 一张卡，卡有类型：`photo` / `note` / `metric` / `html`（稿里那张剧票是 html 卡，沙箱 iframe 渲染）
+- 事件没有编辑；也没有「查看详情」按钮（有 detail_url 时标题才是链接）
+- 三方应用写进来的事件，日期那一行多一个来源名（稿里：「晨跑」来自 Strava，「读完」来自 Readwise，「剧票」来自大麦），结构见 [events.md](../events.md)
+- 健康只在**变了的时候**出现一张卡（稿里：8 月睡得少）；没有每月图表，也没有年度总览
+- 左下角工具条：说明（这一版砍了什么）、深色、移动
+- 深色 / 移动：`?theme=dark`、`?view=mobile`；`?notes=1` 直接打开说明
+
+截图：`shots/timeline-desktop.png`（首屏）、`shots/timeline-events.png`（文字事件 + 健康变化卡）、
+`shots/timeline-source.png`（三方来源 + 数字槽位）、`shots/timeline-mobile.png`、`shots/timeline-dark.png`。
+
 ## 字体
 
 **不选单一字体，选系统字体栈。** 苹果的做法是让系统按字符挑字体，而不是一款字体覆盖中英文：
@@ -98,6 +113,9 @@ python3 -m http.server 4173 --bind 127.0.0.1
 ## 文件
 
 ```
+timeline.html    时间轴 · 事件卡（可点稿）
+timeline.css     时间轴的样式（复用 .v-b token）
+timeline.js      合成数据 + 渲染 + 交互
 system.html      视觉系统规范
 index.html       A/B 切换预览
 a.html / b.html  A 素白 / B 暖白

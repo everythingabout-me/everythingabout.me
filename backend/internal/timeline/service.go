@@ -7,17 +7,22 @@ import (
 	"time"
 
 	"everythingabout.me/backend/internal/config"
+	"everythingabout.me/backend/internal/events"
 	"everythingabout.me/backend/internal/storage"
 	"everythingabout.me/backend/internal/store"
 )
 
 // New 构造内容流服务。Enabled=false 时接口仍可读，但不会启动整理器。
-func New(db *store.DB, objectStorage storage.Storage, cfg config.Timeline) *Service {
+//
+// eventPublisher 是事件的写入口（internal/events）。流水线不直接写表：
+// 事件的校验、去重、媒体解析都在那个包里，这里只负责"选哪些片段"。
+func New(db *store.DB, objectStorage storage.Storage, cfg config.Timeline, eventPublisher *events.Service) *Service {
 	return &Service{
 		db:      db,
 		storage: objectStorage,
 		engine:  NewEngine(cfg),
 		cfg:     cfg,
+		events:  eventPublisher,
 	}
 }
 
@@ -228,6 +233,12 @@ func (s *Service) rebuildMonth(ctx context.Context, userID string, month time.Ti
 		return err
 	}
 
+	// 选中的片段写成事件——这是时间线真正读的东西（v0.4 起）。
+	// 同一批照片重跑不会重复：producer_key 唯一，冲突时只更新。
+	if err := s.events.PublishAuto(ctx, userID, autoEvents(selected, assets, s.engine.Location)); err != nil {
+		return err
+	}
+
 	fileCount, sourceRev, err := s.monthStats(ctx, userID, start, end)
 	if err != nil {
 		return err
@@ -236,10 +247,65 @@ func (s *Service) rebuildMonth(ctx context.Context, userID string, month time.Ti
 	if err := s.saveSnapshot(ctx, userID, month, payload, fileCount, sourceRev); err != nil {
 		return err
 	}
+	// 下面这段是 v0.3 的月快照。前端已经改读 events，这里暂时保留写入，
+	// 等确认没人读之后再删（见 sql/013_events.sql 的注释）。
 	slog.Debug("timeline: month rebuilt",
 		"user", userID, "month", month.Format("2006-01"),
 		"files", fileCount, "candidates", len(candidates), "selected", len(selected))
 	return nil
+}
+
+// autoEvents 把选中的片段映射成事件投稿。
+//
+// 取舍：
+//   - 媒体最多 4 张（photo 类型的上限）。九宫格留给以后的类型，不要为一个格子放宽约束。
+//   - 标题用 Narrator 生成的标题，副标题进 meta（"5 月 3 日 · 9 张"这种）。
+//   - 正文留空：启发式写不出一句话，宁可没有，也不要废话。
+func autoEvents(selected []Moment, assets []Asset, loc *time.Location) []events.AutoInput {
+	byPath := make(map[string]Asset, len(assets))
+	byID := make(map[string]Asset, len(assets))
+	for _, asset := range assets {
+		byPath[asset.Path] = asset
+		byID[asset.NodeID] = asset
+	}
+	out := make([]events.AutoInput, 0, len(selected))
+	for _, moment := range selected {
+		item := momentItem(moment, byID)
+		thumbs := item.Grid
+		if len(thumbs) == 0 && item.Cover != nil {
+			thumbs = []Thumb{*item.Cover}
+		}
+		media := make([]events.AutoMedia, 0, len(thumbs))
+		for _, thumb := range thumbs {
+			asset, ok := byPath[thumb.Path]
+			if !ok {
+				continue
+			}
+			media = append(media, events.AutoMedia{
+				NodeID: asset.NodeID,
+				Path:   asset.Path,
+				Video:  asset.MediaType == "video",
+			})
+			if len(media) == 4 {
+				break
+			}
+		}
+		if len(media) == 0 {
+			continue
+		}
+		endsAt := moment.EndsAt
+		out = append(out, events.AutoInput{
+			ProducerKey: moment.DedupeKey,
+			StartsAt:    moment.StartsAt,
+			EndsAt:      &endsAt,
+			TZ:          loc.String(),
+			Precision:   "minute",
+			Title:       moment.Title,
+			Meta:        moment.Subtitle,
+			Media:       media,
+		})
+	}
+	return out
 }
 
 func (s *Service) buildPayload(

@@ -4,47 +4,31 @@ import {
   ApiError,
   api,
   type AuthUser,
-  type StreamFeed,
-  type StreamItem,
-  type StreamPeriod,
-  type StreamSeries,
+  type EventMedia,
+  type EventMetric,
+  type TimelineEvent,
   type StreamStatus,
-  type StreamThumb,
 } from "../api/client";
 import { BrandMark } from "../components/BrandMark";
 import { RefreshIcon } from "../components/icons";
+import { filesText, t } from "../i18n";
+import { formatEventDate } from "../i18n/format";
 import styles from "./StreamPage.module.css";
 
-function formatMonth(month: string): string {
-  const [year, mon] = month.split("-");
-  return `${year} 年 ${Number(mon)} 月`;
-}
-
-function formatRange(from?: string, to?: string): string {
-  if (!from || !to) return "";
-  const [fy, fm, fd] = from.split("-").map(Number);
-  const [ty, tm, td] = to.split("-").map(Number);
-  if (fy === ty && fm === tm) return `${fm} 月 ${fd} – ${td} 日`;
-  if (fy === ty) return `${fm} 月 ${fd} 日 – ${tm} 月 ${td} 日`;
-  return `${fy} 年 ${fm} 月 ${fd} 日 – ${ty} 年 ${tm} 月 ${td} 日`;
-}
-
-function formatMetric(value: number): string {
-  if (!Number.isFinite(value)) return "—";
-  if (Math.abs(value) >= 1000) return Math.round(value).toLocaleString("zh-CN");
-  if (Number.isInteger(value)) return String(value);
-  return value.toFixed(1);
-}
-
-function filesHref(folder?: string): string {
-  return folder ? `/drive?path=${encodeURIComponent(folder)}` : "/drive";
-}
-
+/**
+ * 时间线：一层扁平的事件流。
+ *
+ * 设计见 docs/design/timeline.md §17 和 docs/design/events.md。三条硬规则：
+ *   1. 没有年 / 月标题，也没有「N 个文件 / N 个事件」——每张卡自带完整日期；
+ *   2. 卡片按 type 渲染：photo / note / metric 用我们的版式，html 是应用自己的，
+ *      跑在 sandbox iframe 里（脚本禁掉 + 注入设计 token）；
+ *   3. 没有编辑，也没有「查看详情」按钮：有 detail_url 时只有标题是链接。
+ */
 export function StreamPage() {
   const { user } = useLoaderData() as { user: AuthUser };
   const navigate = useNavigate();
 
-  const [periods, setPeriods] = useState<StreamPeriod[]>([]);
+  const [events, setEvents] = useState<TimelineEvent[]>([]);
   const [status, setStatus] = useState<StreamStatus | null>(null);
   const [loading, setLoading] = useState(true);
   const [loadingMore, setLoadingMore] = useState(false);
@@ -56,13 +40,13 @@ export function StreamPage() {
   const sentinel = useRef<HTMLDivElement>(null);
   const wasPending = useRef(false);
 
-  const merge = useCallback((current: StreamPeriod[], incoming: StreamPeriod[]) => {
-    const seen = new Set(current.map((period) => period.month));
+  const merge = useCallback((current: TimelineEvent[], incoming: TimelineEvent[]) => {
+    const seen = new Set(current.map((event) => event.id));
     const merged = [...current];
-    for (const period of incoming) {
-      if (!seen.has(period.month)) {
-        seen.add(period.month);
-        merged.push(period);
+    for (const event of incoming) {
+      if (!seen.has(event.id)) {
+        seen.add(event.id);
+        merged.push(event);
       }
     }
     return merged;
@@ -72,11 +56,11 @@ export function StreamPage() {
     setLoading(true);
     setError(null);
     try {
-      const feed: StreamFeed = await api.stream(undefined, 2);
-      setPeriods(feed.periods);
-      nextCursor.current = feed.next;
-      setHasMore(Boolean(feed.next));
-      setStatus(feed.status);
+      const page = await api.events(undefined, 20);
+      setEvents(page.events);
+      nextCursor.current = page.next;
+      setHasMore(Boolean(page.next));
+      setStatus(page.status);
     } catch (cause) {
       if (cause instanceof ApiError && cause.status === 401) {
         navigate("/login", { replace: true });
@@ -94,11 +78,11 @@ export function StreamPage() {
     loadingMoreRef.current = true;
     setLoadingMore(true);
     try {
-      const feed = await api.stream(cursor, 2);
-      setPeriods((current) => merge(current, feed.periods));
-      nextCursor.current = feed.next;
-      setHasMore(Boolean(feed.next));
-      setStatus(feed.status);
+      const page = await api.events(cursor, 20);
+      setEvents((current) => merge(current, page.events));
+      nextCursor.current = page.next;
+      setHasMore(Boolean(page.next));
+      setStatus(page.status);
     } catch (cause) {
       if (cause instanceof ApiError && cause.status === 401) {
         navigate("/login", { replace: true });
@@ -115,7 +99,7 @@ export function StreamPage() {
     void loadInitial();
   }, [loadInitial]);
 
-  // 整理进行中时轮询状态；结束时自动刷新一次，让新内容出现。
+  // 整理进行中时轮询状态；结束时自动刷新一次，让新事件出现。
   useEffect(() => {
     const pending = status?.pending ?? 0;
     if (pending > 0) {
@@ -158,23 +142,23 @@ export function StreamPage() {
     return () => observer.disconnect();
   }, [loadMore, hasMore]);
 
-  const empty = !loading && periods.length === 0;
+  const empty = !loading && events.length === 0;
   const indexing = Boolean(status?.pending && status.pending > 0);
 
   return (
     <div className={styles.page}>
-      <title>Everything About Me</title>
+      <title>{t("app.name")}</title>
 
       <header className={styles.topbar}>
         <div className={styles.topbarInner}>
           <Link to="/" className={styles.brand}>
             <BrandMark className={styles.brandMark} />
-            <span className={styles.brandText}>Everything About Me</span>
+            <span className={styles.brandText}>{t("app.name")}</span>
           </Link>
 
           <nav className={styles.nav}>
             <Link className={styles.navLink} to="/drive">
-              文件
+              {t("nav.files")}
             </Link>
           </nav>
 
@@ -183,8 +167,8 @@ export function StreamPage() {
           <Link
             className={styles.account}
             to="/account"
-            title="账户设置"
-            aria-label={`账户设置：${user.email}`}
+            title={t("nav.accountSettings")}
+            aria-label={t("nav.accountSettingsFor", { email: user.email })}
           >
             <span className={styles.avatar}>{user.email.slice(0, 1).toUpperCase()}</span>
             <span className={styles.email}>{user.email}</span>
@@ -196,8 +180,10 @@ export function StreamPage() {
         {indexing && (
           <div className={styles.working}>
             <span className={styles.dot} />
-            <span>正在整理更早的内容</span>
-            <span className={styles.workingMeta}>已整理 {status?.indexed_files ?? 0} 个文件</span>
+            <span>{t("stream.working")}</span>
+            <span className={styles.workingMeta}>
+              {t("stream.workingMeta", { files: filesText(status?.indexed_files ?? 0) })}
+            </span>
           </div>
         )}
 
@@ -207,31 +193,31 @@ export function StreamPage() {
           <div className={styles.errorBox}>
             <p>{error}</p>
             <button className={styles.textButton} onClick={() => void loadInitial()}>
-              <RefreshIcon size={13} /> 重试
+              <RefreshIcon size={13} /> {t("common.retry")}
             </button>
           </div>
         )}
 
         {!loading && !error && empty && (
           <div className={styles.empty}>
-            <span className={styles.emptyTitle}>{indexing ? "正在整理…" : "还没有内容"}</span>
+            <span className={styles.emptyTitle}>
+              {indexing ? t("stream.emptyIndexingTitle") : t("stream.emptyTitle")}
+            </span>
             <span className={styles.emptyText}>
-              {indexing
-                ? "第一次整理会久一点，照片和视频会按时间出现在这里。"
-                : "上传一些照片、视频或数据文件，它们会按时间出现在这里。"}
+              {indexing ? t("stream.emptyIndexingText") : t("stream.emptyText")}
             </span>
             {!indexing && (
               <Link className={styles.emptyAction} to="/drive">
-                去文件里上传
+                {t("stream.emptyAction")}
               </Link>
             )}
           </div>
         )}
 
         {!loading && !error && !empty && (
-          <div className={styles.stream}>
-            {periods.map((period) => (
-              <StreamMonth key={period.month} period={period} />
+          <div className={styles.feed}>
+            {events.map((event) => (
+              <EventCard key={event.id} event={event} />
             ))}
           </div>
         )}
@@ -241,161 +227,160 @@ export function StreamPage() {
         {loadingMore && (
           <div className={styles.moreLoading}>
             <span className={styles.dot} />
-            继续往下…
+            {t("stream.loadingMore")}
           </div>
         )}
         {!loading && !loadingMore && !hasMore && !empty && !error && (
-          <div className={styles.end}>到底了</div>
+          <div className={styles.end}>{t("stream.end")}</div>
         )}
       </main>
     </div>
   );
 }
 
-function StreamMonth({ period }: { period: StreamPeriod }) {
-  return (
-    <section className={styles.month}>
-      <header className={styles.monthHead}>
-        <h2 className={styles.monthTitle}>{formatMonth(period.month)}</h2>
-        <span className={styles.monthMeta}>{period.file_count.toLocaleString("zh-CN")} 个文件</span>
-      </header>
-      <div className={styles.list}>
-        {period.items.map((item, index) => (
-          <StreamRow key={`${period.month}-${index}-${item.id ?? item.from ?? item.type}`} item={item} />
-        ))}
-        {period.items.length === 0 && (
-          <div className={styles.gap}>
-            <span className={styles.gapLine} />
-            <span className={styles.gapText}>这个月没有可展示的内容</span>
-            <span className={styles.gapMeta}>{period.file_count} 个文件</span>
-          </div>
-        )}
-      </div>
-    </section>
-  );
-}
-
-function StreamRow({ item }: { item: StreamItem }) {
-  if (item.type === "gap") {
-    return (
-      <div className={styles.gap}>
-        <span className={styles.gapLine} />
-        <span className={styles.gapText}>
-          {item.label === "正在整理" ? "正在整理" : formatRange(item.from, item.to)}
-        </span>
-        {item.item_count ? <span className={styles.gapMeta}>{item.item_count} 个文件</span> : null}
-      </div>
-    );
-  }
-
-  if (item.type === "ambient") {
-    return (
-      <div className={styles.ambient}>
-        {(item.series ?? []).map((series) => (
-          <Sparkline key={series.metric} series={series} />
-        ))}
-      </div>
-    );
-  }
-
-  const gridLike = item.layout === "mosaic" || item.layout === "series";
-  const thumbs = gridLike ? item.grid ?? [] : item.cover ? [item.cover] : [];
-  if (!thumbs.length) return null;
+function EventCard({ event }: { event: TimelineEvent }) {
+  const date = formatEventDate(event.local_date);
+  const source = event.source.kind === "app" ? event.source.name : undefined;
 
   return (
-    <article className={styles.card}>
-      <Link
-        className={`${styles.media} ${
-          item.layout === "hero"
-            ? styles.mediaHero
-            : item.layout === "mosaic"
-              ? styles.mediaMosaic
-              : styles.mediaSingle
-        }`}
-        to={filesHref(item.folder)}
-        aria-label={item.title ?? "查看"}
-      >
-        {item.layout === "series" ? (
-          <SeriesStrip thumbs={thumbs} />
-        ) : item.layout === "mosaic" ? (
-          <Mosaic thumbs={thumbs} count={thumbs.length} />
-        ) : (
-          <MediaThumb thumb={thumbs[0]} big={item.layout === "hero"} />
+    <article className={styles.ev}>
+      <div className={styles.kicker}>
+        <b>{date}</b>
+        {source && (
+          <>
+            <span aria-hidden="true">·</span>
+            <span className={styles.source}>
+              {source}
+              {event.source.disconnected ? " (disconnected)" : ""}
+            </span>
+          </>
         )}
-        {item.more ? (
-          <span className={styles.moreChip}>
-            还有 {item.more} {item.layout === "series" ? "个" : "张"}
-          </span>
-        ) : null}
-      </Link>
-      <div className={styles.cardText}>
-        {item.title && <div className={styles.cardTitle}>{item.title}</div>}
-        {item.subtitle && <div className={styles.cardSub}>{item.subtitle}</div>}
       </div>
+
+      {event.type === "html" ? (
+        <HtmlCard event={event} />
+      ) : event.type === "note" ? (
+        <div className={styles.note}>
+          <h3 className={styles.title}>
+            {event.detail_url ? (
+              <a href={event.detail_url} target="_blank" rel="noreferrer">
+                {event.title}
+              </a>
+            ) : (
+              event.title
+            )}
+          </h3>
+          {event.payload.body ? <p className={styles.body}>{event.payload.body}</p> : null}
+          {event.payload.meta ? <div className={styles.metaLine}>{event.payload.meta}</div> : null}
+        </div>
+      ) : (
+        <>
+          <h3 className={styles.title}>
+            {event.detail_url ? (
+              <a href={event.detail_url} target="_blank" rel="noreferrer">
+                {event.title}
+              </a>
+            ) : (
+              event.title
+            )}
+          </h3>
+          <Media media={event.payload.media ?? []} />
+          {event.payload.body ? <p className={styles.body}>{event.payload.body}</p> : null}
+          <Metrics metrics={event.payload.metrics ?? []} />
+          {event.payload.meta ? <div className={styles.metaLine}>{event.payload.meta}</div> : null}
+        </>
+      )}
     </article>
   );
 }
 
-function Mosaic({ thumbs, count }: { thumbs: StreamThumb[]; count: number }) {
+/**
+ * HtmlCard 把三方应用的 HTML 放在 sandbox iframe 里渲染。
+ *
+ * - sandbox 不带 allow-scripts：脚本、表单、顶层跳转全部禁掉；
+ * - 文档里只注入一组设计 token（--eam-*），卡片可以跟随明暗主题，也可以完全不用；
+ * - 高度由 payload 给，服务端 clamp 过（40–640）。
+ *
+ * 不要把它改成 dangerouslySetInnerHTML：样式、事件、暗色模式会一起漏进来。
+ */
+function HtmlCard({ event }: { event: TimelineEvent }) {
+  const tokens = useCardTokens();
+  const height = Math.min(640, Math.max(40, event.payload.height ?? 240));
+  const doc = `<!doctype html><meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src data: https:; style-src 'unsafe-inline'; font-src data:">
+<style>${tokens}
+html,body{margin:0;height:100%;background:transparent;color:var(--eam-text);font:13px/1.55 -apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei",sans-serif;-webkit-font-smoothing:antialiased}
+*{box-sizing:border-box}
+</style>${event.payload.html ?? ""}`;
+
   return (
-    <div className={styles.mosaic} data-count={Math.min(count, 9)}>
-      {thumbs.map((thumb, index) => (
-        <MediaThumb key={`${thumb.path}-${index}`} thumb={thumb} compact={count > 1} />
+    <>
+      <h3 className={styles.srOnly}>{event.title}</h3>
+      <iframe
+        className={styles.htmlCard}
+        sandbox=""
+        referrerPolicy="no-referrer"
+        title={event.title}
+        srcDoc={doc}
+        style={{ height }}
+      />
+    </>
+  );
+}
+
+function useCardTokens(): string {
+  const [tokens, setTokens] = useState("");
+  useEffect(() => {
+    const computed = getComputedStyle(document.documentElement);
+    const value = (name: string) => computed.getPropertyValue(name).trim();
+    const dark = window.matchMedia?.("(prefers-color-scheme: dark)").matches ?? false;
+    setTokens(
+      `:root{color-scheme:${dark ? "dark" : "light"};` +
+        `--eam-bg:${value("--bg")};--eam-surface:${value("--surface")};` +
+        `--eam-text:${value("--text")};--eam-text2:${value("--text-2")};` +
+        `--eam-text3:${value("--text-3")};--eam-line:${value("--border")};` +
+        `--eam-accent:${value("--blue")}}`,
+    );
+  }, []);
+  return tokens;
+}
+
+function Media({ media }: { media: EventMedia[] }) {
+  const items = media.slice(0, 4);
+  if (items.length === 0) return null;
+  const layout =
+    items.length === 1
+      ? styles.mediaOne
+      : items.length === 2
+        ? styles.mediaTwo
+        : items.length === 3
+          ? styles.mediaThree
+          : styles.mediaFour;
+  return (
+    <div className={`${styles.media} ${layout}`}>
+      {items.map((item) => (
+        <Thumb key={item.path} media={item} />
       ))}
     </div>
   );
 }
 
-function SeriesStrip({ thumbs }: { thumbs: StreamThumb[] }) {
-  return (
-    <div className={styles.seriesStrip} data-count={Math.min(thumbs.length, 6)}>
-      {thumbs.map((thumb, index) => (
-        <MediaThumb key={`${thumb.path}-${index}`} thumb={thumb} compact />
-      ))}
-    </div>
-  );
-}
-
-function hueFor(value: string): number {
-  let hash = 0;
-  for (let i = 0; i < value.length; i += 1) {
-    hash = (hash * 31 + value.charCodeAt(i)) % 360;
-  }
-  return hash;
-}
-
-function MediaThumb({
-  thumb,
-  big = false,
-  compact = false,
-}: {
-  thumb: StreamThumb;
-  big?: boolean;
-  compact?: boolean;
-}) {
+function Thumb({ media }: { media: EventMedia }) {
   const [failed, setFailed] = useState(false);
 
-  if (thumb.video) {
-    const style = { "--tile-hue": String(hueFor(thumb.path)) } as React.CSSProperties;
+  if (media.video) {
     return (
-      <div className={`${styles.videoTile} ${big ? styles.bigTile : ""}`} style={style}>
-        <span className={styles.play} aria-hidden="true" />
-        {!compact && (
-          <span className={styles.videoTag}>
-            {thumb.duration_ms ? formatDuration(thumb.duration_ms) : "视频"}
-          </span>
-        )}
+      <div className={`${styles.tile} ${styles.tileVideo}`}>
+        <span className={styles.playIcon} aria-hidden="true" />
       </div>
     );
   }
-  if (failed || !thumb.url) {
-    return <div className={styles.imageFallback} aria-hidden="true" />;
-  }
+  if (failed || !media.url) return <div className={`${styles.tile} ${styles.tileFallback}`} aria-hidden="true" />;
   return (
     <img
-      className={styles.image}
-      src={thumb.url}
-      alt={thumb.name ?? ""}
+      className={styles.tile}
+      src={media.url}
+      alt={media.name ?? ""}
       loading="lazy"
       decoding="async"
       onError={() => setFailed(true)}
@@ -403,63 +388,33 @@ function MediaThumb({
   );
 }
 
-function Sparkline({ series }: { series: StreamSeries }) {
-  const values = series.values;
-  const min = series.min;
-  const max = series.max;
-  const points = values
-    .map((value, index) => {
-      const x = values.length <= 1 ? 50 : (index / (values.length - 1)) * 100;
-      const y = max === min ? 12 : 20 - ((value - min) / (max - min)) * 16;
-      return `${x.toFixed(2)},${y.toFixed(2)}`;
-    })
-    .join(" ");
-
+function Metrics({ metrics }: { metrics: EventMetric[] }) {
+  if (metrics.length === 0) return null;
   return (
-    <div className={styles.series}>
-      <span className={styles.seriesLabel} title={series.label}>
-        {series.label}
-      </span>
-      <svg className={styles.spark} viewBox="0 0 100 24" preserveAspectRatio="none" aria-hidden="true">
-        <polyline
-          points={points}
-          fill="none"
-          stroke="var(--accent)"
-          strokeWidth="1.5"
-          strokeLinecap="round"
-          strokeLinejoin="round"
-          vectorEffect="non-scaling-stroke"
-        />
-      </svg>
-      <span className={styles.seriesValue}>
-        {formatMetric(series.latest)}
-        {series.unit ? ` ${series.unit}` : ""}
-      </span>
+    <div className={styles.stats}>
+      {metrics.map((metric) => (
+        <span key={metric.label}>
+          <em>
+            {metric.value}
+            {metric.unit ? <s>{metric.unit}</s> : null}
+          </em>
+          <i>{metric.label}</i>
+        </span>
+      ))}
     </div>
   );
 }
 
 function LoadingSkeleton() {
   return (
-    <div className={styles.stream} aria-busy="true">
+    <div className={styles.feed} aria-busy="true">
       {[0, 1].map((index) => (
-        <div className={styles.month} key={index}>
-          <div className={styles.monthHead}>
-            <span className={styles.skTitle} />
-            <span className={styles.skMeta} />
-          </div>
-          <div className={styles.skeletonCard} />
-          <div className={styles.skeletonCard} />
+        <div className={styles.ev} key={index}>
+          <span className={styles.skKicker} />
+          <span className={styles.skTitle} />
+          <div className={styles.skMedia} />
         </div>
       ))}
     </div>
   );
-}
-
-function formatDuration(ms: number): string {
-  const seconds = Math.round(ms / 1000);
-  const minutes = Math.floor(seconds / 60);
-  const rest = seconds % 60;
-  if (minutes <= 0) return `${seconds} 秒`;
-  return `${minutes}:${String(rest).padStart(2, "0")}`;
 }

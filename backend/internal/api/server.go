@@ -13,6 +13,7 @@ import (
 	"everythingabout.me/backend/internal/auth"
 	"everythingabout.me/backend/internal/config"
 	"everythingabout.me/backend/internal/emailcode"
+	"everythingabout.me/backend/internal/events"
 	"everythingabout.me/backend/internal/httpx"
 	"everythingabout.me/backend/internal/jobs"
 	"everythingabout.me/backend/internal/mail"
@@ -25,34 +26,37 @@ import (
 )
 
 type Server struct {
-	cfg      *config.Config
-	db       *store.DB
-	auth     *auth.Service
-	codes    *emailcode.Service
-	mail     *mail.Sender
-	storage  storage.Storage
-	nodes    *nodes.Service
-	jobs     *jobs.Service
-	timeline *timeline.Service
-	limiter  *ratelimit.Limiter
-	web      http.Handler
+	cfg       *config.Config
+	db        *store.DB
+	auth      *auth.Service
+	codes     *emailcode.Service
+	mail      *mail.Sender
+	storage   storage.Storage
+	nodes     *nodes.Service
+	jobs      *jobs.Service
+	eventsSvc *events.Service
+	timeline  *timeline.Service
+	limiter   *ratelimit.Limiter
+	web       http.Handler
 }
 
 // New 组装依赖。web 是前端构建产物（SPA）的处理器，可以是 nil。
 func New(cfg *config.Config, db *store.DB, objectStorage storage.Storage, web http.Handler) *Server {
 	nodeService := nodes.New(db, objectStorage)
+	eventService := events.New(db, objectStorage, nodeService)
 	return &Server{
-		cfg:      cfg,
-		db:       db,
-		auth:     auth.New(db, cfg),
-		codes:    emailcode.New(db),
-		mail:     mail.New(cfg),
-		storage:  objectStorage,
-		nodes:    nodeService,
-		jobs:     jobs.New(db, objectStorage, nodeService),
-		timeline: timeline.New(db, objectStorage, cfg.Timeline),
-		limiter:  ratelimit.New(),
-		web:      web,
+		cfg:       cfg,
+		db:        db,
+		auth:      auth.New(db, cfg),
+		codes:     emailcode.New(db),
+		mail:      mail.New(cfg),
+		storage:   objectStorage,
+		nodes:     nodeService,
+		jobs:      jobs.New(db, objectStorage, nodeService),
+		eventsSvc: eventService,
+		timeline:  timeline.New(db, objectStorage, cfg.Timeline, eventService),
+		limiter:   ratelimit.New(),
+		web:       web,
 	}
 }
 
@@ -86,6 +90,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/timeline", s.wrap(s.handleTimeline))
 	mux.HandleFunc("GET /api/timeline/status", s.wrap(s.handleTimelineStatus))
 	mux.HandleFunc("POST /api/timeline/rebuild", s.wrap(s.handleTimelineRebuild))
+	mux.HandleFunc("DELETE /api/events/{id}", s.wrap(s.handleDeleteEvent))
 
 	mux.HandleFunc("GET /api/fs/list", s.wrap(s.handleList))
 	mux.HandleFunc("GET /api/fs/search", s.wrap(s.handleSearch))
@@ -97,6 +102,12 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/fs/delete", s.wrap(s.handleDelete))
 
 	// 对外 API：路径就是功能本身，不带 /v1 或 /api 前缀。
+	// 事件：和文件 API 一样，路径就是功能、不带 /api 前缀。
+	mux.HandleFunc("POST /events", s.api(s.handleAPICreateEvent))
+	mux.HandleFunc("GET /events", s.api(s.handleAPIListEvents))
+	mux.HandleFunc("GET /events/{id}", s.api(s.handleAPIGetEvent))
+	mux.HandleFunc("DELETE /events/{id}", s.api(s.handleAPIDeleteEvent))
+
 	mux.HandleFunc("GET /capabilities", s.api(s.handleAPICapabilities))
 	mux.HandleFunc("GET /list", s.api(s.handleAPIList))
 	mux.HandleFunc("GET /me", s.api(s.handleAPIMe))
@@ -188,10 +199,10 @@ func (s *Server) limitAPI(w http.ResponseWriter, r *http.Request) error {
 func isAPIPath(path string) bool {
 	switch path {
 	case "/capabilities", "/list", "/me", "/mkdir", "/move", "/copy",
-		"/search", "/files", "/upload", "/upload/complete":
+		"/search", "/files", "/upload", "/upload/complete", "/events":
 		return true
 	}
-	for _, prefix := range []string{"/files/", "/move/", "/copy/", "/upload/"} {
+	for _, prefix := range []string{"/files/", "/move/", "/copy/", "/upload/", "/events/"} {
 		if strings.HasPrefix(path, prefix) {
 			return true
 		}

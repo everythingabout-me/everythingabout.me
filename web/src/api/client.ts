@@ -48,52 +48,49 @@ export interface SearchResult {
 }
 
 
-export interface StreamThumb {
+export interface EventMedia {
   path: string;
   url?: string;
   name?: string;
   video?: boolean;
-  duration_ms?: number;
 }
 
-export interface StreamSeries {
-  metric: string;
+export interface EventMetric {
   label: string;
+  value: string;
   unit?: string;
-  days: number[];
-  values: number[];
-  latest: number;
-  min: number;
-  max: number;
 }
 
-export interface StreamItem {
-  type: "moment" | "gap" | "ambient";
-  id?: string;
-  layout?: "single" | "mosaic" | "hero" | "series";
-  title?: string;
-  subtitle?: string;
-  folder?: string;
-  starts_at?: string;
+/** 卡片内容。type 决定哪些字段有值，见 docs/design/events.md §3。 */
+export interface EventPayload {
+  body?: string;
+  meta?: string;
+  media?: EventMedia[];
+  metrics?: EventMetric[];
+  html?: string;
+  height?: number;
+}
+
+export type EventType = "photo" | "note" | "metric" | "html";
+
+export interface EventSource {
+  kind: "native" | "auto" | "app";
+  name?: string;
+  disconnected?: boolean;
+}
+
+/** 时间线上的一条事件。 */
+export interface TimelineEvent {
+  id: string;
+  type: EventType;
+  title: string;
+  starts_at: string;
   ends_at?: string;
-  item_count?: number;
-  more?: number;
-  cover?: StreamThumb;
-  grid?: StreamThumb[];
-  score?: number;
-  label?: string;
-  from?: string;
-  to?: string;
-  series?: StreamSeries[];
-}
-
-export interface StreamPeriod {
-  month: string;
-  file_count: number;
-  moment_count: number;
-  coverage: "ready" | "indexing" | "empty";
-  generated_at?: string;
-  items: StreamItem[];
+  local_date: string;
+  precision: "day" | "minute";
+  detail_url?: string;
+  source: EventSource;
+  payload: EventPayload;
 }
 
 export interface StreamStatus {
@@ -105,8 +102,8 @@ export interface StreamStatus {
   last_generated?: string;
 }
 
-export interface StreamFeed {
-  periods: StreamPeriod[];
+export interface EventPage {
+  events: TimelineEvent[];
   next?: string;
   status: StreamStatus;
 }
@@ -249,11 +246,12 @@ export const api = {
     await post("/api/fs/delete", { path });
   },
 
-  stream(before?: string, months = 2): Promise<StreamFeed> {
+  /** 时间线：一层扁平的事件流，keyset 分页。 */
+  events(cursor?: string, limit = 20): Promise<EventPage> {
     const params = new URLSearchParams();
-    if (before) params.set("before", before);
-    params.set("months", String(months));
-    return request<StreamFeed>(`/api/timeline?${params.toString()}`);
+    if (cursor) params.set("cursor", cursor);
+    params.set("limit", String(limit));
+    return request<EventPage>(`/api/timeline?${params.toString()}`);
   },
 
   streamStatus(): Promise<StreamStatus> {

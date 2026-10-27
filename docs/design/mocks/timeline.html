@@ -1,0 +1,115 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="light">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="icon" type="image/svg+xml" href="favicon.svg">
+<link rel="stylesheet" href="plain.css?v=8">
+<link rel="stylesheet" href="timeline.css?v=2">
+<title>时间轴 · 事件卡 — Everything About Me</title>
+<script>
+  (function () {
+    var q = new URLSearchParams(location.search);
+    var forced = q.get('theme');
+    try {
+      if (forced === 'dark' || forced === 'light') {
+        document.documentElement.dataset.theme = forced;
+      } else {
+        var saved = localStorage.getItem('eam-mock-theme');
+        if (saved === 'dark' || saved === 'light') document.documentElement.dataset.theme = saved;
+      }
+    } catch (e) {}
+  })();
+</script>
+</head>
+<body>
+
+<svg class="sprite" aria-hidden="true" xmlns="http://www.w3.org/2000/svg">
+  <symbol id="mark" viewBox="0 0 1024 1024">
+    <defs><clipPath id="mark-disc"><circle cx="512" cy="512" r="448"/></clipPath></defs>
+    <g clip-path="url(#mark-disc)">
+      <circle cx="512" cy="512" r="448" fill="#FD605E"/>
+      <path d="M0 429H239V595H421V429H603V595H785V429H1024V1024H0Z" fill="#13A7F5"/>
+      <path d="M0 429H239V595H421V429H603V595H785V429H1024" fill="none" stroke="#FFFFFF" stroke-width="24" stroke-linejoin="miter" stroke-miterlimit="4" stroke-linecap="butt"/>
+    </g>
+  </symbol>
+  <symbol id="i-x" viewBox="0 0 16 16"><path d="m4 4 8 8M12 4l-8 8"/></symbol>
+  <symbol id="i-right" viewBox="0 0 16 16"><path d="m6 3.5 4.5 4.5L6 12.5"/></symbol>
+  <symbol id="i-moon" viewBox="0 0 16 16"><path d="M13.2 9.6A5.75 5.75 0 0 1 6.4 2.8a5.75 5.75 0 1 0 6.8 6.8Z"/></symbol>
+  <symbol id="i-sun" viewBox="0 0 16 16"><circle cx="8" cy="8" r="2.75"/><path d="M8 1.5v1.25M8 13.25v1.25M1.5 8h1.25M13.25 8h1.25M3.4 3.4l.9.9M11.7 11.7l.9.9M12.6 3.4l-.9.9M4.3 11.7l-.9.9"/></symbol>
+  <symbol id="i-info" viewBox="0 0 16 16"><circle cx="8" cy="8" r="5.75"/><path d="M8 7.25v3.5M8 5.25v.01"/></symbol>
+  <symbol id="i-play" viewBox="0 0 16 16"><path d="M6 4.4 11.6 8 6 11.6V4.4Z"/></symbol>
+  <symbol id="i-ext" viewBox="0 0 16 16"><path d="M6.5 3.5H3.5c-.55 0-1 .45-1 1v8c0 .55.45 1 1 1h8c.55 0 1-.45 1-1v-3M9.5 3h3.5v3.5M13 3 7 9"/></symbol>
+</svg>
+
+<div class="v-b" id="screen">
+  <div class="tl-app">
+
+    <header class="tl-top">
+      <div class="tl-topin">
+        <a class="tl-brand" href="#">
+          <svg class="mark"><use href="#mark"/></svg>
+          <span class="tl-brandtext">Everything About Me</span>
+        </a>
+        <nav class="tl-nav" aria-label="主导航">
+          <span class="on" aria-current="page">时间轴</span>
+          <a href="#">文件</a>
+        </nav>
+        <div class="spacer"></div>
+        <button class="tl-account" type="button">
+          <span class="tl-av">Y</span>
+          <span class="tl-email">you@example.com</span>
+        </button>
+      </div>
+    </header>
+
+    <main class="tl-feed" id="feed" aria-label="时间轴"></main>
+  </div>
+
+  <div class="tl-tools" role="group" aria-label="设计稿工具">
+    <span class="tl-tool-tag">设计稿 · 可点</span>
+    <button type="button" id="btnNotes"><svg class="ic"><use href="#i-info"/></svg>说明</button>
+    <button type="button" id="btnTheme"><svg class="ic"><use href="#i-moon"/></svg><span>深色</span></button>
+    <button type="button" id="btnView">移动</button>
+  </div>
+
+  <aside class="tl-notes" id="notes" aria-hidden="true">
+    <header class="tl-notesbar">
+      <span>这一版砍掉了什么</span>
+      <button type="button" class="tl-x" id="btnNotesClose" aria-label="关闭"><svg class="ic"><use href="#i-x"/></svg></button>
+    </header>
+    <div class="tl-notesbody">
+      <section>
+        <h3>只有一层：事件卡</h3>
+        <p>没有年标题、没有月标题、没有「N 个文件 / N 个事件」。每张卡自带完整日期（含年份），从上往下就是时间。</p>
+        <p>代价是「哪个月安静」不再一眼可见；换来的是滚起来没有停顿，卡片是页面上唯一的内容单位。</p>
+      </section>
+      <section>
+        <h3>卡片是类型化的</h3>
+        <p>内置四种：<code>photo</code>（1–4 张图 + 一句话）、<code>note</code>（纯文字）、<code>metric</code>（一行数字）、<code>html</code>（应用自己的版式）。html 跑在沙箱 iframe 里，我们只注入设计 token——稿里那张剧票就是。</p>
+      </section>
+      <section>
+        <h3>事件从哪来</h3>
+        <p>站内自己写（<b>native</b>）、文件流水线自动聚（<b>auto</b>）、三方应用用 token 写（<b>app</b>）。来源只出现在日期那一行（「晨跑」来自 Strava、「剧票」来自大麦）。</p>
+        <p>没有编辑；也没有详情按钮——有 detail_url 时标题才是链接，没有就不可点。结构和 API 见 <code>docs/design/events.md</code>。</p>
+      </section>
+      <section>
+        <h3>健康：变了才说话</h3>
+        <p>只有「8 月睡得少」这种真的变了的月份才出现一张卡。没有每月图表，也没有年度总览面板——年度总览会把「年」这个层级重新带回来，先撤掉。</p>
+      </section>
+      <section class="tl-need">
+        <h3>砍掉了什么</h3>
+        <ul>
+          <li>年带、月头三条轨道、31 格密度条、数据带、档案层、年份导航；</li>
+          <li>年 / 月标题，以及它们身上的文件数和事件数；</li>
+          <li>「查看详情」按钮。</li>
+        </ul>
+      </section>
+      <p class="tl-note-foot">数据是合成的；卡片里的日期、张数、公里数都自洽。</p>
+    </div>
+  </aside>
+</div>
+
+<script src="timeline.js?v=2"></script>
+</body>
+</html>

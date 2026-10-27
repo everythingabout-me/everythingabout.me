@@ -3,6 +3,7 @@ package api
 import (
 	"net/http"
 
+	"everythingabout.me/backend/internal/events"
 	"everythingabout.me/backend/internal/httpx"
 )
 
@@ -36,9 +37,18 @@ func (s *Server) handleAPICapabilities(w http.ResponseWriter, r *http.Request) e
 			"defaultWaitSeconds": int(defaultSyncBudget.Seconds()),
 			"maxWaitSeconds":     int(maxAsyncWait.Seconds()),
 		},
+		"events": map[string]any{
+			"types":        []string{events.TypePhoto, events.TypeNote, events.TypeMetric, events.TypeHTML},
+			"maxTitle":     events.MaxTitle,
+			"maxBody":      events.MaxBody,
+			"maxMetrics":   events.MaxMetrics,
+			"maxMedia":     events.MaxMedia,
+			"maxHTMLBytes": events.MaxHTMLLen,
+			"htmlHeight":   map[string]any{"min": events.MinHTMLSize, "max": events.MaxHTMLSize},
+		},
 		"features": []string{
 			"range", "if-match", "overwrite", "recursive-delete",
-			"copy", "search", "upload-resume",
+			"copy", "search", "upload-resume", "events",
 		},
 	})
 	return nil
