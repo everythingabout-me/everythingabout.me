@@ -1,3 +1,10 @@
+/*
+ * Type scale for this page: 14px is the reading size (names, path, buttons, fields and
+ * body values), 13px annotates it (sizes, times, hints, captions, labels), and 11px is
+ * reserved for pills. Weights: 400 for text, 500 for anything clickable and for the name
+ * of a folder. No sizes in between.
+ */
+
 .page {
   min-height: 100vh;
   display: flex;
@@ -241,7 +248,7 @@ a.crumb:hover {
   padding: 0 10px;
   border-radius: 8px;
   color: var(--text);
-  font-size: 13px;
+  font-size: 14px;
   font-weight: 500;
   text-align: left;
   white-space: nowrap;
@@ -275,7 +282,7 @@ a.crumb:hover {
   background: var(--blue);
   color: var(--btn-fg);
   font-size: 14px;
-  font-weight: 600;
+  font-weight: 500;
   white-space: nowrap;
   transition: filter 0.14s ease;
 }
@@ -296,8 +303,8 @@ a.crumb:hover {
   padding: 0 4px;
   border-radius: 999px;
   background: color-mix(in srgb, var(--btn-fg) 20%, transparent);
-  font-size: 10px;
-  font-weight: 700;
+  font-size: 11px;
+  font-weight: 500;
   line-height: 1;
   font-variant-numeric: tabular-nums;
 }
@@ -314,7 +321,7 @@ a.crumb:hover {
   border-radius: 10px;
   background: var(--surface);
   color: var(--text-2);
-  font-size: 12.5px;
+  font-size: 13px;
 }
 
 .jobLabel {
@@ -357,7 +364,7 @@ a.crumb:hover {
   gap: 7px;
   margin: 0 2px 14px;
   color: var(--text-3);
-  font-size: 12.5px;
+  font-size: 13px;
   line-height: 1.5;
   font-variant-numeric: tabular-nums;
 }
@@ -370,7 +377,7 @@ a.crumb:hover {
   margin-left: 6px;
   padding: 0;
   color: var(--text-2);
-  font-size: 12.5px;
+  font-size: 13px;
   font-weight: 500;
 }
 
@@ -390,7 +397,7 @@ a.crumb:hover {
   border-radius: 10px;
   background: var(--surface);
   color: var(--text);
-  font-size: 13px;
+  font-size: 14px;
   font-weight: 500;
   white-space: nowrap;
   transition: background 0.14s ease, border-color 0.14s ease, color 0.14s ease;
@@ -424,7 +431,7 @@ a.crumb:hover {
 .textBtn {
   padding: 5px 9px;
   border-radius: 8px;
-  font-size: 13px;
+  font-size: 14px;
   font-weight: 500;
   color: var(--text-2);
   transition: background 0.14s ease, color 0.14s ease;
@@ -497,7 +504,7 @@ a.crumb:hover {
 }
 
 .nameDir {
-  font-weight: 600;
+  font-weight: 500;
 }
 
 /* Row names never turn blue: the hover background is the only hover affordance. */
@@ -512,7 +519,7 @@ a.crumb:hover {
 .pathHint {
   flex: 0 1 auto;
   min-width: 0;
-  font-size: 12px;
+  font-size: 13px;
   color: var(--text-3);
   white-space: nowrap;
   overflow: hidden;
@@ -522,7 +529,7 @@ a.crumb:hover {
 
 .size,
 .time {
-  font-size: 11.5px;
+  font-size: 13px;
   color: var(--text-3);
   font-variant-numeric: tabular-nums;
   text-align: right;
@@ -558,12 +565,12 @@ a.crumb:hover {
 
 .emptyTitle {
   font-size: 14px;
-  font-weight: 600;
+  font-weight: 500;
 }
 
 .emptyText {
   max-width: 320px;
-  font-size: 12.5px;
+  font-size: 13px;
   line-height: 1.65;
   color: var(--text-3);
 }
@@ -628,7 +635,7 @@ a.crumb:hover {
   border: 1px solid var(--border-strong);
   background: var(--surface);
   color: var(--text);
-  font-size: 13px;
+  font-size: 14px;
   outline: none;
   transition: border-color 0.14s ease, box-shadow 0.14s ease;
 }
@@ -695,8 +702,8 @@ a.crumb:hover {
   border-radius: 10px;
   background: var(--blue);
   color: var(--btn-fg);
-  font-size: 13px;
-  font-weight: 600;
+  font-size: 14px;
+  font-weight: 500;
   white-space: nowrap;
   transition: filter 0.14s ease;
 }
@@ -731,20 +738,20 @@ a.crumb:hover {
 
 .detailRow dt {
   color: var(--text-3);
-  font-size: 12.5px;
+  font-size: 13px;
 }
 
 .detailRow dd {
   margin: 0;
   color: var(--text);
-  font-size: 13px;
+  font-size: 14px;
   font-variant-numeric: tabular-nums;
   overflow-wrap: anywhere;
 }
 
 .detailPath {
   font-family: var(--font-mono);
-  font-size: 12.5px;
+  font-size: 13px;
 }
 
 /* ---------- Drag and drop ---------- */
@@ -769,7 +776,7 @@ a.crumb:hover {
   border: 1.5px dashed var(--border-strong);
   background: color-mix(in srgb, var(--surface) 88%, transparent);
   color: var(--text-2);
-  font-size: 13.5px;
+  font-size: 14px;
   box-shadow: var(--shadow-pop);
 }
 
@@ -855,8 +862,8 @@ a.crumb:hover {
   border-radius: 999px;
   background: var(--hover);
   color: var(--text-3);
-  font-size: 10.5px;
-  font-weight: 600;
+  font-size: 11px;
+  font-weight: 500;
   line-height: 1;
   white-space: nowrap;
 }
@@ -884,7 +891,7 @@ a.crumb:hover {
   min-width: 0;
   overflow: hidden;
   color: var(--text-3);
-  font-size: 11.5px;
+  font-size: 13px;
   line-height: 1.3;
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
