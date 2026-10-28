@@ -16,13 +16,13 @@ import (
 	"everythingabout.me/backend/internal/nodes"
 )
 
-// checks a few things about /files/{path...}: slashes kept, %20 decoded, HEAD routed before GET.
+// checks a few things about /api/files/{path...}: slashes kept, %20 decoded, HEAD routed before GET.
 func TestFilesRoute(t *testing.T) {
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /files/{path...}", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("GET /api/files/{path...}", func(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprintf(w, "GET:%s", r.PathValue("path"))
 	})
-	mux.HandleFunc("HEAD /files/{path...}", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("HEAD /api/files/{path...}", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("X-Handler", "head")
 		w.WriteHeader(http.StatusOK)
 	})
@@ -34,10 +34,10 @@ func TestFilesRoute(t *testing.T) {
 		wantBody   string
 		wantHeader string
 	}{
-		{"multi-level path", http.MethodGet, "/files/Photos/2024/a.jpg", "GET:Photos/2024/a.jpg", ""},
-		{"percent-encoded", http.MethodGet, "/files/A%20B.txt", "GET:A B.txt", ""},
-		{"non-ASCII path", http.MethodGet, "/files/%E7%BE%BD%E6%AF%9B%E7%90%83/a.mp4", "GET:羽毛球/a.mp4", ""},
-		{"HEAD has its own handler", http.MethodHead, "/files/a.jpg", "", "head"},
+		{"multi-level path", http.MethodGet, "/api/files/Photos/2024/a.jpg", "GET:Photos/2024/a.jpg", ""},
+		{"percent-encoded", http.MethodGet, "/api/files/A%20B.txt", "GET:A B.txt", ""},
+		{"non-ASCII path", http.MethodGet, "/api/files/%E7%BE%BD%E6%AF%9B%E7%90%83/a.mp4", "GET:羽毛球/a.mp4", ""},
+		{"HEAD has its own handler", http.MethodHead, "/api/files/a.jpg", "", "head"},
 	}
 
 	for _, tc := range cases {
@@ -62,10 +62,10 @@ func TestFilesRoute(t *testing.T) {
 func TestIsAPIPath(t *testing.T) {
 	yes := []string{
 		"/capabilities", "/list", "/me", "/mkdir", "/move", "/copy", "/search",
-		"/files", "/files/a/b", "/upload", "/upload/complete", "/upload/u_1",
+		"/api/files", "/api/files/a/b", "/upload", "/upload/complete", "/upload/u_1",
 		"/move/m_1", "/copy/c_1", "/copy/c_1/cancel", "/s/abcd2345efgh2345",
 	}
-	no := []string{"/", "/api/fs/list", "/filesx", "/login", "/capabilitiesx"}
+	no := []string{"/", "/api/fs/list", "/files", "/filesx", "/api/filesx", "/login", "/capabilitiesx"}
 
 	for _, path := range yes {
 		if !isAPIPath(path) {
@@ -302,7 +302,7 @@ func TestSaveLinkPrompt(t *testing.T) {
 	prompt := saveLinkPrompt("https://everythingabout.me", "abcd2345efgh2345")
 	for _, want := range []string{
 		"Token: abcd2345efgh2345",
-		"PUT https://everythingabout.me/files/Inbox/2026/10/28/note.md",
+		"PUT https://everythingabout.me/api/files/Inbox/2026/10/28/note.md",
 		"Content-Type: text/markdown",
 		"POST https://everythingabout.me/upload",
 		"Authorization: Bearer abcd2345efgh2345",

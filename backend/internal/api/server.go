@@ -105,8 +105,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/fs/rename", s.wrap(s.handleRename))
 	mux.HandleFunc("POST /api/fs/delete", s.wrap(s.handleDelete))
 
-	// Public API: the path is the feature, with no /v1 or /api prefix.
-	// Events: like the file API, the path is the feature and carries no /api prefix.
+	// Public API: the path is the feature, with no /v1 prefix. File paths live under /api/files
+	// because /files is the web app's route; every other public endpoint still sits at the root.
+	// Events keep their root-level paths too.
 	mux.HandleFunc("POST /events", s.api(s.handleAPICreateEvent))
 	mux.HandleFunc("GET /events", s.api(s.handleAPIListEvents))
 	mux.HandleFunc("GET /events/{id}", s.api(s.handleAPIGetEvent))
@@ -128,12 +129,12 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /upload", s.api(s.handleAPIUpload))
 	mux.HandleFunc("GET /upload/{id}", s.api(s.handleAPIUploadStatus))
 	mux.HandleFunc("POST /upload/complete", s.api(s.handleAPIComplete))
-	mux.HandleFunc("GET /files/{path...}", s.api(s.handleAPIGetFile))
-	mux.HandleFunc("HEAD /files/{path...}", s.api(s.handleAPIHeadFile))
-	mux.HandleFunc("PUT /files/{path...}", s.api(s.handleAPIPutFile))
-	mux.HandleFunc("DELETE /files/{path...}", s.api(s.handleAPIDeleteFile))
+	mux.HandleFunc("GET /api/files/{path...}", s.api(s.handleAPIGetFile))
+	mux.HandleFunc("HEAD /api/files/{path...}", s.api(s.handleAPIHeadFile))
+	mux.HandleFunc("PUT /api/files/{path...}", s.api(s.handleAPIPutFile))
+	mux.HandleFunc("DELETE /api/files/{path...}", s.api(s.handleAPIDeleteFile))
 
-	// A save link is just a page of instructions; saving uses the existing /files and /upload.
+	// A save link is just a page of instructions; saving uses the existing /api/files and /upload.
 	// The sub-router registers GET only; ServeMux answers 405 for POST, with no business handler.
 	saveMux := http.NewServeMux()
 	saveMux.HandleFunc("GET /{code}", s.wrap(s.handleSaveLinkPage))
@@ -209,10 +210,10 @@ func (s *Server) limitAPI(w http.ResponseWriter, r *http.Request) error {
 func isAPIPath(path string) bool {
 	switch path {
 	case "/capabilities", "/list", "/me", "/mkdir", "/move", "/copy",
-		"/search", "/files", "/upload", "/upload/complete", "/events":
+		"/search", "/api/files", "/upload", "/upload/complete", "/events":
 		return true
 	}
-	for _, prefix := range []string{"/files/", "/move/", "/copy/", "/upload/", "/events/", "/s/"} {
+	for _, prefix := range []string{"/api/files/", "/move/", "/copy/", "/upload/", "/events/", "/s/"} {
 		if strings.HasPrefix(path, prefix) {
 			return true
 		}

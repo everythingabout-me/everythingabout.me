@@ -58,6 +58,16 @@ func (s *Server) handleList(w http.ResponseWriter, r *http.Request) error {
 		return err
 	}
 
+	// node tells the web app whether this path is a folder (is_dir), a file to open on its detail
+	// page, or missing (null). The root has no row, so it is null there too.
+	var node *nodes.Row
+	if path != "" {
+		node, err = s.nodes.Live(r.Context(), path, user.ID)
+		if err != nil {
+			return err
+		}
+	}
+
 	items, err := s.nodes.List(r.Context(), user.ID, path, listLimit)
 	if err != nil {
 		return err
@@ -85,6 +95,7 @@ func (s *Server) handleList(w http.ResponseWriter, r *http.Request) error {
 		"parent":     paths.ParentOf(path),
 		"breadcrumb": breadcrumb,
 		"truncated":  len(items) >= listLimit,
+		"node":       node,
 		"items":      items,
 	})
 }

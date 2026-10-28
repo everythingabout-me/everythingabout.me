@@ -55,8 +55,10 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			http.ServeFile(w, r, full)
 			return
 		}
-		// A missing asset with an extension is a 404; never return index.html in place of a .js file
-		if strings.Contains(path.Base(clean), ".") {
+		// A missing asset with an extension is a 404; never return index.html in place of a .js file.
+		// File detail routes are real SPA paths and usually end in an extension
+		// (/files/Photos/2024/a.jpg), so they must fall through to index.html.
+		if strings.Contains(path.Base(clean), ".") && !strings.HasPrefix(clean, "/files/") {
 			http.NotFound(w, r)
 			return
 		}

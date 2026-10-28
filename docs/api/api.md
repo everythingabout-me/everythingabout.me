@@ -13,7 +13,7 @@ both reads and writes trade an address directly with COS.
 ```
 POST /upload          → get an upload address (a small file has exactly one part)
 PUT  <that address>   → bytes go straight to COS
-GET  /files/<path>    → 302 to a download address
+GET  /api/files/<path>    → 302 to a download address
 
 everything else goes through us: /list /search /mkdir /move /copy /delete /me /capabilities
 ```
@@ -45,12 +45,12 @@ The same job under different names; the work is identical:
 | Job | S3 | Google Drive | Dropbox | Ours |
 |---|---|---|---|---|
 | List a directory | `ListObjectsV2` | `files.list` | `files/list_folder` | `GET /list?path=` |
-| Read a file | `GetObject` | `files.get` | `files/download` | `GET /files/<path>` |
-| Write a file | `PutObject` | `files.create` | `files/upload` | `PUT /files/<path>` |
+| Read a file | `GetObject` | `files.get` | `files/download` | `GET /api/files/<path>` |
+| Write a file | `PutObject` | `files.create` | `files/upload` | `PUT /api/files/<path>` |
 | Large file | `MultipartUpload` | resumable upload | `upload_session` | `POST /upload` |
-| Metadata | `HeadObject` | `files.get` | `files/get_metadata` | `HEAD /files/<path>` |
+| Metadata | `HeadObject` | `files.get` | `files/get_metadata` | `HEAD /api/files/<path>` |
 | Create a directory | — (no directories) | `files.create` | `files/create_folder` | `POST /mkdir` |
-| Delete | `DeleteObject` | `files.delete` | `files/delete_v2` | `DELETE /files/<path>` |
+| Delete | `DeleteObject` | `files.delete` | `files/delete_v2` | `DELETE /api/files/<path>` |
 | Move/rename | `CopyObject`+`Delete` | `files.update` | `files/move_v2` | `POST /move` |
 | Copy | `CopyObject` | `files.copy` | `files/copy_v2` | `POST /copy` |
 | Search | — | `files.list(q=)` | `files/search_v2` | `GET /search?q=` |
@@ -76,6 +76,10 @@ Request parameters and return values stay close to theirs too: paths, `cursor` p
 | Capabilities | `GET /capabilities` needs no auth; clients read their limits from it, **do not hard-code** |
 | Parent path | when the parent is a file, writes and mkdir return `409` (nothing grows a subtree under a file) |
 
+The one public route under `/api` is file content: `/api/files/<path>`. `/files` belongs to the web app
+(the file browser and its file detail pages), so the by-path file API moved one level deeper. Every other
+endpoint below stays at the root.
+
 **There is no `id`.** The path is the identity (the same as an S3 key). The server does have a row primary key
 internally, but it never enters JSON — see §8.4 for why.
 
@@ -87,10 +91,10 @@ internally, but it never enters JSON — see §8.4 for why.
 GET    /capabilities                      limits and capabilities (no auth)
 GET    /me                                who am I
 GET    /list?path=                        list a directory
-GET    /files/<path>                      read a file
-HEAD   /files/<path>                      look at metadata
-PUT    /files/<path>                      write a small file
-DELETE /files/<path>                      permanent delete
+GET    /api/files/<path>                  read a file
+HEAD   /api/files/<path>                  look at metadata
+PUT    /api/files/<path>                  write a small file
+DELETE /api/files/<path>                  permanent delete
 POST   /mkdir     {path}                  create a directory
 POST   /move      {from,to,overwrite}     move / rename
 POST   /copy      {from,to,overwrite}     copy
@@ -142,7 +146,7 @@ GET /list?path=Photos/2024&limit=200&cursor=
 ### 4.2 Read a file
 
 ```http
-GET /files/Photos/2024/a.jpg
+GET /api/files/Photos/2024/a.jpg
 Authorization: Bearer eam_live_xxx
 
 → 302 Location: https://<data domain>/drive/<uid>/Photos/2024/a.jpg?q-signature=…
@@ -155,21 +159,21 @@ Authorization: Bearer eam_live_xxx
 Clients do not handle this 302 — every HTTP client follows it automatically:
 
 ```python
-r = requests.get(f"{API}/files/Photos/2024/a.jpg", headers=auth)
+r = requests.get(f"{API}/api/files/Photos/2024/a.jpg", headers=auth)
 open("a.jpg", "wb").write(r.content)      # bytes come from the CDN → COS
 ```
 
 The real path is:
 
 ```
-client ──GET /files/a.jpg──▶ API (auth, accounting) ──302──▶ client ──▶ CDN ──▶ COS
+client ──GET /api/files/a.jpg──▶ API (auth, accounting) ──302──▶ client ──▶ CDN ──▶ COS
 ```
 
 - **Location must point at a separate data domain** (such as `data.example.com`). A same-origin redirect does
   not strip `Authorization`, so the token ends up in the CDN/COS logs; cross-origin, mainstream clients
   (requests, fetch, Go, curl) all strip it automatically. This one is a hard requirement.
 - `Range` is supported (resumable downloads, video scrubbing).
-- For clients that cannot follow redirects: `GET /files/<path>?json=1` → `{"url":…,"name":…,"size":…,"mime":…}`,
+- For clients that cannot follow redirects: `GET /api/files/<path>?json=1` → `{"url":…,"name":…,"size":…,"mime":…}`,
   then issue the GET yourself and **do not send `Authorization`**. This is the only query parameter in the whole
   API that changes the response type.
 - If the path is a directory you get `400 is_directory`; use `/list`.
@@ -177,7 +181,7 @@ client ──GET /files/a.jpg──▶ API (auth, accounting) ──302──▶
 ### 4.3 Metadata
 
 ```http
-HEAD /files/Photos/2024/a.jpg
+HEAD /api/files/Photos/2024/a.jpg
 → 200
    Content-Length: 248123
    Content-Type: image/jpeg
@@ -185,13 +189,13 @@ HEAD /files/Photos/2024/a.jpg
    Last-Modified: Fri, 24 Oct 2026 02:11:07 GMT
 ```
 
-**HEAD only.** The earlier `GET /files/<path>?meta=1` is gone (two entrances to one thing is the easiest fat to
+**HEAD only.** The earlier `GET /api/files/<path>?meta=1` is gone (two entrances to one thing is the easiest fat to
 grow on an API); passing `meta=1` now returns `400` with a message pointing at HEAD.
 
 ### 4.4 Write a small file (one-step shortcut)
 
 ```http
-PUT /files/Apps/badminton/analyses/a.json
+PUT /api/files/Apps/badminton/analyses/a.json
 Authorization: Bearer eam_live_xxx
 Content-Type: application/json
 
@@ -296,12 +300,12 @@ Single-part mode returns an empty `received` — just retransmit the whole part,
 ### 4.6 Delete
 
 ```http
-DELETE /files/Documents/old.pdf
+DELETE /api/files/Documents/old.pdf
 → 204
 ```
 
 - **Permanent delete**: the object and the index go together, with no trash.
-- `DELETE /files/<dir>` requires `?recursive=1`, otherwise `409` — the parameter is there as a guardrail against
+- `DELETE /api/files/<dir>` requires `?recursive=1`, otherwise `409` — the parameter is there as a guardrail against
   slips.
 - The client should confirm once before deleting (that dialog on the web).
 
@@ -380,8 +384,8 @@ POST /mkdir
 | Parent missing | created automatically (`mkdir -p`), no extra parameter |
 | Parent is a file | `409` |
 
-Why `POST /mkdir` instead of `PUT /files/<dir>/`: a directory is "a resource without bytes", and sharing
-`/files/<path>` with files would force a **trailing slash** to tell them apart — the biggest trap in WebDAV.
+Why `POST /mkdir` instead of `PUT /api/files/<dir>/`: a directory is "a resource without bytes", and sharing
+`/api/files/<path>` with files would force a **trailing slash** to tell them apart — the biggest trap in WebDAV.
 With a verb plus a body, a path is always a path and there is no ambiguity.
 
 ### 4.10 Search
@@ -552,7 +556,7 @@ API: https://everythingabout.me
 Authorization: Bearer abcd2345efgh2345
 
 Save a short text (one request):
-  PUT https://everythingabout.me/files/Inbox/2026/10/28/note.md
+  PUT https://everythingabout.me/api/files/Inbox/2026/10/28/note.md
   Content-Type: text/markdown
 
   <content>
@@ -567,10 +571,10 @@ Save a file (image, video, PDF, any size):
 Use a unique path; PUT does not overwrite by default.
 ```
 
-Short text goes straight through [`PUT /files/<path>`](#44-write-a-small-file-one-step-shortcut):
+Short text goes straight through [`PUT /api/files/<path>`](#44-write-a-small-file-one-step-shortcut):
 
 ```http
-PUT /files/Inbox/2026/10/28/note.md
+PUT /api/files/Inbox/2026/10/28/note.md
 Authorization: Bearer abcd2345efgh2345
 Content-Type: text/markdown
 
@@ -592,9 +596,9 @@ POST /upload/complete                # verify the size and write the index
 - The short code is 16 lowercase base32 characters, **without the `eam_` prefix**; sending it as
   `Authorization: Bearer <short code>` is a credential for the full file API.
 - A save link has the same rights as the user: no prefix, no capability bits, no expiry by default.
-- The path is the agent's choice; `Inbox/YYYY/MM/DD/` is a good spot. `PUT /files` creates parent directories
+- The path is the agent's choice; `Inbox/YYYY/MM/DD/` is a good spot. `PUT /api/files` creates parent directories
   automatically and does not overwrite by default (`?overwrite=1` or `If-Match` overwrites).
-- `PUT /files` caps at 32 MiB; larger files go through `/upload`, with bytes never passing through the server.
+- `PUT /api/files` caps at 32 MiB; larger files go through `/upload`, with bytes never passing through the server.
 - Saving is audited as the existing file API's `put` / `upload` / `upload_complete`, visible in the account
   page's "recent activity".
 - `/api/save-links` (cookie session) on the account page creates, lists, and revokes them; after revocation
@@ -645,7 +649,7 @@ Sharing, quotas, and account management live on the **website** and stay out of 
 
 | Phase | What | Status |
 |---|---|---|
-| P1 | `api_tokens` table, Bearer auth, `/list` `/files` `/move` `/me`, presigned downloads, CORS | ✅ |
+| P1 | `api_tokens` table, Bearer auth, `/list` `/api/files` `/move` `/me`, presigned downloads, CORS | ✅ |
 | P2 | `/upload` + `/upload/complete` (single part) | ✅ |
 | P3 | `/search`, directory moves (async), quota and rate limiting, audit | ✅ |
 | P4 | Real multipart (> 5 GiB) | ✅ |
@@ -670,7 +674,7 @@ Implementation details:
 - Audit: writes are recorded in `audit_log` (action / path / status / ip / token / detail); a failed audit write only logs.
 - Multipart upload: sliced automatically above the threshold, one presigned URL per part; at `complete` the `{partNumber, etag}` pairs go to COS to be combined.
 - Error body: `{"error":"not_found","message":"..."}` with a matching HTTP status; `message` is always English (lowercase, no period) and `error` is a stable machine-readable code.
-- Save links: a 16-character base32 short code; GET yields the token + prompt, and saving reuses `PUT /files` and `/upload` rather than adding a new write entrance.
+- Save links: a 16-character base32 short code; GET yields the token + prompt, and saving reuses `PUT /api/files` and `/upload` rather than adding a new write entrance.
 
 The web-facing `/api/fs/*` stays as it is, untouched. The public API lives in `backend/internal/api/api_*.go`,
 auth in `backend/internal/auth/token.go`, and jobs in `backend/internal/jobs`.

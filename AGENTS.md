@@ -77,8 +77,9 @@ Common commands:
   `timeline.Analyzer`) and never construct clients inside a handler.
 - **Deletion is permanent** (there is no trash); deleting a directory requires an explicit `?recursive=1`, and
   code must never recurse "helpfully" on the user's behalf.
-- Do not mix the two auth systems: the public API (`/list`, `/files/...`, `/move`, `/upload`, ...) uses a
-  Bearer token; `/api/*` is web-only and uses the httpOnly cookie `eam_session`.
+- Do not mix the two auth systems: the public API (`/list`, `/api/files/...`, `/move`, `/upload`, ...) uses a
+  Bearer token; the web API (`/api/fs/*`, `/api/auth/*`, ...) is web-only and uses the httpOnly cookie
+  `eam_session`. `/api/files/*` is the one public path under `/api`, because `/files` belongs to the SPA.
 - Long operations (move / copy) always use `Prefer: respond-async` and return `202 + Location`; do not invent a
   second "task" concept.
 - Rate limiting is in-process memory (`internal/ratelimit`), so multiple instances each keep their own count;
@@ -257,7 +258,8 @@ Variants: `Committed locally main@abc1234, not pushed` / `Not committed (tests f
 - Delete or rewrite an existing migration; only append.
 - Change the 5173 port or the `/api` proxy in `web/vite.config.ts` — COS CORS and the development flow depend
   on it.
-- Mix the two auth systems on one route (`/api/*` with a Bearer token, or the public API with a cookie).
+- Mix the two auth systems on one route: the web API (`/api/fs/*`, `/api/auth/*`, ...) uses the cookie, and
+  the public API (including `/api/files/*`) uses Bearer tokens. Keep `/api/files/*` Bearer-only.
 
 ## Known traps (already hit)
 

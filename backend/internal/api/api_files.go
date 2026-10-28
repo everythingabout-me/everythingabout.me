@@ -251,7 +251,7 @@ func (s *Server) handleAPIMe(w http.ResponseWriter, r *http.Request) error {
 	return nil
 }
 
-// ---- /files/<path> ----
+// ---- /api/files/<path> ----
 
 // filePath extracts and normalizes the path from the URL.
 func filePath(r *http.Request) (string, error) {
@@ -292,7 +292,7 @@ func (s *Server) handleAPIGetFile(w http.ResponseWriter, r *http.Request) error 
 	query := r.URL.Query()
 	if query.Get("meta") == "1" {
 		// two entry points for one thing is the easiest fat an API grows; this one is cut.
-		return httpx.BadRequest("?meta=1 was removed; use HEAD /files/<path> for metadata")
+		return httpx.BadRequest("?meta=1 was removed; use HEAD /api/files/<path> for metadata")
 	}
 
 	url, err := s.storage.GetURL(r.Context(), node.Key, storage.URLOptions{

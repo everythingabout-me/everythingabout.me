@@ -4,7 +4,7 @@
  * This list must match the plugins enabled in `FilePreview.tsx`: too many entries make users wait
  * on a 190KB chunk for an empty preview, too few leave viewable files unopenable.
  *
- * It deliberately does not import `@open-file-viewer/core` — DrivePage checks on every render, so
+ * It deliberately does not import `@open-file-viewer/core` — FilesPage checks on every render, so
  * a static reference to the core package would defeat lazy loading. Hence the hand-written list.
  */
 const previewableExtensions: ReadonlySet<string> = new Set([

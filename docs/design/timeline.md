@@ -561,7 +561,7 @@ Key points:
 
 ## 10. Frontend
 
-Route `/` (the stream), with the file browser demoted to `/drive`; on mobile the stream is the main entry point. The UI never says "timeline / event / moment" — only months, cards, and the data band.
+Route `/` (the stream), with the file browser demoted to `/files`; on mobile the stream is the main entry point. The UI never says "timeline / event / moment" — only months, cards, and the data band.
 
 ```
 ┌───────────────────────────────────────────────────────────┐

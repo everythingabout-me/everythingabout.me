@@ -129,8 +129,9 @@ shots/           real Chrome-rendered screenshots (1280 viewport, @2x)
 This system has already landed in `web/`:
 
 - `web/src/styles/globals.css` — warm white / blue / brick red tokens, system font stack, focus
-- `web/src/pages/DrivePage.tsx` / `DrivePage.module.css` — B's title + stats + new directory, 58px row height, pale blue glyph
-- `web/src/pages/StreamPage.module.css` — the stream home's top bar, month headings, empty states, buttons
+- `web/src/components/AppHeader.tsx` / `AppHeader.module.css` — the shared top bar and active nav background
+- `web/src/pages/FilesPage.tsx` / `FilesPage.module.css` — B's title + stats + new directory, 58px row height, pale blue glyph, and the file detail page
+- `web/src/pages/StreamPage.module.css` — the stream feed, event cards, empty states, buttons
 - `web/src/styles/auth.module.css` — login / account cards, inputs, blue primary button, brick red danger
 - `web/src/components/icons.tsx` — icon stroke width unified at 1.5
 

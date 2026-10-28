@@ -9,7 +9,7 @@ import {
   type TimelineEvent,
   type StreamStatus,
 } from "../api/client";
-import { BrandMark } from "../components/BrandMark";
+import { AppHeader } from "../components/AppHeader";
 import { RefreshIcon } from "../components/icons";
 import { filesText, t } from "../i18n";
 import { formatEventDate } from "../i18n/format";
@@ -150,32 +150,7 @@ export function StreamPage() {
     <div className={styles.page}>
       <title>{t("app.name")}</title>
 
-      <header className={styles.topbar}>
-        <div className={styles.topbarInner}>
-          <Link to="/" className={styles.brand}>
-            <BrandMark className={styles.brandMark} />
-            <span className={styles.brandText}>{t("app.name")}</span>
-          </Link>
-
-          <nav className={styles.nav}>
-            <Link className={styles.navLink} to="/drive">
-              {t("nav.files")}
-            </Link>
-          </nav>
-
-          <div className={styles.spacer} />
-
-          <Link
-            className={styles.account}
-            to="/account"
-            title={t("nav.accountSettings")}
-            aria-label={t("nav.accountSettingsFor", { email: user.email })}
-          >
-            <span className={styles.avatar}>{user.email.slice(0, 1).toUpperCase()}</span>
-            <span className={styles.email}>{user.email}</span>
-          </Link>
-        </div>
-      </header>
+      <AppHeader user={user} />
 
       <main className={styles.main}>
         {indexing && (
@@ -208,7 +183,7 @@ export function StreamPage() {
               {indexing ? t("stream.emptyIndexingText") : t("stream.emptyText")}
             </span>
             {!indexing && (
-              <Link className={styles.emptyAction} to="/drive">
+              <Link className={styles.emptyAction} to="/files">
                 {t("stream.emptyAction")}
               </Link>
             )}

@@ -70,16 +70,16 @@ The key sits directly on the path (`drive/<userID>/Photos/2024/a.jpg`), which me
 - **Bilingual**: the locale follows the system/browser preferred language (`zh` → Chinese, everything else → English) with no language switcher; the stream's months, card subtitles, and relative times follow it too
 - Three pages — sign in / sign up (merged into one) / account — that follow the system light/dark setting
 - `/` is a flat event stream: one card is one event (a photo / a sentence / a group of numbers / an app's own HTML), with no year or month headings and no statistics
-- `/drive` is the file browser: breadcrumbs, relative times, type icons, hover actions
-- Clicking a filename opens an in-place preview overlay (`Esc` closes it): images, PDF, Office (docx / xlsx / pptx), plain text and source code, audio and video;
+- `/files` is the file browser: the open folder is the URL (`/files/Photos/2024`), with breadcrumbs, relative times, type icons and hover actions
+- Every file has its own page at `/files/<path>`, built like a folder page (same header, breadcrumbs and title block): an inline preview for images, PDF, Office (docx / xlsx / pptx), plain text and source code, audio and video, plus type, size and timestamps;
   the viewer ([open-file-viewer](https://github.com/xushanpei/open-file-viewer)) plus pdfjs go through `React.lazy`,
-  so nothing downloads on first paint and a single chunk (~191KB gzip) is fetched when you open one, with the per-format renderer loading on top of that; unrecognized types still fall back to a download in a new tab
-- Drag / multi-select upload: placeholder rows appear immediately, with a queue, progress, and speed, cancelable, retryable on failure; `/` focuses search, `Esc` closes the overlay
+  so nothing downloads on first paint and a single chunk (~191KB gzip) is fetched when you open one, with the per-format renderer loading on top of that; formats without a preview still offer a download
+- Drag / multi-select upload: placeholder rows appear immediately, with a queue, progress, and speed, cancelable, retryable on failure; `/` focuses search
 - Search matches both the filename and the full path, and each result shows its directory on the right
 - New directories use an inline input, and deletion has a confirmation dialog (it is permanent)
-- The top bar shows the current account on the right; click through to `/account` to change the email, set a password, or sign out
-- The current directory lives in the URL's `?path=`, so you can share or refresh straight into a level
-- Frontend routes: `/` (stream), `/drive` (files), `/login` (code sign-in, `?mode=password` goes straight to password sign-in), `/account`
+- One shared top bar on every signed-in page: brand, `Home` / `Files` navigation with the current page highlighted, the account chip, and the file page's search and upload actions
+- The current folder or file is the URL itself (`/files/...`), so you can share or refresh straight into it; old `/drive?path=...` links redirect
+- Frontend routes: `/` (stream), `/files` (file browser), `/files/<path>` (folder or file detail), `/login` (code sign-in, `?mode=password` goes straight to password sign-in), `/account`
 
 ## Getting started
 
@@ -231,14 +231,17 @@ cd backend && go run ./cmd/eam token create \
 curl -H "Authorization: Bearer eam_..." https://your-host/list?path=Apps/badminton
 ```
 
+File content lives under `/api/files/<path>` because `/files` is the web app's own route; every other public
+endpoint stays at the root.
+
 | Method | Path | Description |
 |---|---|---|
 | GET | `/capabilities` | No auth: limits, capabilities, rate limits (clients read them here, do not hard-code) |
 | GET | `/list?path=&limit=&cursor=` | List a directory (keyset pagination, includes `writable`) |
-| GET | `/files/<path>` | 302 to a presigned download URL; `?json=1` returns the URL |
-| HEAD | `/files/<path>` | Metadata (length / type / ETag / modification time) |
-| PUT | `/files/<path>` | Write a file (≤ 32 MiB; never overwrites by default, add `?overwrite=1` to overwrite) |
-| DELETE | `/files/<path>` | Permanent delete (directories need `?recursive=1`) |
+| GET | `/api/files/<path>` | 302 to a presigned download URL; `?json=1` returns the URL |
+| HEAD | `/api/files/<path>` | Metadata (length / type / ETag / modification time) |
+| PUT | `/api/files/<path>` | Write a file (≤ 32 MiB; never overwrites by default, add `?overwrite=1` to overwrite) |
+| DELETE | `/api/files/<path>` | Permanent delete (directories need `?recursive=1`) |
 | POST | `/mkdir` | `{"path"}` creates a directory (parents created automatically; an existing directory returns 200, idempotent) |
 | POST | `/move` | `{"from","to","overwrite"}` move / rename |
 | POST | `/copy` | `{"from","to","overwrite"}` copy (files and directories) |
@@ -248,7 +251,7 @@ curl -H "Authorization: Bearer eam_..." https://your-host/list?path=Apps/badmint
 | GET | `/upload/{id}` | See how far it got (the parts already received) and resume after a disconnect |
 | POST | `/upload/complete` | Confirm the upload; verifies the size, then writes the index |
 | GET | `/me` | Current account, token permissions, usage |
-| GET | `/s/<code>` | Save link for agents: returns only a token and a prompt; saving goes through `/files` or `/upload` |
+| GET | `/s/<code>` | Save link for agents: returns only a token and a prompt; saving goes through `/api/files` or `/upload` |
 
 Large file flow: `POST /upload` for URLs → PUT straight to COS (never through this server) → `POST /upload/complete`.
 Writes are recorded in `audit_log`; the rate limit is 600 requests per minute per token.
@@ -265,7 +268,7 @@ https://your-host/s/abcd2345efgh2345
 ```
 
 The URL itself is the token plus the instructions: `GET` only returns a prompt and accepts no content. An agent
-opens it, gets the token, and saves through the existing file API: short text with `PUT /files/Inbox/...`; images,
+opens it, gets the token, and saves through the existing file API: short text with `PUT /api/files/Inbox/...`; images,
 videos, and PDFs with `POST /upload` for a URL that uploads straight to COS, bytes never passing through the
 server. The account page can mint as many as you like, show recent use, and revoke them at any time; a revoked
 link stops working immediately. The short code has no `eam_` prefix and also works directly as a Bearer token for
@@ -302,7 +305,7 @@ the rewrite.
 | DELETE | `/api/events/{id}` | Delete one event (a tombstone, so it cannot come back) |
 | GET | `/api/timeline/status` | Organizing progress (unfinished tasks, files organized, earliest/latest month) |
 | POST | `/api/timeline/rebuild` | Force a full re-organize of the current account (drops the analysis results and backfills from scratch) |
-| GET | `/api/fs/list?path=` | List the current level (queries Postgres, not the bucket) |
+| GET | `/api/fs/list?path=` | List the current level (Postgres only, not the bucket; also returns the path's own `node`, so the UI can tell a folder from a file) |
 | GET | `/api/fs/search?q=` | Fuzzy search by name/path |
 | POST | `/api/fs/upload/sign` | Get STS temporary credentials for a browser direct upload |
 | POST | `/api/fs/upload/confirm` | Writes the index after a HeadObject check |

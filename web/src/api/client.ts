@@ -26,6 +26,7 @@ export interface Item {
   is_dir: boolean;
   size: number;
   mime: string | null;
+  created_at: string;
   updated_at: string;
   meta: Record<string, unknown>;
 }
@@ -40,6 +41,8 @@ export interface ListResult {
   parent: string;
   breadcrumb: Crumb[];
   truncated: boolean;
+  /** The current path itself: a folder, a file (is_dir false), or null at the root / when missing. */
+  node: Item | null;
   items: Item[];
 }
 

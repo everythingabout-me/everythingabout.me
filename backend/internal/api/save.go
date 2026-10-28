@@ -12,7 +12,7 @@ import (
 )
 
 // A save link is instructions for an agent: GET /s/<code> returns the token plus a prompt.
-// It accepts no content itself; saving goes through the file API (PUT /files, POST /upload).
+// It accepts no content itself; saving goes through the file API (PUT /api/files, POST /upload).
 
 // handleSaveLinkPage renders the link page: agents get the Markdown prompt by default,
 // browsers get a page of instructions, and ?format=json serves apps.
@@ -39,7 +39,7 @@ func (s *Server) handleSaveLinkPage(w http.ResponseWriter, r *http.Request) erro
 			"token":      code,
 			"url":        linkURL,
 			"api":        base,
-			"files":      base + "/files/",
+			"files":      base + "/api/files/",
 			"upload":     base + "/upload",
 			"prompt":     prompt,
 			"name":       p.Token.Name,
@@ -80,7 +80,7 @@ API: %s
 Authorization: Bearer %s
 
 Save a short text (one request):
-  PUT %s/files/Inbox/2026/10/28/note.md
+  PUT %s/api/files/Inbox/2026/10/28/note.md
   Content-Type: text/markdown
 
   <content>
