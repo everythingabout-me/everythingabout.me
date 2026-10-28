@@ -12,28 +12,133 @@
   padding: 28px 24px 64px;
 }
 
-/* ---------- Page tools: search + this page's actions ---------- */
+/* ---------- Page header: the path, plus this page's controls ---------- */
 
-.tools {
+.topbar {
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 0 2px 18px;
+  gap: 14px;
+  padding: 0 2px 16px;
 }
 
-/* The search box lives here, not in the shared header, which stays identical on every page. */
+.pathArea {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+/* One uniform line: ancestors, separators and the current folder look the same. */
+.crumbs {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 2px 4px;
+  min-width: 0;
+}
+
+.crumbItem {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.crumb {
+  margin: 0;
+  min-width: 0;
+  padding: 0;
+  color: var(--text-2);
+  font-size: 13px;
+  font-weight: 500;
+  letter-spacing: 0;
+  line-height: 1.45;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  transition: color 0.14s ease;
+}
+
+a.crumb:hover {
+  color: var(--text);
+}
+
+.crumbSep {
+  display: flex;
+  align-items: center;
+  flex: none;
+  color: var(--text-3);
+  opacity: 0.55;
+}
+
+/* Editing the last segment happens in place, where the name already is. */
+.renameInput {
+  min-width: 140px;
+  max-width: 100%;
+  height: 28px;
+  padding: 0 8px;
+  border-radius: 7px;
+  border: 1px solid var(--blue);
+  background: var(--surface);
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 500;
+  outline: none;
+  box-shadow: 0 0 0 4px var(--ring);
+}
+
+.pathTitle {
+  margin: 0;
+  min-width: 0;
+  color: var(--text-2);
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 1.45;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.topActions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex: none;
+  margin-left: auto;
+}
+
+.iconBtn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border-radius: 9px;
+  color: var(--text-2);
+  transition: background 0.14s ease, color 0.14s ease;
+}
+
+.iconBtn:hover,
+.iconBtn[aria-expanded="true"] {
+  background: var(--hover);
+  color: var(--text);
+}
+
+/* The search field is the same control, expanded: icon first, input only while open. */
 .search {
   position: relative;
   display: flex;
   align-items: center;
-  flex: 1 1 200px;
+  flex: none;
+  width: 260px;
   min-width: 0;
-  max-width: 320px;
 }
 
 .searchIcon {
   position: absolute;
-  left: 12px;
+  left: 10px;
   color: var(--blue-ink);
   pointer-events: none;
   display: flex;
@@ -42,9 +147,9 @@
 
 .searchInput {
   width: 100%;
-  height: 36px;
-  padding: 0 32px 0 31px;
-  border-radius: 10px;
+  height: 32px;
+  padding: 0 12px 0 30px;
+  border-radius: 9px;
   border: 1px solid var(--border);
   background: var(--surface);
   color: var(--text);
@@ -72,129 +177,121 @@
   color: var(--blue-ink);
 }
 
-.kbd {
+/* ---------- Actions menu ---------- */
+
+.menuWrap {
+  position: relative;
+}
+
+/* A transparent layer behind the popover: a click anywhere else closes it. */
+.menuScrim {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  background: transparent;
+  cursor: default;
+}
+
+.menu {
   position: absolute;
-  right: 9px;
-  display: grid;
-  place-items: center;
-  min-width: 17px;
-  height: 17px;
-  padding: 0 4px;
-  border-radius: 6px;
-  border: 1px solid var(--border);
-  background: var(--hover);
-  color: var(--text-3);
-  font-size: 10px;
-  line-height: 1;
-  pointer-events: none;
-}
-
-.searchInput:focus + .kbd {
-  opacity: 0;
-}
-
-.toolActions {
+  top: calc(100% + 6px);
+  right: 0;
+  z-index: 41;
   display: flex;
-  align-items: center;
-  gap: 6px;
-  flex: none;
-  margin-left: auto;
-}
-
-.uploadBtn {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  flex: none;
-  height: 36px;
-  padding: 0 15px;
-  border-radius: 10px;
-  background: var(--blue);
-  color: var(--btn-fg);
-  font-size: 13px;
-  font-weight: 600;
-  white-space: nowrap;
-  box-shadow: none;
-  transition: filter 0.14s ease, opacity 0.14s ease;
-}
-
-.uploadBtn:hover {
-  filter: brightness(0.94);
-}
-
-.uploadBtn:active {
-  filter: brightness(0.88);
-}
-
-.uploadBadge {
-  display: inline-grid;
-  place-items: center;
-  min-width: 16px;
-  height: 16px;
-  padding: 0 4px;
-  border-radius: 999px;
-  background: color-mix(in srgb, var(--btn-fg) 20%, transparent);
-  font-size: 10px;
-  font-weight: 700;
-  line-height: 1;
-  font-variant-numeric: tabular-nums;
-}
-
-/* ---------- Page title ---------- */
-
-.masthead {
-  padding: 2px 2px 16px;
-}
-
-.mastheadMain {
-  min-width: 0;
-}
-
-.breadcrumbs {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
+  flex-direction: column;
   gap: 1px;
-  margin-bottom: 6px;
-  color: var(--text-3);
+  min-width: 184px;
+  padding: 5px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--surface);
+  box-shadow: var(--shadow-pop);
 }
 
-.crumbLink {
-  padding: 0;
-  color: var(--text-2);
-  font-size: 12px;
-  font-weight: 500;
-  white-space: nowrap;
-}
-
-.crumbLink:hover {
-  color: var(--text);
-}
-
-.breadcrumbSep {
+.menuItem {
   display: flex;
   align-items: center;
-  color: var(--text-3);
-  opacity: 0.6;
+  gap: 9px;
+  width: 100%;
+  height: 34px;
+  padding: 0 10px;
+  border-radius: 8px;
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 500;
+  text-align: left;
+  white-space: nowrap;
+  transition: background 0.12s ease;
 }
 
-.pageTitle {
-  margin: 0;
-  font-size: 22px;
-  line-height: 1.35;
-  font-weight: 600;
-  letter-spacing: 0;
+.menuItem svg {
+  flex: none;
+  color: var(--text-3);
+}
+
+.menuItem:hover:not(:disabled) {
+  background: var(--hover);
+}
+
+.menuItem:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+/* ---------- Rename progress ---------- */
+
+.jobRow {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 0 2px 12px;
+  padding: 9px 12px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface);
+  color: var(--text-2);
+  font-size: 12.5px;
+}
+
+.jobLabel {
+  flex: 0 1 auto;
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.stats {
+.jobCount {
+  flex: none;
+  color: var(--text-3);
+  font-variant-numeric: tabular-nums;
+}
+
+.jobBar {
+  flex: 1 1 80px;
+  min-width: 48px;
+  height: 4px;
+  border-radius: 999px;
+  background: var(--hover);
+  overflow: hidden;
+}
+
+.jobBarFill {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--blue);
+  transition: width 0.3s ease;
+}
+
+/* ---------- File facts (a file page lists no children) ---------- */
+
+.fileMeta {
   display: flex;
   align-items: center;
   flex-wrap: wrap;
   gap: 7px;
-  margin: 7px 0 0;
+  margin: 0 2px 14px;
   color: var(--text-3);
   font-size: 12.5px;
   line-height: 1.5;

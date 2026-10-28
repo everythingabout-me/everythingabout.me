@@ -50,6 +50,25 @@ export interface SearchResult {
   items: Item[];
 }
 
+/**
+ * A background move/copy of a directory. The web API only surfaces it for a directory rename,
+ * but the shape is the shared one: the same row backs `/move/{id}` and `/copy/{id}`.
+ */
+export interface Job {
+  id: string;
+  op: "move" | "copy";
+  from: string;
+  to: string;
+  status: "pending" | "running" | "done" | "failed" | "cancelled";
+  total: number;
+  done: number;
+  error?: string;
+  cancelRequested: boolean;
+  createdAt: string;
+  startedAt: string | null;
+  finishedAt: string | null;
+}
+
 
 export interface EventMedia {
   path: string;
@@ -311,8 +330,22 @@ export const api = {
     await post("/api/fs/mkdir", { path });
   },
 
-  async rename(from: string, to: string): Promise<void> {
-    await post("/api/fs/rename", { from, to });
+  /**
+   * A file is renamed in one request; a directory is a subtree, so it answers with a job whose
+   * progress is polled at `renameStatus`. `job` is null when the work already finished.
+   * `respond-async` keeps the request from blocking while a big directory is being copied.
+   */
+  async rename(from: string, to: string): Promise<{ job: Job | null }> {
+    const data = await request<{ job?: Job }>("/api/fs/rename", {
+      method: "POST",
+      body: JSON.stringify({ from, to }),
+      headers: { Prefer: "respond-async" },
+    });
+    return { job: data.job ?? null };
+  },
+
+  async renameStatus(id: string): Promise<{ job: Job }> {
+    return request<{ job: Job }>(`/api/fs/rename/${encodeURIComponent(id)}`);
   },
 
   async deletePath(path: string): Promise<void> {

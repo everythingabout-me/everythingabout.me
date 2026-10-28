@@ -154,6 +154,26 @@ export function ChevronRightIcon(props: IconProps) {
   );
 }
 
+/** The "more actions" affordance: three dots, filled so they read at 16px. */
+export function MoreIcon(props: IconProps) {
+  return (
+    <svg {...base(props)} stroke="none" fill="currentColor">
+      <circle cx="3.5" cy="8" r="1.1" />
+      <circle cx="8" cy="8" r="1.1" />
+      <circle cx="12.5" cy="8" r="1.1" />
+    </svg>
+  );
+}
+
+export function PencilIcon(props: IconProps) {
+  return (
+    <svg {...base(props)}>
+      <path d="M10.4 2.6a1.55 1.55 0 0 1 2.2 2.2L5.6 11.8l-3 .8.8-3z" />
+      <path d="m9.3 3.7 2.2 2.2" />
+    </svg>
+  );
+}
+
 /** Pick an icon by extension, keeping the visuals restrained */
 export function GlyphFor({ name, mime, isDir }: { name: string; mime?: string | null; isDir: boolean }) {
   if (isDir) return <FolderIcon />;

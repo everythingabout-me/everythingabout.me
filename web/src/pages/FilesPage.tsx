@@ -1,6 +1,6 @@
 import { Suspense, lazy, memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useLoaderData, useNavigate, useParams } from "react-router";
-import { ApiError, api, type AuthUser, type Crumb, type Item } from "../api/client";
+import { ApiError, api, type AuthUser, type Crumb, type Item, type Job } from "../api/client";
 import { AppHeader } from "../components/AppHeader";
 import {
   ChevronRightIcon,
@@ -9,8 +9,9 @@ import {
   FileIcon,
   FolderIcon,
   GlyphFor,
+  MoreIcon,
+  PencilIcon,
   PlusIcon,
-  RefreshIcon,
   SearchIcon,
   UploadIcon,
 } from "../components/icons";
@@ -268,44 +269,17 @@ const UploadRow = memo(function UploadRow({
   );
 });
 
-function Breadcrumbs({ crumbs }: { crumbs: Crumb[] }) {
-  return (
-    <nav className={styles.breadcrumbs} aria-label={t("drive.pathLabel")}>
-      {crumbs.map((crumb, index) => (
-        <span key={crumb.path || "root"} style={{ display: "contents" }}>
-          {index > 0 && (
-            <span className={styles.breadcrumbSep}>
-              <ChevronRightIcon size={12} />
-            </span>
-          )}
-          <Link className={styles.crumbLink} to={filesHref(crumb.path)}>
-            {crumbName(crumb)}
-          </Link>
-        </span>
-      ))}
-    </nav>
-  );
-}
-
-/** A file's own page, built like a folder page: same header, breadcrumbs and title block. */
-function FileDetail({ file, trail }: { file: Item; trail: Crumb[] }) {
-  const parents = trail.slice(0, -1);
-
+/** A file's own page: the path bar above it already names the file, so this adds only facts. */
+function FileDetail({ file }: { file: Item }) {
   return (
     <>
-      <div className={styles.masthead}>
-        <div className={styles.mastheadMain}>
-          {parents.length > 0 && <Breadcrumbs crumbs={parents} />}
-          <h1 className={styles.pageTitle}>{file.name}</h1>
-          <p className={styles.stats}>
-            <span>{fileTypeName(file)}</span>
-            <span className={styles.statSep}>·</span>
-            <span>{formatSize(Number(file.size))}</span>
-            <span className={styles.statSep}>·</span>
-            <span>{formatRelativeTime(file.updated_at)}</span>
-          </p>
-        </div>
-      </div>
+      <p className={styles.fileMeta}>
+        <span>{fileTypeName(file)}</span>
+        <span className={styles.statSep}>·</span>
+        <span>{formatSize(Number(file.size))}</span>
+        <span className={styles.statSep}>·</span>
+        <span>{formatRelativeTime(file.updated_at)}</span>
+      </p>
 
       <section className={styles.viewerPanel}>
         {canPreviewFile(file.name) ? (
@@ -384,9 +358,15 @@ export function FilesPage() {
   const [newName, setNewName] = useState("");
   const [toast, setToast] = useState<{ text: string; kind: "info" | "error" } | null>(null);
   const [dragging, setDragging] = useState(false);
+  const [searchOpen, setSearchOpen] = useState(false);
+  const [menuOpen, setMenuOpen] = useState(false);
+  const [renaming, setRenaming] = useState(false);
+  const [renameName, setRenameName] = useState("");
+  const [renameJob, setRenameJob] = useState<Job | null>(null);
 
-  const fileInput = useRef<HTMLInputElement>(null);
   const searchInput = useRef<HTMLInputElement>(null);
+  const renameInput = useRef<HTMLInputElement>(null);
+  const renameTimer = useRef<number | null>(null);
   const toastTimer = useRef<number | null>(null);
   const dragDepth = useRef(0);
   const completedUploads = useRef(0);
@@ -439,6 +419,10 @@ export function FilesPage() {
     void load(path);
   }, [path, load]);
 
+  useEffect(() => {
+    setRenaming(false);
+  }, [path]);
+
   /** Once a file's confirm succeeds, swap its placeholder row for the returned node. */
   const handleUploaded = useCallback((task: UploadTask, item: Item) => {
     completedUploads.current += 1;
@@ -474,6 +458,8 @@ export function FilesPage() {
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
         setCreating(false);
+        setMenuOpen(false);
+        setRenaming(false);
         setToast(null);
       }
     };
@@ -481,7 +467,7 @@ export function FilesPage() {
     return () => window.removeEventListener("keydown", onKeyDown);
   }, []);
 
-  // "/" focuses the page's search box, except while typing in a field.
+  // "/" opens the search field, except while typing in one.
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
       const target = event.target as HTMLElement | null;
@@ -489,12 +475,32 @@ export function FilesPage() {
         target?.tagName === "INPUT" || target?.tagName === "TEXTAREA" || target?.isContentEditable;
       if (event.key === "/" && !typing) {
         event.preventDefault();
-        searchInput.current?.focus();
+        setSearchOpen(true);
       }
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
   }, []);
+
+  useEffect(() => {
+    if (!searchOpen) return;
+    searchInput.current?.focus();
+  }, [searchOpen]);
+
+  // Focus and pre-select the name, so a rename starts from the current name, not an empty box.
+  useEffect(() => {
+    if (!renaming) return;
+    renameInput.current?.focus();
+    renameInput.current?.select();
+  }, [renaming]);
+
+  // A rename keeps polling after the page unmounts without this.
+  useEffect(
+    () => () => {
+      if (renameTimer.current) window.clearTimeout(renameTimer.current);
+    },
+    [],
+  );
 
   const runSearch = async (keyword: string) => {
     const value = keyword.trim();
@@ -573,13 +579,10 @@ export function FilesPage() {
     return { entries: list, visibleUploads: uploading };
   }, [activeQuery, items, path, uploads]);
 
-  const activeUploadCount = visibleUploads.filter((task) => task.status !== "failed").length;
-
   // Before the first listing arrives, build the trail from the URL so the title and breadcrumbs
   // do not flash "all files" on a deep link.
   const trail = crumbTrail.length > 0 && loadedPath === path ? crumbTrail : crumbsForPath(path);
   const currentCrumb = trail[trail.length - 1];
-  const parentCrumbs = trail.slice(0, -1);
   const currentName = currentCrumb ? crumbName(currentCrumb) : t("drive.root");
 
   const pending = loading || loadedPath !== path;
@@ -588,6 +591,95 @@ export function FilesPage() {
   // The current path may be a file even while search results are on screen; never upload to it.
   const canUpload =
     !pending && !loadError && !file && !notFound && !(current !== null && !current.is_dir);
+
+  // A rename only ever changes the last segment, so the parent stays put.
+  const parentPath = path.includes("/") ? path.slice(0, path.lastIndexOf("/")) : "";
+
+  const startCreateFolder = () => {
+    setMenuOpen(false);
+    setCreating(true);
+    setNewName("");
+  };
+
+  const startRename = () => {
+    setMenuOpen(false);
+    setRenameName(currentName);
+    setRenaming(true);
+  };
+
+  const cancelRename = () => {
+    setRenaming(false);
+    setRenameName("");
+  };
+
+  const clearRenameTimer = () => {
+    if (renameTimer.current) window.clearTimeout(renameTimer.current);
+    renameTimer.current = null;
+  };
+
+  const finishRename = (to: string) => {
+    clearRenameTimer();
+    setRenameJob(null);
+    cancelRename();
+    showToast(t("drive.renamed", { name: to.split("/").pop() ?? to }));
+    // The path is the identity: the new URL reloads the listing through the route effect.
+    navigate(filesHref(to), { replace: true });
+  };
+
+  const failRename = (message: string) => {
+    clearRenameTimer();
+    setRenameJob(null);
+    showToast(message, "error");
+  };
+
+  /** A directory rename answers 202 first; the job row shows how many objects are left. */
+  const pollRename = (id: string, to: string) => {
+    const tick = async () => {
+      try {
+        const { job } = await api.renameStatus(id);
+        setRenameJob(job);
+        if (job.status === "done") {
+          finishRename(to);
+          return;
+        }
+        if (job.status === "failed" || job.status === "cancelled") {
+          failRename(job.error || t("drive.renameFailed"));
+          return;
+        }
+        renameTimer.current = window.setTimeout(tick, 1200);
+      } catch (error) {
+        failRename(error instanceof Error ? error.message : t("drive.renameFailed"));
+      }
+    };
+    renameTimer.current = window.setTimeout(tick, 600);
+  };
+
+  const applyRename = async () => {
+    const name = renameName.trim().normalize("NFC");
+    if (!name) {
+      cancelRename();
+      return;
+    }
+    const from = path;
+    const to = joinPath(parentPath, name);
+    setRenaming(false);
+    if (to === from) return;
+    try {
+      const { job } = await api.rename(from, to);
+      if (!job || job.status === "done") {
+        finishRename(to);
+        return;
+      }
+      if (job.status === "failed" || job.status === "cancelled") {
+        failRename(job.error || t("drive.renameFailed"));
+        return;
+      }
+      setRenameJob(job);
+      pollRename(job.id, to);
+    } catch (error) {
+      failRename(error instanceof Error ? error.message : t("drive.renameFailed"));
+    }
+  };
 
   const onDrop = (event: React.DragEvent) => {
     event.preventDefault();
@@ -623,99 +715,184 @@ export function FilesPage() {
 
       <AppHeader user={user} />
 
-      <input
-        ref={fileInput}
-        type="file"
-        multiple
-        hidden
-        onChange={(event) => {
-          const files = Array.from(event.target.files ?? []);
-          event.target.value = "";
-          enqueue(files, path, itemExists);
-        }}
-      />
-
       <main className={styles.main}>
-        {/* Search and the primary action belong to this page, not to the shared header. */}
-        <div className={styles.tools}>
-          <div className={styles.search}>
-            <span className={styles.searchIcon}>
-              <SearchIcon size={14} />
-            </span>
-            <input
-              ref={searchInput}
-              className={styles.searchInput}
-              placeholder={t("drive.searchPlaceholder")}
-              aria-label={t("drive.searchPlaceholder")}
-              value={query}
-              onChange={(event) => {
-                setQuery(event.target.value);
-                if (!event.target.value && activeQuery) void load(path);
-              }}
-              onKeyDown={(event) => {
-                if (event.key === "Enter") void runSearch(query);
-                if (event.key === "Escape") {
-                  setQuery("");
-                  if (activeQuery) void load(path);
-                  event.currentTarget.blur();
-                }
-              }}
-            />
-            <span className={styles.kbd}>/</span>
-          </div>
-
-          <div className={styles.toolActions}>
-            {file && (
-              <a
-                className={styles.secondaryBtn}
-                href={api.downloadHref(file.path)}
-                target="_blank"
-                rel="noreferrer"
-              >
-                <DownloadIcon size={14} />
-                {t("file.download")}
-              </a>
+        {/* The path is the title: one row, with this page's controls on the right. */}
+        <div className={styles.topbar}>
+          <div className={styles.pathArea}>
+            {activeQuery ? (
+              <h1 className={styles.pathTitle}>
+                {t("drive.resultsFor", { query: activeQuery, results: resultsText(items.length) })}
+              </h1>
+            ) : (
+              <nav className={styles.crumbs} aria-label={t("drive.pathLabel")}>
+                {trail.map((crumb, index) => {
+                  const isLast = index === trail.length - 1;
+                  return (
+                    <span key={crumb.path || "root"} className={styles.crumbItem}>
+                      {index > 0 && (
+                        <span className={styles.crumbSep}>
+                          <ChevronRightIcon size={12} />
+                        </span>
+                      )}
+                      {!isLast ? (
+                        <Link className={styles.crumb} to={filesHref(crumb.path)}>
+                          {crumbName(crumb)}
+                        </Link>
+                      ) : renaming ? (
+                        <input
+                          ref={renameInput}
+                          className={styles.renameInput}
+                          value={renameName}
+                          aria-label={t("drive.renamePlaceholder")}
+                          placeholder={t("drive.renamePlaceholder")}
+                          onChange={(event) => setRenameName(event.target.value)}
+                          onBlur={cancelRename}
+                          onKeyDown={(event) => {
+                            if (event.key === "Enter") void applyRename();
+                            if (event.key === "Escape") cancelRename();
+                          }}
+                        />
+                      ) : (
+                        <h1 className={styles.crumb}>{crumbName(crumb)}</h1>
+                      )}
+                    </span>
+                  );
+                })}
+              </nav>
             )}
 
-            {!file && !notFound && (
-              <>
-                <button
-                  className={styles.secondaryBtn}
-                  onClick={() => {
-                    setCreating(true);
-                    setNewName("");
-                  }}
-                  disabled={Boolean(activeQuery)}
-                >
-                  <PlusIcon size={14} />
-                  {t("drive.newFolder")}
-                </button>
-                <button
-                  className={styles.ghostBtn}
-                  onClick={() => void load(path)}
-                  title={t("common.refresh")}
-                  aria-label={t("common.refresh")}
-                >
-                  <RefreshIcon size={16} />
-                </button>
-              </>
-            )}
-
-            {canUpload && (
-              <button
-                className={styles.uploadBtn}
-                onClick={() => fileInput.current?.click()}
-                title={t("drive.upload")}
-              >
-                <UploadIcon size={14} />
-                <span className={styles.uploadLabel}>{t("drive.upload")}</span>
-                {activeUploadCount > 0 && (
-                  <span className={styles.uploadBadge}>{activeUploadCount}</span>
-                )}
+            {activeQuery && (
+              <button className={styles.clearLink} onClick={() => void load(path)}>
+                {t("drive.clear")}
               </button>
             )}
           </div>
+
+          <div className={styles.topActions}>
+            {searchOpen || activeQuery ? (
+              <div className={styles.search}>
+                <span className={styles.searchIcon}>
+                  <SearchIcon size={14} />
+                </span>
+                <input
+                  ref={searchInput}
+                  className={styles.searchInput}
+                  placeholder={t("drive.searchPlaceholder")}
+                  aria-label={t("drive.searchPlaceholder")}
+                  value={query}
+                  onChange={(event) => {
+                    setQuery(event.target.value);
+                    if (!event.target.value && activeQuery) void load(path);
+                  }}
+                  onBlur={() => {
+                    if (!query) setSearchOpen(false);
+                  }}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter") void runSearch(query);
+                    if (event.key === "Escape") {
+                      setSearchOpen(false);
+                      setQuery("");
+                      if (activeQuery) void load(path);
+                      event.currentTarget.blur();
+                    }
+                  }}
+                />
+              </div>
+            ) : (
+              <button
+                className={styles.iconBtn}
+                onClick={() => setSearchOpen(true)}
+                title={t("common.search")}
+                aria-label={t("common.search")}
+              >
+                <SearchIcon size={16} />
+              </button>
+            )}
+
+            {!activeQuery && !notFound && (
+              <div className={styles.menuWrap}>
+                <button
+                  className={styles.iconBtn}
+                  onClick={() => setMenuOpen((open) => !open)}
+                  aria-haspopup="menu"
+                  aria-expanded={menuOpen}
+                  aria-label={t("drive.actions")}
+                  title={t("drive.actions")}
+                >
+                  <MoreIcon size={16} />
+                </button>
+                {menuOpen && (
+                  <>
+                    {/* A click anywhere outside the popover just closes it. */}
+                    <div
+                      className={styles.menuScrim}
+                      aria-hidden="true"
+                      onClick={() => setMenuOpen(false)}
+                    />
+                    <div className={styles.menu} role="menu">
+                      {!pending && !file && (
+                        <button
+                          className={styles.menuItem}
+                          role="menuitem"
+                          onClick={startCreateFolder}
+                        >
+                          <PlusIcon size={14} />
+                          {t("drive.newFolder")}
+                        </button>
+                      )}
+                      {!pending && file && (
+                        <a
+                          className={styles.menuItem}
+                          role="menuitem"
+                          href={api.downloadHref(file.path)}
+                          target="_blank"
+                          rel="noreferrer"
+                        >
+                          <DownloadIcon size={14} />
+                          {t("file.download")}
+                        </a>
+                      )}
+                      {!pending && (file || path !== "") && (
+                        <button
+                          className={styles.menuItem}
+                          role="menuitem"
+                          onClick={startRename}
+                          disabled={Boolean(renameJob)}
+                        >
+                          <PencilIcon size={14} />
+                          {t("drive.rename")}
+                        </button>
+                      )}
+                    </div>
+                  </>
+                )}
+              </div>
+            )}
+          </div>
         </div>
+
+        {renameJob && (
+          <div className={styles.jobRow} role="status">
+            <span className={styles.jobLabel}>
+              {t("drive.renaming", { name: renameJob.from.split("/").pop() || renameJob.from })}
+            </span>
+            {renameJob.total > 0 && (
+              <span className={styles.jobCount}>
+                {renameJob.done} / {renameJob.total}
+              </span>
+            )}
+            <span className={styles.jobBar}>
+              <span
+                className={styles.jobBarFill}
+                style={{
+                  width: `${
+                    renameJob.total > 0 ? Math.round((renameJob.done / renameJob.total) * 100) : 0
+                  }%`,
+                }}
+              />
+            </span>
+          </div>
+        )}
 
         {loadError ? (
           <section className={styles.panel}>
@@ -728,15 +905,9 @@ export function FilesPage() {
             </div>
           </section>
         ) : file ? (
-          <FileDetail file={file} trail={trail} />
+          <FileDetail file={file} />
         ) : notFound ? (
           <>
-            <div className={styles.masthead}>
-              <div className={styles.mastheadMain}>
-                {parentCrumbs.length > 0 && <Breadcrumbs crumbs={parentCrumbs} />}
-                <h1 className={styles.pageTitle}>{currentName}</h1>
-              </div>
-            </div>
             <section className={styles.panel}>
               <div className={styles.empty}>
                 <span className={styles.emptyIcon}>
@@ -752,30 +923,6 @@ export function FilesPage() {
           </>
         ) : (
           <>
-            <div className={styles.masthead}>
-              <div className={styles.mastheadMain}>
-                {activeQuery ? (
-                  <>
-                    <h1 className={styles.pageTitle}>{t("drive.results")}</h1>
-                    <p className={styles.stats}>
-                      {t("drive.resultsFor", {
-                        query: activeQuery,
-                        results: resultsText(items.length),
-                      })}
-                      <button className={styles.clearLink} onClick={() => void load(path)}>
-                        {t("drive.clear")}
-                      </button>
-                    </p>
-                  </>
-                ) : (
-                  <>
-                    {parentCrumbs.length > 0 && <Breadcrumbs crumbs={parentCrumbs} />}
-                    <h1 className={styles.pageTitle}>{currentName}</h1>
-                  </>
-                )}
-              </div>
-            </div>
-
             <section className={styles.panel} aria-busy={pending}>
               {creating && (
                 <div className={styles.newRow}>

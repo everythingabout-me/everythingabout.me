@@ -311,7 +311,8 @@ the rewrite.
 | POST | `/api/fs/upload/confirm` | Writes the index after a HeadObject check |
 | GET | `/api/fs/download?path=` | 302 to a presigned URL (`&json=1` returns JSON) |
 | POST | `/api/fs/mkdir` | Create a directory (writes a zero-byte placeholder object) |
-| POST | `/api/fs/rename` | Rename/move a single file; use coscli for directories |
+| POST | `/api/fs/rename` | Rename a file in one request; a directory answers `202` + `Location` because every object inside has to move |
+| GET | `/api/fs/rename/{id}` | Progress of a directory rename (`done` / `total`, `status`, `error`) |
 | POST | `/api/fs/delete` | Permanent delete (every record in the subtree) |
 | GET | `/api/health` | Liveness probe |
 

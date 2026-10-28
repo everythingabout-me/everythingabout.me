@@ -55,7 +55,12 @@ func WriteJSON(w http.ResponseWriter, status int, payload any) {
 
 // WriteOK writes {ok:true,data:...}, keeping the response shape from before the rewrite.
 func WriteOK(w http.ResponseWriter, data any) {
-	WriteJSON(w, http.StatusOK, okEnvelope{OK: true, Data: data})
+	WriteOKStatus(w, http.StatusOK, data)
+}
+
+// WriteOKStatus is WriteOK with an explicit status, for a 202 that is still an envelope.
+func WriteOKStatus(w http.ResponseWriter, status int, data any) {
+	WriteJSON(w, status, okEnvelope{OK: true, Data: data})
 }
 
 // WriteError maps an error onto {ok:false,error:"..."}.

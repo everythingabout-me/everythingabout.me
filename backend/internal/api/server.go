@@ -103,6 +103,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/fs/download", s.handleDownload)
 	mux.HandleFunc("POST /api/fs/mkdir", s.wrap(s.handleMkdir))
 	mux.HandleFunc("POST /api/fs/rename", s.wrap(s.handleRename))
+	mux.HandleFunc("GET /api/fs/rename/{id}", s.wrap(s.handleRenameStatus))
 	mux.HandleFunc("POST /api/fs/delete", s.wrap(s.handleDelete))
 
 	// Public API: the path is the feature, with no /v1 prefix. File paths live under /api/files

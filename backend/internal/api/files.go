@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"everythingabout.me/backend/internal/httpx"
+	"everythingabout.me/backend/internal/jobs"
 	"everythingabout.me/backend/internal/nodes"
 	"everythingabout.me/backend/internal/paths"
 	"everythingabout.me/backend/internal/storage"
@@ -381,10 +382,6 @@ func (s *Server) handleRename(w http.ResponseWriter, r *http.Request) error {
 	if source == nil {
 		return httpx.NotFound("source file not found")
 	}
-	if source.IsDir {
-		return httpx.BadRequest(
-			"renaming a directory copies every object server-side, which is slow at TB scale. Use coscli to rename, then run reconcile.")
-	}
 
 	collision, err := s.nodes.Live(r.Context(), to, user.ID)
 	if err != nil {
@@ -392,6 +389,36 @@ func (s *Server) handleRename(w http.ResponseWriter, r *http.Request) error {
 	}
 	if collision != nil {
 		return httpx.Conflict("target path already exists")
+	}
+
+	// A directory is a subtree: renaming it means copying every object inside, so it runs as a
+	// background move and reports progress at its own subpath. Files stay one synchronous copy.
+	if source.IsDir {
+		if paths.IsInside(to, from) {
+			return httpx.BadRequest("target cannot be inside the source")
+		}
+		if err := s.assertParentDirs(r.Context(), user.ID, to); err != nil {
+			return err
+		}
+		job, err := s.runJob(r, jobs.OpMove, user.ID, from, to, parsePrefer(r.Header.Get("Prefer")))
+		if err != nil {
+			return err
+		}
+		if job.Status == "failed" {
+			return httpx.Internal(job.Error)
+		}
+		if job.Status == "done" {
+			s.timeline.Notify(user.ID)
+		}
+		w.Header().Set("Location", "/api/fs/rename/"+job.ID)
+		status := http.StatusAccepted
+		if job.Terminal() {
+			status = http.StatusOK
+		} else {
+			w.Header().Set("Retry-After", "2")
+		}
+		httpx.WriteOKStatus(w, status, map[string]any{"job": job})
+		return nil
 	}
 
 	if err := s.nodes.EnsureParents(r.Context(), to, user.ID); err != nil {
@@ -412,6 +439,22 @@ func (s *Server) handleRename(w http.ResponseWriter, r *http.Request) error {
 	}
 	s.timeline.Notify(user.ID)
 	return s.ok(w, map[string]any{"node": node})
+}
+
+// GET /api/fs/rename/{id}: progress of a directory rename that answered 202.
+func (s *Server) handleRenameStatus(w http.ResponseWriter, r *http.Request) error {
+	user, err := s.requireUser(r)
+	if err != nil {
+		return err
+	}
+	job, err := s.jobs.Get(r.Context(), user.ID, r.PathValue("id"))
+	if err != nil {
+		return err
+	}
+	if job == nil {
+		return httpx.NotFound("rename job not found")
+	}
+	return s.ok(w, map[string]any{"job": job})
 }
 
 func (s *Server) handleDelete(w http.ResponseWriter, r *http.Request) error {
