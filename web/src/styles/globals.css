@@ -49,6 +49,9 @@
     "Noto Sans JP", "Noto Sans KR", "Helvetica Neue", Arial, sans-serif;
   --font-mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
 
+  /* Layout: one page width for every page (and the header sitting on it) */
+  --page-width: 920px;
+
   color-scheme: light;
 }
 

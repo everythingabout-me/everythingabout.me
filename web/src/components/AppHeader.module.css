@@ -14,7 +14,7 @@
   align-items: center;
   gap: 12px;
   width: 100%;
-  max-width: 920px;
+  max-width: var(--page-width);
   height: 64px;
   margin: 0 auto;
   padding: 0 24px;

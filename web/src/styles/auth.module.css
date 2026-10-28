@@ -6,7 +6,7 @@
 
 .header {
   width: 100%;
-  max-width: 880px;
+  max-width: var(--page-width);
   margin: 0 auto;
   padding: 20px 24px;
 }
@@ -41,6 +41,8 @@
   align-items: center;
   justify-content: center;
   width: 100%;
+  max-width: var(--page-width);
+  margin: 0 auto;
   padding: 24px 24px 72px;
 }
 
@@ -63,7 +65,7 @@
 }
 
 .cardWide {
-  width: min(100%, 560px);
+  width: min(100%, var(--page-width));
 }
 
 @keyframes card-in {
@@ -443,7 +445,7 @@
    ============================================================ */
 
 .header {
-  max-width: 920px;
+  max-width: var(--page-width);
   padding: 20px 24px;
 }
 
@@ -480,7 +482,7 @@
 }
 
 .cardWide {
-  width: min(100%, 600px);
+  width: min(100%, var(--page-width));
 }
 
 .eyebrow {

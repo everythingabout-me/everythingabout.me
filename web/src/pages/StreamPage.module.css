@@ -12,7 +12,7 @@
 
 .main {
   width: 100%;
-  max-width: 768px;
+  max-width: var(--page-width);
   margin: 0 auto;
   padding: 0 24px 140px;
 }
