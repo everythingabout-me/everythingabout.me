@@ -302,86 +302,20 @@ func TestSaveLinkPrompt(t *testing.T) {
 	prompt := saveLinkPrompt("https://everythingabout.me", "abcd2345efgh2345")
 	for _, want := range []string{
 		"Token: abcd2345efgh2345",
-		"POST https://everythingabout.me/s/abcd2345efgh2345",
+		"PUT https://everythingabout.me/files/Inbox/2026/10/28/note.md",
 		"Content-Type: text/markdown",
+		"POST https://everythingabout.me/upload",
 		"Authorization: Bearer abcd2345efgh2345",
 	} {
 		if !strings.Contains(prompt, want) {
 			t.Errorf("prompt is missing %q:\n%s", want, prompt)
 		}
 	}
+	if strings.Contains(prompt, "POST https://everythingabout.me/s/") {
+		t.Errorf("the link page must not be a write endpoint:\n%s", prompt)
+	}
 	if strings.Contains(prompt, "confirmation") {
 		t.Errorf("prompt should not tell the agent what to confirm:\n%s", prompt)
-	}
-	if !strings.Contains(prompt, "/upload") {
-		t.Errorf("prompt should explain the direct upload flow for files:\n%s", prompt)
-	}
-}
-
-func TestSaveLinkExtension(t *testing.T) {
-	cases := []struct {
-		filename string
-		mime     string
-		want     string
-	}{
-		{"photo.JPG", "image/jpeg", ".jpg"},
-		{"report.pdf", "application/pdf", ".pdf"},
-		{"", "image/png", ".png"},
-		{"", "text/markdown", ".md"},
-		{"", "application/octet-stream", ".bin"},
-		{"clip", "video/mp4", ".mp4"},
-		{"weird.name!", "application/pdf", ".pdf"},
-	}
-	for _, tc := range cases {
-		if got := saveLinkExtension(tc.filename, tc.mime); got != tc.want {
-			t.Errorf("saveLinkExtension(%q, %q) = %q, want %q", tc.filename, tc.mime, got, tc.want)
-		}
-	}
-}
-
-func TestCleanMediaType(t *testing.T) {
-	cases := map[string]string{
-		"text/markdown; charset=utf-8": "text/markdown",
-		"IMAGE/PNG":                    "image/png",
-		"":                             "",
-	}
-	for input, want := range cases {
-		if got := cleanMediaType(input); got != want {
-			t.Errorf("cleanMediaType(%q) = %q, want %q", input, got, want)
-		}
-	}
-}
-
-func TestIsTextContent(t *testing.T) {
-	yes := []string{"text/plain", "text/markdown", "application/json", "application/x-www-form-urlencoded"}
-	no := []string{"image/jpeg", "video/mp4", "application/pdf", "application/octet-stream"}
-	for _, value := range yes {
-		if !isTextContent(value) {
-			t.Errorf("%q should be text", value)
-		}
-	}
-	for _, value := range no {
-		if isTextContent(value) {
-			t.Errorf("%q should not be text", value)
-		}
-	}
-}
-
-func TestFileSlug(t *testing.T) {
-	cases := []struct {
-		title string
-		want  string
-	}{
-		{"关于简单与信任", "关于简单与信任"},
-		{"Hello world", "Hello-world"},
-		{"a/b:c*d", "a-b-c-d"},
-		{"  --  ", ""},
-		{"", ""},
-	}
-	for _, tc := range cases {
-		if got := fileSlug(tc.title); got != tc.want {
-			t.Errorf("fileSlug(%q) = %q, want %q", tc.title, got, tc.want)
-		}
 	}
 }
 
@@ -403,5 +337,14 @@ func TestSaveLinkHTML(t *testing.T) {
 	}
 	if strings.Contains(body, "<content>") {
 		t.Fatal("prompt should be escaped in the html page")
+	}
+}
+
+func TestSaveLinkPostIsRejected(t *testing.T) {
+	handler := (&Server{}).Handler()
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/s/abcd2345efgh2345", nil))
+	if recorder.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("status = %d, want 405", recorder.Code)
 	}
 }

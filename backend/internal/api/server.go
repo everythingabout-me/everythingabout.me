@@ -133,9 +133,11 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("PUT /files/{path...}", s.api(s.handleAPIPutFile))
 	mux.HandleFunc("DELETE /files/{path...}", s.api(s.handleAPIDeleteFile))
 
-	// 保存链接：URL 本身就是凭证，GET 出说明，POST 存正文。
+	// 保存链接只是一页说明书；保存走已有的 /files 和 /upload。
 	mux.HandleFunc("GET /s/{code}", s.wrap(s.handleSaveLinkPage))
-	mux.HandleFunc("POST /s/{code}", s.api(s.handleSaveLinkCapture))
+	mux.HandleFunc("/s/{code}", func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "method not allowed; save through /files or /upload", http.StatusMethodNotAllowed)
+	})
 
 	if s.web != nil {
 		mux.Handle("/", s.web)
@@ -189,10 +191,6 @@ const apiRatePerMinute = 600
 // limitAPI 按令牌（没有令牌就按 IP）做粗粒度限流，顺带给出 Retry-After。
 func (s *Server) limitAPI(w http.ResponseWriter, r *http.Request) error {
 	key := "ip:" + httpx.ClientIP(r)
-	if code := strings.TrimPrefix(r.URL.Path, "/s/"); code != r.URL.Path && code != "" {
-		// 保存链接没有 Authorization 头，按 URL 里的短码区分调用方。
-		key = "link:" + code
-	}
 	if header := strings.TrimSpace(r.Header.Get("Authorization")); strings.HasPrefix(header, "Bearer ") {
 		if id, _, ok := auth.ParseToken(strings.TrimPrefix(header, "Bearer ")); ok {
 			key = "tok:" + id

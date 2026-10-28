@@ -4,7 +4,6 @@ import { formatRelativeTime } from "../i18n/format";
 import styles from "../styles/auth.module.css";
 
 const actionKeys: Record<string, MessageKey> = {
-  capture: "activity.action.capture",
   put: "activity.action.put",
   delete: "activity.action.delete",
   move: "activity.action.move",

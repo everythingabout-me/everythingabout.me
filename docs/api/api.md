@@ -510,15 +510,16 @@ GET    /events/{id}          → 单条完整 JSON
 
 ### 4.14 保存链接（给 agent）
 
-连接不需要先"配对"：用户把一条 URL 发给 agent，URL 本身就是凭证和说明书。
+链接只负责发 token 和说明书；保存走已有的文件 API，`/s/<code>` 本身不接收内容。
 
 ```http
 GET /s/abcd2345efgh2345
 ```
 
-- `Accept: text/markdown`（或 `curl` 默认）返回给 agent 的 prompt：token、POST 地址、内容格式、返回形状。
+- `Accept: text/markdown`（或 `curl` 默认）返回给 agent 的 prompt。
 - 浏览器打开返回一页说明。
-- `?format=json` 返回 `{token, url, save, prompt, ...}`，给不能读 prompt 的 App。
+- `?format=json` 返回 `{token, url, api, files, upload, prompt, ...}`。
+- 对 `/s/<code>` 发 `POST` 会返回 `405`。
 
 ```markdown
 # everythingabout.me
@@ -526,42 +527,52 @@ GET /s/abcd2345efgh2345
 Connected to this drive.
 
 Token: abcd2345efgh2345
-Save: POST https://everythingabout.me/s/abcd2345efgh2345
-Content-Type: text/markdown (or image/jpeg, application/pdf, video/mp4, ...)
+API: https://everythingabout.me
+Authorization: Bearer abcd2345efgh2345
 
-  <content or file bytes>
+Save a short text (one request):
+  PUT https://everythingabout.me/files/Inbox/2026/10/28/note.md
+  Content-Type: text/markdown
 
-Optional query: ?title=...&filename=photo.jpg
-Response: {"path": "...", "url": "...", "mime": "...", "size": ...}
+  <content>
 
-Files over 32 MiB:
+Save a file (image, video, PDF, any size):
   POST https://everythingabout.me/upload
-  {"path": "Inbox/2026/10/28/photo.jpg", "size": 12345678, "mime": "image/jpeg"}
-  PUT the bytes to each returned part URL, then POST https://everythingabout.me/upload/complete
+  {"path": "Inbox/2026/10/28/photo.jpg", "size": 12345, "mime": "image/jpeg"}
 
-Full API: Authorization: Bearer abcd2345efgh2345
+  PUT the bytes to each returned part URL, then:
+  POST https://everythingabout.me/upload/complete
+
+Use a unique path; PUT does not overwrite by default.
 ```
 
-保存就是往同一个 URL POST 内容：
+短文本直接走 [`PUT /files/<path>`](#44-写小文件一步快捷方式)：
 
 ```http
-POST /s/abcd2345efgh2345
+PUT /files/Inbox/2026/10/28/note.md
+Authorization: Bearer abcd2345efgh2345
 Content-Type: text/markdown
 
 今天聊出来的那段……
 ```
 
-```json
-201 {"path":"Inbox/2026/10/27/关于简单与信任-6f3a9c2b.md","url":"https://…/drive?path=…","title":"…","mime":"text/markdown","size":42,"duplicate":false}
+图片、视频、PDF 走 [`POST /upload`](#45-上传所有大小统一三步)：
+
+```http
+POST /upload
+Authorization: Bearer abcd2345efgh2345
+
+{"path":"Inbox/2026/10/28/photo.jpg","size":248123,"mime":"image/jpeg"}
+→ 预签名 part URL
+PUT <part URL>                       # 字节直连 COS
+POST /upload/complete                # 校验大小并落索引
 ```
 
-- 短码是 16 位小写 base32，**不带 `eam_` 前缀**；`Authorization: Bearer <短码>` 也能直接走完整文件 API。
+- 短码是 16 位小写 base32，**不带 `eam_` 前缀**；`Authorization: Bearer <短码>` 就是完整文件 API 的凭证。
 - 保存链接和用户本人同权：不设前缀、不设能力位、默认不过期。
-- **不按文件类型分支**：`POST /s/<code>` 的 body 原样存盘，`Content-Type` 决定 mime；没有 `?filename=` 时按 mime 推扩展名。文本、图片、PDF 都一样，32 MiB 以内一个请求完成。
-- 超过 32 MiB 的文件（常见是视频）用同一把 token 调 `/upload` 拿预签名地址，字节直传 COS，不经过服务器。
-- 文件名由标题 + 内容 SHA-256 决定：同一天重复提交同一段内容返回 `200` + `duplicate:true`，不会存两份。
-- 落盘为 `Inbox/YYYY/MM/DD/<title>-<hash>.<ext>`，**文件里只有提交的内容，没有 frontmatter**；标题、来源、时间写在 `nodes.meta` 里。
-- 每次保存都写 `audit_log`（action=`capture`），和文件 API 的写操作一样可追溯。
+- 路径由 agent 决定，建议放在 `Inbox/YYYY/MM/DD/`；`PUT /files` 会自动建父目录，默认不覆盖（`?overwrite=1` 或 `If-Match` 才覆盖）。
+- `PUT /files` 上限 32 MiB；更大的文件用 `/upload`，字节不经过服务器。
+- 保存的审计就是已有文件 API 的 `put` / `upload` / `upload_complete`，账户页“最近活动”里能看到。
 - 账户页的 `/api/save-links`（cookie 会话）负责创建、列表、撤销；撤销后 `/s/<code>` 立即 404。
 - 短码里的 MAC 由服务端密钥派生；换掉 `COS_SECRET_KEY` 会让已有保存链接失效。
 
@@ -633,7 +644,7 @@ Content-Type: text/markdown
 - 审计：写操作记进 `audit_log`（action / path / status / ip / token / detail），写失败只打日志。
 - 分片上传：超过阈值自动切片，每片一个预签名 URL；`complete` 时把 `{partNumber, etag}` 交给 COS 合并。
 - 错误体：`{"error":"not_found","message":"..."}`，HTTP 状态码同步给；`message` 统一是英文（小写、无句号），`error` 是稳定的机器可读码。
-- 保存链接：16 位 base32 短码，GET 出 prompt、POST 存正文；按正文 hash 去重，落 `Inbox/` 下的 Markdown。
+- 保存链接：16 位 base32 短码，GET 出 token+prompt；保存复用 `PUT /files` 与 `/upload`，不新增写入口。
 
 网页用的 `/api/fs/*` 照旧，不动。对外 API 在 `backend/internal/api/api_*.go`，
 认证在 `backend/internal/auth/token.go`，作业在 `backend/internal/jobs`。
