@@ -18,7 +18,7 @@
   display: flex;
   align-items: center;
   gap: 14px;
-  padding: 0 2px 16px;
+  padding: 2px 2px 18px;
 }
 
 .pathArea {
@@ -51,10 +51,10 @@
   min-width: 0;
   padding: 0;
   color: var(--text-2);
-  font-size: 13px;
+  font-size: 14px;
   font-weight: 500;
   letter-spacing: 0;
-  line-height: 1.45;
+  line-height: 1.5;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -75,15 +75,15 @@ a.crumb:hover {
 
 /* Editing the last segment happens in place, where the name already is. */
 .renameInput {
-  min-width: 140px;
+  min-width: 150px;
   max-width: 100%;
-  height: 28px;
-  padding: 0 8px;
+  height: 30px;
+  padding: 0 9px;
   border-radius: 7px;
   border: 1px solid var(--blue);
   background: var(--surface);
   color: var(--text);
-  font-size: 13px;
+  font-size: 14px;
   font-weight: 500;
   outline: none;
   box-shadow: 0 0 0 4px var(--ring);
@@ -93,9 +93,9 @@ a.crumb:hover {
   margin: 0;
   min-width: 0;
   color: var(--text-2);
-  font-size: 13px;
+  font-size: 14px;
   font-weight: 500;
-  line-height: 1.45;
+  line-height: 1.5;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -113,9 +113,9 @@ a.crumb:hover {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 32px;
-  height: 32px;
-  border-radius: 9px;
+  width: 36px;
+  height: 36px;
+  border-radius: 10px;
   color: var(--text-2);
   transition: background 0.14s ease, color 0.14s ease;
 }
@@ -131,7 +131,7 @@ a.crumb:hover {
   display: flex;
   align-items: center;
   flex: none;
-  width: 260px;
+  width: 280px;
   min-width: 0;
 }
 
@@ -145,13 +145,13 @@ a.crumb:hover {
 
 .searchInput {
   width: 100%;
-  height: 32px;
-  padding: 0 12px 0 30px;
-  border-radius: 9px;
+  height: 36px;
+  padding: 0 12px 0 31px;
+  border-radius: 10px;
   border: 1px solid var(--border);
   background: var(--surface);
   color: var(--text);
-  font-size: 13px;
+  font-size: 14px;
   outline: none;
   box-shadow: none;
   transition: border-color 0.15s ease, box-shadow 0.15s ease, background 0.15s ease;
@@ -186,9 +186,9 @@ a.crumb:hover {
   align-items: center;
   justify-content: center;
   flex: none;
-  width: 22px;
-  height: 22px;
-  border-radius: 6px;
+  width: 24px;
+  height: 24px;
+  border-radius: 7px;
   color: var(--text-3);
   transition: background 0.14s ease, color 0.14s ease;
 }
@@ -269,12 +269,12 @@ a.crumb:hover {
   align-items: center;
   gap: 6px;
   flex: none;
-  height: 32px;
-  padding: 0 13px;
-  border-radius: 9px;
+  height: 36px;
+  padding: 0 15px;
+  border-radius: 10px;
   background: var(--blue);
   color: var(--btn-fg);
-  font-size: 13px;
+  font-size: 14px;
   font-weight: 600;
   white-space: nowrap;
   transition: filter 0.14s ease;
@@ -953,19 +953,21 @@ a.crumb:hover {
     padding: 22px 16px 60px;
   }
 
-  /* Narrow screens: search gets its own line, the actions sit under it. */
-  .tools {
+  /* Narrow screens: the controls wrap under the path. */
+  .topbar {
     flex-wrap: wrap;
+    gap: 10px;
     padding: 0 2px 16px;
   }
 
-  .search {
+  .pathArea,
+  .topActions {
     flex: 1 1 100%;
-    max-width: none;
   }
 
-  .kbd {
-    display: none;
+  .search {
+    flex: 1 1 auto;
+    width: auto;
   }
 
   .row,

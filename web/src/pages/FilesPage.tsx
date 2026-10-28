@@ -745,7 +745,7 @@ export function FilesPage() {
                     <span key={crumb.path || "root"} className={styles.crumbItem}>
                       {index > 0 && (
                         <span className={styles.crumbSep}>
-                          <ChevronRightIcon size={12} />
+                          <ChevronRightIcon size={13} />
                         </span>
                       )}
                       {!isLast ? (
@@ -783,7 +783,7 @@ export function FilesPage() {
                       aria-label={t("drive.actions")}
                       title={t("drive.actions")}
                     >
-                      <ChevronDownIcon size={14} />
+                      <ChevronDownIcon size={15} />
                     </button>
                     {menuOpen && (
                       <>
@@ -846,7 +846,7 @@ export function FilesPage() {
             {searchOpen || activeQuery ? (
               <div className={styles.search}>
                 <span className={styles.searchIcon}>
-                  <SearchIcon size={14} />
+                  <SearchIcon size={15} />
                 </span>
                 <input
                   ref={searchInput}
