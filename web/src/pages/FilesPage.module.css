@@ -24,7 +24,7 @@
 .pathArea {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 4px;
   flex: 1 1 auto;
   min-width: 0;
 }
@@ -120,8 +120,7 @@ a.crumb:hover {
   transition: background 0.14s ease, color 0.14s ease;
 }
 
-.iconBtn:hover,
-.iconBtn[aria-expanded="true"] {
+.iconBtn:hover {
   background: var(--hover);
   color: var(--text);
 }
@@ -139,10 +138,9 @@ a.crumb:hover {
 .searchIcon {
   position: absolute;
   left: 10px;
-  color: var(--blue-ink);
+  color: var(--text-3);
   pointer-events: none;
   display: flex;
-  transition: color 0.15s ease;
 }
 
 .searchInput {
@@ -167,20 +165,46 @@ a.crumb:hover {
   border-color: var(--border-strong);
 }
 
-.searchInput:focus {
-  border-color: var(--blue);
+/* Focus only darkens the border: a search field should not turn into an accent block. */
+.searchInput:focus,
+.searchInput:focus-visible {
+  border-color: var(--border-strong);
   background: var(--surface);
-  box-shadow: 0 0 0 4px var(--ring);
+  box-shadow: none;
+  outline: none;
 }
 
-.search:focus-within .searchIcon {
-  color: var(--blue-ink);
-}
-
-/* ---------- Actions menu ---------- */
+/* ---------- Folder menu ---------- */
 
 .menuWrap {
   position: relative;
+  display: flex;
+}
+
+.menuTrigger {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  width: 22px;
+  height: 22px;
+  border-radius: 6px;
+  color: var(--text-3);
+  transition: background 0.14s ease, color 0.14s ease;
+}
+
+.menuTrigger:hover,
+.menuTrigger[aria-expanded="true"] {
+  background: var(--hover);
+  color: var(--text);
+}
+
+.menuTrigger svg {
+  transition: transform 0.16s ease;
+}
+
+.menuTrigger[aria-expanded="true"] svg {
+  transform: rotate(180deg);
 }
 
 /* A transparent layer behind the popover: a click anywhere else closes it. */
@@ -195,7 +219,7 @@ a.crumb:hover {
 .menu {
   position: absolute;
   top: calc(100% + 6px);
-  right: 0;
+  left: 0;
   z-index: 41;
   display: flex;
   flex-direction: column;
@@ -236,6 +260,46 @@ a.crumb:hover {
 .menuItem:disabled {
   opacity: 0.4;
   cursor: default;
+}
+
+/* ---------- Upload ---------- */
+
+.uploadBtn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex: none;
+  height: 32px;
+  padding: 0 13px;
+  border-radius: 9px;
+  background: var(--blue);
+  color: var(--btn-fg);
+  font-size: 13px;
+  font-weight: 600;
+  white-space: nowrap;
+  transition: filter 0.14s ease;
+}
+
+.uploadBtn:hover {
+  filter: brightness(0.94);
+}
+
+.uploadBtn:active {
+  filter: brightness(0.88);
+}
+
+.uploadBadge {
+  display: inline-grid;
+  place-items: center;
+  min-width: 16px;
+  height: 16px;
+  padding: 0 4px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--btn-fg) 20%, transparent);
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1;
+  font-variant-numeric: tabular-nums;
 }
 
 /* ---------- Rename progress ---------- */
@@ -303,6 +367,7 @@ a.crumb:hover {
 }
 
 .clearLink {
+  margin-left: 6px;
   padding: 0;
   color: var(--text-2);
   font-size: 12.5px;

@@ -3,13 +3,13 @@ import { Link, useLoaderData, useNavigate, useParams } from "react-router";
 import { ApiError, api, type AuthUser, type Crumb, type Item, type Job } from "../api/client";
 import { AppHeader } from "../components/AppHeader";
 import {
+  ChevronDownIcon,
   ChevronRightIcon,
   CloseIcon,
   DownloadIcon,
   FileIcon,
   FolderIcon,
   GlyphFor,
-  MoreIcon,
   PencilIcon,
   PlusIcon,
   SearchIcon,
@@ -364,6 +364,7 @@ export function FilesPage() {
   const [renameName, setRenameName] = useState("");
   const [renameJob, setRenameJob] = useState<Job | null>(null);
 
+  const fileInput = useRef<HTMLInputElement>(null);
   const searchInput = useRef<HTMLInputElement>(null);
   const renameInput = useRef<HTMLInputElement>(null);
   const renameTimer = useRef<number | null>(null);
@@ -585,6 +586,7 @@ export function FilesPage() {
   const currentCrumb = trail[trail.length - 1];
   const currentName = currentCrumb ? crumbName(currentCrumb) : t("drive.root");
 
+  const activeUploadCount = visibleUploads.filter((task) => task.status !== "failed").length;
   const pending = loading || loadedPath !== path;
   const file = !activeQuery && current && !current.is_dir ? current : null;
   const notFound = !pending && !loadError && !activeQuery && !file && current === null && path !== "";
@@ -715,6 +717,18 @@ export function FilesPage() {
 
       <AppHeader user={user} />
 
+      <input
+        ref={fileInput}
+        type="file"
+        multiple
+        hidden
+        onChange={(event) => {
+          const files = Array.from(event.target.files ?? []);
+          event.target.value = "";
+          enqueue(files, path, itemExists);
+        }}
+      />
+
       <main className={styles.main}>
         {/* The path is the title: one row, with this page's controls on the right. */}
         <div className={styles.topbar}>
@@ -758,6 +772,66 @@ export function FilesPage() {
                     </span>
                   );
                 })}
+                {!activeQuery && !notFound && (
+                  <div className={styles.menuWrap}>
+                    {/* The menu belongs to the folder you are in, so it hangs off its name. */}
+                    <button
+                      className={styles.menuTrigger}
+                      onClick={() => setMenuOpen((open) => !open)}
+                      aria-haspopup="menu"
+                      aria-expanded={menuOpen}
+                      aria-label={t("drive.actions")}
+                      title={t("drive.actions")}
+                    >
+                      <ChevronDownIcon size={14} />
+                    </button>
+                    {menuOpen && (
+                      <>
+                        {/* A click anywhere outside the popover just closes it. */}
+                        <div
+                          className={styles.menuScrim}
+                          aria-hidden="true"
+                          onClick={() => setMenuOpen(false)}
+                        />
+                        <div className={styles.menu} role="menu">
+                          {!pending && !file && (
+                            <button
+                              className={styles.menuItem}
+                              role="menuitem"
+                              onClick={startCreateFolder}
+                            >
+                              <PlusIcon size={14} />
+                              {t("drive.newFolder")}
+                            </button>
+                          )}
+                          {!pending && file && (
+                            <a
+                              className={styles.menuItem}
+                              role="menuitem"
+                              href={api.downloadHref(file.path)}
+                              target="_blank"
+                              rel="noreferrer"
+                            >
+                              <DownloadIcon size={14} />
+                              {t("file.download")}
+                            </a>
+                          )}
+                          {!pending && (file || path !== "") && (
+                            <button
+                              className={styles.menuItem}
+                              role="menuitem"
+                              onClick={startRename}
+                              disabled={Boolean(renameJob)}
+                            >
+                              <PencilIcon size={14} />
+                              {t("drive.rename")}
+                            </button>
+                          )}
+                        </div>
+                      </>
+                    )}
+                  </div>
+                )}
               </nav>
             )}
 
@@ -809,64 +883,18 @@ export function FilesPage() {
               </button>
             )}
 
-            {!activeQuery && !notFound && (
-              <div className={styles.menuWrap}>
-                <button
-                  className={styles.iconBtn}
-                  onClick={() => setMenuOpen((open) => !open)}
-                  aria-haspopup="menu"
-                  aria-expanded={menuOpen}
-                  aria-label={t("drive.actions")}
-                  title={t("drive.actions")}
-                >
-                  <MoreIcon size={16} />
-                </button>
-                {menuOpen && (
-                  <>
-                    {/* A click anywhere outside the popover just closes it. */}
-                    <div
-                      className={styles.menuScrim}
-                      aria-hidden="true"
-                      onClick={() => setMenuOpen(false)}
-                    />
-                    <div className={styles.menu} role="menu">
-                      {!pending && !file && (
-                        <button
-                          className={styles.menuItem}
-                          role="menuitem"
-                          onClick={startCreateFolder}
-                        >
-                          <PlusIcon size={14} />
-                          {t("drive.newFolder")}
-                        </button>
-                      )}
-                      {!pending && file && (
-                        <a
-                          className={styles.menuItem}
-                          role="menuitem"
-                          href={api.downloadHref(file.path)}
-                          target="_blank"
-                          rel="noreferrer"
-                        >
-                          <DownloadIcon size={14} />
-                          {t("file.download")}
-                        </a>
-                      )}
-                      {!pending && (file || path !== "") && (
-                        <button
-                          className={styles.menuItem}
-                          role="menuitem"
-                          onClick={startRename}
-                          disabled={Boolean(renameJob)}
-                        >
-                          <PencilIcon size={14} />
-                          {t("drive.rename")}
-                        </button>
-                      )}
-                    </div>
-                  </>
+            {canUpload && (
+              <button
+                className={styles.uploadBtn}
+                onClick={() => fileInput.current?.click()}
+                title={t("drive.upload")}
+              >
+                <UploadIcon size={14} />
+                {t("drive.upload")}
+                {activeUploadCount > 0 && (
+                  <span className={styles.uploadBadge}>{activeUploadCount}</span>
                 )}
-              </div>
+              </button>
             )}
           </div>
         </div>

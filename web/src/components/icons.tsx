@@ -154,13 +154,10 @@ export function ChevronRightIcon(props: IconProps) {
   );
 }
 
-/** The "more actions" affordance: three dots, filled so they read at 16px. */
-export function MoreIcon(props: IconProps) {
+export function ChevronDownIcon(props: IconProps) {
   return (
-    <svg {...base(props)} stroke="none" fill="currentColor">
-      <circle cx="3.5" cy="8" r="1.1" />
-      <circle cx="8" cy="8" r="1.1" />
-      <circle cx="12.5" cy="8" r="1.1" />
+    <svg {...base(props)}>
+      <path d="m3.5 6 4.5 4.5L12.5 6" />
     </svg>
   );
 }
