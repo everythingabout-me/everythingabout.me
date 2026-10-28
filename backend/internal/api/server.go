@@ -134,10 +134,10 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("DELETE /files/{path...}", s.api(s.handleAPIDeleteFile))
 
 	// 保存链接只是一页说明书；保存走已有的 /files 和 /upload。
-	mux.HandleFunc("GET /s/{code}", s.wrap(s.handleSaveLinkPage))
-	mux.HandleFunc("/s/{code}", func(w http.ResponseWriter, r *http.Request) {
-		http.Error(w, "method not allowed; save through /files or /upload", http.StatusMethodNotAllowed)
-	})
+	// 子路由只注册 GET，POST 由 ServeMux 自己回 405，不写业务 handler。
+	saveMux := http.NewServeMux()
+	saveMux.HandleFunc("GET /{code}", s.wrap(s.handleSaveLinkPage))
+	mux.Handle("/s/", http.StripPrefix("/s", saveMux))
 
 	if s.web != nil {
 		mux.Handle("/", s.web)
