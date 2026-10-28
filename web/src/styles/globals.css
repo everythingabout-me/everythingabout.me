@@ -12,7 +12,7 @@
   --text-2: #615b52;
   --text-3: #786f65;
 
-  /* Blue: light blue fills icon backgrounds, deep blue drives buttons and icon strokes */
+  /* Blue: icon strokes and fills only — text is never blue, in any state */
   --blue: #13a7f5;
   --blue-ink: #0b7bc4;
   --blue-light: #eaf6fe;

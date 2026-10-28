@@ -58,14 +58,14 @@
 
 .navLink:hover {
   background: var(--hover);
-  color: var(--blue-ink);
+  color: var(--text);
 }
 
 /* The current page keeps a filled background at rest, not just on hover. */
 .navLinkActive,
 .navLinkActive:hover {
   background: var(--blue-light);
-  color: var(--blue-ink);
+  color: var(--text);
   font-weight: 600;
 }
 
@@ -94,7 +94,7 @@
 .account:hover {
   border-color: var(--border-strong);
   background: var(--hover);
-  color: var(--blue-ink);
+  color: var(--text);
 }
 
 .avatar {
@@ -105,7 +105,7 @@
   height: 22px;
   border-radius: 50%;
   background: var(--blue-light);
-  color: var(--blue-ink);
+  color: var(--text);
   font-size: 11px;
   font-weight: 600;
   line-height: 1;

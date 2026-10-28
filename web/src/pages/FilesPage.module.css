@@ -168,7 +168,7 @@
 }
 
 .crumbLink:hover {
-  color: var(--blue-ink);
+  color: var(--text);
 }
 
 .breadcrumbSep {
@@ -207,13 +207,15 @@
 
 .clearLink {
   padding: 0;
-  color: var(--blue-ink);
+  color: var(--text-2);
   font-size: 12.5px;
   font-weight: 500;
 }
 
 .clearLink:hover {
-  color: var(--blue);
+  color: var(--text);
+  text-decoration: underline;
+  text-underline-offset: 3px;
 }
 
 .secondaryBtn {
@@ -268,7 +270,7 @@
 
 .textBtn:hover {
   background: var(--surface);
-  color: var(--blue-ink);
+  color: var(--text);
 }
 
 /* ---------- List ---------- */
@@ -336,20 +338,13 @@
   font-weight: 600;
 }
 
-.row:hover .nameDir {
-  color: var(--blue-ink);
-}
+/* Row names never turn blue: the hover background is the only hover affordance. */
 
 .nameLink {
   display: block;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-}
-
-.nameLink:hover,
-.row:hover .nameLink {
-  color: var(--blue-ink);
 }
 
 .pathHint {
@@ -721,7 +716,7 @@
 
 .statusActive {
   background: var(--blue-light);
-  color: var(--blue-ink);
+  color: var(--text);
 }
 
 .statusFailed {
