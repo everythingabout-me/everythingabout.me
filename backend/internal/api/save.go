@@ -4,13 +4,14 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"html/template"
 	"io"
+	"mime"
 	"net/http"
 	"net/url"
+	"path/filepath"
 	"strings"
 	"time"
 	"unicode"
@@ -22,15 +23,9 @@ import (
 )
 
 // 保存链接是给 agent 用的入口：URL 本身就是凭证，GET 返回 token + prompt，
-// POST 把正文存成一个 Markdown 文件。设计见 docs/api/api.md §4.14。
+// POST 把文本或二进制存成文件。设计见 docs/api/api.md §4.14。
 
-const saveLinkMaxBody = 1 << 20 // 1 MiB，纯文本足够
-
-type saveLinkRequest struct {
-	Text   string `json:"text"`
-	Title  string `json:"title"`
-	Source string `json:"source"`
-}
+const saveLinkMaxBody = apiMaxPutSize // 和 PUT /files 一样，32 MiB 以内直接收
 
 // handleSaveLinkPage 渲染链接页：agent 默认拿到 Markdown prompt，
 // 浏览器拿到一页说明，?format=json 给 App。
@@ -56,7 +51,7 @@ func (s *Server) handleSaveLinkPage(w http.ResponseWriter, r *http.Request) erro
 		httpx.WriteJSON(w, http.StatusOK, map[string]any{
 			"token":      code,
 			"url":        linkURL,
-			"save":       map[string]any{"method": "POST", "url": linkURL, "contentType": "text/markdown"},
+			"save":       map[string]any{"method": "POST", "url": linkURL, "contentType": "as sent"},
 			"prompt":     prompt,
 			"name":       p.Token.Name,
 			"createdAt":  p.Token.CreatedAt,
@@ -85,8 +80,8 @@ func (s *Server) handleSaveLinkPage(w http.ResponseWriter, r *http.Request) erro
 	}
 }
 
-// handleSaveLinkCapture 接收正文。支持原始 text/markdown 和 JSON 两种写法；
-// 文件名用正文 hash，同一天重复提交不会生成两份。
+// handleSaveLinkCapture 接收任意类型的内容，文本、图片、PDF、视频都走这里。
+// 和 PUT /files 一样，32 MiB 以内由服务端落盘；更大的文件走 /upload 直传。
 func (s *Server) handleSaveLinkCapture(w http.ResponseWriter, r *http.Request) error {
 	p, err := s.auth.VerifySaveLink(r.Context(), r.PathValue("code"))
 	if err != nil {
@@ -96,48 +91,43 @@ func (s *Server) handleSaveLinkCapture(w http.ResponseWriter, r *http.Request) e
 		return httpx.NotFound("save link not found")
 	}
 
-	contentType := strings.ToLower(strings.TrimSpace(r.Header.Get("Content-Type")))
-	if !saveLinkAcceptsText(contentType) {
-		return httpx.NewError(http.StatusUnsupportedMediaType,
-			"binary files must use the direct upload flow (POST /upload with this link's Bearer token); see the link prompt")
-	}
-
 	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, saveLinkMaxBody))
 	if err != nil {
 		var tooLarge *http.MaxBytesError
 		if errors.As(err, &tooLarge) {
-			return httpx.NewError(http.StatusRequestEntityTooLarge, "content is too large; keep it under 1MiB")
+			return httpx.NewError(http.StatusRequestEntityTooLarge,
+				"content is too large; use POST /upload for files over 32MiB")
 		}
 		return httpx.BadRequest("failed to read request body")
 	}
-
-	var req saveLinkRequest
-	if strings.HasPrefix(contentType, "application/json") {
-		if err := json.Unmarshal(body, &req); err != nil {
-			return httpx.BadRequest("invalid JSON body")
-		}
-	} else {
-		req.Text = string(body)
-	}
-	req.Text = strings.TrimSpace(req.Text)
-	if req.Text == "" {
+	if len(body) == 0 {
 		return httpx.BadRequest("content cannot be empty")
 	}
-	if title := strings.TrimSpace(r.URL.Query().Get("title")); title != "" {
-		req.Title = title
+
+	contentType := cleanMediaType(r.Header.Get("Content-Type"))
+	filename := saveLinkFilename(r)
+	if contentType == "" {
+		contentType = mime.TypeByExtension(filepath.Ext(filename))
 	}
-	if source := strings.TrimSpace(r.URL.Query().Get("source")); source != "" {
-		req.Source = source
+	if contentType == "" {
+		contentType = "application/octet-stream"
 	}
 
-	title := strings.TrimSpace(req.Title)
+	title := strings.TrimSpace(r.URL.Query().Get("title"))
+	if title == "" && isTextContent(contentType) {
+		title = saveLinkTitle(string(body))
+	}
+	if title == "" && filename != "" {
+		title = strings.TrimSuffix(filepath.Base(filename), filepath.Ext(filename))
+	}
 	if title == "" {
-		title = saveLinkTitle(req.Text)
+		title = "Saved file"
 	}
 	if len([]rune(title)) > 80 {
 		title = string([]rune(title)[:80])
 	}
-	source := strings.TrimSpace(req.Source)
+
+	source := strings.TrimSpace(r.URL.Query().Get("source"))
 	if source == "" {
 		source = p.Token.Name
 	}
@@ -146,12 +136,13 @@ func (s *Server) handleSaveLinkCapture(w http.ResponseWriter, r *http.Request) e
 	if loc, err := time.LoadLocation(s.cfg.Timeline.Timezone); err == nil {
 		now = now.In(loc)
 	}
-	hash := sha256.Sum256([]byte(req.Text))
+	hash := sha256.Sum256(body)
 	hashName := hex.EncodeToString(hash[:])
+	ext := saveLinkExtension(filename, contentType)
 	slug := fileSlug(title)
-	path := fmt.Sprintf("Inbox/%s/%s.md", now.Format("2006/01/02"), hashName[:12])
+	path := fmt.Sprintf("Inbox/%s/%s%s", now.Format("2006/01/02"), hashName[:12], ext)
 	if slug != "" {
-		path = fmt.Sprintf("Inbox/%s/%s-%s.md", now.Format("2006/01/02"), slug, hashName[:8])
+		path = fmt.Sprintf("Inbox/%s/%s-%s%s", now.Format("2006/01/02"), slug, hashName[:8], ext)
 	}
 
 	existing, err := s.nodes.Live(r.Context(), path, p.User.ID)
@@ -162,12 +153,11 @@ func (s *Server) handleSaveLinkCapture(w http.ResponseWriter, r *http.Request) e
 		s.recordAudit(r, p, "capture", path, http.StatusOK, map[string]any{
 			"size": existing.Size, "title": title, "link": p.Token.Name, "duplicate": true,
 		})
-		writeCaptureResult(w, r, http.StatusOK, path, title, true)
+		writeCaptureResult(w, r, http.StatusOK, path, title, contentType, existing.Size, true)
 		return nil
 	}
 
-	content := saveFileContent(req.Text)
-	size := int64(len(content))
+	size := int64(len(body))
 	if err := s.checkQuota(r.Context(), p.User.ID, size, nil); err != nil {
 		return err
 	}
@@ -178,8 +168,7 @@ func (s *Server) handleSaveLinkCapture(w http.ResponseWriter, r *http.Request) e
 		return err
 	}
 
-	mime := "text/markdown; charset=utf-8"
-	info, err := s.storage.Put(r.Context(), paths.KeyFor(path, p.User.ID), bytes.NewReader([]byte(content)), size, mime)
+	info, err := s.storage.Put(r.Context(), paths.KeyFor(path, p.User.ID), bytes.NewReader(body), size, contentType)
 	if err != nil {
 		return err
 	}
@@ -199,12 +188,12 @@ func (s *Server) handleSaveLinkCapture(w http.ResponseWriter, r *http.Request) e
 		OwnerID:          p.User.ID,
 		Path:             path,
 		Size:             info.Size,
-		Mime:             &mime,
+		Mime:             &contentType,
 		ETag:             etag,
 		StorageClass:     storageClass,
 		SourceModifiedAt: modified,
 		Meta: map[string]any{
-			"mime": mime, "sha256": hashName, "title": title, "source": source,
+			"mime": contentType, "sha256": hashName, "title": title, "source": source,
 			"captured_at": now.UTC().Format(time.RFC3339),
 		},
 	})
@@ -213,19 +202,101 @@ func (s *Server) handleSaveLinkCapture(w http.ResponseWriter, r *http.Request) e
 	}
 	s.timeline.Notify(p.User.ID)
 	s.recordAudit(r, p, "capture", path, http.StatusCreated, map[string]any{
-		"size": info.Size, "title": title, "link": p.Token.Name,
+		"size": info.Size, "title": title, "link": p.Token.Name, "mime": contentType,
 	})
-	writeCaptureResult(w, r, http.StatusCreated, path, title, false)
+	writeCaptureResult(w, r, http.StatusCreated, path, title, contentType, info.Size, false)
 	return nil
 }
 
-func writeCaptureResult(w http.ResponseWriter, r *http.Request, status int, path, title string, duplicate bool) {
+func writeCaptureResult(w http.ResponseWriter, r *http.Request, status int, path, title, contentType string, size int64, duplicate bool) {
 	httpx.WriteJSON(w, status, map[string]any{
 		"path":      path,
 		"url":       requestBaseURL(r) + "/drive?path=" + url.QueryEscape(path),
 		"title":     title,
+		"mime":      contentType,
+		"size":      size,
 		"duplicate": duplicate,
 	})
+}
+
+func cleanMediaType(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+	if parsed, _, err := mime.ParseMediaType(raw); err == nil {
+		return parsed
+	}
+	return strings.ToLower(raw)
+}
+
+func isTextContent(contentType string) bool {
+	return strings.HasPrefix(contentType, "text/") ||
+		contentType == "application/json" ||
+		contentType == "application/xml" ||
+		contentType == "application/x-www-form-urlencoded"
+}
+
+// saveLinkFilename 先看 ?filename=，再看 Content-Disposition。
+func saveLinkFilename(r *http.Request) string {
+	if name := strings.TrimSpace(r.URL.Query().Get("filename")); name != "" {
+		return filepath.Base(name)
+	}
+	raw := r.Header.Get("Content-Disposition")
+	if raw == "" {
+		return ""
+	}
+	if _, params, err := mime.ParseMediaType(raw); err == nil {
+		if name := params["filename"]; name != "" {
+			return filepath.Base(name)
+		}
+	}
+	return ""
+}
+
+func saveLinkExtension(filename, contentType string) string {
+	ext := strings.ToLower(filepath.Ext(filename))
+	if validExtension(ext) {
+		return ext
+	}
+	switch contentType {
+	case "text/markdown":
+		return ".md"
+	case "text/plain", "application/x-www-form-urlencoded":
+		return ".txt"
+	case "application/json":
+		return ".json"
+	case "application/pdf":
+		return ".pdf"
+	case "image/jpeg":
+		return ".jpg"
+	case "image/png":
+		return ".png"
+	case "image/gif":
+		return ".gif"
+	case "image/webp":
+		return ".webp"
+	case "video/mp4":
+		return ".mp4"
+	case "video/quicktime":
+		return ".mov"
+	}
+	if extensions, err := mime.ExtensionsByType(contentType); err == nil && len(extensions) > 0 {
+		return extensions[0]
+	}
+	return ".bin"
+}
+
+func validExtension(ext string) bool {
+	if len(ext) < 2 || len(ext) > 11 || ext[0] != '.' {
+		return false
+	}
+	for _, char := range ext[1:] {
+		if !unicode.IsLetter(char) && !unicode.IsDigit(char) {
+			return false
+		}
+	}
+	return true
 }
 
 func saveLinkTitle(text string) string {
@@ -241,14 +312,6 @@ func saveLinkTitle(text string) string {
 		return line
 	}
 	return "Saved note"
-}
-
-// saveFileContent 只保证正文以换行结尾，不添加任何 frontmatter。
-func saveFileContent(text string) string {
-	if strings.HasSuffix(text, "\n") {
-		return text
-	}
-	return text + "\n"
 }
 
 // fileSlug 把标题变成文件名可用的短横线串；中文、字母、数字保留。
@@ -274,36 +337,24 @@ func fileSlug(title string) string {
 	return slug
 }
 
-// saveLinkAcceptsText 区分“文本走 /s”和“文件走直传”。
-// 没有 Content-Type 的请求按文本处理，方便 curl --data-binary。
-func saveLinkAcceptsText(contentType string) bool {
-	return contentType == "" ||
-		strings.HasPrefix(contentType, "text/") ||
-		strings.HasPrefix(contentType, "application/json")
-}
-
 func saveLinkPrompt(base, code string) string {
 	return fmt.Sprintf(`# everythingabout.me
 
 Connected to this drive.
 
 Token: %s
+Save: POST %s/s/%s
+Content-Type: text/markdown (or image/jpeg, application/pdf, video/mp4, ...)
 
-Text:
-  POST %s/s/%s
-  Content-Type: text/markdown
+  <content or file bytes>
 
-  <content>
+Optional query: ?title=...&filename=photo.jpg
+Response: {"path": "...", "url": "...", "mime": "...", "size": ...}
 
-  Optional query: ?title=...
-  Response: {"path": "Inbox/2026/10/28/....md", "url": "..."}
-
-Files (image, video, PDF):
+Files over 32 MiB:
   POST %s/upload
-  {"path": "Inbox/2026/10/28/photo.jpg", "size": 12345, "mime": "image/jpeg"}
-
-  PUT the bytes to each returned part URL, then:
-  POST %s/upload/complete
+  {"path": "Inbox/2026/10/28/photo.jpg", "size": 12345678, "mime": "image/jpeg"}
+  PUT the bytes to each returned part URL, then POST %s/upload/complete
 
 Full API: Authorization: Bearer %s
 `, code, base, code, base, base, code)

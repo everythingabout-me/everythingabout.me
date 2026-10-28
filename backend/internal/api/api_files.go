@@ -98,8 +98,6 @@ func codeForStatus(status int) string {
 		return "gone"
 	case http.StatusRequestEntityTooLarge:
 		return "too_large"
-	case http.StatusUnsupportedMediaType:
-		return "unsupported_media_type"
 	case http.StatusTooManyRequests:
 		return "rate_limited"
 	case http.StatusInsufficientStorage:

@@ -516,7 +516,7 @@ GET    /events/{id}          → 单条完整 JSON
 GET /s/abcd2345efgh2345
 ```
 
-- `Accept: text/markdown`（或 `curl` 默认）返回给 agent 的 prompt：token、POST 地址、正文格式、返回形状。
+- `Accept: text/markdown`（或 `curl` 默认）返回给 agent 的 prompt：token、POST 地址、内容格式、返回形状。
 - 浏览器打开返回一页说明。
 - `?format=json` 返回 `{token, url, save, prompt, ...}`，给不能读 prompt 的 App。
 
@@ -526,27 +526,23 @@ GET /s/abcd2345efgh2345
 Connected to this drive.
 
 Token: abcd2345efgh2345
+Save: POST https://everythingabout.me/s/abcd2345efgh2345
+Content-Type: text/markdown (or image/jpeg, application/pdf, video/mp4, ...)
 
-Text:
-  POST https://everythingabout.me/s/abcd2345efgh2345
-  Content-Type: text/markdown
+  <content or file bytes>
 
-  <content>
+Optional query: ?title=...&filename=photo.jpg
+Response: {"path": "...", "url": "...", "mime": "...", "size": ...}
 
-  Optional query: ?title=...
-  Response: {"path": "Inbox/2026/10/28/....md", "url": "..."}
-
-Files (image, video, PDF):
+Files over 32 MiB:
   POST https://everythingabout.me/upload
-  {"path": "Inbox/2026/10/28/photo.jpg", "size": 12345, "mime": "image/jpeg"}
-
-  PUT the bytes to each returned part URL, then:
-  POST https://everythingabout.me/upload/complete
+  {"path": "Inbox/2026/10/28/photo.jpg", "size": 12345678, "mime": "image/jpeg"}
+  PUT the bytes to each returned part URL, then POST https://everythingabout.me/upload/complete
 
 Full API: Authorization: Bearer abcd2345efgh2345
 ```
 
-文本就是往同一个 URL POST 正文：
+保存就是往同一个 URL POST 内容：
 
 ```http
 POST /s/abcd2345efgh2345
@@ -556,15 +552,15 @@ Content-Type: text/markdown
 ```
 
 ```json
-201 {"path":"Inbox/2026/10/27/关于简单与信任-6f3a9c2b.md","url":"https://…/drive?path=…","title":"…","duplicate":false}
+201 {"path":"Inbox/2026/10/27/关于简单与信任-6f3a9c2b.md","url":"https://…/drive?path=…","title":"…","mime":"text/markdown","size":42,"duplicate":false}
 ```
 
 - 短码是 16 位小写 base32，**不带 `eam_` 前缀**；`Authorization: Bearer <短码>` 也能直接走完整文件 API。
 - 保存链接和用户本人同权：不设前缀、不设能力位、默认不过期。
-- **文本和文件分开走**：`POST /s/<code>` 只收 `text/*` 或 JSON 文本；图片、视频、PDF 用同一把 token 调 `/upload` 拿预签名地址，字节直传 COS，不经过服务器。把二进制 POST 到 `/s` 会返回 `415`，并指向这条直传流程。
-- 文本正文可以是原始 `text/markdown`，也可以是 `{"text","title","source"}` JSON。
-- 文件名由标题 + 正文 SHA-256 决定：同一天重复提交同一段内容返回 `200` + `duplicate:true`，不会存两份。
-- 落盘为 `Inbox/YYYY/MM/DD/<title>-<hash>.md`，**文件里只有正文，没有 frontmatter**；标题、来源、时间写在 `nodes.meta` 里，不塞进 Markdown。
+- **不按文件类型分支**：`POST /s/<code>` 的 body 原样存盘，`Content-Type` 决定 mime；没有 `?filename=` 时按 mime 推扩展名。文本、图片、PDF 都一样，32 MiB 以内一个请求完成。
+- 超过 32 MiB 的文件（常见是视频）用同一把 token 调 `/upload` 拿预签名地址，字节直传 COS，不经过服务器。
+- 文件名由标题 + 内容 SHA-256 决定：同一天重复提交同一段内容返回 `200` + `duplicate:true`，不会存两份。
+- 落盘为 `Inbox/YYYY/MM/DD/<title>-<hash>.<ext>`，**文件里只有提交的内容，没有 frontmatter**；标题、来源、时间写在 `nodes.meta` 里。
 - 每次保存都写 `audit_log`（action=`capture`），和文件 API 的写操作一样可追溯。
 - 账户页的 `/api/save-links`（cookie 会话）负责创建、列表、撤销；撤销后 `/s/<code>` 立即 404。
 - 短码里的 MAC 由服务端密钥派生；换掉 `COS_SECRET_KEY` 会让已有保存链接失效。
@@ -602,7 +598,6 @@ Content-Type: text/markdown
 | 409 | 同名冲突、非空目录、移动/复制对象过多 |
 | 412 | 条件写失败 |
 | 413 | 超过 32 MiB，请用 `/upload` |
-| 415 | 保存链接收到二进制；图片/视频/PDF 请走 `/upload` 直传 |
 | 429 | 限流，带 `Retry-After` |
 | 500 | 服务端错误；`job_failed` 时带 `id`，可以 `POST /{动作}/{id}/retry` |
 | 507 | 配额用尽 |

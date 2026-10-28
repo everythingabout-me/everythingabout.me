@@ -258,9 +258,10 @@ curl -H "Authorization: Bearer eam_..." https://your-host/list?path=Apps/badmint
 https://your-host/s/abcd2345efgh2345
 ```
 
-这条 URL 本身就是 token 和说明书。agent 打开它拿到 prompt，往同一个 URL POST 正文，
-就会存成 `Inbox/YYYY/MM/DD/<title>-<hash>.md`，文件内容就是提交的正文。图片、视频、PDF 用同一把 token
-走 `/upload` 直传 COS，字节不经过服务器。账户页可以生成多条、看最近使用、随时撤销；
+这条 URL 本身就是 token 和说明书。agent 打开它拿到 prompt，往同一个 URL POST 内容，
+就会存成 `Inbox/YYYY/MM/DD/<title>-<hash>.<ext>`，文件内容就是提交的原文。文本、图片、PDF 都走同一个入口，
+32 MiB 以内的文件一个请求完成；更大的视频用同一把 token 走 `/upload` 直传 COS，字节不经过服务器。
+账户页可以生成多条、看最近使用、随时撤销；
 撤销后链接立即失效。短码不带 `eam_` 前缀，也可以直接作为 Bearer token 调用完整文件 API。
 账户页的“最近活动”会按时间列出谁在什么时候改了哪个路径；保存链接和事件投稿都记进 `audit_log`。
 

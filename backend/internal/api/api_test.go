@@ -318,31 +318,52 @@ func TestSaveLinkPrompt(t *testing.T) {
 	}
 }
 
-func TestSaveLinkAcceptsText(t *testing.T) {
-	yes := []string{"", "text/plain", "text/markdown; charset=utf-8", "application/json"}
-	no := []string{"image/jpeg", "video/mp4", "application/pdf", "application/octet-stream"}
-	for _, value := range yes {
-		if !saveLinkAcceptsText(value) {
-			t.Errorf("%q should be treated as text", value)
-		}
+func TestSaveLinkExtension(t *testing.T) {
+	cases := []struct {
+		filename string
+		mime     string
+		want     string
+	}{
+		{"photo.JPG", "image/jpeg", ".jpg"},
+		{"report.pdf", "application/pdf", ".pdf"},
+		{"", "image/png", ".png"},
+		{"", "text/markdown", ".md"},
+		{"", "application/octet-stream", ".bin"},
+		{"clip", "video/mp4", ".mp4"},
+		{"weird.name!", "application/pdf", ".pdf"},
 	}
-	for _, value := range no {
-		if saveLinkAcceptsText(value) {
-			t.Errorf("%q should go through direct upload", value)
+	for _, tc := range cases {
+		if got := saveLinkExtension(tc.filename, tc.mime); got != tc.want {
+			t.Errorf("saveLinkExtension(%q, %q) = %q, want %q", tc.filename, tc.mime, got, tc.want)
 		}
 	}
 }
 
-func TestSaveFileContent(t *testing.T) {
-	content := saveFileContent("hello\nworld")
-	if content != "hello\nworld\n" {
-		t.Fatalf("content = %q", content)
+func TestCleanMediaType(t *testing.T) {
+	cases := map[string]string{
+		"text/markdown; charset=utf-8": "text/markdown",
+		"IMAGE/PNG":                    "image/png",
+		"":                             "",
 	}
-	if strings.HasPrefix(content, "---") {
-		t.Fatal("saved content must not start with frontmatter")
+	for input, want := range cases {
+		if got := cleanMediaType(input); got != want {
+			t.Errorf("cleanMediaType(%q) = %q, want %q", input, got, want)
+		}
 	}
-	if again := saveFileContent(content); again != content {
-		t.Fatalf("trailing newline should be idempotent: %q != %q", again, content)
+}
+
+func TestIsTextContent(t *testing.T) {
+	yes := []string{"text/plain", "text/markdown", "application/json", "application/x-www-form-urlencoded"}
+	no := []string{"image/jpeg", "video/mp4", "application/pdf", "application/octet-stream"}
+	for _, value := range yes {
+		if !isTextContent(value) {
+			t.Errorf("%q should be text", value)
+		}
+	}
+	for _, value := range no {
+		if isTextContent(value) {
+			t.Errorf("%q should not be text", value)
+		}
 	}
 }
 
