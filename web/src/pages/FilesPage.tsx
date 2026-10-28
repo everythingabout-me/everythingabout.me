@@ -16,7 +16,7 @@ import {
 } from "../components/icons";
 import { canPreviewFile } from "../components/preview/supported";
 import { filesHref } from "../filesPath";
-import { filesText, foldersText, resultsText, t } from "../i18n";
+import { filesText, resultsText, t } from "../i18n";
 import { formatRelativeTime } from "../i18n/format";
 import { useUploadQueue, type UploadStatus, type UploadTask } from "./useUploadQueue";
 import styles from "./FilesPage.module.css";
@@ -551,7 +551,7 @@ export function FilesPage() {
 
   // In-flight placeholder rows share one list with real files and follow the same ordering:
   // when an upload finishes, the real file lands where its placeholder was and nothing jumps.
-  const { entries, visibleUploads, visibleItems } = useMemo(() => {
+  const { entries, visibleUploads } = useMemo(() => {
     const uploading = uploads.filter((task) => task.dir === path);
     const pendingPaths = new Set(uploading.map((task) => task.path));
     // When overwriting a same-named file, hide the old one and keep only the placeholder row;
@@ -570,15 +570,9 @@ export function FilesPage() {
       })),
     ];
     if (!activeQuery) list.sort(compareEntries);
-    return { entries: list, visibleUploads: uploading, visibleItems: baseItems };
+    return { entries: list, visibleUploads: uploading };
   }, [activeQuery, items, path, uploads]);
 
-  const totalSize = visibleItems.reduce(
-    (sum, item) => (item.is_dir ? sum : sum + Number(item.size)),
-    0,
-  );
-  const fileCount = visibleItems.filter((item) => !item.is_dir).length;
-  const folderCount = visibleItems.filter((item) => item.is_dir).length;
   const activeUploadCount = visibleUploads.filter((task) => task.status !== "failed").length;
 
   // Before the first listing arrives, build the trail from the URL so the title and breadcrumbs
@@ -777,12 +771,6 @@ export function FilesPage() {
                   <>
                     {parentCrumbs.length > 0 && <Breadcrumbs crumbs={parentCrumbs} />}
                     <h1 className={styles.pageTitle}>{currentName}</h1>
-                    {!pending && (
-                      <p className={styles.stats}>
-                        {foldersText(folderCount)} · {filesText(fileCount)}
-                        {totalSize > 0 && <span> · {formatSize(totalSize)}</span>}
-                      </p>
-                    )}
                   </>
                 )}
               </div>
@@ -867,14 +855,6 @@ export function FilesPage() {
                 </div>
               )}
             </section>
-
-            {!pending && visibleItems.length > 0 && (fileCount > 0 || totalSize > 0) && (
-              <footer className={styles.footer}>
-                {fileCount > 0 && <span>{filesText(fileCount)}</span>}
-                {fileCount > 0 && totalSize > 0 && <span>·</span>}
-                {totalSize > 0 && <span>{formatSize(totalSize)}</span>}
-              </footer>
-            )}
           </>
         )}
       </main>

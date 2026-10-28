@@ -58,11 +58,6 @@ export function legacyFilesText(count: number): string {
   return locale === "zh" ? `${n} 个旧文件` : `${n} ${count === 1 ? "old file" : "old files"}`;
 }
 
-export function foldersText(count: number): string {
-  const n = formatNumber(count);
-  return locale === "zh" ? `${n} 个目录` : `${n} ${count === 1 ? "folder" : "folders"}`;
-}
-
 export function resultsText(count: number): string {
   const n = formatNumber(count);
   return locale === "zh" ? `${n} 个结果` : `${n} ${count === 1 ? "result" : "results"}`;
