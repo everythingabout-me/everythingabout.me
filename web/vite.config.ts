@@ -16,7 +16,10 @@ export default defineConfig({
         changeOrigin: false,
       },
       // Save links are server-rendered, so in dev they must reach Go too, not Vite's SPA fallback.
-      "/s": {
+      // A key starting with "^" is matched as a RegExp. The bare prefix "/s" would also match
+      // Vite's own "/src/**" module URLs (the matcher is a plain startsWith) and proxy the whole
+      // app's source to Go, which answers every module request with 404.
+      "^/s/": {
         target: "http://127.0.0.1:8080",
         changeOrigin: false,
       },
