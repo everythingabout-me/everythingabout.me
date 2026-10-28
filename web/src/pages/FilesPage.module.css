@@ -12,13 +12,137 @@
   padding: 28px 24px 64px;
 }
 
-/* ---------- Page title / actions ---------- */
+/* ---------- Page tools: search + this page's actions ---------- */
+
+.tools {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 2px 18px;
+}
+
+/* The search box lives here, not in the shared header, which stays identical on every page. */
+.search {
+  position: relative;
+  display: flex;
+  align-items: center;
+  flex: 1 1 200px;
+  min-width: 0;
+  max-width: 320px;
+}
+
+.searchIcon {
+  position: absolute;
+  left: 12px;
+  color: var(--blue-ink);
+  pointer-events: none;
+  display: flex;
+  transition: color 0.15s ease;
+}
+
+.searchInput {
+  width: 100%;
+  height: 36px;
+  padding: 0 32px 0 31px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text);
+  font-size: 13px;
+  outline: none;
+  box-shadow: none;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease, background 0.15s ease;
+}
+
+.searchInput::placeholder {
+  color: var(--text-3);
+}
+
+.searchInput:hover {
+  border-color: var(--border-strong);
+}
+
+.searchInput:focus {
+  border-color: var(--blue);
+  background: var(--surface);
+  box-shadow: 0 0 0 4px var(--ring);
+}
+
+.search:focus-within .searchIcon {
+  color: var(--blue-ink);
+}
+
+.kbd {
+  position: absolute;
+  right: 9px;
+  display: grid;
+  place-items: center;
+  min-width: 17px;
+  height: 17px;
+  padding: 0 4px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: var(--hover);
+  color: var(--text-3);
+  font-size: 10px;
+  line-height: 1;
+  pointer-events: none;
+}
+
+.searchInput:focus + .kbd {
+  opacity: 0;
+}
+
+.toolActions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: none;
+  margin-left: auto;
+}
+
+.uploadBtn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex: none;
+  height: 36px;
+  padding: 0 15px;
+  border-radius: 10px;
+  background: var(--blue);
+  color: var(--btn-fg);
+  font-size: 13px;
+  font-weight: 600;
+  white-space: nowrap;
+  box-shadow: none;
+  transition: filter 0.14s ease, opacity 0.14s ease;
+}
+
+.uploadBtn:hover {
+  filter: brightness(0.94);
+}
+
+.uploadBtn:active {
+  filter: brightness(0.88);
+}
+
+.uploadBadge {
+  display: inline-grid;
+  place-items: center;
+  min-width: 16px;
+  height: 16px;
+  padding: 0 4px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--btn-fg) 20%, transparent);
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1;
+  font-variant-numeric: tabular-nums;
+}
+
+/* ---------- Page title ---------- */
 
 .masthead {
-  display: flex;
-  align-items: flex-end;
-  justify-content: space-between;
-  gap: 20px;
   padding: 2px 2px 16px;
 }
 
@@ -90,14 +214,6 @@
 
 .clearLink:hover {
   color: var(--blue);
-}
-
-.mastheadActions {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  flex: none;
-  padding-bottom: 2px;
 }
 
 .secondaryBtn {
@@ -690,15 +806,19 @@
     padding: 22px 16px 60px;
   }
 
-  .masthead {
-    flex-direction: column;
-    align-items: stretch;
-    gap: 12px;
+  /* Narrow screens: search gets its own line, the actions sit under it. */
+  .tools {
+    flex-wrap: wrap;
+    padding: 0 2px 16px;
   }
 
-  .mastheadActions {
-    justify-content: flex-start;
-    padding-bottom: 0;
+  .search {
+    flex: 1 1 100%;
+    max-width: none;
+  }
+
+  .kbd {
+    display: none;
   }
 
   .row,
@@ -738,5 +858,19 @@
   .detailRow {
     grid-template-columns: 84px minmax(0, 1fr);
     gap: 12px;
+  }
+}
+
+@media (max-width: 520px) {
+  .tools {
+    gap: 6px;
+  }
+
+  .uploadLabel {
+    display: none;
+  }
+
+  .uploadBtn {
+    padding: 0 10px;
   }
 }

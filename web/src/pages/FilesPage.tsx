@@ -305,18 +305,6 @@ function FileDetail({ file, trail }: { file: Item; trail: Crumb[] }) {
             <span>{formatRelativeTime(file.updated_at)}</span>
           </p>
         </div>
-
-        <div className={styles.mastheadActions}>
-          <a
-            className={styles.secondaryBtn}
-            href={api.downloadHref(file.path)}
-            target="_blank"
-            rel="noreferrer"
-          >
-            <DownloadIcon size={14} />
-            {t("file.download")}
-          </a>
-        </div>
       </div>
 
       <section className={styles.viewerPanel}>
@@ -398,6 +386,7 @@ export function FilesPage() {
   const [dragging, setDragging] = useState(false);
 
   const fileInput = useRef<HTMLInputElement>(null);
+  const searchInput = useRef<HTMLInputElement>(null);
   const toastTimer = useRef<number | null>(null);
   const dragDepth = useRef(0);
   const completedUploads = useRef(0);
@@ -486,6 +475,21 @@ export function FilesPage() {
       if (event.key === "Escape") {
         setCreating(false);
         setToast(null);
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, []);
+
+  // "/" focuses the page's search box, except while typing in a field.
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      const target = event.target as HTMLElement | null;
+      const typing =
+        target?.tagName === "INPUT" || target?.tagName === "TEXTAREA" || target?.isContentEditable;
+      if (event.key === "/" && !typing) {
+        event.preventDefault();
+        searchInput.current?.focus();
       }
     };
     window.addEventListener("keydown", onKeyDown);
@@ -623,22 +627,7 @@ export function FilesPage() {
     >
       <title>{`${file ? file.name : currentName} · ${t("app.name")}`}</title>
 
-      <AppHeader
-        user={user}
-        search={{
-          value: query,
-          onChange: (value) => {
-            setQuery(value);
-            if (!value && activeQuery) void load(path);
-          },
-          onSubmit: () => void runSearch(query),
-        }}
-        upload={
-          canUpload
-            ? { count: activeUploadCount, onClick: () => fileInput.current?.click() }
-            : undefined
-        }
-      />
+      <AppHeader user={user} />
 
       <input
         ref={fileInput}
@@ -653,6 +642,87 @@ export function FilesPage() {
       />
 
       <main className={styles.main}>
+        {/* Search and the primary action belong to this page, not to the shared header. */}
+        <div className={styles.tools}>
+          <div className={styles.search}>
+            <span className={styles.searchIcon}>
+              <SearchIcon size={14} />
+            </span>
+            <input
+              ref={searchInput}
+              className={styles.searchInput}
+              placeholder={t("drive.searchPlaceholder")}
+              aria-label={t("drive.searchPlaceholder")}
+              value={query}
+              onChange={(event) => {
+                setQuery(event.target.value);
+                if (!event.target.value && activeQuery) void load(path);
+              }}
+              onKeyDown={(event) => {
+                if (event.key === "Enter") void runSearch(query);
+                if (event.key === "Escape") {
+                  setQuery("");
+                  if (activeQuery) void load(path);
+                  event.currentTarget.blur();
+                }
+              }}
+            />
+            <span className={styles.kbd}>/</span>
+          </div>
+
+          <div className={styles.toolActions}>
+            {file && (
+              <a
+                className={styles.secondaryBtn}
+                href={api.downloadHref(file.path)}
+                target="_blank"
+                rel="noreferrer"
+              >
+                <DownloadIcon size={14} />
+                {t("file.download")}
+              </a>
+            )}
+
+            {!file && !notFound && (
+              <>
+                <button
+                  className={styles.secondaryBtn}
+                  onClick={() => {
+                    setCreating(true);
+                    setNewName("");
+                  }}
+                  disabled={Boolean(activeQuery)}
+                >
+                  <PlusIcon size={14} />
+                  {t("drive.newFolder")}
+                </button>
+                <button
+                  className={styles.ghostBtn}
+                  onClick={() => void load(path)}
+                  title={t("common.refresh")}
+                  aria-label={t("common.refresh")}
+                >
+                  <RefreshIcon size={16} />
+                </button>
+              </>
+            )}
+
+            {canUpload && (
+              <button
+                className={styles.uploadBtn}
+                onClick={() => fileInput.current?.click()}
+                title={t("drive.upload")}
+              >
+                <UploadIcon size={14} />
+                <span className={styles.uploadLabel}>{t("drive.upload")}</span>
+                {activeUploadCount > 0 && (
+                  <span className={styles.uploadBadge}>{activeUploadCount}</span>
+                )}
+              </button>
+            )}
+          </div>
+        </div>
+
         {loadError ? (
           <section className={styles.panel}>
             <div className={styles.empty}>
@@ -715,28 +785,6 @@ export function FilesPage() {
                     )}
                   </>
                 )}
-              </div>
-
-              <div className={styles.mastheadActions}>
-                <button
-                  className={styles.secondaryBtn}
-                  onClick={() => {
-                    setCreating(true);
-                    setNewName("");
-                  }}
-                  disabled={Boolean(activeQuery)}
-                >
-                  <PlusIcon size={14} />
-                  {t("drive.newFolder")}
-                </button>
-                <button
-                  className={styles.ghostBtn}
-                  onClick={() => void load(path)}
-                  title={t("common.refresh")}
-                  aria-label={t("common.refresh")}
-                >
-                  <RefreshIcon size={16} />
-                </button>
               </div>
             </div>
 
