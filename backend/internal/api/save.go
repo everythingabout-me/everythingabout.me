@@ -11,11 +11,11 @@ import (
 	"everythingabout.me/backend/internal/httpx"
 )
 
-// 保存链接是给 agent 的说明书：GET /s/<code> 返回 token + prompt。
-// 它本身不接收内容；保存全部走已有的文件 API（PUT /files、POST /upload）。
+// A save link is instructions for an agent: GET /s/<code> returns the token plus a prompt.
+// It accepts no content itself; saving goes through the file API (PUT /files, POST /upload).
 
-// handleSaveLinkPage 渲染链接页：agent 默认拿到 Markdown prompt，
-// 浏览器拿到一页说明，?format=json 给 App。
+// handleSaveLinkPage renders the link page: agents get the Markdown prompt by default,
+// browsers get a page of instructions, and ?format=json serves apps.
 func (s *Server) handleSaveLinkPage(w http.ResponseWriter, r *http.Request) error {
 	code := r.PathValue("code")
 	p, err := s.auth.VerifySaveLink(r.Context(), code)
@@ -69,7 +69,7 @@ func (s *Server) handleSaveLinkPage(w http.ResponseWriter, r *http.Request) erro
 	}
 }
 
-// saveLinkPrompt 只描述“拿这个 token 怎么调已有 API”，不定义新的写入入口。
+// saveLinkPrompt only explains how to call the API with this token; it defines no new write path.
 func saveLinkPrompt(base, code string) string {
 	return fmt.Sprintf(`# everythingabout.me
 
@@ -121,7 +121,7 @@ func requestBaseURL(r *http.Request) string {
 	return scheme + "://" + host
 }
 
-// ---------- 网页：账户页的链接列表 ----------
+// ---------- web: the account page's link list ----------
 
 func (s *Server) handleListSaveLinks(w http.ResponseWriter, r *http.Request) error {
 	user, err := s.requireUser(r)

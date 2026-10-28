@@ -17,9 +17,9 @@ func TestNormalize(t *testing.T) {
 		{"./Photos/./a.jpg", "Photos/a.jpg"},
 		{`Photos\2024\a.jpg`, "Photos/2024/a.jpg"},
 		{"  Photos/a.jpg  ", "Photos/a.jpg"},
-		// 只 trim 整条路径，中间的分段保留空格（和改造前一致）
+		// Only the whole path is trimmed; interior segments keep their spaces (as before the rewrite)
 		{"  照片 / 2024 / a.jpg  ", "照片 / 2024 / a.jpg"},
-		// macOS 上传的是 NFD，归一化成 NFC 后才不会出现“同名两个文件”
+		// macOS uploads NFD; only after normalizing to NFC do we avoid "two files with the same name"
 		{"Cafe\u0301.jpg", "Café.jpg"},
 	}
 	for _, tc := range cases {

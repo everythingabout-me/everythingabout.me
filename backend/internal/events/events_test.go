@@ -20,8 +20,8 @@ func baseInput() AppInput {
 	}
 }
 
-// 校验是唯一的写入口：网页、流水线、三方应用都从这里过。
-// 这些用例就是 docs/design/events.md §3 / §6.4 的限额表。
+// Validation is the only write gate: web, pipeline and third-party apps all pass
+// through it. These cases are the limits table from docs/design/events.md §3 / §6.4.
 func TestValidateApp(t *testing.T) {
 	cases := []struct {
 		name   string
@@ -112,7 +112,7 @@ func TestCursorRoundTrip(t *testing.T) {
 	}
 }
 
-// 空页必须序列化成 []，不是 null：前端把 events 当数组用。
+// An empty page must serialize as [], not null: the frontend treats events as an array.
 func TestScanEventsEmptyIsNotNil(t *testing.T) {
 	list, err := scanEvents(emptyRows{})
 	if err != nil {

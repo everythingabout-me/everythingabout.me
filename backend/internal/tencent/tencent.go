@@ -1,7 +1,8 @@
-// Package tencent 实现腾讯云 API 的 TC3-HMAC-SHA256 签名。
+// Package tencent implements TC3-HMAC-SHA256 signing for Tencent Cloud APIs.
 //
-// 只覆盖本服务用到的两个接口：SES 发信和 STS 临时凭证。
-// 手写签名避免了把整个 tencentcloud-sdk-go 拖进来（几百 MB、上百个服务）。
+// It covers only the two endpoints this service uses: SES sending and STS temporary
+// credentials. Hand-rolling the signature avoids dragging in all of tencentcloud-sdk-go
+// (hundreds of MB, a hundred-plus services).
 package tencent
 
 import (
@@ -24,7 +25,7 @@ type Credentials struct {
 	SecretKey string
 }
 
-// APIError 是腾讯云返回的业务错误。
+// APIError is a business error returned by Tencent Cloud.
 type APIError struct {
 	Code      string
 	Message   string
@@ -40,7 +41,7 @@ func (e *APIError) Error() string {
 
 var httpClient = &http.Client{Timeout: 15 * time.Second}
 
-// Call 调用一个腾讯云 JSON API，把响应放进 out。
+// Call invokes one Tencent Cloud JSON API and decodes the response into out.
 func Call(
 	ctx context.Context,
 	cred Credentials,

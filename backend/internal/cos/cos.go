@@ -1,4 +1,4 @@
-// Package cos 是 storage.Storage 的腾讯云 COS 实现。
+// Package cos is the Tencent Cloud COS implementation of storage.Storage.
 package cos
 
 import (
@@ -99,8 +99,8 @@ func (c *Client) PutEmpty(ctx context.Context, key string) error {
 	return err
 }
 
-// sizedReader 让 SDK 能读出长度（progress + 5GB 检查），同时把
-// Content-Length 显式传给 COS，避免退化成 chunked 上传。
+// sizedReader lets the SDK read the length (for progress and the 5GB check) while also
+// passing Content-Length to COS explicitly, so the upload does not degrade into chunked.
 type sizedReader struct {
 	io.Reader
 	size int64
@@ -182,7 +182,7 @@ func (c *Client) List(ctx context.Context, prefix string, onPage func(storage.Pa
 			next = result.Contents[len(result.Contents)-1].Key
 		}
 		if next == marker {
-			// 防御性判断：marker 没前进就不要无限循环
+			// Defensive: never loop forever if the marker fails to advance
 			return errors.New("COS listing did not advance; bucket configuration looks wrong")
 		}
 		marker = next
@@ -203,8 +203,8 @@ func (c *Client) GetURL(ctx context.Context, key string, opts storage.URLOptions
 	if opts.ContentType != "" {
 		query.Set("response-content-type", opts.ContentType)
 	}
-	// 数据万象的处理参数必须和签名一起带上，否则 COS 会认为签名不匹配。
-	// 例如 Process = "imageMogr2/thumbnail/640x>"。
+	// Data processing parameters must be signed along with the rest of the query, or COS
+	// considers the signature mismatched. For example Process = "imageMogr2/thumbnail/640x>".
 	if opts.Process != "" {
 		query.Set(opts.Process, "")
 	}
@@ -222,8 +222,8 @@ func (c *Client) GetURL(ctx context.Context, key string, opts storage.URLOptions
 	return signed.String(), nil
 }
 
-// PutURL 生成上传用的预签名 PUT URL。只签 Host，不签 Content-Type，
-// 这样客户端可以自由发 Content-Type，不会因为多带一个头就签名不匹配。
+// PutURL builds a presigned PUT URL for uploads. Only Host is signed, not Content-Type, so
+// the client can send any Content-Type without the signature falling over.
 func (c *Client) PutURL(ctx context.Context, key string, expiresSeconds int) (string, error) {
 	if expiresSeconds <= 0 {
 		expiresSeconds = 3600
@@ -254,10 +254,11 @@ var uploadActions = []string{
 	"name/cos:ListParts",
 }
 
-// stsResource 拼 STS 策略里的资源路径。key 必须按 URL 段做百分号编码：
-// STS 会先解码策略里的资源路径再和请求比对，而解码规则把 + 当成空格，
-// 所以文件名里带 + 时（例如 "选手甲+选手乙vsPlayerC+PlayerD.MOV"）策略授权的
-// 对象和真实 key 对不上，直传会被 COS 拒成 403 AccessDenied。
+// stsResource assembles the resource path for an STS policy. key must be percent-encoded
+// per URL segment: STS decodes the resource path in the policy before comparing it against
+// the request, and that decoder treats + as a space, so a filename containing + (for
+// example "选手甲+选手乙vsPlayerC+PlayerD.MOV") means the policy grants a different object than the
+// real key and the direct upload is rejected by COS with 403 AccessDenied.
 func stsResource(region, appID, bucket, key string) string {
 	segments := strings.Split(key, "/")
 	for i, segment := range segments {
@@ -267,8 +268,8 @@ func stsResource(region, appID, bucket, key string) string {
 		region, appID, bucket, strings.Join(segments, "/"))
 }
 
-// escapeKeySegment 只保留 RFC 3986 的 unreserved 字符，其余字节（包括
-// 中文的 UTF-8 字节和 + % # ? 等）一律编码成 %XX。
+// escapeKeySegment keeps only RFC 3986 unreserved characters and percent-encodes every other
+// byte (CJK UTF-8 bytes, and + % # ? and friends) as %XX.
 func escapeKeySegment(segment string) string {
 	var b strings.Builder
 	b.Grow(len(segment))
@@ -345,7 +346,7 @@ func (c *Client) InitiateMultipart(ctx context.Context, key string) (string, err
 	return result.UploadID, nil
 }
 
-// MultipartPartURL 把 partNumber 和 uploadId 放进 query 一起签名。
+// MultipartPartURL signs partNumber and uploadId as part of the query string.
 func (c *Client) MultipartPartURL(
 	ctx context.Context,
 	key, uploadID string,
@@ -390,7 +391,7 @@ func (c *Client) CompleteMultipart(
 	if _, _, err := c.client.Object.CompleteMultipartUpload(ctx, key, uploadID, opt); err != nil {
 		return nil, err
 	}
-	// Complete 的响应不带大小，HEAD 一次拿最终大小和 ETag。
+	// The Complete response carries no size, so HEAD once for the final size and ETag.
 	return c.Head(ctx, key)
 }
 
@@ -399,8 +400,9 @@ func (c *Client) AbortMultipart(ctx context.Context, key, uploadID string) error
 	return err
 }
 
-// ListParts 列出已经传上来的分片。上传会话不存在（被 abort 或过期回收）
-// 时返回空列表，让接口能给出"重新发起"的提示而不是 500。
+// ListParts lists the parts already uploaded. When the upload session is gone (aborted or
+// reaped after expiry) it returns an empty list, so the API can suggest starting over
+// instead of returning a 500.
 func (c *Client) ListParts(ctx context.Context, key, uploadID string) ([]storage.PartInfo, error) {
 	var (
 		parts  []storage.PartInfo

@@ -8,8 +8,9 @@ import (
 	"everythingabout.me/backend/internal/jobs"
 )
 
-// findJob 取出某个动作下的作业，并确认它属于当前用户、也没越出令牌范围。
-// 别人的作业和不存在一律 404，不泄露存在性。
+// findJob loads a job for one action, confirming it belongs to the current user and
+// stays within the token's scope. Other people's jobs and missing ones are both 404,
+// so existence never leaks.
 func (s *Server) findJob(r *http.Request, op jobs.Op) (*auth.Principal, *jobs.Job, error) {
 	p, err := s.principal(r)
 	if err != nil {
@@ -31,7 +32,7 @@ func (s *Server) findJob(r *http.Request, op jobs.Op) (*auth.Principal, *jobs.Jo
 	return p, job, nil
 }
 
-// jobGet 是 GET /move/{id} 和 GET /copy/{id} 的共同实现。
+// jobGet backs both GET /move/{id} and GET /copy/{id}.
 func (s *Server) jobGet(op jobs.Op) handlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) error {
 		_, job, err := s.findJob(r, op)
@@ -43,7 +44,7 @@ func (s *Server) jobGet(op jobs.Op) handlerFunc {
 	}
 }
 
-// jobCancel 请求停下：正在跑的话，当前这一项搬完就停。
+// jobCancel asks the job to stop: if it is running, it stops once the current item is done.
 func (s *Server) jobCancel(op jobs.Op) handlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) error {
 		p, job, err := s.findJob(r, op)
@@ -65,7 +66,7 @@ func (s *Server) jobCancel(op jobs.Op) handlerFunc {
 	}
 }
 
-// jobRetry 从失败/取消的地方接着做。
+// jobRetry resumes from where the job failed or was cancelled.
 func (s *Server) jobRetry(op jobs.Op) handlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) error {
 		p, job, err := s.findJob(r, op)

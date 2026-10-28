@@ -1,229 +1,279 @@
 # AGENTS.md
 
-给在本仓库里工作的 AI agent / 新同事的动手须知。完整说明在 [README.md](README.md)，
-接口设计在 [docs/api/api.md](docs/api/api.md)，事件模型在 [docs/design/events.md](docs/design/events.md)。
-本文件只写“动手前必须知道的事”，不重复 README。
+Working notes for AI agents and new teammates in this repo. The full story is in
+[README.md](README.md); the API design is in [docs/api/api.md](docs/api/api.md) and the event model in
+[docs/design/events.md](docs/design/events.md). This file only covers what you must know before touching
+anything, and does not repeat the README.
 
-## 一句话
+## One paragraph
 
-我个人数据基座：**邮箱账号 + 文件层 + 一条自动整理的内容流**。账号、目录树、属性、事件在
-Postgres，文件字节在腾讯云 COS。Go 后端（标准库 `net/http`）+ React SPA（Vite + React Router），
-前后端分离，没有 Next.js。
+My personal data base: **an email-backed account system + a file layer + one self-organizing stream**.
+Accounts, the folder tree, attributes, and events live in Postgres; file bytes live in Tencent Cloud COS.
+Go backend (standard library `net/http`) + React SPA (Vite + React Router), frontend and backend split,
+no Next.js.
 
-## 跑起来
+## Running it
 
-前置：Go 1.26+、Node 20.19+、Postgres；本地开发还需要一个 COS 桶和腾讯云子账号密钥。
+Prerequisites: Go 1.26+, Node 20.19+, Postgres. Local development also needs a COS bucket and a Tencent
+Cloud sub-account key pair.
 
 ```bash
-cp .env.example .env    # 填 DATABASE_URL / COS_*；.env 不要提交
-make install            # go mod download + 前端 npm install
-make migrate            # 按文件名顺序执行 sql/*.sql
-make dev                # 后端 :8080 + Vite :5173（/api 已代理）
+cp .env.example .env    # fill in DATABASE_URL / COS_*; never commit .env
+make install            # go mod download + frontend npm install
+make migrate            # run sql/*.sql in filename order
+make dev                # backend :8080 + Vite :5173 (/api is proxied)
 ```
 
-常用命令：
+Common commands:
 
-| 命令 | 作用 | 需要外部依赖 |
+| Command | What it does | External dependencies |
 |---|---|---|
-| `make dev` | Go 后端 + Vite 一起跑 | Postgres + COS |
-| `make server` | 只起 Go（有 `web/dist` 时顺带托管前端） | 同上 |
-| `make build` | 构建 `web/dist` 再编译 `bin/eam` | 无（需 node_modules） |
-| `make test` | `go test ./...` + `tsc --noEmit` | 无 |
-| `make fmt` | `gofmt -w` 后端 | 无 |
-| `make migrate` | 建表 / 升级 | Postgres |
-| `make check` / `make check-write` | `eam doctor` 自检（--write 会写探针对象再删） | Postgres + COS（+ SES） |
+| `make dev` | Run the Go backend and Vite together | Postgres + COS |
+| `make server` | Backend only (also serves the frontend if `web/dist` exists) | Same |
+| `make build` | Build `web/dist`, then compile `bin/eam` | None (needs node_modules) |
+| `make test` | `go test ./...` + `tsc --noEmit` | None |
+| `make fmt` | `gofmt -w` the backend | None |
+| `make migrate` | Create / upgrade tables | Postgres |
+| `make check` / `make check-write` | `eam doctor` self-check (`--write` writes a probe object, then deletes it) | Postgres + COS (+ SES) |
 
-- 后端所有维护命令都收在一个二进制里：`cd backend && go run ./cmd/eam <cmd>`（或 `./bin/eam`）。
-- `.env` 由 `internal/config` 自动从当前目录往上找三层加载，不用手动 export；Go 本身不会读 `.env`。
-- 开发环境没配 SES 时，验证码会打印在后端日志并自动填进登录页——**不要把开发服务器暴露到公网**。
+- Every backend maintenance command lives in one binary: `cd backend && go run ./cmd/eam <cmd>` (or `./bin/eam`).
+- `internal/config` loads `.env` automatically, searching up to three directories upward, so you never export
+  by hand; Go itself does not read `.env`.
+- Without SES configured in development, the verification code is printed to the backend log and filled into
+  the login page automatically — **never expose a development server to the public internet**.
 
-## 仓库地图
+## Repo map
 
-| 路径 | 内容 |
+| Path | Contents |
 |---|---|
-| `backend/cmd/eam/` | 唯一入口：`server` / `migrate` / `doctor` / `reconcile` / `claim` / `token` |
-| `backend/internal/api/` | 路由与 handler：网页 `/api/*`、对外 API、`/events` |
-| `backend/internal/nodes/` | 文件索引表 `nodes` 的读写；只存元数据，不存字节 |
-| `backend/internal/storage/` | 对象存储接口；实现是 `internal/cos/`（腾讯云） |
-| `backend/internal/timeline/` + `events/` | 内容流：分析 → 分组 → 评分 → 叙述，落成 `events` |
-| `backend/internal/auth/` `emailcode/` `mail/` | 验证码、密码、会话、API token、SES |
-| `backend/internal/jobs/` | 目录 move / copy 的异步任务 |
-| `sql/` | 只进不退的迁移，按文件名顺序执行 |
-| `web/src/` | React 19 + Vite + React Router 8；样式是 CSS Modules |
-| `docs/` | 接口与设计文档；改语义前先读这里 |
+| `backend/cmd/eam/` | Single entrypoint: `server` / `migrate` / `doctor` / `reconcile` / `claim` / `token` |
+| `backend/internal/api/` | Routes and handlers: web `/api/*`, the public API, `/events` |
+| `backend/internal/nodes/` | Reads and writes the `nodes` file index; metadata only, never bytes |
+| `backend/internal/storage/` | Object storage interface; implementation in `internal/cos/` (Tencent Cloud) |
+| `backend/internal/timeline/` + `events/` | The stream: analyze → group → score → narrate, stored as `events` |
+| `backend/internal/auth/` `emailcode/` `mail/` | Verification codes, passwords, sessions, API tokens, SES |
+| `backend/internal/jobs/` | Async jobs for directory move / copy |
+| `sql/` | Forward-only migrations, run in filename order |
+| `web/src/` | React 19 + Vite + React Router 8; styling is CSS Modules |
+| `docs/` | API and design docs; read these before changing semantics |
 
-## 后端约定
+## Backend conventions
 
-- 标准库 `net/http` + Go 1.22 方法路由（`mux.HandleFunc("GET /api/...")`），**不要引入 Web 框架**。
-- Handler 统一 `func(http.ResponseWriter, *http.Request) error`，用 `s.wrap`（网页）或 `s.api`（对外 API）包装；
-  业务错误用 `httpx.Error`（`httpx.BadRequest(...)` 等），会被映射成状态码 + `{ok:false,error}`。
-- 响应信封固定：`{ok:true,data}` / `{ok:false,error}`（`internal/httpx`）。
-- **注释和文档用中文；日志、CLI 输出、API 错误文案、测试失败信息用英文。** 界面文案走前端 i18n。
-- 路径就是身份：改动只认逻辑路径（NFC 归一化），对外 API 不暴露 node id；COS key 是
-  `drive/<用户ID>/<path>`。不要绕过 `internal/paths` 自己拼 key。
-- 多用户隔离靠 `owner_id`（`users.id`，UUID）——新表 / 新查询必须带用户维度。
-- 依赖在 `api.New` 里组装；新服务先定义接口（参考 `storage.Storage`、`timeline.Analyzer`），不要在 handler 里 new 客户端。
-- **删除是永久的**（没有回收站）；目录删除必须显式 `?recursive=1`，不要在代码里替用户“顺手递归”。
-- 两套鉴权不要混：对外 API（`/list`、`/files/...`、`/move`、`/upload` 等）用 Bearer token；
-  `/api/*` 只给网页，用 httpOnly cookie `eam_session`。
-- 长操作（move / copy）统一走 `Prefer: respond-async`，返回 `202 + Location`；不要新增一套“任务”概念。
-- 限流是单进程内存的（`internal/ratelimit`），多实例部署会各算各的；知道这个前提再改。
-- 时间线后台整理器在服务启动后单独 `StartTimeline(ctx)` 启动；sweeper 约每 20 分钟扫一次增量，
-  `POST /api/timeline/rebuild` 是手动全量重建。
+- Standard library `net/http` + Go 1.22 method routing (`mux.HandleFunc("GET /api/...")`). **Do not add a web
+  framework.**
+- Handlers all use `func(http.ResponseWriter, *http.Request) error` and are wrapped with `s.wrap` (web) or
+  `s.api` (public API). Business errors use `httpx.Error` (`httpx.BadRequest(...)` etc.), which maps to a
+  status code plus `{ok:false,error}`.
+- The response envelope is fixed: `{ok:true,data}` / `{ok:false,error}` (`internal/httpx`).
+- **Everything in this repo is written in English** — comments, docs, SQL comments, Makefile and scripts,
+  commit messages, logs, CLI output, API error text, and test failure messages. Chinese exists only as
+  product copy: the `zh` entries in `web/src/i18n/messages.ts`, the `zh` email templates, CJK test fixtures
+  that exercise non-ASCII paths, and keyword data that recognizes Chinese file/folder names.
+- Path is identity: changes only ever touch the logical path (NFC-normalized), and the public API never
+  exposes node ids; a COS key is `drive/<userID>/<path>`. Never build keys yourself outside `internal/paths`.
+- Multi-user isolation rests on `owner_id` (`users.id`, a UUID) — new tables and queries must always carry the
+  user dimension.
+- Dependencies are wired in `api.New`; define an interface first for a new service (see `storage.Storage`,
+  `timeline.Analyzer`) and never construct clients inside a handler.
+- **Deletion is permanent** (there is no trash); deleting a directory requires an explicit `?recursive=1`, and
+  code must never recurse "helpfully" on the user's behalf.
+- Do not mix the two auth systems: the public API (`/list`, `/files/...`, `/move`, `/upload`, ...) uses a
+  Bearer token; `/api/*` is web-only and uses the httpOnly cookie `eam_session`.
+- Long operations (move / copy) always use `Prefer: respond-async` and return `202 + Location`; do not invent a
+  second "task" concept.
+- Rate limiting is in-process memory (`internal/ratelimit`), so multiple instances each keep their own count;
+  know that before changing it.
+- The timeline organizer is started separately with `StartTimeline(ctx)` after the server starts; the sweeper
+  scans for increments roughly every 20 minutes, and `POST /api/timeline/rebuild` is the manual full rebuild.
 
-## 数据库 / 迁移
+## Database / migrations
 
-- 新迁移命名 `sql/0NN_xxx.sql`，数字递增、一个文件一个主题；文件头写清楚改了什么、为什么。
-- **没有版本表，`make migrate` 每次都重跑全部文件**，所以：
-  - 用 `create table if not exists`、`add column if not exists`；
-  - 破坏性 DDL 要加保护或单独的过渡步骤（参考 `sql/010_drop_soft_delete.sql`）；
-  - 数据回填写在同一个文件里，并且可重复执行。
-- `nodes` 是索引不是副本：**永远不要把文件字节写进数据库**；`path` / `key` 的映射只在 `internal/nodes`、`internal/paths`。
-- 老数据的 `source_modified_at` 要跑过 `reconcile` 才完整；没填之前时间线会退回 `updated_at`。
+- Name new migrations `sql/0NN_xxx.sql`: increasing number, one topic per file, with a header explaining what
+  changed and why.
+- **There is no version table, so `make migrate` re-runs every file on every invocation.** Therefore:
+  - use `create table if not exists` / `add column if not exists`;
+  - guard destructive DDL or put it in a separate transitional step (see `sql/010_drop_soft_delete.sql`);
+  - keep data backfills in the same file and make them idempotent.
+- `nodes` is an index, not a copy: **never write file bytes into the database**; the `path` / `key` mapping
+  lives only in `internal/nodes` and `internal/paths`.
+- `source_modified_at` on older rows is only complete after `reconcile` has run; until it is filled, the
+  timeline falls back to `updated_at`.
 
-## 前端约定
+## Frontend conventions
 
-- 纯 SPA，没有 SSR。路由是 React Router data router（`router.tsx`），页面数据在 `loader` 取，未登录 `throw redirect("/login")`。
-- 所有请求走 `src/api/client.ts`（唯一出口），它负责信封解包和 `ApiError`；不要在页面里直接 `fetch`。
-  例外是拿到 STS 后浏览器直传 COS（`cos-js-sdk-v5`，按需加载）。
-- 样式：全局 token 在 `src/styles/globals.css`（暖白纸感 + 蓝色强调 + `prefers-color-scheme` 自动深浅色），
-  页面布局用 `*.module.css`；**不引入 Tailwind / CSS-in-JS**。
-- i18n：模块加载时按浏览器语言二选一（zh / en），没有切换入口。新增文案必须同时补 `messages.ts` 的 en 和 zh，
-  漏 key 会在 `tsc` 报错；不要硬编码界面中文。
-- 字体、间距、圆角、阴影从 `globals.css` 的变量取；`--danger` 只给不可逆操作。
-- 保持首屏体积：大依赖按需动态 import。
+- Pure SPA, no SSR. Routing is a React Router data router (`router.tsx`); page data comes from `loader`, and
+  logged-out requests `throw redirect("/login")`.
+- Every request goes through `src/api/client.ts` (the single exit), which unwraps the envelope and raises
+  `ApiError`; do not call `fetch` directly in a page. The exception is browser-to-COS uploads after STS
+  (`cos-js-sdk-v5`, loaded on demand).
+- Styling: global tokens live in `src/styles/globals.css` (warm paper feel + blue accent + automatic
+  light/dark via `prefers-color-scheme`); page layouts use `*.module.css`. **No Tailwind, no CSS-in-JS.**
+- i18n: the locale is chosen once at module load from the browser language (zh / en), with no switcher. New
+  copy must be added to both the `en` and `zh` entries in `messages.ts`; a missing key fails `tsc`. Never
+  hard-code Chinese UI copy.
+- Take fonts, spacing, radii, and shadows from the variables in `globals.css`; `--danger` is only for
+  irreversible actions.
+- Keep the first-paint bundle small: dynamically import heavy dependencies.
 
-## 改完之后
+## After changing something
 
-1. `make test` 必须通过（Go 测试 + 前端 typecheck）；只改前端也跑。
-2. Go 代码 `gofmt`（或 `make fmt`）；TS 保持现有风格（2 空格、双引号、分号）。
-3. 改了接口 / 字段：同步 `docs/api/api.md`、README 的接口表，以及 `web/src/api/client.ts` 的类型。
-4. 改了表结构：追加 `sql/` 迁移，并确认 `make migrate` 可以重复执行。
-5. 新增界面文案：en / zh 两份都补。
-6. 提交信息用 Conventional Commits + 中文摘要，例如 `fix(cos): STS 策略资源按段编码，修文件名带 + 时直传 403`。
+1. `make test` must pass (Go tests + frontend typecheck); run it even if you only touched the frontend.
+2. Run `gofmt` on Go code (or `make fmt`); keep the existing TS style (2 spaces, double quotes, semicolons).
+3. If you changed an API or a field: update `docs/api/api.md`, the endpoint table in the README, and the types
+   in `web/src/api/client.ts`.
+4. If you changed the schema: append a migration under `sql/` and confirm `make migrate` is re-runnable.
+5. If you added UI copy: add both the `en` and `zh` versions.
+6. Commit messages use Conventional Commits with an English summary, for example
+   `fix(cos): encode STS policy resource per path segment so uploads with + stop 403ing`.
 
-## Git 工作流
+## Git workflow
 
-原则：**主工作区只保留 `main`，所有改动在 worktree 的任务分支上做，rebase 后线性合回 `main`。**
-`main` 不能同时在两个 worktree 里 checkout，所以“直接提交到 main”落地为：
-任务分支提交 → rebase 到最新 main → 在主工作区 `merge --ff-only` →（有 remote 时）push。
-除用户明确说“直接改主工作区”外，所有改动都走 worktree。
+Principle: **the main working tree only ever checks out `main`; all work happens on a task branch in a
+worktree, is rebased, and merges back linearly into `main`.** `main` cannot be checked out in two worktrees
+at once, so "commit directly to main" means: commit on the task branch → rebase onto the latest `main` →
+`merge --ff-only` in the main working tree → (if a remote exists) push.
 
-### 1. 开 worktree
+Unless the user explicitly says "just work in the main tree", everything goes through a worktree.
+
+### 1. Create a worktree
 
 ```bash
-git fetch origin                                    # 有 remote 时；没有就跳过
+git fetch origin                                    # when a remote exists; skip otherwise
 git worktree add .worktrees/<type>-<slug> -b <type>/<slug> main
 ```
 
-- 目录固定在仓库内的 `.worktrees/`（已加入 `.gitignore`）；不要放到仓库外，沙箱只允许写仓库内。
-- 分支名 `<type>/<slug>`，type 用 `feat` / `fix` / `chore` / `docs`；重名时加日期或随机后缀。
-- 一个任务一个 worktree；并行任务各开各的，不要复用或改动别人的分支。
-- 新 worktree 里没有 `node_modules` 和 `.env`（都在 ignore 里），在 worktree 根目录补链接：
+- The directory is always under the repo's `.worktrees/` (already gitignored); do not put it outside the repo,
+  since the sandbox only allows writes inside it.
+- Branch names are `<type>/<slug>`, where type is `feat` / `fix` / `chore` / `docs`; add a date or random
+  suffix if the name is taken.
+- One worktree per task; parallel tasks get their own, and never reuse or touch someone else's branch.
+- A new worktree has no `node_modules` and no `.env` (both are ignored); add links from the worktree root:
 
   ```bash
-  ln -s ../../../web/node_modules web/node_modules   # make test 的 tsc 需要
-  ln -s ../../.env .env                              # 只有要起服务/连库时才需要
+  ln -s ../../../web/node_modules web/node_modules   # needed by tsc in make test
+  ln -s ../../.env .env                              # only needed to run the server or hit the DB
   ```
 
-  `.gitignore` 用的是 `node_modules`（无斜杠），所以这个软链不会出现在 `git status` 里。
-- 沙箱里默认的 Go 缓存在 `~/Library/Caches/go-build`（仓库外，可能不可写）；在 worktree 根目录用仓库内的：
+  `.gitignore` uses `node_modules` (no trailing slash), so this symlink does not show up in `git status`.
+- The default Go cache in the sandbox is `~/Library/Caches/go-build` (outside the repo, possibly not
+  writable); from the worktree root use the one inside the repo:
 
   ```bash
   GOCACHE=$PWD/../../.gocache make test
   ```
 
-- 主工作区里用户未提交的改动**不属于这个任务**：不要 stash、不要 reset、不要带进 worktree。
-  任务要改同一批文件时先问用户。
+- Uncommitted changes in the main working tree **do not belong to this task**: do not stash them, do not reset
+  them, do not bring them into the worktree. If the task must touch the same files, ask the user first.
 
-### 2. 做、测、提交
+### 2. Do it, test it, commit it
 
 ```bash
-GOCACHE=$PWD/../../.gocache make test   # 必须通过；只改前端也要跑
-git status                # 确认只有自己改的文件
-git add <具体文件>
-git commit -m "feat(scope): 中文摘要"
+GOCACHE=$PWD/../../.gocache make test   # must pass; run it even for frontend-only changes
+git status                # confirm only your files changed
+git add <specific files>
+git commit -m "feat(scope): English summary"
 ```
 
-- 一个逻辑变更一个 commit；信息用 Conventional Commits + 中文摘要，正文写“为什么”。
-- 不要 `git add -A` / `git commit -a`：主工作区可能有用户自己的改动。
-- 测试不过就修；修不动就停下来说明，不要把红色状态提交到 main。
-- **有开放问题时不要提交**（需求不清、需要用户决策、测试失败待定）：保留 worktree + 分支，
-  在最后的消息里写清楚停在哪、需要什么。
-- **没收敛就别一版一个 commit。** 用户一句“做吧”可以当需求定稿：第一版实现 + `make test` 通过就提交、
-  合回 main，这没问题。但只要用户接着提修改（换口径、调参数、纠正方向），就说明事情还在动——这时每改一版
-  都提一个 commit，等于把草稿永久写进 main（main 只前进、事后不 squash，想合成一个就得改写历史）。
-  正确做法是改动先留在 worktree 里不提交，继续改到用户说“就这样”，再一次性提交合回；
-  只有判断很确切、后面基本不会动的改动（独立的 bug 修复、纯机械替换）才值得中途提交。
-- 用户说“先不提交 / 先看 diff”时照做。
+- One logical change per commit; use Conventional Commits with an English summary and put the "why" in the
+  body.
+- Do not use `git add -A` / `git commit -a`: the main tree may contain the user's own changes.
+- If tests fail, fix them; if you cannot, stop and explain instead of committing a red state to `main`.
+- **Do not commit with open questions** (unclear requirements, a decision that needs the user, a failing test
+  still under investigation): keep the worktree and branch and state clearly in your final message where you
+  stopped and what you need.
+- **Do not commit a new version for every revision while things are still moving.** A user saying "go ahead"
+  can count as final: shipping the first implementation with passing `make test` and merging to `main` is
+  fine. But as soon as the user starts asking for changes (different framing, tuned parameters, corrected
+  direction), the work is still moving — committing every revision writes drafts into `main` permanently
+  (`main` only moves forward and is never squashed afterwards; collapsing them later means rewriting
+  history). The right move is to leave changes uncommitted in the worktree, keep revising until the user says
+  "that's it", then commit once and merge. Only changes you are confident will not move again (an isolated
+  bug fix, a purely mechanical replacement) deserve a mid-flight commit.
+- When the user says "don't commit yet / show me the diff first", do exactly that.
 
-### 3. 合回 main
+### 3. Merge back into main
 
 ```bash
-git fetch origin                # 有 remote 时
-git rebase main                 # 有 remote 时用 origin/main
-# 冲突：逐个解决 → git add → git rebase --continue → 重新 make test
+git fetch origin                # when a remote exists
+git rebase main                 # use origin/main when a remote exists
+# On conflicts: resolve one by one → git add → git rebase --continue → make test again
 
-git -C <主工作区> merge --ff-only <type>/<slug>
-git -C <主工作区> push origin main          # 有 remote 时
+git -C <main worktree> merge --ff-only <type>/<slug>
+git -C <main worktree> push origin main          # when a remote exists
 ```
 
-- 合并必须在主工作区做（main 在那里 checkout），`--ff-only` 保证历史线性；不要产生 merge commit。
-- 分支上已经堆了几版草稿才发现要收敛时：`git -C <主工作区> merge --squash <type>/<slug>` → 在主工作区
-  `git commit`，把草稿压成一个提交进 main。`--squash` 同样不产生 merge commit，历史仍然线性。
-- 主工作区的未提交改动挡住 merge 时：先问用户，不要强来，也不要在脏工作区上 `pull --rebase`。
-- **永远不要** `push --force` 到 main，也不要 `reset --hard` / `clean -fd` 主工作区。
-- 有 remote 且 push 被拒（别人先推了）：`git -C <主工作区> pull --rebase origin main` →
-  重跑 `make test` → 再 push；循环仍失败就停下来报告。
-- 当前仓库还没有 remote：只做本地合并，最后的消息写“本地提交，未推送”。加了 origin 后按上面的 fetch/push 走。
+- Merging must happen in the main working tree (that is where `main` is checked out); `--ff-only` keeps
+  history linear, so never create a merge commit.
+- If you only realize a branch holds several drafts after the fact: `git -C <main worktree> merge --squash
+  <type>/<slug>` → `git commit` in the main tree to squash the drafts into one commit on `main`. `--squash`
+  also produces no merge commit, so history stays linear.
+- If uncommitted changes in the main tree block the merge: ask the user first; do not force it and do not run
+  `pull --rebase` on a dirty tree.
+- **Never** `push --force` to `main`, and never `reset --hard` / `clean -fd` the main working tree.
+- With a remote, if the push is rejected (someone pushed first): `git -C <main worktree> pull --rebase origin
+  main` → re-run `make test` → push again; if that still loops, stop and report.
+- The repo currently has no remote: do the local merge only, and end the final message with "committed
+  locally, not pushed". Once an origin exists, follow the fetch/push steps above.
 
-### 4. 清理
+### 4. Clean up
 
-只在两种情况清理：已合并进 main，或用户明确说放弃这次改动。
+Only clean up in two cases: already merged into `main`, or the user explicitly says to drop the work.
 
 ```bash
-# 先删掉第 1 步补的链接，清理更干净
+# Remove the links added in step 1 first for a cleaner removal
 rm -f .worktrees/<type>-<slug>/web/node_modules .worktrees/<type>-<slug>/.env
 
-git -C <主工作区> worktree remove .worktrees/<type>-<slug>
-git -C <主工作区> branch -d <type>/<slug>    # 未合并时会被拒绝，这是保护，别急着 -D
-git -C <主工作区> worktree prune
-git -C <主工作区> worktree list              # 确认只剩主工作区
+git -C <main worktree> worktree remove .worktrees/<type>-<slug>
+git -C <main worktree> branch -d <type>/<slug>    # refuses if unmerged; that is protection, do not rush to -D
+git -C <main worktree> worktree prune
+git -C <main worktree> worktree list              # confirm only the main tree remains
 ```
 
-- 已合并 → worktree 和分支都删；明确放弃 → 删 worktree，**保留分支**并说明（避免丢工作）。
-- **还在等用户回答的任务不要清理**，否则下次要从头再来；在消息里给出 worktree 路径。
-- 确实要强删（比如链接已删但仍有残留）时，确认没有未提交改动再用 `worktree remove --force`；
-  不要对主工作区用 `--force`。
+- Merged → delete both the worktree and the branch; explicitly abandoned → delete the worktree but **keep the
+  branch** and say so (so nothing is lost).
+- **Do not clean up a task that is still waiting for an answer from the user**, or you will have to start over;
+  give the worktree path in your message.
+- If you truly must force-remove (for example the links are gone but files remain), confirm there are no
+  uncommitted changes and use `worktree remove --force`; never `--force` the main working tree.
 
-### 5. 最后一条消息的格式
+### 5. Format of the final message
 
-提交/清理情况放在消息**最末尾**，一行说完：
+Put the commit / cleanup status at the **very end** of the message, in one line, written in the user's
+language:
 
 ```text
-已提交 main@abc1234（已推送）· 3 个文件 · worktree 已清理
+Committed main@abc1234 (pushed) · 3 files · worktree cleaned up
 ```
 
-变体：`本地提交 main@abc1234，未推送` / `未提交（测试失败：xxx）` /
-`未提交（等你确认：xxx）` / `已合并 main@abc1234，worktree 保留在 .worktrees/xxx（等你确认）`。
-没有改动也要写 `无改动，未提交`。
+Variants: `Committed locally main@abc1234, not pushed` / `Not committed (tests failing: xxx)` /
+`Not committed (waiting for your answer: xxx)` / `Merged main@abc1234, worktree kept at
+.worktrees/xxx (waiting for your answer)`. With no changes at all, write `No changes, nothing committed`.
 
-## 不要做
+## Do not
 
-- 不要提交 `.env`、密钥、`bin/`、`.gocache/`、`web/dist/`（已在 `.gitignore`）。
-- 不要让服务端中转文件字节：下载用 302 预签名，上传用 STS 直传 / 分片。
-- 不要删除或改写已有迁移文件，只能追加。
-- 不要改 `web/vite.config.ts` 的 5173 端口或 `/api` 代理——COS CORS 和开发流程都依赖它。
-- 不要把两套鉴权混在同一个路由上（`/api/*` 加 Bearer，或对外 API 加 cookie）。
+- Commit `.env`, secrets, `bin/`, `.gocache/`, or `web/dist/` (all gitignored).
+- Proxy file bytes through the server: downloads use a 302 to a presigned URL; uploads use STS direct upload /
+  multipart.
+- Delete or rewrite an existing migration; only append.
+- Change the 5173 port or the `/api` proxy in `web/vite.config.ts` — COS CORS and the development flow depend
+  on it.
+- Mix the two auth systems on one route (`/api/*` with a Bearer token, or the public API with a cookie).
 
-## 已知坑（踩过）
+## Known traps (already hit)
 
-- `cos-js-sdk-v5` 固定了有审计告警的 `fast-xml-parser`，`npm audit` 报 critical，目前无升级路径。
-- STS 会先把策略里的资源路径解码再比对，`+` 会被当空格；`internal/cos` 已按路径段编码，
-  改签名 / 策略时别回退（否则文件名带 `+` 直传 403）。
-- macOS 文件名是 NFD，不归一化会出现“同名两个文件”；`paths.Normalize` 负责转 NFC。
-- 目录改名 / 移动是逐个对象服务端复制，TB 级很慢；大目录先用 coscli 再 `reconcile`。
-- 修改邮箱需要**当前邮箱 + 新邮箱**两个验证码；只拿到 session 改不了。
-- 移动 / 复制后时间线不会立刻刷新：等 sweeper 或手动 `POST /api/timeline/rebuild`。
-- 从旧版本升级：`sql/013_events.sql` 会清空快照水位并排队重算（只在还没有任何 events 时执行，
-  避免 `migrate` 每次重跑都把时间线重置）；后台处理完，时间线才会出现事件。
+- `cos-js-sdk-v5` pins a `fast-xml-parser` with an audit advisory; `npm audit` reports critical and there is
+  currently no upgrade path.
+- STS decodes policy resource paths before comparing, so `+` is treated as a space; `internal/cos` already
+  encodes per path segment, so do not regress that when touching signing or policies (otherwise uploads of
+  filenames containing `+` return 403).
+- macOS filenames are NFD; without normalization you get "two files with the same name". `paths.Normalize`
+  converts to NFC.
+- Renaming or moving a directory copies objects one by one on the server, which is very slow at TB scale; for
+  big directories use coscli first, then `reconcile`.
+- Changing the email address requires two verification codes, for **both the current and the new address**;
+  a session alone cannot do it.
+- The timeline does not refresh immediately after a move / copy: wait for the sweeper or call
+  `POST /api/timeline/rebuild` manually.
+- Upgrading from an older version: `sql/013_events.sql` clears the snapshot watermark and queues a recompute
+  (it only runs while there are no events yet, so a repeated `migrate` does not reset the timeline every
+  time); events only appear after the background pass finishes.

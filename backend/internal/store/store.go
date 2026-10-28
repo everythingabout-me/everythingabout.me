@@ -1,4 +1,4 @@
-// Package store 管理 Postgres 连接池。
+// Package store manages the Postgres connection pool.
 package store
 
 import (
@@ -37,7 +37,7 @@ func (db *DB) Pool() *pgxpool.Pool { return db.pool }
 
 func (db *DB) Close() { db.pool.Close() }
 
-// IsUniqueViolation 判断 Postgres 唯一约束冲突（邮箱重复等）。
+// IsUniqueViolation reports a Postgres unique-constraint conflict (a duplicate email, say).
 func IsUniqueViolation(err error) bool {
 	var pgErr *pgconn.PgError
 	return errors.As(err, &pgErr) && pgErr.Code == "23505"

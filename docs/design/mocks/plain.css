@@ -1,6 +1,6 @@
 /* ============================================================
-   朴素版视觉方案 · 共享样式
-   原则：黑白灰为主；颜色只出现在 logo、上传进度、不可逆操作
+   Plain visual system · shared styles
+   Rules: black, white, and gray dominate; color appears only in the logo, upload progress, and irreversible actions
    ============================================================ */
 
 :root {
@@ -53,7 +53,7 @@ button { cursor: pointer; background: none; border: 0; padding: 0; }
 a { color: inherit; text-decoration: none; }
 .sprite { position: absolute; width: 0; height: 0; overflow: hidden; }
 
-/* ---------- 评审页外壳 ---------- */
+/* ---------- Review page shell ---------- */
 .rv-bar {
   position: sticky;
   top: 0;
@@ -225,7 +225,7 @@ a { color: inherit; text-decoration: none; }
 .rv-duo .frame { display: flex; flex-direction: column; height: 100%; }
 .rv-duo .auth-app { flex: 1; }
 
-/* ---------- 颜色预算 ---------- */
+/* ---------- Color budget ---------- */
 .budget {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
@@ -314,7 +314,7 @@ a { color: inherit; text-decoration: none; }
 .rv-foot b { color: var(--rv-text2); font-weight: 500; }
 
 /* ============================================================
-   变体 token
+   Variant tokens
    ============================================================ */
 .v-a {
   --bg: #f6f7f7;
@@ -449,13 +449,13 @@ html[data-theme="dark"] .v-b {
   --shadow: 0 1px 2px rgba(0, 0, 0, 0.4), 0 16px 36px -30px rgba(0, 0, 0, 0.8);
 }
 
-/* 变体显隐 */
+/* Variant visibility */
 .v-a .copy-b, .v-b .copy-a,
 .v-a .only-b, .v-b .only-a,
 .v-a .head-b, .v-b .head-a { display: none; }
 
 /* ============================================================
-   应用
+   App
    ============================================================ */
 .app, .auth-app {
   color: var(--text);
@@ -478,7 +478,7 @@ html[data-theme="dark"] .v-b {
 .app .mark, .auth-app .mark { width: 21px; height: 21px; display: block; flex: none; }
 .spacer { flex: 1; }
 
-/* 顶栏 */
+/* Top bar */
 .app .topbar {
   background: color-mix(in srgb, var(--surface) 84%, transparent);
   border-bottom: 1px solid var(--border);
@@ -579,7 +579,7 @@ html[data-theme="dark"] .v-b {
 .app .btn-primary:hover { opacity: 0.86; }
 .app .btn-primary .ic { width: 14px; height: 14px; }
 
-/* 主体 */
+/* Main body */
 .app .main {
   width: 100%;
   max-width: var(--max);
@@ -724,7 +724,7 @@ html[data-theme="dark"] .v-b {
 }
 .app .footer i { width: 3px; height: 3px; border-radius: 50%; background: currentColor; opacity: 0.55; }
 
-/* 登录 / 账户 */
+/* Login / account */
 .auth-app { display: flex; flex-direction: column; min-height: 100%; background: linear-gradient(180deg, var(--bg-top) 0, var(--bg) 320px); }
 .auth-app .auth-head {
   width: 100%;
@@ -874,7 +874,7 @@ html[data-theme="dark"] .v-b {
 }
 .auth-app .danger-link:hover { background: var(--danger-soft); }
 
-/* ---------- 单屏截图 ---------- */
+/* ---------- Single-screen screenshots ---------- */
 html[data-view="app"] .rv-bar,
 html[data-view="app"] .rv-intro,
 html[data-view="app"] .rv-stagehead,
@@ -904,7 +904,7 @@ html[data-view="app"] .rv-duo, html[data-view="auth"] .rv-duo { grid-template-co
 html[data-view="app"] .rv-duo .frame, html[data-view="auth"] .rv-duo .frame { border-radius: 12px; box-shadow: var(--rv-shadow); }
 html[data-view="app"] .app, html[data-view="auth"] .auth-app { min-height: 100vh; }
 
-/* ---------- 响应式 ---------- */
+/* ---------- Responsive ---------- */
 @media (max-width: 900px) {
   .rv-bar { padding: 0 16px; }
   .rv-home span, .rv-name { display: none; }
@@ -933,5 +933,5 @@ html[data-view="app"] .app, html[data-view="auth"] .auth-app { min-height: 100vh
   .auth-app .card { padding: 22px; }
 }
 
-/* 变体显隐（放在最后，避免被 .app .head-* 的 display 覆盖） */
+/* Variant visibility (last, so .app .head-* display rules don't override it) */
 .v-a .head-b, .v-b .head-a { display: none !important; }

@@ -1,15 +1,17 @@
-// Package timeline 把文件整理成一条内容流。
+// Package timeline turns files into one stream.
 //
-// 界面上不出现"事件""时间线""片段"这些概念：对用户它就是一条按时间往下
-// 滚的内容流。内部仍然需要一个单位（这里叫 Moment），因为它可以跨天、
-// 可以融合多个来源，而且是密度计算的最小对象。
+// The UI never says "event", "timeline" or "segment": to the user this is just a
+// stream scrolling down through time. Internally we still need a unit (Moment
+// here), because it can span days, merge several sources, and it is the smallest
+// object that density is computed over.
 //
-// 流水线刻意分成两步：
-//  1. scan / backfill：把 nodes 里的文件变成 timeline_assets（时间、类型、是否叙事）；
-//  2. month：把一个月里的 assets 聚成 moments，按预算挑选，写成 timeline_snapshots。
+// The pipeline deliberately has two steps:
+//  1. scan / backfill: turn files in nodes into timeline_assets (time, type, narrative or not);
+//  2. month: group one month's assets into moments, select by budget, write timeline_snapshots.
 //
-// 分析、分组、评分、命名都走接口（Analyzer / Grouper / Scorer / Narrator），
-// 现在只有启发式实现；以后接多模态或大模型时替换实现即可，上层不用改。
+// Analysis, grouping, scoring and naming all go through interfaces
+// (Analyzer / Grouper / Scorer / Narrator). Only heuristics exist today; plugging in
+// multimodal models or an LLM later swaps the implementation, not the callers.
 package timeline
 
 import (
@@ -18,21 +20,23 @@ import (
 )
 
 const (
-	// pipelineVersion 变了会触发重新分析。改分类/评分逻辑时 +1。
+	// Bumping pipelineVersion forces a re-analysis; increment it whenever
+	// classification or scoring changes.
 	pipelineVersion = 2
 
-	// 一条内容流里，一个月的展示预算（单位 ≈ 72px）。
-	// 预算上限不是目标：没有值得看的就不放。
+	// Per-month display budget within a stream (one unit ≈ 72px).
+	// The cap is not a target: if nothing is worth showing, nothing appears.
 	defaultMonthBudget = 24
-	// 单日最多几个 Moment、多少展示成本，防止一天挤爆一个月。
+	// Max moments and display cost per day, so one day cannot crowd out a month.
 	maxPerDayMoments = 3
 	maxPerDayCost    = 12
-	// 参与挑选的最低价值。
+	// Minimum value a moment needs to enter selection.
 	minScore = 0.40
 )
 
-// FileInput 是 Analyzer 的输入：只依赖索引里已有的字段，
-// 不要求读对象字节；需要读字节的（健康 CSV）由 AmbientExtractor 负责。
+// FileInput is the Analyzer's input: it relies only on fields the index already
+// has and never requires reading object bytes; reading bytes (health CSVs) is the
+// AmbientExtractor's job.
 type FileInput struct {
 	UserID         string
 	NodeID         string
@@ -47,31 +51,33 @@ type FileInput struct {
 	CreatedAt      time.Time
 }
 
-// Facts 是分析结果。将来的 EXIF / GPS / 画面标签 / 审美分都往这里加。
+// Facts is the analysis result. Future EXIF / GPS / frame labels / aesthetics
+// scores all land here.
 type Facts struct {
 	EventTime      time.Time
 	TimeSource     string
 	TimeConfidence float64
 	MediaType      string // photo | video | audio | doc | data | other
-	Narrative      bool   // 是否参与内容流
-	Ambient        bool   // 是否作为环境数据（健康 CSV 等）
+	Narrative      bool   // whether it joins the stream
+	Ambient        bool   // whether it is ambient data (health CSVs etc.)
 	Screenshot     bool
 	Quality        float64
-	// Meta 是扩展位：多模态分析结果（标签、场景、人脸数……）放这里，
-	// 现在只写一些便于调试的启发式依据。
+	// Meta is the extension slot: multimodal results (labels, scenes, face count,
+	// ...) go here; for now it only holds heuristic evidence handy for debugging.
 	Meta map[string]any
 }
 
-// Analyzer 决定一个文件的时间、类型和初步价值信号。
+// Analyzer decides a file's time, type and first-pass value signal.
 //
-// 接入多模态时实现这个接口：读图片/视频、跑模型、写回 Facts 和 Meta。
-// 注意它会被批量调用，实现里要自己做并发控制和限流。
+// To add multimodality, implement this interface: read images/videos, run models,
+// write back Facts and Meta. It is called in batches, so the implementation owns
+// its own concurrency control and rate limiting.
 type Analyzer interface {
 	Name() string
 	Analyze(ctx context.Context, file FileInput) (Facts, error)
 }
 
-// Asset 是整理后的文件事实。month 阶段只读这个。
+// Asset is a file fact after analysis. The month stage reads only this.
 type Asset struct {
 	NodeID     string
 	Path       string
@@ -87,8 +93,8 @@ type Asset struct {
 	Screenshot bool
 }
 
-// Moment 是内容流的原子单元：一次会话、一段旅行、一个系列。
-// 它不一定只属于一天，也不一定只有一种来源。
+// Moment is the stream's atomic unit: one session, one trip, one series.
+// It need not belong to a single day, nor to a single source.
 type Moment struct {
 	ID          string
 	DedupeKey   string
@@ -112,36 +118,41 @@ type Moment struct {
 	DurationMS  int64
 }
 
-// Grouper 把一个月里的 assets 聚成候选 Moment。
-// 现在的实现是"按天 + 时间间隔切会话"；以后可以用场景/地点/人物模型。
+// Grouper clusters one month's assets into candidate moments.
+// Today it splits sessions by day plus time gap; scene / place / people models can
+// replace it later.
 type Grouper interface {
 	Name() string
 	Group(ctx context.Context, assets []Asset) ([]Moment, error)
 }
 
-// Scorer 给 Moment 打价值分。多模态审美、LLM 判断都从这里接。
+// Scorer gives a moment its value score. Multimodal aesthetics and LLM judgment
+// hook in here.
 type Scorer interface {
 	Name() string
 	Score(ctx context.Context, moment *Moment) error
 }
 
-// Narrator 负责标题和副标题。现在用路径/时段模板，以后换 LLM。
+// Narrator owns the title and subtitle. Path and time-of-day templates today, an
+// LLM later.
 type Narrator interface {
 	Name() string
 	Narrate(ctx context.Context, moment *Moment) error
 }
 
-// AmbientExtractor 从数据文件里抽日粒度序列（睡眠、心率、步数……）。
+// AmbientExtractor pulls day-granularity series (sleep, heart rate, steps, ...) out
+// of data files.
 //
-// 接入更复杂的解析器（Apple Health 全量导出、手环私有格式）时实现这个接口，
-// 注册到 Engine.Ambient 里即可；解析失败不影响文件本身。
+// For heavier parsers (full Apple Health exports, vendor-specific band formats),
+// implement this interface and register it in Engine.Ambient; a parse failure never
+// affects the file itself.
 type AmbientExtractor interface {
 	Name() string
 	Match(path string, mime string) bool
 	Extract(ctx context.Context, file FileInput, data []byte) ([]SeriesSample, error)
 }
 
-// SeriesSample 是一条日粒度的观测值。
+// SeriesSample is one day-granularity observation.
 type SeriesSample struct {
 	Metric string
 	Label  string
@@ -150,7 +161,7 @@ type SeriesSample struct {
 	Value  float64
 }
 
-// Month 是内容流的一页。读路径只读 timeline_snapshots.payload。
+// Month is one page of the stream. The read path reads only timeline_snapshots.payload.
 type Month struct {
 	Month       string `json:"month"`
 	FileCount   int    `json:"file_count"`
@@ -160,7 +171,8 @@ type Month struct {
 	Items       []Item `json:"items"`
 }
 
-// Item 是渲染一张卡所需的最小信息。Type 决定前端用哪种卡片。
+// Item is the minimal information needed to render one card. Type picks the
+// frontend card.
 type Item struct {
 	Type      string   `json:"type"` // moment | gap | ambient
 	ID        string   `json:"id,omitempty"`
@@ -181,7 +193,8 @@ type Item struct {
 	Series    []Series `json:"series,omitempty"`
 }
 
-// Thumb 是一个可展示的封面。URL 在读取时预签名（10 分钟），快照里不存。
+// Thumb is a displayable cover. Its URL is presigned at read time (10 minutes) and
+// never stored in a snapshot.
 type Thumb struct {
 	Path       string `json:"path"`
 	URL        string `json:"url,omitempty"`
@@ -190,7 +203,7 @@ type Thumb struct {
 	DurationMS int64  `json:"duration_ms,omitempty"`
 }
 
-// Series 是数据带里的一条迷你曲线。
+// Series is one mini curve in the data band.
 type Series struct {
 	Metric string    `json:"metric"`
 	Label  string    `json:"label"`
@@ -202,7 +215,7 @@ type Series struct {
 	Max    float64   `json:"max"`
 }
 
-// Status 给前端判断"还有多少在整理"。
+// Status tells the frontend how much organizing is still in flight.
 type Status struct {
 	Enabled       bool   `json:"enabled"`
 	Pending       int    `json:"pending"`
@@ -212,7 +225,7 @@ type Status struct {
 	LastGenerated string `json:"last_generated,omitempty"`
 }
 
-// Feed 是一次分页读取的结果。
+// Feed is the result of one paginated read.
 type Feed struct {
 	Periods []Month `json:"periods"`
 	Next    string  `json:"next,omitempty"`

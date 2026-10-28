@@ -17,11 +17,13 @@ import { CloseIcon } from "../icons";
 import styles from "./FilePreview.module.css";
 
 /**
- * 预览器主体，整个文件只通过 `React.lazy` 进入：首屏不下载这一块。
+ * The previewer proper. The whole file only enters through `React.lazy`: the first screen never
+ * downloads this chunk.
  *
- * 插件只建一次——每次渲染都 new 一份会重建预览实例，缩放和滚动位置都会丢。
- * 这一层只启用六个常用家族（图片 / PDF / Office / 文本 / 音视频）；CAD、3D、GIS
- * 要额外拖 mlightcad、three、leaflet，对个人文件库不值得，需要时再加。
+ * Plugins are built once — re-creating them on every render rebuilds the viewer instance and
+ * loses zoom and scroll position. This layer enables only the six common families (images / PDF /
+ * Office / text / audio and video); CAD, 3D and GIS would drag in mlightcad, three and leaflet,
+ * which is not worth it for a personal file library. Add them when needed.
  */
 const plugins = [
   imagePlugin(),
@@ -42,14 +44,14 @@ export default function FilePreview({
   onClose: () => void;
 }) {
   const dialog = useRef<HTMLDivElement>(null);
-  // 预签名地址只负责 302；字节由浏览器直连 COS，服务端不中转。
+  // The presigned URL only handles the 302; the browser talks to COS directly, never through us.
   const url = api.downloadHref(path);
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key === "Escape") onClose();
     };
-    // 弹层下面还有一整页列表，滚动要锁住，否则滚轮会把背后的表格带着走。
+    // A full listing page sits under the overlay: lock scrolling or the wheel drags it along.
     const previousOverflow = document.body.style.overflow;
     document.body.style.overflow = "hidden";
     dialog.current?.focus();

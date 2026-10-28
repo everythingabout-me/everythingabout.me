@@ -1,5 +1,6 @@
-// Package emailcode 管理邮箱验证码：登录、注册、改邮箱共用。
-// 只存验证码的 scrypt 哈希，不存明文；10 分钟过期，最多尝试 5 次。
+// Package emailcode manages email verification codes, shared by login, registration, and
+// email changes. Only the scrypt hash of a code is stored, never the plaintext; codes expire
+// after 10 minutes and allow at most 5 attempts.
 package emailcode
 
 import (
@@ -21,8 +22,8 @@ const (
 	maxAttempts = 5
 )
 
-// ErrIncorrect 表示验证码不匹配。调用方靠它换一句带上下文的话，
-// 而不是去比字符串。
+// ErrIncorrect means the verification code did not match. Callers use it to swap in a
+// message with context rather than comparing strings.
 var ErrIncorrect = httpx.BadRequest("incorrect verification code")
 
 type Service struct {
@@ -33,7 +34,7 @@ func New(db *store.DB) *Service {
 	return &Service{db: db}
 }
 
-// generate 用密码学安全的随机数，补零保证永远是 6 位。
+// generate uses a cryptographically secure random number, zero-padded to always be 6 digits.
 func generate() (string, error) {
 	n, err := rand.Int(rand.Reader, big.NewInt(1_000_000))
 	if err != nil {
@@ -42,7 +43,7 @@ func generate() (string, error) {
 	return fmt.Sprintf("%06d", n.Int64()), nil
 }
 
-// Issue 发一个新验证码；同一邮箱同一用途的旧码立即作废。
+// Issue mints a new code; older codes for the same email and purpose are voided immediately.
 func (s *Service) Issue(ctx context.Context, email, purpose, ip string) (string, error) {
 	code, err := generate()
 	if err != nil {
@@ -72,13 +73,13 @@ func (s *Service) Issue(ctx context.Context, email, purpose, ip string) (string,
 		email, purpose, codeHash, expiresAt, ipArg); err != nil {
 		return "", err
 	}
-	// 顺手清理一天前的过期记录
+	// Sweep records that expired more than a day ago while we are here
 	_, _ = pool.Exec(ctx, `delete from email_codes where expires_at < now() - interval '1 day'`)
 	return code, nil
 }
 
-// Revoke 在邮件发送失败时把刚生成的码作废，
-// 避免留下一个用户永远收不到的可用码。
+// Revoke voids the code that was just minted when the mail fails to send, so no usable code
+// is left behind that the user can never receive.
 func (s *Service) Revoke(ctx context.Context, email, purpose string) error {
 	_, err := s.db.Pool().Exec(ctx,
 		`update email_codes set consumed_at = now()
@@ -86,8 +87,8 @@ func (s *Service) Revoke(ctx context.Context, email, purpose string) error {
 	return err
 }
 
-// VerifyLatest 校验验证码但不消费，返回记录 id，
-// 供调用方在“两个码都验证通过”后再一起消费。
+// VerifyLatest checks a code without consuming it and returns the record id, so the caller
+// can consume both only after both codes have passed.
 func (s *Service) VerifyLatest(ctx context.Context, email string, purposes []string, code string) (string, error) {
 	var (
 		id        string
@@ -125,7 +126,7 @@ func (s *Service) VerifyLatest(ctx context.Context, email string, purposes []str
 	return id, nil
 }
 
-// ConsumeByID 把已经验证通过的验证码标记为已使用。
+// ConsumeByID marks an already-verified code as used.
 func (s *Service) ConsumeByID(ctx context.Context, id string) error {
 	tag, err := s.db.Pool().Exec(ctx,
 		`update email_codes set consumed_at = now()
@@ -139,7 +140,7 @@ func (s *Service) ConsumeByID(ctx context.Context, id string) error {
 	return nil
 }
 
-// Consume 校验并消费验证码。
+// Consume verifies a code and consumes it.
 func (s *Service) Consume(ctx context.Context, email string, purposes []string, code string) error {
 	id, err := s.VerifyLatest(ctx, email, purposes, code)
 	if err != nil {

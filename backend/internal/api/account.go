@@ -9,6 +9,7 @@ import (
 	"everythingabout.me/backend/internal/auth"
 	"everythingabout.me/backend/internal/emailcode"
 	"everythingabout.me/backend/internal/httpx"
+	"everythingabout.me/backend/internal/mail"
 	"everythingabout.me/backend/internal/validation"
 )
 
@@ -73,7 +74,7 @@ func (s *Server) handleAccount(w http.ResponseWriter, r *http.Request) error {
 	})
 }
 
-/** 登录 / 注册共用的验证码发送接口 */
+/** sends verification codes for both sign-in and sign-up */
 func (s *Server) handleSendCode(w http.ResponseWriter, r *http.Request) error {
 	if err := httpx.AssertSameOrigin(r); err != nil {
 		return err
@@ -107,7 +108,7 @@ func (s *Server) handleSendCode(w http.ResponseWriter, r *http.Request) error {
 	if err := s.limiter.Enforce("signin-code:email:"+email, 5, hour); err != nil {
 		return err
 	}
-	// 同一邮箱 60 秒内只能发一次；界面上也会倒计时
+	// one send per email per 60s; the UI counts down too
 	if err := s.limiter.Enforce("signin-code:cooldown:"+email, 1, oneMinute); err != nil {
 		return err
 	}
@@ -116,9 +117,9 @@ func (s *Server) handleSendCode(w http.ResponseWriter, r *http.Request) error {
 	if err != nil {
 		return err
 	}
-	devCode, err := s.mail.SendVerificationCode(r.Context(), email, code)
+	devCode, err := s.mail.SendVerificationCode(r.Context(), email, code, mail.RequestLocale(r))
 	if err != nil {
-		// 没发出去就别留一个用户永远收不到的可用验证码
+		// if delivery failed, do not leave a usable code the user will never receive
 		_ = s.codes.Revoke(r.Context(), email, "signin")
 		return err
 	}
@@ -129,7 +130,7 @@ func (s *Server) handleSendCode(w http.ResponseWriter, r *http.Request) error {
 	return s.ok(w, payload)
 }
 
-/** 验证码登录；邮箱不存在且注册开放时，自动创建一个无密码账号 */
+/** sign in with a code; creates a passwordless account if the email is new and sign-up is open */
 func (s *Server) handleVerifyCode(w http.ResponseWriter, r *http.Request) error {
 	if err := httpx.AssertSameOrigin(r); err != nil {
 		return err
@@ -164,7 +165,7 @@ func (s *Server) handleVerifyCode(w http.ResponseWriter, r *http.Request) error 
 		return httpx.Forbidden("sign-up is closed")
 	}
 
-	// 兼容旧流程发出去的 register 验证码
+	// accept register codes issued by the old flow
 	if err := s.codes.Consume(r.Context(), email, []string{"signin", "register"}, code); err != nil {
 		return err
 	}
@@ -267,7 +268,7 @@ func (s *Server) startSession(w http.ResponseWriter, r *http.Request, userID str
 	return nil
 }
 
-/** 设置或修改密码；账号已有密码时必须先验证当前密码 */
+/** set or change the password; an account that already has one must verify the current password */
 func (s *Server) handleSetPassword(w http.ResponseWriter, r *http.Request) error {
 	if err := httpx.AssertSameOrigin(r); err != nil {
 		return err
@@ -318,7 +319,7 @@ func (s *Server) handleSetPassword(w http.ResponseWriter, r *http.Request) error
 	return s.ok(w, map[string]any{"user": auth.ToUser(updated)})
 }
 
-/** 移除密码，之后只能靠邮箱验证码登录；需要当前密码 */
+/** remove the password, after which only email codes can sign in; requires the current password */
 func (s *Server) handleRemovePassword(w http.ResponseWriter, r *http.Request) error {
 	if err := httpx.AssertSameOrigin(r); err != nil {
 		return err
@@ -361,7 +362,7 @@ func (s *Server) handleRemovePassword(w http.ResponseWriter, r *http.Request) er
 	return s.ok(w, map[string]any{"user": auth.ToUser(updated)})
 }
 
-/** 给「当前邮箱」发验证码，用于改邮箱前的身份确认 */
+/** send a code to the current email, to confirm identity before changing it */
 func (s *Server) handleCurrentEmailCode(w http.ResponseWriter, r *http.Request) error {
 	if err := httpx.AssertSameOrigin(r); err != nil {
 		return err
@@ -392,7 +393,7 @@ func (s *Server) handleCurrentEmailCode(w http.ResponseWriter, r *http.Request) 
 	if err != nil {
 		return err
 	}
-	devCode, err := s.mail.SendVerificationCode(r.Context(), current.Email, code)
+	devCode, err := s.mail.SendVerificationCode(r.Context(), current.Email, code, mail.RequestLocale(r))
 	if err != nil {
 		_ = s.codes.Revoke(r.Context(), current.Email, "change_email_old")
 		return err
@@ -404,7 +405,7 @@ func (s *Server) handleCurrentEmailCode(w http.ResponseWriter, r *http.Request) 
 	return s.ok(w, payload)
 }
 
-/** 给「新邮箱」发验证码；要求已登录 */
+/** send a code to the new email; requires a session */
 func (s *Server) handleNewEmailCode(w http.ResponseWriter, r *http.Request) error {
 	if err := httpx.AssertSameOrigin(r); err != nil {
 		return err
@@ -455,7 +456,7 @@ func (s *Server) handleNewEmailCode(w http.ResponseWriter, r *http.Request) erro
 	if err != nil {
 		return err
 	}
-	devCode, err := s.mail.SendVerificationCode(r.Context(), email, code)
+	devCode, err := s.mail.SendVerificationCode(r.Context(), email, code, mail.RequestLocale(r))
 	if err != nil {
 		_ = s.codes.Revoke(r.Context(), email, "change_email")
 		return err
@@ -467,7 +468,7 @@ func (s *Server) handleNewEmailCode(w http.ResponseWriter, r *http.Request) erro
 	return s.ok(w, payload)
 }
 
-/** 修改邮箱：当前邮箱和新邮箱的两个验证码都必须正确 */
+/** change the email: both the current and the new address must present a valid code */
 func (s *Server) handleChangeEmail(w http.ResponseWriter, r *http.Request) error {
 	if err := httpx.AssertSameOrigin(r); err != nil {
 		return err
@@ -507,7 +508,7 @@ func (s *Server) handleChangeEmail(w http.ResponseWriter, r *http.Request) error
 		return httpx.Conflict("this email is already used by another account")
 	}
 
-	// 先都验证通过，再一起消费：不会因为其中一个填错而把另一个作废
+	// verify both first, then consume both: a typo in one must not burn the other
 	oldID, err := s.codes.VerifyLatest(r.Context(), current.Email, []string{"change_email_old"}, oldCode)
 	if err != nil {
 		return labelCodeError(err, "current email")

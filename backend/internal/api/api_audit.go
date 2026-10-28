@@ -10,7 +10,7 @@ import (
 	"everythingabout.me/backend/internal/httpx"
 )
 
-// recordAudit 记一条写操作。审计失败不影响业务，只打日志。
+// recordAudit records one write. A failed audit never breaks the operation; it only logs.
 func (s *Server) recordAudit(
 	r *http.Request,
 	p *auth.Principal,
@@ -40,8 +40,8 @@ func (s *Server) recordAudit(
 	}
 }
 
-// ActivityItem 是账户页"最近活动"的一条。来源优先显示保存链接名，
-// 其次是 API token 名；网页自己的操作没有 token，来源为空。
+// ActivityItem is one row of the account page's "recent activity". Source shows the
+// save link name first, then the API token name; web actions carry no token, so it is empty.
 type ActivityItem struct {
 	Action    string `json:"action"`
 	Path      string `json:"path"`

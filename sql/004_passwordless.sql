@@ -1,3 +1,3 @@
--- 密码改为可选：新账号默认没有密码，只用邮箱验证码登录。
--- 已有账号（如果有）保留原来的 password_hash，不受影响。
+-- Passwords become optional: new accounts have none by default and sign in with email codes only.
+-- Existing accounts (if any) keep their current password_hash and are unaffected.
 alter table users alter column password_hash drop not null;

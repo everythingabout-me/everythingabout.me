@@ -154,7 +154,7 @@ export function ChevronRightIcon(props: IconProps) {
   );
 }
 
-/** 根据扩展名挑一个图标，保持视觉克制 */
+/** Pick an icon by extension, keeping the visuals restrained */
 export function GlyphFor({ name, mime, isDir }: { name: string; mime?: string | null; isDir: boolean }) {
   if (isDir) return <FolderIcon />;
   const ext = name.split(".").pop()?.toLowerCase() ?? "";

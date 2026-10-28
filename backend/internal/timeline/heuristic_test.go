@@ -148,7 +148,7 @@ func TestVideoSeriesCollapses(t *testing.T) {
 		t.Fatalf("series lost items")
 	}
 
-	// 6 天 6 个视频不够成系列，仍然按天。
+	// Six videos over six days is not a series; they stay day by day.
 	var sparse []Asset
 	for day := 0; day < 6; day++ {
 		sparse = append(sparse, makeVideo(day))
@@ -178,7 +178,7 @@ func TestSelectRespectsBudgetAndDayCap(t *testing.T) {
 		}
 	}
 
-	// 30 天每天 1 条，预算 24 → 最多 6 条，且要分散。
+	// One item a day for 30 days with a budget of 24 → at most 6, and spread out.
 	var spread []Moment
 	for day := 0; day < 30; day++ {
 		spread = append(spread, makeMoment(day, 0, 0.6))
@@ -194,7 +194,7 @@ func TestSelectRespectsBudgetAndDayCap(t *testing.T) {
 		}
 	}
 
-	// 同一天 10 条，单日上限 3 条 / 12 单位。
+	// Ten items on one day against the 3-a-day / 12-unit cap.
 	var sameDay []Moment
 	for i := 0; i < 10; i++ {
 		sameDay = append(sameDay, makeMoment(0, i, 0.9))

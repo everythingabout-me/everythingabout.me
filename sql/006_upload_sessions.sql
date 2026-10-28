@@ -1,16 +1,16 @@
--- 大文件直传的“上传会话”。
+-- "Upload sessions" for streaming large files straight to storage.
 --
--- 流程：POST /upload 建一条会话并下发预签名 URL → 客户端把字节直接 PUT 到 COS
---      → POST /upload/complete 校验后落索引。
--- 会话本身不存字节，只存“谁、往哪写、多大、什么时候过期”。
+-- Flow: POST /upload creates a session and hands out a presigned URL -> the client PUTs the bytes
+--       straight to COS -> POST /upload/complete verifies them and writes the index.
+-- A session stores no bytes, only "who, writing where, how large, and when it expires".
 
 create table if not exists upload_sessions (
-  id           text primary key,                 -- u_<24 位十六进制>
+  id           text primary key,                 -- u_<24 hex chars>
   user_id      uuid not null references users(id) on delete cascade,
-  path         text not null,                    -- 逻辑路径（NFC）
+  path         text not null,                    -- logical path (NFC)
   size         bigint not null,
   mime         text not null default '',
-  part_size    bigint not null default 0,        -- 单分片时等于 size
+  part_size    bigint not null default 0,        -- equals size for a single part
   created_at   timestamptz not null default now(),
   expires_at   timestamptz not null,
   completed_at timestamptz,

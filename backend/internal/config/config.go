@@ -1,8 +1,9 @@
-// Package config 负责读取环境变量和 .env。
+// Package config reads environment variables and .env.
 //
-// Go 进程不会自动加载 .env。这里会从当前目录往上找三层，找到 .env 后
-// 把里面还没设置的变量补进进程环境，所以 `cd backend && go run ./cmd/eam`
-// 和从仓库根目录启动的行为一致。
+// A Go process does not load .env by itself. This package searches up to three directories
+// upward from the current one, and once it finds .env it fills any variables that are not
+// set yet into the process environment, so `cd backend && go run ./cmd/eam` behaves the
+// same as starting from the repository root.
 package config
 
 import (
@@ -14,7 +15,7 @@ import (
 	"time"
 )
 
-// Config 是一次进程启动所需的全部配置。
+// Config is all the configuration one process start needs.
 type Config struct {
 	Addr             string
 	AppEnv           string
@@ -23,25 +24,26 @@ type Config struct {
 	SessionTTLDays   int
 	CookieSecure     bool
 	RegistrationOpen bool
-	// QuotaBytes 是每个账号的存储上限，0 表示不限。
+	// QuotaBytes is the storage cap per account; 0 means unlimited.
 	QuotaBytes int64
-	// MultipartThreshold 超过这个大小的上传走分片，默认 5 GiB。
+	// MultipartThreshold is the size above which uploads go multipart; defaults to 5 GiB.
 	MultipartThreshold int64
-	// UploadPartSize 是分片大小，默认 64 MiB。
+	// UploadPartSize is the part size; defaults to 64 MiB.
 	UploadPartSize int64
 	COS            COS
 	SES            SES
 	Timeline       Timeline
 }
 
-// Timeline 是内容流后台整理器的配置。
+// Timeline is the configuration for the stream's background organizer.
 type Timeline struct {
 	Enabled bool
-	// Workers 是并行处理文件/月份的数量。纯元数据整理很轻，2 个就够。
+	// Workers is how many files/months run in parallel. Pure metadata work is light; 2 is enough.
 	Workers int
-	// MonthBudget 是一个月最多占多少"展示单位"（1 单位 ≈ 72px）。
+	// MonthBudget is how many "display units" a month may take up at most (1 unit ≈ 72px).
 	MonthBudget int
-	// Timezone 决定"哪一天"怎么算。照片拍到半夜、跨时区时以这个时区为准。
+	// Timezone decides how "which day" is computed. Photos shot late at night or across
+	// time zones are judged by this zone.
 	Timezone string
 }
 
@@ -57,27 +59,32 @@ type SES struct {
 	SecretKey        string
 	Region           string
 	FromEmailAddress string
-	TemplateID       int64
-	TemplateVar      string
-	Subject          string
-	ReplyTo          string
+	// TemplateID / Subject are the default, English pair. SES stores one template per language, so
+	// Chinese is an optional override: when TemplateIDZh is unset, Chinese requests get the default.
+	TemplateID   int64
+	TemplateVar  string
+	Subject      string
+	TemplateIDZh int64
+	SubjectZh    string
+	ReplyTo      string
 }
 
-// IsProduction 决定 cookie 是否加 Secure、没配 SES 时是否允许把验证码
-// 打印到日志（生产环境必须配好 SES，不能静默）。
+// IsProduction decides whether cookies get Secure and whether a missing SES setup may print
+// the verification code to the log (production must have SES configured; staying silent is
+// not an option).
 func (c *Config) IsProduction() bool { return c.AppEnv == "production" }
 
 func (c *Config) SessionTTL() time.Duration {
 	return time.Duration(c.SessionTTLDays) * 24 * time.Hour
 }
 
-// SESConfigured：发件人、模板、密钥都齐了才算配置好。
+// SESConfigured is only true once the sender, template, and keys are all in place.
 func (c *Config) SESConfigured() bool {
 	return c.SES.FromEmailAddress != "" && c.SES.TemplateID > 0 &&
 		c.SES.SecretID != "" && c.SES.SecretKey != ""
 }
 
-// COSAppID 从桶名的 APPID 后缀里取出账号 ID，STS 策略需要。
+// COSAppID pulls the account ID out of the APPID suffix of a bucket name; STS policies need it.
 func COSAppID(bucket string) string {
 	index := strings.LastIndex(bucket, "-")
 	if index < 0 || index == len(bucket)-1 {
@@ -86,7 +93,7 @@ func COSAppID(bucket string) string {
 	return bucket[index+1:]
 }
 
-// Load 读取 .env（如果存在），再校验必需项。
+// Load reads .env if it exists, then validates the required values.
 func Load() (*Config, error) {
 	loadDotEnv()
 
@@ -117,7 +124,9 @@ func Load() (*Config, error) {
 			FromEmailAddress: os.Getenv("SES_FROM_EMAIL_ADDRESS"),
 			TemplateID:       int64(positiveInt("SES_TEMPLATE_ID", 0)),
 			TemplateVar:      envOr("SES_TEMPLATE_VAR", "code"),
-			Subject:          envOr("SES_SUBJECT", "Everything About Me 验证码"),
+			Subject:          envOr("SES_SUBJECT", "Everything About Me verification code"),
+			TemplateIDZh:     int64(positiveInt("SES_TEMPLATE_ID_ZH", 0)),
+			SubjectZh:        envOr("SES_SUBJECT_ZH", "Everything About Me 验证码"),
 			ReplyTo:          os.Getenv("SES_REPLY_TO_ADDRESS"),
 		},
 		Timeline: Timeline{
@@ -128,7 +137,7 @@ func Load() (*Config, error) {
 		},
 	}
 
-	// CookieSecure 显式设置优先；否则正式环境默认加 Secure。
+	// An explicit COOKIE_SECURE wins; otherwise production defaults to Secure.
 	switch strings.ToLower(os.Getenv("COOKIE_SECURE")) {
 	case "true":
 		c.CookieSecure = true
@@ -145,8 +154,8 @@ func Load() (*Config, error) {
 	return c, nil
 }
 
-// ValidateCOS 只给真正要访问桶的命令（server / doctor / reconcile / claim）用，
-// 建表这类纯数据库操作不需要 COS 配置。
+// ValidateCOS is only for commands that really touch the bucket (server / doctor /
+// reconcile / claim); pure database work such as migrations needs no COS config.
 func (c *Config) ValidateCOS() error {
 	for name, value := range map[string]string{
 		"COS_SECRET_ID":  c.COS.SecretID,
@@ -161,8 +170,8 @@ func (c *Config) ValidateCOS() error {
 	return nil
 }
 
-// webDir 依次尝试仓库根目录和 backend/ 目录下的 web/dist，
-// 所以 `cd backend && go run` 和仓库根目录下的 `./bin/eam` 都能找到前端。
+// webDir tries web/dist under the repository root and under backend/ in turn, so that both
+// `cd backend && go run` and `./bin/eam` from the repository root find the frontend.
 func webDir() string {
 	if value := os.Getenv("WEB_DIR"); value != "" {
 		return value
@@ -213,7 +222,8 @@ func firstNonEmpty(values ...string) string {
 	return ""
 }
 
-// loadDotEnv 从当前目录向上最多三层找 .env，只补充还没设置的变量。
+// loadDotEnv looks up to three directories up from the current one for .env and only fills
+// in variables that are not set yet.
 func loadDotEnv() {
 	path := os.Getenv("EAM_ENV_FILE")
 	if path == "" {

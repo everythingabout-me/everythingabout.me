@@ -1,93 +1,93 @@
-# 事件（Event）：结构与来源
+# Events: structure and origins
 
-> 状态：v1.0 · 2026-10 · **P0 已落地**（实现状态见 §12）
-> 界面见 [`timeline.md` §17](timeline.md)；这里只回答：**事件长什么样、谁能写、写进来之后归谁。**
-> 现在还没有事件。站内会写一部分，三方应用会写一部分，先把契约定下来。
-
----
-
-## 0. 一句话
-
-一条事件 = **一段时间 + 一张卡（类型 + payload）+ 一个可选的详情链接**；来源只是归因。
+> Status: v1.0 · 2026-10 · **P0 shipped** (implementation status in §12)
+> The UI is in [`timeline.md` §17](timeline.md); this file answers only: **what an event looks like, who can write one, and who owns it once written.**
+> There are no events yet. The site will write some, third-party apps will write some; let's fix the contract first.
 
 ---
 
-## 1. 四个决定
+## 0. One line
 
-### 1.1 时间线拥有事件，应用只是投稿
+An event = **a time span + one card (type + payload) + an optional detail link**; the origin is just attribution.
 
-三方写进来的事件存在用户的账号里，不是应用的一张外链：
+---
 
-- 用户断开应用、应用下线、token 被撤销 —— 事件都还在，只是来源标记失效（`来源已断开`）；
-- 用户删除写墓碑（`state='deleted'`），内容清空、去重键保留——否则流水线重跑或应用重推会把它复活；
-- 应用调删除只冻结（`detached`），内容保留，不带走。
+## 1. Four decisions
 
-「个人编年史」和「第三方动态墙」的分界线就在这里。反过来做（事件属于应用、断开就消失）会让时间线变成一个不稳定的聚合器。
+### 1.1 The timeline owns events; apps only submit them
 
-### 1.2 卡片是类型化的，不是一套固定槽位
+An event written by a third party lives in the user's account, not as a foreign link owned by the app:
 
-每种卡片有自己的 `type` 和 `payload`，服务端按类型校验、渲染器按类型出卡。内置四种：
+- The user disconnects the app, the app shuts down, the token is revoked — the events are all still there, only the origin marker goes stale (`Source disconnected`);
+- When the user deletes an event, write a tombstone (`state='deleted'`): content is cleared and the dedupe key is kept — otherwise a pipeline rerun or an app re-push would resurrect it;
+- When an app calls delete, the event is only frozen (`detached`); the content is kept and not taken away.
 
-| type | payload | 长什么样 | 典型 |
+This is exactly where "a personal chronicle" and "a third-party activity wall" part ways. Doing it the other way (events belong to the app and vanish on disconnect) would turn the timeline into an unstable aggregator.
+
+### 1.2 Cards are typed, not one fixed set of slots
+
+Each card type has its own `type` and `payload`; the server validates by type, and the renderer emits by type. Four are built in:
+
+| type | payload | What it looks like | Typical |
 |---|---|---|---|
-| `photo` | `{ media: 1–4, body?, meta? }` | 图片（1 张大图 / 2–4 张拼贴）+ 一句话 | 「青海湖 · 四天」 |
-| `note` | `{ body, meta? }` | 纯文字，落在浅色底上 | 「搬家」 |
-| `metric` | `{ metrics: 1–3, body? }` | 一行数字 + 一句话 | 「晨跑 · 12.4 km」 |
-| `html` | `{ html, height }` | 应用自己的版式，沙箱渲染 | 票根、海报、小报告 |
+| `photo` | `{ media: 1–4, body?, meta? }` | image (1 full-width / a 2–4 collage) + one sentence | "Qinghai Lake · four days" |
+| `note` | `{ body, meta? }` | plain text on a light background | "Moving house" |
+| `metric` | `{ metrics: 1–3, body? }` | one row of numbers + one sentence | "Morning run · 12.4 km" |
+| `html` | `{ html, height }` | the app's own layout, rendered in a sandbox | a ticket stub, a poster, a small report |
 
-所有类型共享的三个字段：`title`、时间、`detail_url`（可选）。类型决定内容和版式，共享字段决定它怎么进时间线。
+All types share three fields: `title`, the time, and `detail_url` (optional). The type decides content and layout; the shared fields decide how the event slots into the timeline.
 
-**`html` 只是一类，不是例外。** 总有表达不了的东西，与其让应用把内容硬塞进三种模板，不如给它一个隔离的画布。
+**`html` is just another type, not an exception.** There is always something that cannot be expressed; rather than forcing apps to cram their content into three templates, give them an isolated canvas.
 
-### 1.3 没有编辑
+### 1.3 No editing
 
-事件写完就是写完：
+An event is finished once it is written:
 
-- 没有用户编辑 —— 没有改标题、换封面、拖拽排序，也就没有 `locked_fields`、没有「用户改过所以不覆盖」这一整类冲突；
-- 生产者可以**重推**同一个 `external_id` 覆盖自己的事件（那是更新，不是编辑）；
-- 用户可以删除（那不是编辑）。
+- No user editing — no retitling, no swapping the cover, no drag-and-drop ordering, and therefore no `locked_fields` and none of that whole class of "the user changed it, so don't overwrite it" conflicts;
+- A producer may **re-push** the same `external_id` to overwrite its own event (that is an update, not an edit);
+- The user may delete (that is not an edit).
 
-上一版设计里的「用户编辑优先级最高」这一章可以整段删掉。少一个功能，少掉的是锁字段、合并冲突、撤销、影子版本四件事。
+The whole "user edits have the highest priority" chapter from the previous design can be deleted outright. Dropping one feature drops four things with it: field locks, merge conflicts, undo, and shadow versions.
 
-### 1.4 `html` 要隔离，不只是过滤
+### 1.4 `html` needs isolation, not just filtering
 
-三方 HTML 直接进我们的 DOM，等于把版式、暗色模式、移动端一起交出去，还得防 XSS。所以：
+Third-party HTML straight into our DOM would hand over the layout, dark mode, and mobile at once, on top of needing XSS protection. So:
 
-- 渲染在 `<iframe sandbox>` 里（不给 `allow-scripts`），高度由 payload 指定、服务端钳制；
-- 文档里注入一组设计 token（`--eam-bg` / `--eam-text` / `--eam-line` / `--eam-accent`），卡片**可以**用它们跟随明暗主题，也可以完全不用；
-- 图片只允许 `https:` 和 `data:`，外链脚本一律不执行；
-- 高度上限 640px，超出在卡片内部滚动。
+- Render it in `<iframe sandbox>` (without `allow-scripts`), with the height given by the payload and clamped by the server;
+- Inject a set of design tokens into the document (`--eam-bg` / `--eam-text` / `--eam-line` / `--eam-accent`); a card **may** use them to follow the light/dark theme, or ignore them entirely;
+- Images are restricted to `https:` and `data:`; external scripts never execute;
+- Height cap is 640px; overflow scrolls inside the card.
 
 ---
 
-## 2. 数据模型
+## 2. Data model
 
 ```sql
 create table if not exists events (
   id            uuid primary key default gen_random_uuid(),
   user_id       uuid not null references users(id) on delete cascade,
 
-  -- 归因
+  -- attribution
   origin        text not null default 'native',      -- native | auto | app
   token_id      uuid references api_tokens(id) on delete set null,
-  external_id   text,                                -- 应用内的事件 id
-  producer_key  text,                                -- auto：流水线的去重键
+  external_id   text,                                -- the event id inside the app
+  producer_key  text,                                -- auto: the pipeline's dedupe key
 
-  -- 时间
+  -- time
   starts_at     timestamptz not null,
   ends_at       timestamptz,
   tz            text not null,
-  local_date    date not null,                       -- starts_at 在 tz 下的日期，分桶用
+  local_date    date not null,                       -- the date of starts_at in tz, used for bucketing
   precision     text not null default 'day',         -- day | minute
 
-  -- 卡片
+  -- card
   type          text not null,                       -- photo | note | metric | html
-  title         text not null,                       -- 所有类型都有，列表/通知/无障碍用
-  payload       jsonb not null,                      -- 随 type 变，见 §3
-  detail_url    text,                                -- 可选：这条事件的详情页
+  title         text not null,                       -- all types have it; used in lists/notifications/a11y
+  payload       jsonb not null,                      -- varies by type, see §3
+  detail_url    text,                                -- optional: the detail page for this event
 
-  -- 状态
-  state         text not null default 'published',   -- published | detached | deleted（墓碑）
+  -- state
+  state         text not null default 'published',   -- published | detached | deleted (tombstone)
   merged_into   uuid references events(id) on delete set null,
   created_at    timestamptz not null default now(),
   updated_at    timestamptz not null default now()
@@ -105,7 +105,7 @@ create index if not exists events_time
   on events (user_id, local_date desc, starts_at desc)
   where state = 'published';
 
--- 媒体：payload 里写路径，落库时解析成 node；删文件时卡片自己退化
+-- Media: payloads carry paths, resolved to nodes on write; deleting a file degrades the card on its own
 create table if not exists event_media (
   event_id uuid not null references events(id) on delete cascade,
   idx      int not null,
@@ -115,63 +115,63 @@ create table if not exists event_media (
 create index if not exists event_media_node on event_media (node_id);
 ```
 
-要点：
+Key points:
 
-- **`payload` 是 jsonb**：类型少、字段少，不值得为每种卡建表；校验在应用层，渲染器按 `type` 读。
-- **`local_date` 写入时算好**，读的时候不转时区，跨时区旅行不串天。
-- **媒体只能是盘里的文件**：三方要带图，先用自己的 token 传进自己的前缀（如 `Apps/strava/2025/0803.jpg`），事件里引用路径。不做外链图片——防盗链、失效、审核、SSRF 都是问题。
-- **`detail_url` 只有一个**，就是「这条事件的详情页」。没有就是没有，不猜。
-- `merged_into` 留给以后（§10）。
+- **`payload` is jsonb**: few types, few fields — not worth a table per card type; validation lives in the app layer, and the renderer reads by `type`.
+- **`local_date` is computed on write**, never converted by time zone on read, so traveling across zones does not drift days.
+- **Media can only be files in the drive**: a third party that wants to attach images first uploads them into its own prefix with its own token (e.g. `Apps/strava/2025/0803.jpg`) and then references the path in the event. No hotlinked images — hotlink protection, link rot, moderation, and SSRF are all problems.
+- **There is exactly one `detail_url`**, and it means "the detail page for this event". If there isn't one, there isn't; don't guess.
+- `merged_into` is reserved for later (§10).
 
-### 2.1 和现有表的关系
+### 2.1 Relationship to the existing tables
 
-- `timeline_moments` → **由 `events` 取代**。迁移时按 `dedupe_key` 灌成 `origin='auto'`、`producer_key=dedupe_key`。
-- `timeline_snapshots` → **取消**。没有预算、没有密度，读路径直接按 `local_date` 查 `events`；每次应用写入都要重算快照反而更贵。
-- `timeline_assets`、`timeline_series` / `timeline_points` → 保留（文件时间、健康数据）。
+- `timeline_moments` → **replaced by `events`**. During the migration, rows are loaded as `origin='auto'` with `producer_key=dedupe_key`.
+- `timeline_snapshots` → **dropped**. No budget, no density; the read path queries `events` by `local_date` directly, and recomputing a snapshot on every app write would only be more expensive.
+- `timeline_assets`, `timeline_series` / `timeline_points` → kept (file times, health data).
 
 ---
 
-## 3. 四种内置类型
+## 3. The four built-in types
 
-所有 payload 都是纯数据，不含 HTML（`html` 类型除外）。
+Every payload is pure data, no HTML (except the `html` type).
 
 ### 3.1 `photo`
 
 ```json
 {
   "media": ["Photos/2025/06/12/a.jpg", "Photos/2025/06/12/b.jpg"],
-  "body": "第三天翻到海拔 4,100，风把三脚架吹倒了。",
-  "meta": "780 张 → 9 张 · 12.6 km",
+  "body": "On day three we climbed to 4,100 m and the wind knocked the tripod over.",
+  "meta": "780 photos → 9 · 12.6 km",
   "cover": 0
 }
 ```
 
-- `media` 1–4 张；1 张是 3:2 大图，2–4 张自动拼贴；
-- `cover` 是 `media` 的下标，不填就是 0；
-- `meta` 是那行小灰字（张数、人数、距离），可选。
+- `media` holds 1–4 items; 1 is a 3:2 full-width image, 2–4 are collaged automatically;
+- `cover` is an index into `media`; it defaults to 0;
+- `meta` is the small gray line (photo count, number of people, distance), optional.
 
 ### 3.2 `note`
 
 ```json
-{ "body": "搬到城西。第一晚只有一张床垫和一个箱子，窗外是高架，整夜有车过去。", "meta": "214 个文件" }
+{ "body": "Moved to the west side. The first night there was only a mattress and one box; the elevated road was outside the window and cars went by all night.", "meta": "214 files" }
 ```
 
-纯文字一张卡。`body` ≤ 500 字。
+One card of plain text. `body` ≤ 500 characters.
 
 ### 3.3 `metric`
 
 ```json
 {
   "metrics": [
-    { "label": "距离", "value": "12.4", "unit": "km" },
-    { "label": "配速", "value": "5'02\"", "unit": "/km" },
-    { "label": "心率", "value": "148", "unit": "bpm" }
+    { "label": "Distance", "value": "12.4", "unit": "km" },
+    { "label": "Pace", "value": "5'02\"", "unit": "/km" },
+    { "label": "Heart rate", "value": "148", "unit": "bpm" }
   ],
-  "body": "配速最后两公里掉到 5'30\"。"
+  "body": "Pace dropped to 5'30\" over the last two kilometers."
 }
 ```
 
-1–3 个数字，渲染成一行；`value` 是字符串，允许 `5'02"`、`12.4` 这种写法。
+1–3 numbers rendered as one row; `value` is a string, so forms like `5'02"` and `12.4` are allowed.
 
 ### 3.4 `html`
 
@@ -182,49 +182,49 @@ create index if not exists event_media_node on event_media (node_id);
 }
 ```
 
-- 渲染在 `<iframe sandbox>` 里，见 §1.4；
-- `height` 40–640，服务端钳制；宽度永远是容器的 100%；
-- 文档里会先注入设计 token 和 `<meta charset>`，其他什么都不注入；
-- 不允许 `<script>`、`<iframe>`、`<object>`；`<style>`/`<link>` 只允许内联（外部样式表不加载）。
+- Rendered in `<iframe sandbox>`, see §1.4;
+- `height` is 40–640, clamped by the server; the width is always 100% of the container;
+- Design tokens and `<meta charset>` are injected into the document first; nothing else is injected;
+- `<script>`, `<iframe>`, `<object>` are not allowed; `<style>`/`<link>` may only be inline (external stylesheets do not load).
 
-> 服务端仍然过一遍白名单（标签 + 属性），沙箱是第二道，不是唯一一道。
-
----
-
-## 4. 详情链接
-
-`detail_url` 是**可选**的，而且**不做一个按钮**：
-
-- 有：标题本身就是链接（hover 下划线），打开新标签；
-- 没有：标题不可点，整张卡也不可点；
-- 我们的卡片暂时都没有 —— 站内还没有事件详情页；
-- 三方自己决定加不加，指向它自己的活动页、文章页、账单页；
-- `html` 卡片的链接由它自己的 HTML 决定，我们不管。
-
-不做站内详情页。等有「多图 / 原文 / 来源文件」的真实需求再设计，不要凭想象先画一屏。
+> The server still runs an allowlist pass (tags + attributes); the sandbox is a second layer, not the only one.
 
 ---
 
-## 5. 三种来源
+## 4. The detail link
 
-| origin | 谁写 | 去重键 | 典型 |
+`detail_url` is **optional**, and it **does not become a button**:
+
+- Present: the title itself is the link (underline on hover), opening a new tab;
+- Absent: the title is not clickable, and neither is the card;
+- None of our cards have one yet — there is no in-site event detail page;
+- Third parties decide for themselves whether to add one, pointing at their own activity page, article page, or billing page;
+- For `html` cards, the links are decided by their own HTML; we don't touch that.
+
+No in-site detail page. Wait until there is a real need ("multiple images / the original text / the source files"), and don't sketch a screen from imagination.
+
+---
+
+## 5. Three origins
+
+| origin | Who writes | Dedupe key | Typical |
 |---|---|---|---|
-| `native` | 站内（自动生成或用户新建） | 无 | 「搬家」「青海湖」 |
-| `auto` | 文件流水线 | `producer_key` | 照片会话、跨天旅行 |
-| `app` | 三方应用（Bearer token） | `external_id` | 「晨跑」「票根」 |
+| `native` | The site (auto-generated or user-created) | none | "Moving house", "Qinghai Lake" |
+| `auto` | The file pipeline | `producer_key` | photo sessions, cross-day trips |
+| `app` | Third-party apps (Bearer token) | `external_id` | "Morning run", "Ticket stub" |
 
-同一张表、同一套读路径。**不新增「应用事件」这种二等公民**：它只是 `origin` 不同，归因那一行不同。
+Same table, same read path. **No second-class "app event" citizen**: the only difference is `origin`, i.e. that line of attribution.
 
-**订阅源（P1）**：不是所有应用都会写 API。给一个导入地址（RSS / Atom / iCal / JSON feed），后台每天拉一次，按条目 id 生成 `origin='app'` 的事件。数据模型不用改。
+**Feeds (P1)**: not every app will write to the API. Give it an import URL (RSS / Atom / iCal / JSON feed), poll it once a day in the background, and generate events with `origin='app'` keyed by item id. The data model does not change.
 
 ---
 
-## 6. 写入 API
+## 6. Write API
 
-遵循 [`docs/api/api.md`](../api/api.md)：Bearer、UTC、`{"error","message"}`、路径即身份。
-**例外**：事件有 `id`。文件用路径当身份，事件没有天然路径；对应用来说稳定的句柄始终是它自己的 `external_id`。
+Follows [`docs/api/api.md`](../api/api.md): Bearer, UTC, `{"error","message"}`, path is identity.
+**Exception**: events have an `id`. Files use the path as identity, but events have no natural path; the stable handle for an app is always its own `external_id`.
 
-### 6.1 创建 / 更新（幂等）
+### 6.1 Create / update (idempotent)
 
 ```http
 POST /events
@@ -237,15 +237,15 @@ Idempotency-Key: strava:run-8921
   "ends_at":   "2025-08-03T08:02:00Z",
   "tz": "Asia/Shanghai",
   "precision": "minute",
-  "title": "晨跑 · 北岸",
+  "title": "Morning run · North shore",
   "detail_url": "https://www.strava.com/activities/8921",
   "type": "metric",
   "payload": {
     "metrics": [
-      { "label": "距离", "value": "12.4", "unit": "km" },
-      { "label": "配速", "value": "5'02\"", "unit": "/km" }
+      { "label": "Distance", "value": "12.4", "unit": "km" },
+      { "label": "Pace", "value": "5'02\"", "unit": "/km" }
     ],
-    "body": "出门时 24 度。"
+    "body": "24 degrees when I left the house."
   }
 }
 ```
@@ -254,134 +254,134 @@ Idempotency-Key: strava:run-8921
 201 { "id": "0f1c…", "url": "https://your-host/e/0f1c…", "state": "published" }
 ```
 
-- 以 `(user, token, external_id)` 去重：同一个 `external_id` 再来一次是**整体替换**，返回 `200` 和同一个 `id`；
-- 带 `Idempotency-Key` 就按「同 key 同结果」处理，重试安全；
-- 用户删掉的事件再推回来 → `410 gone`，应用应当停止重试。
+- Deduped by `(user, token, external_id)`: the same `external_id` again is a **full replacement**, returning `200` and the same `id`;
+- With `Idempotency-Key`, "same key, same result" applies, so retries are safe;
+- An event the user deleted, pushed again → `410 gone`, and the app should stop retrying.
 
-### 6.2 其它
+### 6.2 The rest
 
 ```http
-DELETE /events/{id}      # 应用侧删除 → state=detached（内容保留）
-GET    /api/events?from=&to= # 对账：返回自己写过的 external_id 列表
-GET    /events/{id}      # 单条（完整 JSON，供应用渲染分享页）
+DELETE /events/{id}      # app-side delete → state=detached (content kept)
+GET    /api/events?from=&to= # reconciliation: returns the list of external_ids you have written
+GET    /events/{id}      # one event (full JSON, for the app to render a share page)
 ```
 
-没有 `PATCH`：重推就是更新，少一个接口。
+No `PATCH`: re-pushing is the update; one endpoint less.
 
-> **路径约定**：和文件 API 一样，对外接口的路径就是功能本身，不带 `/v1` 或 `/api` 前缀（见 [api.md](../api/api.md)）。
-> 网页用的读接口仍然是 `GET /api/timeline`（cookie 会话）。
+> **Path convention**: as with the file API, a public endpoint's path is the feature itself, with no `/v1` or `/api` prefix (see [api.md](../api/api.md)).
+> The web read endpoint remains `GET /api/timeline` (cookie session).
 
-### 6.3 权限
+### 6.3 Permissions
 
 ```sql
 alter table api_tokens add column if not exists can_events boolean not null default false;
 ```
 
-- 用户建 token 时勾「写事件」，名字就是归属名（`Strava`、`Readwise`）；
-- 应用只能写自己创建的、只能引用 token 前缀内的媒体（复用现有 403 越界逻辑）；
-- 没有应用注册表、没有 OAuth。真要开放成平台，再加 `apps` 表和 `app_id`，`events.token_id` 不用动。
+- When creating a token the user ticks "write events"; the token name is the attribution name (`Strava`, `Readwise`);
+- An app can only write what it created, and can only reference media inside its own token prefix (reusing the existing 403 out-of-bounds logic);
+- No app registry, no OAuth. If this really opens up as a platform, add an `apps` table and `app_id`; `events.token_id` does not change.
 
-### 6.4 限额
+### 6.4 Limits
 
-| 项 | 值 |
+| Item | Value |
 |---|---|
-| `title` | ≤ 80 字 |
-| `body` | ≤ 500 字 |
+| `title` | ≤ 80 characters |
+| `body` | ≤ 500 characters |
 | `metrics` | ≤ 3 |
 | `media` | ≤ 4 |
-| `html` | ≤ 32 KB，height 40–640 |
-| 单次请求体 | ≤ 64 KB |
-| 频率 | 每 token 60 次/分钟，单日 2,000 条 |
+| `html` | ≤ 32 KB, height 40–640 |
+| Request body | ≤ 64 KB |
+| Rate | 60 requests/minute per token, 2,000 events/day |
 
-限额进 `GET /capabilities`，客户端不要写死。
+Limits go into `GET /capabilities`; clients must not hard-code them.
 
 ---
 
-## 7. 归因与展示
+## 7. Attribution and display
 
-只在日期那一行露出谁写的：
+Only the date line reveals who wrote it:
 
 ```
 8 月 3 日 · Strava ↗        ← 三方
 8 月 15 日                   ← native / auto（不显示）
 ```
 
-- 名称取 token 的 `name`；
-- token 被撤销后显示 `Strava（已断开）`，`detail_url` 失效，内容不动；
-- 不做应用 logo、不做品牌色；也不做「只看某个应用」的筛选器 —— 真需要了，那是搜索该管的事。
+- The name comes from the token's `name`;
+- After the token is revoked it shows `Strava (disconnected)`; `detail_url` no longer works, and the content is untouched;
+- No app logos, no brand colors; and no "only this app" filter either — if that becomes necessary, it is search's business.
 
 ---
 
-## 8. 生命周期
+## 8. Lifecycle
 
-| 动作 | 结果 |
+| Action | Result |
 |---|---|
-| 生产者创建 | `state='published'` |
-| 生产者重推同一个 `external_id` | 整体替换 payload（事件 id 不变） |
-| 生产者删除 | `state='detached'`，内容保留，`detail_url` 清空 |
-| 用户删除 | `state='deleted'`（墓碑）+ 清空内容 + 删 `event_media`；生产者重推会被忽略 |
-| 撤销 token | 事件保留；来源显示「已断开」 |
-| 用户删除某应用的全部事件 | 批量墓碑（设置里提供，未实现） |
+| Producer creates | `state='published'` |
+| Producer re-pushes the same `external_id` | payload fully replaced (event id unchanged) |
+| Producer deletes | `state='detached'`, content kept, `detail_url` cleared |
+| User deletes | `state='deleted'` (tombstone) + content cleared + `event_media` deleted; later re-pushes are ignored |
+| Token revoked | events kept; the origin shows "disconnected" |
+| User deletes all events from one app | bulk tombstone (offered in settings, not implemented) |
 
-没有「用户修改」这一行，所以也没有锁定字段、没有合并冲突。
+There is no "user modified" row, so there are no locked fields and no merge conflicts.
 
 ---
 
-## 9. 分期
+## 9. Phases
 
-| 阶段 | 内容 |
+| Phase | Scope |
 |---|---|
-| **P0** ✅ | `events` / `event_media` 迁移；四种类型；auto 流水线写 `origin='auto'`；`POST` / `DELETE` / `GET /events`；来源那一行；`detail_url`；网页读接口换成扁平事件流 |
-| **P1** | feed 导入（RSS / iCal）；html 的服务端白名单清洗（现在只靠 sandbox）；应用事件的对账 UI |
-| **P2** | 合并；更多类型（清单 / 引用 / 地点）；应用注册表 |
+| **P0** ✅ | the `events` / `event_media` migration; the four types; the auto pipeline writes `origin='auto'`; `POST` / `DELETE` / `GET /events`; the origin line; `detail_url`; the web read endpoint switched to a flat event stream |
+| **P1** | feed import (RSS / iCal); server-side allowlist sanitizing for html (currently only the sandbox); a reconciliation UI for app events |
+| **P2** | merging; more types (checklist / quote / place); an app registry |
 
-`html` 放 P1 是因为它要先把沙箱、token 注入、高度钳制做对；`photo` 那三种先跑通，时间线就能用。
-
----
-
-## 10. 合并（P2，只留结构）
-
-同一天的照片和一次跑步，现在是两条事件。以后可以合并成一条，卡片上挂两个来源：`merged_into` 指向主事件，子事件不显示。
-
-**P2 之前不做任何自动合并。** 宁可两条，也不要算法把「同一天」硬说成「同一件事」。
+`html` sits in P1 because the sandbox, token injection, and height clamping must be right first; once the three `photo`-family types work, the timeline is usable.
 
 ---
 
-## 11. 未定
+## 10. Merging (P2, structure only)
 
-1. **站内要不要事件详情页**：现在所有卡片都没有 `detail_url`，点不了。等「多图 / 原文 / 来源文件」真有需求再做。
-2. **事件的删除粒度**：现在只能一条条删（且网页上还没入口）。要不要「删掉这个应用的全部事件」？批量墓碑的成本很低，但入口放哪儿没定。
-3. **`html` 的审核**：P1 放开后，谁来判断一张 HTML 卡是不是钓鱼？先靠来源标记 + 用户可删，还是先只对白名单应用开放？
-4. **自动事件和应用的边界**：同一天的照片（auto）和跑步（app）要不要在时间线上互相提及？现在互相不知道对方存在。
-5. **一条事件几张图**：暂定 4。旅行那种 9 张是放宽 `photo`，还是等详情页？
+A day's photos and one run are two events today. Later they can merge into one, with two origins hanging off the card: `merged_into` points at the primary event, and child events are not displayed.
+
+**No automatic merging before P2.** Better two events than an algorithm insisting that "the same day" means "the same thing".
 
 ---
 
-## 12. 实现状态
+## 11. Undecided
 
-| 东西 | 位置 |
+1. **Should there be an in-site event detail page**: no card has a `detail_url` today, so none is clickable. Revisit when "multiple images / the original text / the source files" is a real need.
+2. **Deletion granularity for events**: today only one at a time (and the web has no entry point yet). Should there be "delete all events from this app"? Bulk tombstones are cheap, but where to put the entry point is undecided.
+3. **Reviewing `html`**: once P1 opens it up, who judges whether an HTML card is phishing? Start with source labeling + user deletion, or open it only to allowlisted apps first?
+4. **The boundary between automatic events and app events**: should a day's photos (auto) and a run (app) mention each other on the timeline? Today they don't know the other exists.
+5. **How many images per event**: 4 for now. For trips with 9, do we loosen `photo`, or wait for the detail page?
+
+---
+
+## 12. Implementation status
+
+| Thing | Location |
 |---|---|
-| 表结构 | [`sql/013_events.sql`](../../sql/013_events.sql) |
-| 领域逻辑（校验 / 读 / 写 / 墓碑） | [`backend/internal/events/events.go`](../../backend/internal/events/events.go) |
-| 网页读接口 + 对外 API | [`backend/internal/api/events.go`](../../backend/internal/api/events.go) |
-| 自动事件的生产者 | [`backend/internal/timeline/service.go`](../../backend/internal/timeline/service.go)（`autoEvents` / `PublishAuto`） |
-| 前端 | [`web/src/pages/StreamPage.tsx`](../../web/src/pages/StreamPage.tsx) |
-| 令牌能力位 | `api_tokens.can_events`；CLI `eam token create --events` |
+| Schema | [`sql/013_events.sql`](../../sql/013_events.sql) |
+| Domain logic (validation / read / write / tombstones) | [`backend/internal/events/events.go`](../../backend/internal/events/events.go) |
+| Web read endpoint + public API | [`backend/internal/api/events.go`](../../backend/internal/api/events.go) |
+| Producer of automatic events | [`backend/internal/timeline/service.go`](../../backend/internal/timeline/service.go) (`autoEvents` / `PublishAuto`) |
+| Frontend | [`web/src/pages/StreamPage.tsx`](../../web/src/pages/StreamPage.tsx) |
+| Token capability bit | `api_tokens.can_events`; CLI `eam token create --events` |
 
-已落地：
+Shipped:
 
-- `events` / `event_media` 两张表；令牌的第三个能力位 `can_events`；
-- 四种卡片类型的写入校验（限额集中在 `events.ValidateApp`）；
-- 幂等 upsert（`external_id`）、墓碑（用户删除）、detached（应用删除）；
-- 媒体解析：路径 → `node`，必须在 token 前缀内；读的时候预签名缩略图；
-- 网页：`GET /api/timeline` 返回扁平事件流（keyset 游标），卡片按类型渲染，html 走 sandbox iframe；
-- 流水线：每个月的选中片段写成 `origin='auto'` 的事件。
+- The `events` / `event_media` tables; the token's third capability bit `can_events`;
+- Write validation for the four card types (limits centralized in `events.ValidateApp`);
+- Idempotent upsert (`external_id`), tombstones (user delete), detached (app delete);
+- Media resolution: path → `node`, which must be inside the token prefix; presigned thumbnails on read;
+- Web: `GET /api/timeline` returns a flat event stream (keyset cursor), cards render by type, html goes through a sandbox iframe;
+- Pipeline: each month's selected moments are written as events with `origin='auto'`.
 
-还没做（按设计暂缓，不是遗漏）：
+Not done yet (deliberately deferred by design, not oversights):
 
-- **原生编辑器**：站内还不能手写一条事件（native 目前没有生产者）；
-- **feed 导入**（RSS / iCal）；
-- **健康变化卡**：`timeline_series` 还在，但还没有"发现异常 → 生成一张卡"的生产者；
-- **合并**（`merged_into` 只有字段）；
-- **删除的 UI**：`DELETE /api/events/{id}` 和 `DeleteOwned` 都在，网页上没有入口；
-- 服务端对 html 的白名单清洗（现在只有 sandbox + CSP）。
+- **A native editor**: the site still cannot write an event by hand (native has no producer yet);
+- **Feed import** (RSS / iCal);
+- **Health change cards**: `timeline_series` is still there, but there is no producer that goes "spot an anomaly → generate a card";
+- **Merging** (`merged_into` is only a field);
+- **Delete UI**: `DELETE /api/events/{id}` and `DeleteOwned` both exist, but the web has no entry point;
+- Server-side allowlist sanitizing for html (currently only the sandbox + CSP).

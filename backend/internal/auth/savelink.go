@@ -15,7 +15,7 @@ import (
 	"everythingabout.me/backend/internal/httpx"
 )
 
-// SaveLinkTokenPrefix 是审计里区分保存链接和普通 API token 的前缀。
+// SaveLinkTokenPrefix distinguishes save links from ordinary API tokens in the audit log.
 const SaveLinkTokenPrefix = "link:"
 
 const (
@@ -26,7 +26,8 @@ const (
 
 var saveLinkEncoding = base32.StdEncoding.WithPadding(base32.NoPadding)
 
-// SaveLink 是账户页展示的一条保存链接。Code 由服务端按行重算，不落库。
+// SaveLink is one save link as shown on the account page. Code is recomputed by the
+// server per row and never stored.
 type SaveLink struct {
 	ID         string  `json:"id"`
 	Name       string  `json:"name"`
@@ -37,8 +38,8 @@ type SaveLink struct {
 	Revoked    bool    `json:"revoked"`
 }
 
-// 保存链接的明文：<8 位 link_id><8 位 MAC>，都是小写 base32。
-// MAC = HMAC-SHA256(服务端密钥, user_id + ":" + link_id) 的前 8 个字符。
+// Plaintext of a save link: <8-char link_id><8-char MAC>, all lowercase base32.
+// MAC = the first 8 characters of HMAC-SHA256(server key, user_id + ":" + link_id).
 func (s *Service) saveLinkCode(userID, linkID string) string {
 	mac := hmac.New(sha256.New, s.linkKey)
 	mac.Write([]byte(userID))
@@ -82,7 +83,8 @@ func (s *Service) saveLinkFromRow(id, linkID, name, createdAt string, lastUsed *
 	}
 }
 
-// CreateSaveLink 生成一条全权保存链接。明文不落库，账户页随时可以重算。
+// CreateSaveLink mints a save link with full privileges. The plaintext never hits the
+// database, so the account page can recompute it at any time.
 func (s *Service) CreateSaveLink(ctx context.Context, userID string) (*SaveLink, error) {
 	name := "Save link"
 	var (
@@ -112,7 +114,8 @@ func (s *Service) CreateSaveLink(ctx context.Context, userID string) (*SaveLink,
 	return nil, httpx.Internal("failed to allocate a save link; please retry")
 }
 
-// ListSaveLinks 返回这个账号的全部链接（含已撤销的，账户页可以显示状态）。
+// ListSaveLinks returns every link on the account, revoked ones included, so the account
+// page can show status.
 func (s *Service) ListSaveLinks(ctx context.Context, userID string) ([]SaveLink, error) {
 	rows, err := s.db.Pool().Query(ctx,
 		`select id::text, link_id, name,
@@ -142,7 +145,7 @@ func (s *Service) ListSaveLinks(ctx context.Context, userID string) ([]SaveLink,
 	return links, rows.Err()
 }
 
-// RevokeSaveLink 让一条链接立即失效。
+// RevokeSaveLink invalidates a link immediately.
 func (s *Service) RevokeSaveLink(ctx context.Context, userID, id string) error {
 	tag, err := s.db.Pool().Exec(ctx,
 		`update save_links set revoked_at = now()
@@ -157,8 +160,9 @@ func (s *Service) RevokeSaveLink(ctx context.Context, userID, id string) error {
 	return nil
 }
 
-// VerifySaveLink 校验 URL 里的短码，返回一个和用户本人同等权限的身份。
-// 无效时返回 (nil, nil)，调用方决定是 404 还是继续走别的认证。
+// VerifySaveLink checks the short code from the URL and returns an identity with the same
+// privileges as the user themself. On failure it returns (nil, nil); the caller decides
+// whether that means a 404 or falling through to another auth method.
 func (s *Service) VerifySaveLink(ctx context.Context, code string) (*Principal, error) {
 	linkID, mac, ok := parseSaveLinkCode(code)
 	if !ok {
@@ -199,7 +203,7 @@ func (s *Service) VerifySaveLink(ctx context.Context, code string) (*Principal, 
 	token.CreatedAt = createdAt
 	token.LastUsedAt = lastUsed
 
-	// 每分钟最多更新一次，避免每个请求都写库。
+	// Update at most once a minute so every request does not hit the database.
 	_, _ = s.db.Pool().Exec(ctx,
 		`update save_links set last_used_at = now()
 		  where link_id = $1

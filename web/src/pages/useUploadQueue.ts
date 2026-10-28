@@ -1,59 +1,65 @@
 /**
- * 上传队列。
+ * The upload queue.
  *
- * 每个文件先变成一条占位任务（排队中），一次只直传一个文件。字节通过
- * STS 临时凭证由浏览器直接传给 COS，服务端只在最后 confirm 一次落索引。
+ * Every file first becomes a placeholder task (queued), and only one file uploads directly at a
+ * time. The browser sends the bytes straight to COS with STS temporary credentials; the server
+ * only confirms once at the end and writes the index.
  *
- * 这里刻意不把队列放进 React state 的更新函数里：上传是并发的异步流程，
- * 需要一个同步可读的 tasksRef 来判断"下一个该传谁"，tasks 只负责渲染。
+ * The queue deliberately does not live inside React state updaters: uploading is a concurrent
+ * async flow, so it needs a synchronously readable tasksRef to decide "who goes next", while
+ * tasks exists only for rendering.
  */
 import { useCallback, useRef, useState } from "react";
 import { api, type Item } from "../api/client";
 import { t } from "../i18n";
 
 /**
- * 同时进行的上传数。
+ * How many uploads run at once.
  *
- * 一次只传一个文件：两个文件并行只会把带宽对半劈开，总时长不变，反而让
- * 两个进度条都慢吞吞地爬。串行还让单片吃满带宽，一个传完就是真传完。
+ * One file at a time: two in parallel just split the bandwidth in half, keeping the total duration
+ * while making both progress bars crawl. Serial also lets a single part soak up the bandwidth, so
+ * a file that finishes is really finished.
  */
 const MAX_PARALLEL_UPLOADS = 1;
 /**
- * 单个文件内同时上传的分片数。
+ * How many parts of a single file upload at once.
  *
- * 浏览器对同一个 host 最多 6 条连接；1 个文件 × 4 片占 4 条，剩下的留给
- * 列表、sign、confirm 这些请求。再多只会让分片排在队列里，进度一顿一顿的。
- * 分片是 Blob 视图不复制字节，4 × 128MB 同时在飞也不占额外内存。
+ * Browsers allow at most 6 connections per host; 1 file x 4 parts takes 4 of them and leaves the
+ * rest for listing, sign and confirm calls. More parts only queue up and make progress stutter.
+ * Parts are Blob views that copy no bytes, so 4 x 128MB in flight costs no extra memory.
  */
 const CHUNK_PARALLEL_LIMIT = 4;
 
 const MB = 1024 * 1024;
 /**
- * 单片下限。比这更小的片基本活在 TCP 慢启动里，还要单独付一次请求往返和
- * 签名，净亏；所以文件切不出 ≥16MB 的片时不切。
+ * Minimum part size. Smaller parts live inside TCP slow start and still pay their own round trip
+ * plus signature, which is a net loss; so if a file cannot yield parts of at least 16MB, do not
+ * split it.
  *
- * 另外分片上传本身要先付三次往返——ListMultipartUploads 探续传、
- * InitiateMultipartUpload、最后 CompleteMultipartUpload，RTT 35ms 时约 100ms。
- * 32MB 单流在国内链路上 0.3–1s 就传完了，拆成两片 8–16MB 反而更慢。
+ * Multipart also pays three round trips up front — ListMultipartUploads to probe for a resumable
+ * upload, InitiateMultipartUpload, then CompleteMultipartUpload — about 100ms at 35ms RTT. A 32MB
+ * single stream finishes in 0.3–1s on domestic links, while splitting it into two 8–16MB parts is
+ * actually slower.
  */
 const MIN_SLICE_SIZE = 16 * MB;
 /**
- * 单片上限。一片失败（SDK 会重试 2 次）要重传整片，128MB 已是能接受的粒度；
- * 4 × 128MB 就是 512MB 同时在飞（Blob 视图，不复制字节，不占额外内存）。
+ * Maximum part size. A failed part (the SDK retries twice) must be re-sent whole, and 128MB is
+ * already an acceptable grain; 4 x 128MB means 512MB in flight (Blob views, no byte copies, no
+ * extra memory).
  */
 const MAX_SLICE_SIZE = 128 * MB;
 
 /**
- * 片数：先保证每片 ≥16MB，最多一轮 4 片；512MB 以上一轮装不下就加轮数，
- * 每轮仍是 4 片。
+ * Part count: guarantee at least 16MB per part, with at most 4 parts per round; above 512MB a
+ * single round cannot hold the file, so add rounds, still 4 parts each.
  *
- *   片数 = min(4, ⌊size / 16MB⌋)          size ≤ 512MB
- *   片数 = 4 × ⌈size / 512MB⌉             size > 512MB
+ *   parts = min(4, floor(size / 16MB))     size <= 512MB
+ *   parts = 4 * ceil(size / 512MB)         size > 512MB
  *
- * 为什么片数取 4 的整数倍：固定 128MB 切片时 600MB 会切成 128×4 + 88，最后
- * 那 88MB 只有一条连接在跑，等于最后一段时间只用 1/4 带宽。按 4 的倍数均分
- * （600MB → 8 × 75MB）每条连接的工作量和 128×4 + 22×4 完全一样，但每轮都
- * 是满的，也没有 22MB 这种刚起步就结束的碎尾。
+ * Why a multiple of 4: with a fixed 128MB slice size, 600MB becomes 128x4 + 88, and that last
+ * 88MB runs on a single connection, so the tail uses only a quarter of the bandwidth. Splitting
+ * evenly in multiples of 4 (600MB -> 8 x 75MB) gives every connection the same work as
+ * 128x4 + 22x4, but every round is full and there is no 22MB stub that ends just as it starts.
  */
 function partCountFor(size: number): number {
   const perRound = MAX_SLICE_SIZE * CHUNK_PARALLEL_LIMIT;
@@ -64,39 +70,40 @@ function partCountFor(size: number): number {
 }
 
 /**
- * 按文件大小挑切片大小。
+ * Pick the slice size from the file size.
  *
- *   ≤32MB      不切，单次 putObject（两片只有 8–16MB，低于下限）
- *   32–48MB    2 片
- *   48–64MB    3 片
- *   64MB–512MB 4 片（单片 16–128MB）
- *   512MB–1GB  8 片（两轮 × 4）
- *   1GB 以上   每多 512MB 加一轮
+ *   <= 32MB      no split, a single putObject (two parts would be only 8–16MB, below the minimum)
+ *   32–48MB      2 parts
+ *   48–64MB      3 parts
+ *   64MB–512MB   4 parts (16–128MB each)
+ *   512MB–1GB    8 parts (two rounds of 4)
+ *   over 1GB     one more round per extra 512MB
  *
- * 48GB 是 384 片、96 轮，离 COS 的 10000 片上限还很远。想更细就调小
- * MAX_SLICE_SIZE；想让 32MB 以下也并发，就把 MIN_SLICE_SIZE 降到 8MB。
- * SDK 的判定是 size > SliceSize 才切片，所以返回等于 size 时自然走单次 PUT。
+ * 48GB is 384 parts over 96 rounds, still far from the COS limit of 10000 parts. Lower
+ * MAX_SLICE_SIZE for a finer grain; lower MIN_SLICE_SIZE to 8MB to parallelize below 32MB too.
+ * The SDK only slices when size > SliceSize, so returning size itself naturally means a single PUT.
  */
 function sliceSizeFor(size: number): number {
   const parts = partCountFor(size);
   if (parts <= 1) return Math.max(size, MIN_SLICE_SIZE);
-  // 按字节向上取整，保证 ⌈size / 单片⌉ 不超过算好的片数。
+  // Round up in bytes so ceil(size / slice) never exceeds the computed part count.
   return Math.ceil(size / parts);
 }
 
 /**
- * 平滑的上传速度。
+ * Smoothed upload speed.
  *
- * SDK 给的 info.speed 是相邻两次进度回调（300ms）之间的瞬时差值，网络稍微
- * 一抖就在 0 和峰值之间来回跳。这里改用「最近几秒前进的字节 ÷ 实际耗时」，
- * 而且只用前进过的字节：分片重试失败时 SDK 会把 loaded 往回扣。
+ * The SDK's info.speed is the instant delta between two progress callbacks (300ms), so any network
+ * jitter bounces it between 0 and the peak. Use "bytes advanced over the last few seconds divided
+ * by the actual elapsed time" instead, and only count forward progress: the SDK pulls loaded back
+ * when a part retry fails.
  */
 const SPEED_WINDOW_MS = 3000;
 
 class SpeedMeter {
   private samples: { at: number; loaded: number }[] = [];
 
-  /** 记一次进度，返回单调的已传字节数和平滑速度（字节/秒）。 */
+  /** Record a progress sample; return monotonic loaded bytes and smoothed speed (bytes/s). */
   push(rawLoaded: number, now: number): { loaded: number; speed: number } {
     const last = this.samples[this.samples.length - 1];
     const loaded = last ? Math.max(last.loaded, rawLoaded) : rawLoaded;
@@ -106,7 +113,7 @@ class SpeedMeter {
     while (this.samples.length > 1 && this.samples[1].at <= cutoff) this.samples.shift();
 
     const first = this.samples[0];
-    // 用 now 而不是最后一个采样点：卡住不动时速度会自然衰减到 0，而不是冻在旧值。
+    // Use now, not the last sample, so a stalled upload decays to 0 instead of freezing.
     const span = Math.max(now - first.at, 300);
     return { loaded, speed: ((loaded - first.loaded) / span) * 1000 };
   }
@@ -118,16 +125,16 @@ export interface UploadTask {
   id: string;
   file: File;
   name: string;
-  /** 上传时所在的目录，用来决定这条占位行显示在哪个目录里。 */
+  /** Directory the upload started in; decides which directory shows this placeholder row. */
   dir: string;
   path: string;
   size: number;
   overwrite: boolean;
   status: UploadStatus;
   loaded: number;
-  /** 字节/秒，只有 uploading 时有意义。 */
+  /** Bytes per second; only meaningful while uploading. */
   speed: number;
-  /** 字节已经传完，只差 confirm。失败重试时可以直接跳过重传。 */
+  /** The bytes are all up, only confirm is missing. A retry can skip re-sending them. */
   uploaded: boolean;
   error?: string;
 }
@@ -137,11 +144,11 @@ interface UploadRuntime {
   taskId?: string;
   cos?: CancelableCos;
   target?: { bucket: string; region: string; key: string };
-  /** 取消时用它把等待中的传输 Promise 直接 reject 掉。 */
+  /** Cancellation uses it to reject the pending transfer Promise outright. */
   abortTransfer?: () => void;
 }
 
-/** 只声明取消流程会用到的两个方法，避免把整个 SDK 类型带进来。 */
+/** Declare only the two methods the cancel flow needs, so the whole SDK type stays out. */
 interface CancelableCos {
   cancelTask(taskId: string): void;
   abortUploadTask(params: {
@@ -166,7 +173,7 @@ function newTaskId(): string {
   return `upload-${Date.now().toString(36)}-${taskSeq.toString(36)}`;
 }
 
-/** COS SDK 的错误对象有三种历史形状，挨个取一条能看的消息。 */
+/** COS SDK errors come in three historical shapes; try each for a readable message. */
 function errorMessage(error: unknown): string {
   if (error instanceof Error && error.message) return error.message;
   if (typeof error === "string" && error) return error;
@@ -207,7 +214,7 @@ export function useUploadQueue(
   const onUploadedRef = useRef(onUploaded);
   onUploadedRef.current = onUploaded;
 
-  /** 同步更新 ref 和 state，异步流程永远读 tasksRef。 */
+  /** Update ref and state together; async flows always read tasksRef. */
   const update = useCallback((mutate: (current: UploadTask[]) => UploadTask[]) => {
     const next = mutate(tasksRef.current);
     tasksRef.current = next;
@@ -224,14 +231,15 @@ export function useUploadQueue(
         if (!task || task.status !== "uploading") return;
 
         if (task.uploaded) {
-          // 上一轮已经传完字节，只是 confirm 失败；别再传一遍。
+          // The previous round uploaded every byte and only confirm failed; do not send it again.
           update((current) =>
             current.map((entry) =>
               entry.id === id ? { ...entry, status: "finalizing", speed: 0 } : entry,
             ),
           );
         } else {
-          // COS SDK 只有真正上传时才需要，按需加载，首屏小很多。
+          // The COS SDK is only needed once an upload really starts: load it on demand, which
+          // keeps the first screen small.
           const { default: COS } = await import("cos-js-sdk-v5");
           if (runtime.canceled) return;
 
@@ -266,7 +274,7 @@ export function useUploadQueue(
                   runtime.taskId = taskId;
                 },
                 onTaskStart: () => {
-                  // 如果 cancel 发生在任务真正开始之前，这里补一刀。
+                  // If cancel happened before the task actually started, finish it off here.
                   if (runtime.canceled && runtime.taskId) cos.cancelTask(runtime.taskId);
                 },
                 onProgress: (info) => {
@@ -350,7 +358,7 @@ export function useUploadQueue(
         const next = tasksRef.current.find((task) => task.status === "queued");
         if (!next) break;
         runningRef.current += 1;
-        // 重试会从 0 或上次已传字节重新开始，速度窗口一并清掉。
+        // A retry restarts from 0 or from the bytes already sent, so drop the speed window too.
         metersRef.current.delete(next.id);
         update((current) =>
           current.map((task) =>
@@ -383,7 +391,8 @@ export function useUploadQueue(
           if (runtime.cos) {
             if (runtime.taskId) runtime.cos.cancelTask(runtime.taskId);
             if (runtime.target) {
-              // 分片上传取消后 COS 侧会留下碎片，尽力清一次；失败也不影响界面。
+              // A canceled multipart upload leaves fragments on the COS side; clean up best-effort,
+              // and failure does not affect the UI.
               void runtime.cos
                 .abortUploadTask({
                   Bucket: runtime.target.bucket,
@@ -395,7 +404,7 @@ export function useUploadQueue(
             }
           }
         } catch {
-          // 取消是尽力而为：SDK 内部报错也不能让占位行留在界面上。
+          // Cancellation is best effort: an SDK error must not leave the placeholder row on screen.
         }
       }
       update((current) => current.filter((task) => task.id !== id));

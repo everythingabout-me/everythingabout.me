@@ -9,7 +9,7 @@ import (
 	"everythingabout.me/backend/internal/store"
 )
 
-// UserRow 是 users 表的一行；password_hash 可为空（密码是可选的）。
+// UserRow is one row of the users table; password_hash may be null (the password is optional).
 type UserRow struct {
 	ID             string
 	Email          string
@@ -20,7 +20,7 @@ type UserRow struct {
 	LastLoginAt    *string
 }
 
-// User 是暴露给前端的形状，永远不含 password_hash。
+// User is the shape exposed to the frontend; it never carries password_hash.
 type User struct {
 	ID             string  `json:"id"`
 	Email          string  `json:"email"`
@@ -39,8 +39,8 @@ func ToUser(row *UserRow) *User {
 	}
 }
 
-// userColumns 返回 select 列表。alias 用于 join 查询（例如 "u"），
-// 避免和 sessions.created_at 这类同名列冲突。
+// userColumns returns the select list. alias is for join queries (for example "u"), so
+// that same-named columns like sessions.created_at do not collide.
 func userColumns(alias string) string {
 	column := func(name string) string {
 		if alias == "" {
@@ -93,7 +93,7 @@ func (s *Service) LegacyNodeCount(ctx context.Context) (int, error) {
 	return count, err
 }
 
-// FindUserByEmail 邮箱大小写不敏感。
+// FindUserByEmail matches email case-insensitively.
 func (s *Service) FindUserByEmail(ctx context.Context, email string) (*UserRow, error) {
 	return scanUserRow(s.db.Pool().QueryRow(ctx,
 		`select `+userColumns("")+` from users where lower(email) = lower($1) limit 1`, email))
@@ -129,5 +129,5 @@ func (s *Service) TouchLastLogin(ctx context.Context, id string) error {
 	return err
 }
 
-// IsUniqueViolation 暴露给账号相关 handler 使用。
+// IsUniqueViolation is exposed for the account handlers.
 var IsUniqueViolation = store.IsUniqueViolation

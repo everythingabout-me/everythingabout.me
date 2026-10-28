@@ -1,9 +1,10 @@
-// Package jobs 在后台执行目录级的长操作（移动 / 复制）。
+// Package jobs runs directory-level long operations (move / copy) in the background.
 //
-// 目录没有“一次性改名”的原语：key 就是路径，所以搬 N 个对象 = N 次服务端复制。
-// 但对外没有“任务”这个概念——动作没做完时接口回 202 + Location，
-// 进度地址就是动作自己的子路径（/move/{id}、/copy/{id}）。
-// 这张表纯粹是实现细节，客户端永远不需要知道它的存在。
+// Directories have no "rename in one shot" primitive: the key is the path, so moving N
+// objects means N server-side copies. Externally, though, there is no "task" concept —
+// while the action is unfinished the API returns 202 + Location, and the progress URL is the
+// action's own subpath (/move/{id}, /copy/{id}). This table is purely an implementation
+// detail; clients never need to know it exists.
 package jobs
 
 import (
@@ -25,7 +26,8 @@ import (
 	"everythingabout.me/backend/internal/store"
 )
 
-// Op 是后台作业对应的动作。它不出现在协议里，只决定 id 前缀和进度地址。
+// Op is the action a background job performs. It never appears in the protocol; it only
+// decides the id prefix and the progress URL.
 type Op string
 
 const (
@@ -40,10 +42,10 @@ func (o Op) prefix() string {
 	return "m_"
 }
 
-// 作业的最长执行时间，防止一个跑飞的 goroutine 永远占着。
+// Upper bound on how long a job may run, so a runaway goroutine cannot hold on forever.
 const jobTimeout = 6 * time.Hour
 
-// Job 是进度地址返回的形状。移动和复制共用同一套字段。
+// Job is the shape returned at the progress URL. Move and copy share the same set of fields.
 type Job struct {
 	ID              string  `json:"id"`
 	Op              Op      `json:"op"`
@@ -61,7 +63,7 @@ type Job struct {
 	userID string
 }
 
-// Terminal 表示这次动作已经结束（不管成功还是失败）。
+// Terminal reports that the action has ended, whether it succeeded or failed.
 func (j *Job) Terminal() bool {
 	switch j.Status {
 	case "done", "failed", "cancelled":
@@ -82,8 +84,9 @@ func New(db *store.DB, objectStorage storage.Storage, nodeService *nodes.Service
 	return service
 }
 
-// recoverStale 把上个进程留下的未完成作业标成失败，避免它们永远停在 running。
-// 单实例部署的假设；多实例要改成心跳。
+// recoverStale marks unfinished jobs left behind by the previous process as failed, so they
+// do not sit in running forever. This assumes a single instance; multiple instances would
+// need heartbeats instead.
 func (s *Service) recoverStale() {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -127,7 +130,8 @@ func scanJob(row pgx.Row) (*Job, error) {
 	return &job, nil
 }
 
-// Start 建作业并异步开跑。调用方负责校验来源存不存在、目标会不会撞车。
+// Start creates a job and starts it asynchronously. The caller is responsible for checking
+// that the source exists and the target does not collide.
 func (s *Service) Start(ctx context.Context, op Op, userID, from, to string) (*Job, error) {
 	if err := s.nodes.EnsureParents(ctx, to, userID); err != nil {
 		return nil, err
@@ -149,14 +153,14 @@ func (s *Service) Start(ctx context.Context, op Op, userID, from, to string) (*J
 	return job, nil
 }
 
-// Get 按用户查作业；别人的作业返回 (nil, nil)。
+// Get loads a job scoped to the user; someone else's job returns (nil, nil).
 func (s *Service) Get(ctx context.Context, userID, id string) (*Job, error) {
 	return scanJob(s.db.Pool().QueryRow(ctx,
 		`select `+jobColumns+` from fs_jobs where id = $1 and user_id = $2::uuid`, id, userID))
 }
 
-// Wait 最多等 budget 这么久，然后返回作业的最新状态。
-// 没做完也返回（不报错）——调用方看到非终态就回 202。
+// Wait blocks for at most budget, then returns the job's latest state. It returns even when
+// the job is unfinished (that is not an error) — the caller answers 202 on a non-terminal state.
 func (s *Service) Wait(ctx context.Context, userID, id string, budget time.Duration) (*Job, error) {
 	deadline := time.Now().Add(budget)
 	for {
@@ -177,8 +181,9 @@ func (s *Service) Wait(ctx context.Context, userID, id string, budget time.Durat
 	}
 }
 
-// Cancel 请求停下。还没开始的直接判 cancelled；正在跑的搬完当前这一项就停。
-// 已经结束的作业是幂等的，原样返回。
+// Cancel asks the job to stop. One that has not started is marked cancelled outright; a
+// running one stops after finishing the item at hand. On a finished job this is a no-op that
+// returns it unchanged.
 func (s *Service) Cancel(ctx context.Context, userID, id string) (*Job, error) {
 	job, err := s.Get(ctx, userID, id)
 	if err != nil || job == nil {
@@ -198,7 +203,8 @@ func (s *Service) Cancel(ctx context.Context, userID, id string) (*Job, error) {
 	return s.Get(ctx, userID, id)
 }
 
-// Retry 从失败/取消的地方接着做：重新扫一遍来源，已经搬走的记录不在里面了。
+// Retry picks up where failure or cancellation left off: it rescans the source, and rows
+// already moved are no longer in it.
 func (s *Service) Retry(ctx context.Context, userID, id string) (*Job, error) {
 	job, err := s.Get(ctx, userID, id)
 	if err != nil || job == nil {
@@ -222,7 +228,7 @@ func (s *Service) Retry(ctx context.Context, userID, id string) (*Job, error) {
 	return s.Get(ctx, userID, id)
 }
 
-// jobByID 是内部用的读取，不带用户过滤。
+// jobByID is the internal read, with no user filter.
 func (s *Service) jobByID(ctx context.Context, id string) (*Job, error) {
 	return scanJob(s.db.Pool().QueryRow(ctx,
 		`select `+jobColumns+` from fs_jobs where id = $1`, id))
@@ -265,7 +271,7 @@ func (s *Service) run(id string) {
 	done := 0
 	for i := range rows {
 		row := &rows[i]
-		// 每 10 个看一眼要不要停，免得每个对象都多一次查询。
+		// Check for a stop request every 10 items, so each object does not cost an extra query.
 		if i%10 == 0 && s.cancelRequested(ctx, id) {
 			s.finish(ctx, id, "cancelled", done, nil)
 			return
@@ -311,7 +317,7 @@ func (s *Service) moveOne(ctx context.Context, userID string, row *nodes.Row, ta
 				return err
 			}
 			if err := s.storage.Remove(ctx, row.Key); err != nil {
-				// 旧对象删不掉最多留个孤儿，不能因此把整个作业判失败。
+				// A leftover old object is at worst an orphan; it must not fail the whole job.
 				slog.Warn("jobs: failed to delete old object", "key", row.Key, "error", err)
 			}
 		}
@@ -321,8 +327,8 @@ func (s *Service) moveOne(ctx context.Context, userID string, row *nodes.Row, ta
 	return err
 }
 
-// copyOne 复制对象并建一条新索引。复制出来的东西是**新对象**：
-// 新的一行、新的创建时间，源不动。
+// copyOne copies the object and creates a new index row. What gets copied is a **new
+// object**: a new row with a new creation time, and the source stays as it is.
 func (s *Service) copyOne(ctx context.Context, userID string, row *nodes.Row, target string) error {
 	newKey := paths.KeyFor(target, userID)
 	if row.IsDir {
@@ -344,7 +350,7 @@ func (s *Service) copyOne(ctx context.Context, userID string, row *nodes.Row, ta
 		return err
 	}
 
-	// 元数据（sha256 之类）跟着内容一起复制过去。
+	// Metadata (sha256 and the like) is copied over together with the content.
 	var meta map[string]any
 	if len(row.Meta) > 0 {
 		_ = json.Unmarshal(row.Meta, &meta)

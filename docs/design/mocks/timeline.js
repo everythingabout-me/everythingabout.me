@@ -1,6 +1,6 @@
 /* ============================================================
-   时间轴 · 事件卡（v2）
-   一条事件 = 一张卡；健康只在「变了」和「一年一次」的时候出现
+   Timeline · event cards (v2)
+   One event = one card; health appears only when "something changed" or "once a year"
    ============================================================ */
 (function () {
   "use strict";
@@ -11,7 +11,7 @@
   const esc = (s) =>
     String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
 
-  /* ---------- 数据 ---------- */
+  /* ---------- Data ---------- */
 
   const SLEEP_2025 = [7.5, 7.3, 7.6, 7.2, 7.4, 6.9, 7.0, 6.7, 7.2, 7.3, 7.1, 7.0];
   const SLEEP_2024 = [7.6, 7.5, 7.6, 7.4, 7.5, 7.3, 7.4, 7.2, 7.5, 7.4, 7.3, 7.2];
@@ -252,7 +252,7 @@
     },
   ];
 
-  /* ---------- 渲染 ---------- */
+  /* ---------- Rendering ---------- */
 
   function spark(values, baseline, w, h) {
     const min = Math.min(...values, baseline);
@@ -406,7 +406,7 @@
   }
   render();
 
-  /* ---------- 交互 ---------- */
+  /* ---------- Interaction ---------- */
 
   const btnTheme = document.getElementById("btnTheme");
   function paintTheme() {

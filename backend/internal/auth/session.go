@@ -14,16 +14,18 @@ import (
 
 const SessionCookie = "eam_session"
 
-// Service 收敛账号、密码和会话的全部数据库操作。
+// Service centralizes every database operation for accounts, passwords, and sessions.
 type Service struct {
 	db  *store.DB
 	cfg *config.Config
-	// linkKey 只用于派生保存链接里的 MAC。它不落库，改了之后旧链接会失效。
+	// linkKey only derives the MAC inside save links. It is never stored, so changing it
+	// invalidates existing links.
 	linkKey []byte
 }
 
 func New(db *store.DB, cfg *config.Config) *Service {
-	// 复用部署时已经存在的密钥做派生；没有 COS 密钥的纯数据库命令用库地址兜底。
+	// Derive from a secret the deployment already has; database-only commands with no COS
+	// key fall back to the database URL.
 	seed := cfg.COS.SecretKey
 	if seed == "" {
 		seed = cfg.DatabaseURL
@@ -37,7 +39,7 @@ func hashToken(token string) string {
 	return fmt.Sprintf("%x", sum)
 }
 
-// CreateSession 生成 token，库里只存它的 SHA-256。
+// CreateSession mints a token; only its SHA-256 is stored.
 func (s *Service) CreateSession(ctx context.Context, userID, userAgent, ip string) (string, time.Time, error) {
 	token, err := randomToken()
 	if err != nil {
@@ -60,7 +62,7 @@ func (s *Service) CreateSession(ctx context.Context, userID, userAgent, ip strin
 	if err != nil {
 		return "", time.Time{}, err
 	}
-	// 顺手清掉过期会话，避免表无限增长
+	// Sweep expired sessions while we are here so the table does not grow forever
 	_, _ = s.db.Pool().Exec(ctx, `delete from sessions where expires_at < now()`)
 	return token, expiresAt, nil
 }
@@ -73,7 +75,7 @@ func (s *Service) sessionToken(r *http.Request) string {
 	return cookie.Value
 }
 
-// SessionUser 返回当前登录用户；未登录返回 (nil, nil)。
+// SessionUser returns the signed-in user, or (nil, nil) when nobody is signed in.
 func (s *Service) SessionUser(ctx context.Context, r *http.Request) (*User, error) {
 	token := s.sessionToken(r)
 	if token == "" {
@@ -95,7 +97,7 @@ func (s *Service) SessionUser(ctx context.Context, r *http.Request) (*User, erro
 	return ToUser(row), nil
 }
 
-// RequireUser 是接口层的登录闸门。
+// RequireUser is the login gate at the API layer.
 func (s *Service) RequireUser(ctx context.Context, r *http.Request) (*User, error) {
 	user, err := s.SessionUser(ctx, r)
 	if err != nil {
@@ -137,7 +139,7 @@ func (s *Service) DestroySession(ctx context.Context, token string) error {
 	return err
 }
 
-// Logout 删库里的会话并清 cookie。
+// Logout deletes the session row and clears the cookie.
 func (s *Service) Logout(ctx context.Context, r *http.Request, w http.ResponseWriter) error {
 	if token := s.sessionToken(r); token != "" {
 		if err := s.DestroySession(ctx, token); err != nil {

@@ -1,4 +1,4 @@
-# 不带斜杠：同时忽略真实目录和 worktree 里指过来的 node_modules 软链
+# No trailing slash: ignores both real directories and the node_modules symlink in worktrees
 node_modules
 dist/
 
@@ -6,10 +6,10 @@ dist/
 bin/
 .gocache/
 
-# 任务 worktree（见 AGENTS.md 的 Git 工作流）
+# Task worktrees (see the Git workflow in AGENTS.md)
 .worktrees/
 
-# 本地环境与缓存
+# Local environment and caches
 .env
 .env.local
 .npm-cache/

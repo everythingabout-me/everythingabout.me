@@ -1,5 +1,5 @@
-// Package validation 只做“像不像”的宽松校验：
-// 邮箱能不能收信，由验证码流程确认。
+// Package validation does loose "does it look right" checks only: whether an address can
+// actually receive mail is settled by the verification code flow.
 package validation
 
 import (
@@ -41,7 +41,7 @@ func Password(value string) (string, error) {
 	return value, nil
 }
 
-// VerificationCode 校验 6 位数字验证码。
+// VerificationCode checks a 6-digit numeric verification code.
 func VerificationCode(value string) (string, error) {
 	code := strings.TrimSpace(value)
 	if !codeRe.MatchString(code) {

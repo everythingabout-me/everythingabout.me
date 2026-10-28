@@ -1,9 +1,10 @@
 /**
- * 日期与数字的本地化格式化。
+ * Locale-aware formatting for dates and numbers.
  *
- * 时间线是一层扁平的事件卡：每张卡自带完整日期（含年份），没有年 / 月标题。
- * 日期由后端按用户时区算好（local_date），这里只负责按界面语言排版——
- * 不要在浏览器里用 starts_at 重新算日期，否则跨时区会串天。
+ * The timeline is one flat layer of event cards: every card carries a full date (year included),
+ * with no year/month headings. The backend computes dates in the user's time zone (local_date);
+ * this module only lays them out in the UI language. Never recompute the date from starts_at in
+ * the browser, or cross-time-zone events will land on the wrong day.
  */
 import { locale, t } from "./index";
 
@@ -25,7 +26,7 @@ function dayDate(parts: DayParts): Date {
   return new Date(parts.year, parts.month - 1, parts.day);
 }
 
-/** 事件卡的日期："2025 年 8 月 3 日" / "Aug 3, 2025"。 */
+/** Date on an event card, laid out per locale: "Aug 3, 2025" in en, the zh form otherwise. */
 export function formatEventDate(localDate: string): string {
   const parts = parseDay(localDate);
   if (!parts) return localDate;
@@ -33,7 +34,7 @@ export function formatEventDate(localDate: string): string {
   return dayShortYear.format(dayDate(parts));
 }
 
-/** 相对时间："刚刚 / 5 分钟前 / 3 天前 / 2026-10-24"。 */
+/** Relative time: "just now", "5 minutes ago", "3 days ago", then an absolute date past a week. */
 export function formatRelativeTime(iso: string): string {
   const then = new Date(iso);
   if (Number.isNaN(then.getTime())) return iso;

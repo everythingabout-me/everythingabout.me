@@ -1,52 +1,52 @@
-# 时间线（Timeline）设计草案
+# Timeline design draft
 
-> 状态：v0.1 · 2026-10 · 待讨论
+> Status: v0.1 · 2026-10 · under discussion
 >
-> 一句话：时间线不是「按日期排的文件列表」，而是一份**有编辑取舍的个人编年史**。
-> 文件是证据，片段（moment）才是时间线的单位。
+> One line: the timeline is not "a file list sorted by date" but a **personal chronicle with editorial judgment**.
+> Files are evidence; the moment is the unit of the timeline.
 >
-> **2026-10 更新**：落地以 §17 与 [events.md](events.md) 为准。
-> §3 的 `moments` / 快照、§4 的月预算、§8 的用户编辑，都没有实施、也不打算实施（见 §17.4）。
+> **2026-10 update**: what actually ships is governed by §17 and [events.md](events.md).
+> The `moments` / snapshot model in §3, the monthly budget in §4, and user editing in §8 were never implemented, and there is no plan to implement them (see §17.4).
 
 ---
 
-## 1. 定位与目标
+## 1. Positioning and goals
 
-### 1.1 它解决什么问题
+### 1.1 What problem it solves
 
-用户把十年的照片、视频、健康导出、文档倒进网盘，得到的是一个**越来越难浏览的目录树**。
-他想看的不是「2019/05/12 有 437 个文件」，而是「2019 年 5 月，我去了趟青海」。
+A user pours ten years of photos, videos, health exports, and documents into a drive and ends up with a **directory tree that keeps getting harder to browse**.
+What they want to see is not "437 files on 2019/05/12" but "in May 2019 I went to Qinghai."
 
-时间线的职责：
+The timeline's job:
 
-1. **把文件还原成经历**：按事件时间聚合、去重、挑代表，变成可读的片段；
-2. **控制叙述密度**：不是全量展示，也不是随机截断，而是「值得看的占版面，不值得的折起来」；
-3. **永远可追溯**：任何被折叠的东西都能一层层展开回原始文件，不制造数据丢失的错觉；
-4. **自动回流**：新上传和旧文件 backfill 都走同一条流水线，用户不用手动「整理」。
+1. **Turn files back into experiences**: aggregate by event time, dedupe, pick representatives, and turn the result into readable moments;
+2. **Control narrative density**: no dumping everything, no random truncation, but "what deserves attention gets space, what doesn't gets folded away";
+3. **Always traceable**: anything folded away can be expanded level by level back to the original file, without creating the illusion that data was lost;
+4. **Automatic flow-in**: new uploads and old-file backfill go through the same pipeline, so the user never has to "organize" by hand.
 
-### 1.2 非目标
+### 1.2 Non-goals
 
-- 不做「所有文件的流水账」。那是文件浏览器的职责，时间线只保留编年摘要 + 完整入口。
-- 不做社交 feed，不做打卡，不做「你已连续记录 87 天」这种催促。
-- 不在读路径上做分析（缩略图、EXIF、聚类都必须预计算）。
-- 第一版不追求 AI 审美 / 人脸识别；先把结构和取舍做对，ML 是增益项而不是地基。
+- No "running log of every file". That is the file browser's job; the timeline keeps only the chronicle summary plus a full entry point.
+- No social feed, no check-ins, no nagging like "you've logged 87 days in a row".
+- No analysis on the read path (thumbnails, EXIF, clustering must all be precomputed).
+- The first version does not chase AI aesthetics or face recognition; get the structure and the judgments right first — ML is a bonus, not the foundation.
 
-### 1.3 最小单位不是「天」
+### 1.3 The smallest unit is not "the day"
 
-这是整个设计里最关键的一个决定。
+This is the single most important decision in the whole design.
 
-如果以「天」为单位，一天 500 张照片和一天 1 个视频都会变成一张日期卡，要么爆炸要么空洞。
-所以时间线的最小单位是 **片段（moment）**：
+If the unit were "the day", a day with 500 photos and a day with 1 video would both become one date card: either it explodes or it's empty.
+So the smallest unit of the timeline is the **moment**:
 
-- 一个片段有开始/结束时间，可以**跨天**（一趟 5 天的旅行 = 1 个片段）；
-- 一个片段由若干文件 +（可选）其他来源的证据组成（健康、GPS、文档）；
-- 时间线是「片段 + 空白」的序列，不是「日期 + 文件」的列表。
+- A moment has a start and an end and can **span days** (a 5-day trip = 1 moment);
+- A moment is made of some files plus (optionally) evidence from other sources (health, GPS, documents);
+- The timeline is a sequence of "moments + gaps", not a list of "dates + files".
 
-天只是编年层的桶；**没有片段的日子直接压缩成一段空白**，不占版面。
+The day is only the bucket of the chronicle layer; **days without a moment collapse into one gap** and take up no space.
 
 ---
 
-## 2. 三层结构
+## 2. Three layers
 
 ```
 ┌──────────────────────────────────────────────────────────────┐
@@ -62,51 +62,51 @@
 └──────────────────────────────────────────────────────────────┘
 ```
 
-三条原则：
+Three principles:
 
-1. **叙事层有损，编年层和明细层无损。** 时间线可以只展示 6 个片段，但月标题必须写清楚这个月有多少文件；点进去必须能看到全部。
-2. **片段可以跨天、可以多来源。** 一趟旅行、一次装修、一段连续的健康数据，都应该是一个叙事单元，而不是按天切碎。
-3. **空白是信息。** 三个月没有值得看的东西，就显示一条压缩的空白行，而不是用低价值内容填满。
+1. **The narrative layer is lossy; the chronicle layer and the detail layer are lossless.** The timeline may show only 6 moments, but the month heading must state how many files the month has, and clicking through must show all of them.
+2. **A moment can span days and draw on multiple sources.** A trip, a renovation, a stretch of continuous health data should each be one narrative unit, not chopped up by day.
+3. **A gap is information.** If three months hold nothing worth looking at, show one collapsed gap row instead of filling it with low-value content.
 
 ---
 
-## 3. 数据模型
+## 3. Data model
 
-### 3.1 先补一个现有缺口：文件时间
+### 3.1 First, fill an existing hole: file time
 
-现在 `nodes` 只有 `created_at / updated_at`（都是「写进索引的时间」）。
-`reconcile` 导入十年前的文件时，`created_at` 全是今天 —— 时间线会以为所有历史文件都是今天上传的。
+Right now `nodes` only has `created_at / updated_at` (both are "when it was written into the index").
+When `reconcile` imports files from ten years ago, `created_at` is all today — the timeline would think every historical file was uploaded today.
 
-必须补：
+It must gain:
 
 ```sql
--- 对象在存储侧的最后修改时间（COS List/HeadObject 的 LastModified）
--- 它不是"拍摄时间"，但是唯一可靠的文件自身时间，兜底用
+-- Last modified time of the object on the storage side (LastModified from COS List/HeadObject)
+-- It is not "capture time", but it is the only reliable time belonging to the file itself, used as a fallback
 alter table nodes add column if not exists source_modified_at timestamptz;
 ```
 
-`reconcile` / 上传确认 / API PUT 都要写入。这是 P0 的前置改动，否则 backfill 出来的时间线全是错的。
+`reconcile` / upload confirmation / API PUT must all write it. This is the P0 prerequisite; without it, every backfilled timeline is wrong.
 
-### 3.2 表结构
+### 3.2 Schema
 
 ```sql
--- 每个文件的时间与可展示事实。媒体、文档、数据文件都有一行。
+-- Each file's time and presentable facts. Media, documents, and data files all have a row.
 create table if not exists asset_facts (
   user_id        uuid not null references users(id) on delete cascade,
   node_id        uuid not null references nodes(id) on delete cascade,
-  event_time     timestamptz,          -- 事件时间：EXIF > 文件名日期 > mtime > 入库时间
-  local_date     date,                 -- 拍摄地本地日期，分桶用（跨时区不串天）
-  tz             text,                 -- 拍摄地时区，如 Asia/Shanghai
+  event_time     timestamptz,          -- event time: EXIF > filename date > mtime > ingest time
+  local_date     date,                 -- local date at the shooting location, used for bucketing (no day drift across time zones)
+  tz             text,                 -- time zone at the shooting location, e.g. Asia/Shanghai
   time_source    text not null,        -- exif | filename | mtime | ingest
   time_confidence real not null default 0.5,
   media_type     text,                 -- photo | video | audio | doc | data | other
   width int, height int, duration_ms bigint,
   gps_lat double precision, gps_lon double precision,
-  quality        real,                 -- 清晰度/曝光/构图启发式，0..1
-  phash          bit(64),              -- 感知哈希，去重用
+  quality        real,                 -- sharpness/exposure/composition heuristic, 0..1
+  phash          bit(64),              -- perceptual hash, used for dedupe
   is_screenshot  boolean not null default false,
   duplicate_of   uuid references nodes(id) on delete set null,
-  content_sig    text,                 -- etag + size + pipeline_version，幂等用
+  content_sig    text,                 -- etag + size + pipeline_version, used for idempotency
   analyzed_at    timestamptz,
   pipeline_version int not null default 1,
   primary key (user_id, node_id)
@@ -114,27 +114,27 @@ create table if not exists asset_facts (
 create index asset_facts_day on asset_facts (user_id, local_date);
 create index asset_facts_time on asset_facts (user_id, event_time);
 
--- 时间线的原子单元
+-- The atomic unit of the timeline
 create table if not exists moments (
   id             uuid primary key default gen_random_uuid(),
   user_id        uuid not null references users(id) on delete cascade,
-  dedupe_key     text not null,        -- 重算时用来认领旧片段，保持 id / 深链稳定
+  dedupe_key     text not null,        -- used to claim the old moment on recompute, keeping the id / deep link stable
   kind           text not null,        -- trip | outing | session | series | metric | milestone | note
   starts_at      timestamptz not null,
   ends_at        timestamptz not null,
-  local_date     date not null,        -- 叙事锚点日（starts_at 的本地日）
+  local_date     date not null,        -- narrative anchor day (the local day of starts_at)
   title          text,
   subtitle       text,
   cover_node_id  uuid references nodes(id) on delete set null,
   item_count     int not null default 0,
-  source_kinds   text[] not null default '{}',  -- {photo,health,gps,doc} 多源证据
-  score          real not null,        -- 价值 0..1
-  cost           int not null,         -- 展示成本（单位见 §4）
+  source_kinds   text[] not null default '{}',  -- {photo,health,gps,doc} multi-source evidence
+  score          real not null,        -- value 0..1
+  cost           int not null,         -- display cost (units in §4)
   layout         text not null,        -- hero | mosaic | strip | series | metric | note | compact
-  reason         jsonb not null default '{}',   -- 评分依据，可解释 + 可调试
-  evidence       jsonb not null default '{}',   -- 融合了哪些别的来源
+  reason         jsonb not null default '{}',   -- scoring rationale, explainable + debuggable
+  evidence       jsonb not null default '{}',   -- which other sources were fused in
   state          text not null default 'provisional', -- provisional|published|hidden|user_edited
-  locked_fields  text[] not null default '{}',  -- title/cover/pin/hide，重算不覆盖
+  locked_fields  text[] not null default '{}',  -- title/cover/pin/hide, never overwritten by recompute
   pipeline_version int not null default 1,
   created_at     timestamptz not null default now(),
   updated_at     timestamptz not null default now(),
@@ -152,7 +152,7 @@ create table if not exists moment_items (
   primary key (moment_id, node_id)
 );
 
--- 目录级来源策略：照片走叙事、健康走数据带、证件照不上时间线
+-- Directory-level source policy: photos go to the narrative, health goes to the data band, ID photos stay off the timeline
 create table if not exists source_rules (
   id          uuid primary key default gen_random_uuid(),
   user_id     uuid not null references users(id) on delete cascade,
@@ -163,7 +163,7 @@ create table if not exists source_rules (
   unique (user_id, path_prefix)
 );
 
--- 环境数据（健康、步数、体重、花费……先说健康）
+-- Ambient data (health, steps, weight, spending... let's start with health)
 create table if not exists metric_series (
   id       uuid primary key default gen_random_uuid(),
   user_id  uuid not null references users(id) on delete cascade,
@@ -171,7 +171,7 @@ create table if not exists metric_series (
   metric   text not null,              -- resting_hr | sleep_hours | steps
   unit     text,
   cadence  text,                       -- daily | hourly | irregular
-  pinned   boolean not null default true,  -- 是否上数据带
+  pinned   boolean not null default true,  -- whether it goes on the data band
   unique (user_id, source, metric)
 );
 
@@ -184,13 +184,13 @@ create table if not exists metric_points (
   primary key (series_id, local_date)
 );
 
--- 已发布的月快照：读路径只读这张表。
--- 它是 moments 的反规范化读模型（选中的片段 + 排序 + 卡片形状 + gap），
--- moments 才是事实源；快照可以随时从 moments 重新生成。
+-- Published monthly snapshots: the read path reads only this table.
+-- It is the denormalized read model of moments (selected moments + ordering + card shapes + gaps),
+-- moments remains the source of truth; a snapshot can be regenerated from moments at any time.
 create table if not exists timeline_snapshots (
   user_id    uuid not null references users(id) on delete cascade,
-  month      date not null,            -- 当月 1 号
-  payload    jsonb not null,           -- 选中的片段 + 空白 + 数据带摘要
+  month      date not null,            -- the 1st of the month
+  payload    jsonb not null,           -- selected moments + gaps + data band summary
   coverage   text not null,            -- indexed | analyzed | curated
   file_count int not null default 0,
   moment_count int not null default 0,
@@ -200,147 +200,147 @@ create table if not exists timeline_snapshots (
 );
 ```
 
-### 3.3 片段的重算 ≠ 删了重建
+### 3.3 Recomputing a moment ≠ deleting and rebuilding
 
-`moments` 是持久实体，不是每次重算都清空：
+`moments` is a persistent entity; it is not wiped on every recompute:
 
-- 每个片段有一个 `dedupe_key`（通常是「锚点节点 id + 日期 + kind」的哈希）；
-- 重算时按 `dedupe_key` 认领旧片段，只更新变化的字段；
-- `locked_fields` 里的字段（用户改过的标题、封面、置顶、隐藏）不覆盖；
-- 消失的片段标 `state='hidden'` 而不是删除，保留深链和用户操作记录。
+- Each moment has a `dedupe_key` (usually a hash of "anchor node id + date + kind");
+- On recompute, the old moment is claimed by `dedupe_key`, and only changed fields are updated;
+- Fields listed in `locked_fields` (a title, cover, pin, or hide the user changed) are never overwritten;
+- A moment that disappears is marked `state='hidden'` instead of being deleted, preserving deep links and the record of user actions.
 
-这样时间线的 URL、收藏、用户编辑在重算和 backfill 之后都还是有效的。
+That way timeline URLs, favorites, and user edits stay valid after recomputes and backfills.
 
 ---
 
-## 4. 密度：恒定带宽 + 弹性分配
+## 4. Density: constant bandwidth + elastic allocation
 
-### 4.1 把「密度」变成一个可计算的预算
+### 4.1 Turning "density" into a computable budget
 
-用户的直觉是「有价值的就多给点地方，没价值的少给点」。
-落到实现上是两条约束：
+The user's intuition is "give the valuable stuff more room and the worthless stuff less".
+In implementation that becomes two constraints:
 
-- **全局带宽恒定**：不管这个月拍了 50 张还是 5000 张，一个月的展示高度上限差不多；
-- **局部密度弹性**：带宽给谁，由价值决定，允许从一个月的安静日子借给高价值事件。
+- **Global bandwidth is constant**: whether the month holds 50 photos or 5,000, the cap on a month's display height is about the same;
+- **Local density is elastic**: value decides who gets the bandwidth, and a month is allowed to borrow from its quiet days for a high-value event.
 
-定义单位 `u = 72px`（一个紧凑行）：
+Define the display unit `u = 72px` (one compact row):
 
-| 卡片 | 成本 | 典型高度 | 用在哪 |
+| Card | Cost | Typical height | Where it's used |
 |---|---|---|---|
-| hero | 6u | 432px | 单视频、旅行封面、大事件 |
-| mosaic | 4u | 288px | 一次出游的 5–9 张精选 |
-| series | 3u | 216px | 每日 vlog、连续剧集 |
-| 普通 | 2u | 144px | 单张照片、一般片段 |
-| 紧凑 | 1u | 72px | 周报、小里程碑 |
-| 数据带 | 2u/月 | 一条边栏 | 健康等环境数据 |
+| hero | 6u | 432px | a single video, a trip cover, a big event |
+| mosaic | 4u | 288px | the 5–9 selected shots from one outing |
+| series | 3u | 216px | a daily vlog, an episodic series |
+| regular | 2u | 144px | a single photo, an ordinary moment |
+| compact | 1u | 72px | a weekly report, a small milestone |
+| data band | 2u/month | one side rail | health and other ambient data |
 
-每月预算 `B` 默认 24u（约 2.2 屏），提供 `calm 14 / standard 24 / rich 36` 三档。
-**预算是上限，不是目标** —— 没有值得看的东西就空着。
+The monthly budget `B` defaults to 24u (about 2.2 screens), with `calm 14 / standard 24 / rich 36` presets.
+**The budget is a ceiling, not a target** — if there is nothing worth looking at, leave it empty.
 
-### 4.2 选择算法
+### 4.2 Selection algorithm
 
-对每个月做一次小型背包：
+Run a small knapsack per month:
 
 ```
-输入：候选片段 m_i，价值 v_i ∈ [0,1]，成本 c_i ∈ {1,2,3,5,6}
-约束：
+Input: candidate moments m_i, value v_i ∈ [0,1], cost c_i ∈ {1,2,3,5,6}
+Constraints:
   Σ c_i ≤ B_month
-  单日 ≤ 3 个片段，且 ≤ 12u
-  v_i ≥ τ（τ = 0.35；整月为空时放宽到 0.25，最多 1 张紧凑卡）
-  v_i ≥ 0.75 时最多从相邻两个月借 12u（本月上限 1.5B）
-目标：最大化 Σ v_i（同源/同时段做多样性抑制，见 §5.3）
+  ≤ 3 moments per day, and ≤ 12u
+  v_i ≥ τ (τ = 0.35; relax to 0.25 when the whole month is empty, at most 1 compact card)
+  when v_i ≥ 0.75, borrow at most 12u from the two adjacent months (month cap 1.5B)
+Objective: maximize Σ v_i (with diversity suppression for the same source / same time window, see §5.3)
 ```
 
-- 实际实现是**贪心 + 递减的最小间隔**（2 天 → 1 天 → 0 天）：先按价值选，普通内容尽量散开，高价值内容（≥0.75）允许挨着；
-- 成本档位少、预算小，也完全可以换成精确 DP；现在优先保证"同质内容不会挤在一起"，因为时间线的节奏比多塞一条更重要；
-- 多样性抑制在选择前做：同一会话的候选先合并成一个，近重复的直接剔除；
-- 顺序永远是时间序，选择只决定「谁出现、以多大成本出现」。
+- The actual implementation is **greedy plus a decaying minimum gap** (2 days → 1 day → 0 days): select by value first, spread ordinary content out as much as possible, and let high-value content (≥0.75) sit next to itself;
+- With few cost tiers and a small budget, this could just as well be exact DP; for now the priority is "homogeneous content must not bunch up", because the rhythm of the timeline matters more than squeezing in one more item;
+- Diversity suppression happens before selection: candidates from the same session are merged into one, and near-duplicates are dropped outright;
+- Order is always chronological; selection only decides "who appears and at what cost".
 
-### 4.3 它自然产生的行为
+### 4.3 Behavior this produces naturally
 
-| 情况 | 结果 |
+| Situation | Result |
 |---|---|
-| 普通月份（每周零星照片） | 2–4 个普通片段，+ 月标题，不硬凑 |
-| 旅行月（5 天拍 2000 张） | 3 个 hero/mosaic（含跨天 trip 卡），其余日期压缩 |
-| 每天一个 vlog | 1 张 series 卡（3u）+ 可能 1 个精选单集，不占 30 张卡 |
-| 每天 500 张照片 | 按会话聚成 1–3 个片段，每片段 1 张 mosaic，不是 500 行 |
-| 每天健康数据 | 1 条数据带（2u/月）+ 周报 + 少量异常卡 |
-| 三个月没内容 | 一条压缩空白行 + 文件计数，点开看全部 |
+| An ordinary month (a few photos each week) | 2–4 ordinary moments, plus the month heading; no padding |
+| A travel month (2,000 photos in 5 days) | 3 hero/mosaic cards (including the cross-day trip card); the remaining days are collapsed |
+| One vlog per day | 1 series card (3u) plus maybe 1 featured episode; not 30 cards |
+| 500 photos per day | Clustered into 1–3 moments by session, each with 1 mosaic; not 500 rows |
+| Health data every day | 1 data band (2u/month) + a weekly report + a few anomaly cards |
+| Three months with nothing | One collapsed gap row + file count; click to see everything |
 
-### 4.4 保底与反转
+### 4.4 Floors and overrides
 
-- **保底**：一个索引里有内容、但没有任何片段达到 τ 的月份，最多显示 1 张紧凑卡（标题用「N 个文件」），避免时间线看起来坏了；
-- **借带宽**：高价值事件（婚礼、毕业、长途旅行）允许超过当月预算，从前后月份借，最多 1.5 倍；
-- **当月豁免**：最近 14 天的片段在「最新」区可以全部出现（用户刚上传，要能看到），但叙事层仍按预算走。这两个东西在 UI 上分开（见 §8）。
-
----
-
-## 5. 价值评分：什么算「有趣」
-
-### 5.1 评分框架
-
-```
-v = clamp( 0.9·内容 + 0.5·结构 + 0.7·情境 + 0.5·人际 + 0.8·人工 + 0.5·多源加成 - 惩罚 )
-```
-
-每项先归一化到 0..1，权重先拍脑袋，用固定 fixtures 校准（见 §12）。
-
-| 组 | 信号（第一版可算的） | 说明 |
-|---|---|---|
-| 内容 | 分辨率、清晰度、曝光、时长、文档页数/字数、视频音量起伏 | 不追求审美，先排除废片 |
-| 结构 | 会话规模、连拍比例、时段罕见度、文件夹语义（旅行/婚礼/毕业）、文件名语义 | 500 张本身就是一个信号 |
-| 情境 | 离家距离、新地点（相对个人历史）、海拔爬升、与健康数据共现、距上次同类事件的时间 | 「第一次/很久没做」权重高 |
-| 人际 | 人脸数量（不做识别）、合影比例、自拍比例 | P2 再上人脸聚类 |
-| 人工 | 收藏、标签、备注、置顶、分享；隐藏/「不上时间线」为负 | 用户显式信号优先级最高 |
-| 多源 | 同一时段有照片 + GPS + 心率 + 文档 → ×(1 + 0.15·(n-1)) | 时间线是「生活事实的 join」 |
-| 惩罚 | 截图、表情包、收据、安装包、备份、node_modules、缓存、近重复 | 直接压到 τ 以下 |
-
-每条片段把 `reason` 存下来（哪些信号、各多少分），用途有三：调试密度、向用户解释「为什么看到这个」、以及 P2 让 LLM 写标题时作为输入。
-
-### 5.2 分类先于评分
-
-评分之前，先判断**这个文件/目录属于哪一类叙事**，因为不同类的处理方式完全不同：
-
-| 类型 | 例子 | 时间线处理 |
-|---|---|---|
-| 经历 episodic | 照片、视频、旅行、聚会 | 聚成片段，参与预算 |
-| 周期 ambient | 健康、步数、睡眠、位置轨迹、行车记录仪 | **不进片段**，进数据带；只出聚合和异常 |
-| 系列 series | 每日 vlog、连续剧、播客 | 1 张系列卡，不按集数占版面 |
-| 收藏 collected | 下载的 PDF、安装包、代码、备份、证件 | 默认不上叙事层；只计入编年层文件数 |
-| 作品 work | 项目目录、设计稿、文档迭代 | P2：按「项目活跃期」成一个里程碑 |
-
-「收藏」和「经历」的区分很重要：网盘里 80% 的文件是收藏，把它们塞进时间线会让真正的记忆被淹没。
-默认规则可以从路径/扩展名/大小推断，用户可以在文件夹上右键改（`source_rules`）。
-
-### 5.3 会话与去重
-
-**照片（P0 核心）**：
-
-1. 按 `event_time` 排序；
-2. 切会话：`Δt > 25min` 或 位移 > 3km 或（P2）场景向量距离过大；
-3. 会话内去重：`Δt < 3s` 且 phash 汉明距离 ≤ 8 → 同组；只保留质量最高的那张，其余记 `duplicate_of`；
-4. 代表帧：封面 = 质量 × 人脸数 × 中心度最高；网格用 MMR 选 4–9 张（λ=0.7，避免 9 张一样的）；
-5. 跨天合并成 trip：连续几天都在「离家 > 50km 且同一方向」，间隔 < 24h → 一个 `trip` 片段，内部按天分章节（明细层）。
-
-**视频**：
-
-- 短视频（< 3min）：按普通片段处理，封面 = 首帧/关键帧 + 时长；
-- 长视频：按会话聚类，卡片显示时长和章节数（章节从场景切换里切，P1）；
-- 每天固定一个、时长相近、机位固定 → **ambient**（监控/行车记录仪），出「视频带 + 运动/人声高光」，不是 365 张卡；
-- 每天固定一个、时长和内容变化 → **series**，1 张系列卡 + 精选单集。
-  P0 已实现基础判断：同一目录、跨 ≥7 天、≥7 个视频 → 一张系列卡（`SessionGrouper`）。
-
-**健康数据**：
-
-- CSV / JSON / Apple Health `export.xml` / FIT / TCX → 解析到 `metric_points`（按天聚合）；
-- 同一份数据重复导入：按 content hash + 日期范围幂等 upsert；
-- 文件本身**永远不出现在时间线上**，只在月标题的「N 个数据文件」里可点开。
+- **Floor**: for a month that has content in the index but no moment reaching τ, show at most 1 compact card (titled "N files"), so the timeline does not look broken;
+- **Borrowed bandwidth**: high-value events (a wedding, a graduation, a long trip) may exceed the monthly budget by borrowing from the adjacent months, up to 1.5×;
+- **Current-month exemption**: moments from the last 14 days may all appear in the "latest" section (the user just uploaded them and must be able to see them), but the narrative layer still follows the budget. The two are visually separate in the UI (see §8).
 
 ---
 
-## 6. 三个重点场景
+## 5. Value scoring: what counts as "interesting"
 
-### 6.1 一天一个视频
+### 5.1 Scoring framework
+
+```
+v = clamp( 0.9·content + 0.5·structure + 0.7·context + 0.5·people + 0.8·manual + 0.5·multi-source bonus - penalty )
+```
+
+Each term is normalized to 0..1 first; the weights are educated guesses, calibrated against fixed fixtures (see §12).
+
+| Group | Signals (computable in v1) | Notes |
+|---|---|---|
+| Content | resolution, sharpness, exposure, duration, page/word count for documents, audio-level swing in video | not about aesthetics; first filter out the duds |
+| Structure | session size, burst ratio, how rare the time of day is, folder semantics (trip/wedding/graduation), filename semantics | 500 photos is itself a signal |
+| Context | distance from home, new place (relative to personal history), elevation gain, co-occurrence with health data, time since the last event of the same kind | "first time / haven't done this in ages" weighs heavily |
+| People | face count (no recognition), share of group shots, share of selfies | face clustering comes in P2 |
+| Manual | favorites, tags, notes, pins, shares; hide / "not on the timeline" counts negative | explicit user signals have the highest priority |
+| Multi-source | photos + GPS + heart rate + documents in the same window → ×(1 + 0.15·(n-1)) | the timeline is "a join over life facts" |
+| Penalty | screenshots, memes, receipts, installers, backups, node_modules, caches, near-duplicates | push straight below τ |
+
+Each moment stores its `reason` (which signals, how many points each), for three uses: debugging density, explaining to the user "why am I seeing this", and — in P2 — as input for an LLM writing the title.
+
+### 5.2 Classification comes before scoring
+
+Before scoring, decide **which kind of narrative this file/directory belongs to**, because the kinds are handled completely differently:
+
+| Kind | Examples | Timeline handling |
+|---|---|---|
+| episodic | photos, videos, trips, parties | clustered into moments, participate in the budget |
+| ambient | health, steps, sleep, location traces, dashcam | **never enters a moment**, goes to the data band; only aggregates and anomalies surface |
+| series | a daily vlog, episodic shows, podcasts | 1 series card; takes no space per episode |
+| collected | downloaded PDFs, installers, code, backups, IDs | off the narrative layer by default; only counted in the chronicle layer's file count |
+| work | project directories, design files, document revisions | P2: one milestone per "project active period" |
+
+Telling "collected" from "episodic" matters a lot: 80% of a drive is collected material, and stuffing it into the timeline drowns the real memories.
+Default rules can be inferred from path/extension/size, and the user can right-click a folder to change them (`source_rules`).
+
+### 5.3 Sessions and dedupe
+
+**Photos (the P0 core)**:
+
+1. Sort by `event_time`;
+2. Split into sessions: `Δt > 25min` or displacement > 3km, or (P2) scene-vector distance too large;
+3. Dedupe within a session: `Δt < 3s` and pHash Hamming distance ≤ 8 → same group; keep only the highest-quality frame, record the rest as `duplicate_of`;
+4. Representative frames: cover = highest quality × face count × centrality; the grid picks 4–9 with MMR (λ=0.7, so you don't get 9 identical shots);
+5. Merge across days into a trip: several consecutive days "more than 50km from home and in the same direction" with gaps < 24h → one `trip` moment, split into chapters by day inside (detail layer).
+
+**Video**:
+
+- Short video (< 3min): handled as an ordinary moment, cover = first/key frame + duration;
+- Long video: clustered by session; the card shows duration and chapter count (chapters cut from scene changes, P1);
+- One per day, similar duration, fixed camera position → **ambient** (surveillance/dashcam), producing a "video band + motion/voice highlights", not 365 cards;
+- One per day, with duration and content varying → **series**, 1 series card + featured episodes.
+  P0 already implements the basic call: same directory, spanning ≥7 days, ≥7 videos → one series card (`SessionGrouper`).
+
+**Health data**:
+
+- CSV / JSON / Apple Health `export.xml` / FIT / TCX → parsed into `metric_points` (aggregated by day);
+- Importing the same data twice: idempotent upsert keyed by content hash + date range;
+- The files themselves **never appear on the timeline**; they are reachable only through "N data files" in the month heading.
+
+---
+
+## 6. Three key scenarios
+
+### 6.1 One video per day
 
 ```
 2025 年 6 月 · 30 个视频 · 1 个系列
@@ -351,12 +351,12 @@ v = clamp( 0.9·内容 + 0.5·结构 + 0.7·情境 + 0.5·人际 + 0.8·人工 +
 └─────────────────────────────────────────────────┘
 ```
 
-- 先判「系列」还是「环境」：主题/时长/机位变化 → series；几乎不变 → ambient。
-- 系列卡只占 3u，一整年的日更也只占一个月的 1/8 带宽。
-- 单集不逐条出现；「本月最佳一集」可以额外占 1 张普通卡（按价值选），给一个进入点。
-- 如果用户就是想逐条看：点进系列 → 剧集列表（月份分组、时长、封面），或者直接用文件浏览器。
+- First decide "series" or "ambient": theme/duration/camera position vary → series; nearly constant → ambient.
+- A series card costs only 3u; a whole year of daily uploads takes 1/8 of one month's bandwidth.
+- Individual episodes do not appear one by one; "the month's best episode" may take one extra ordinary card (picked by value), as an entry point.
+- If the user really wants to watch them one by one: click into the series → episode list (grouped by month, with duration and cover), or just use the file browser.
 
-### 6.2 一天 500 张照片
+### 6.2 500 photos in one day
 
 ```
 6 月 15 日 · 周日
@@ -373,15 +373,15 @@ v = clamp( 0.9·内容 + 0.5·结构 + 0.7·情境 + 0.5·人际 + 0.8·人工 +
 └─────────────────────────────────────────────────┘
 ```
 
-- 500 张不是「500 个条目」，也不是「随便取前 9 张」：先会话化（上午西湖 / 晚上家），会话内去重 + MMR 选代表。
-- 一天最多 3 个片段（12u），超出的会话折叠进明细层，用「另有 N 张」明确告知。
-- 卡片上永远有 `N 张 → 9 张` 的诚实标注，点击进「这天」的全量网格，被选中的有标记。
-- 近重复（连拍、同一场景）默认合并，显示「78 张相似」而不是散落 78 行。
-- （P1）服务端预合成一张 mosaic 封面图，移动端只发 1 个图片请求，而不是 9 个预签名 URL。
+- 500 photos are not "500 items", and it is not "grab the first 9": sessionize first (West Lake in the morning / home in the evening), then dedupe within each session and pick representatives with MMR.
+- At most 3 moments per day (12u); extra sessions fold into the detail layer, disclosed explicitly with "N more".
+- The card always carries the honest `N photos → 9` annotation, and clicking goes to the full grid for that day, with the selected ones marked.
+- Near-duplicates (bursts, the same scene) are merged by default, showing "78 similar" instead of 78 scattered rows.
+- (P1) The server pre-composes one mosaic cover image, so mobile makes 1 image request instead of 9 presigned URLs.
 
-### 6.3 每天的健康数据
+### 6.3 Health data every day
 
-健康数据是**观测**，不是**事件**。它不进叙事层，而是成为时间轴上的「数据带」：
+Health data is an **observation**, not an **event**. It does not enter the narrative layer; it becomes a "data band" on the time axis:
 
 ```
 2025 年 6 月 ────────────────────────────────
@@ -393,14 +393,14 @@ v = clamp( 0.9·内容 + 0.5·结构 + 0.7·情境 + 0.5·人际 + 0.8·人工 +
 └ 6/23 · 月报：睡眠 -0.4h，步数 +12%              ┘   compact
 ```
 
-- **数据带**：固定在时间轴左侧的 24–40px 窄栏（移动端折叠成顶部可展开条），按周/月画迷你 sparkline，颜色用**相对个人基线的 z-score**，不是绝对值；
-- **周报/月报**：只在「有变化」时出现（变化 < ε 就不出现），1u；
-- **异常卡**：连续 3 天偏离基线、破纪录、数据中断 > 3 天，才升格成一张普通片段，带证据和「看看」；
-- 原始日文件永远不单独成卡；月标题里有「N 个数据文件」入口；
-- 导入十年的数据时，数据带应该**静默补齐历史**，不产生「你新增了 3,650 个文件」的通知；
-- 数据带是通用机制，以后可以接体重、花费、屏幕时间、听歌记录，不需要改时间线本身。
+- **Data band**: a fixed 24–40px narrow rail on the left of the time axis (on mobile it collapses into an expandable strip at the top), drawing a mini sparkline per week/month, colored by **z-score relative to the personal baseline**, not by absolute value;
+- **Weekly/monthly reports**: only appear when "something changed" (if the change < ε, they don't appear), 1u;
+- **Anomaly cards**: three consecutive days off baseline, a record broken, or a gap > 3 days in the data — only then is it promoted to an ordinary moment, with evidence and a "take a look";
+- Raw daily files never become cards on their own; the month heading carries the "N data files" entry point;
+- When importing ten years of data, the data band should **backfill history silently** and not produce "you added 3,650 files" notifications;
+- The data band is a generic mechanism; weight, spending, screen time, and listening history can attach later without changing the timeline itself.
 
-**跨源融合才是终局**：同一天的照片 + GPS + 心率，可以合成一个普通卡做不到的片段：
+**Cross-source fusion is the endgame**: photos + GPS + heart rate on the same day can compose a moment that an ordinary card cannot:
 
 ```
 ┌ 6/15 · 西湖徒步 · 12.6km · 爬升 620m ────────────┐
@@ -409,59 +409,59 @@ v = clamp( 0.9·内容 + 0.5·结构 + 0.7·情境 + 0.5·人际 + 0.8·人工 +
 └──────────────────────────────────────────────────┘
 ```
 
-这也是这个产品该有的样子：时间线不是一个相册，而是**把一个人散落在各类文件里的生活事实 join 起来的地方**。
-照片提供画面，GPS 提供地点和轨迹，健康数据提供强度，文档提供上下文。单源也能用，多源时价值乘 1.15^(n-1)。
+That is also what this product should look like: the timeline is not a photo album, it is **the place that joins the life facts scattered across all kinds of files**.
+Photos provide the picture, GPS the place and the trace, health data the intensity, documents the context. A single source still works; with several sources the value multiplies by 1.15^(n-1).
 
-### 6.4 其它几个容易踩的场景
+### 6.4 A few other scenarios that are easy to get wrong
 
-| 场景 | 处理 |
+| Scenario | Handling |
 |---|---|
-| 一天横跨多个城市/景点 | 按会话切，最多 3 个片段；同类会话合并成「A 和 B」 |
-| 旅行 5 天 | 1 个 trip 片段（跨天），明细层按天分章节 |
-| 婚礼拍了 3000 张 | 1 个 hero + 1 个 mosaic（仪式/宴席），其余进明细 |
-| 截图 / 表情包 / 收据 | 默认 filtered，不计入叙事层，但保留在编年层计数 |
-| 证件、合同、安装包 | collected，默认不上时间线 |
-| 每月一次的对账单 | ambient 或 series（按文件形态判断），不逐张 |
-| 十年的照片一次性导入 | 先出「文件密度热力图」的编年层（秒级），再逐月精细化 |
-| 同一天上传旧文件 | 事件时间归到旧日期，同时「最近整理」里有一条轻提示 |
-| 时区 / 跨天 | 用拍摄地本地日期分桶；EXIF 没有时用 mtime 转用户主时区，标低置信度 |
-| 文件时间不可信（下载的旧图、微信图片） | `time_confidence` 低 → 不进叙事层，进「时间待确认」列表 |
+| One day across several cities/sights | split by session, at most 3 moments; same-kind sessions merge into "A and B" |
+| A 5-day trip | 1 trip moment (spanning days), detail layer split into chapters by day |
+| 3,000 photos at a wedding | 1 hero + 1 mosaic (ceremony/banquet), the rest into detail |
+| Screenshots / memes / receipts | filtered by default, not counted in the narrative layer, but still counted in the chronicle layer |
+| IDs, contracts, installers | collected, off the timeline by default |
+| A monthly statement | ambient or series (judged by file shape), never per file |
+| Ten years of photos imported at once | first show the chronicle layer's "file density heatmap" (seconds), then refine month by month |
+| Old files uploaded today | event time falls on the old date, plus a light note in "recently organized" |
+| Time zones / crossing days | bucket by the local date at the shooting location; when EXIF is missing, convert mtime to the user's home time zone and mark low confidence |
+| Untrustworthy file times (downloaded old images, WeChat images) | low `time_confidence` → not in the narrative layer, but in a "time unconfirmed" list |
 
 ---
 
-## 7. Backfill：自动、增量、可解释
+## 7. Backfill: automatic, incremental, explainable
 
-### 7.1 触发点
+### 7.1 Trigger points
 
-| 来源 | 触发 |
+| Source | Trigger |
 |---|---|
-| 网页上传确认 | `upload/confirm` 成功后入队 |
-| 对外 API PUT | 写入索引后入队 |
-| `reconcile`（COS 清单 / coscli 灌库） | 批量入队，按 etag 去重 |
-| 用户改文件夹策略 | 相关月份重算 |
-| 流水线版本升级 | 后台惰性重算，不阻塞读 |
+| Web upload confirmation | queued after `upload/confirm` succeeds |
+| Public API PUT | queued after the index write |
+| `reconcile` (COS inventory / coscli bulk load) | queued in batches, deduped by etag |
+| User changes a folder policy | the affected months are recomputed |
+| Pipeline version bump | lazily recomputed in the background, never blocking reads |
 
-### 7.2 三级推进，「先粗后细」
+### 7.2 Three-stage progression, "coarse before fine"
 
-用户在导入 2TB 数据时，不能等分析完才看到时间线：
+When importing 2TB of data, the user must not wait for analysis to finish before seeing a timeline:
 
-| 阶段 | 输入 | 产出 | 成本 |
+| Stage | Input | Output | Cost |
 |---|---|---|---|
-| **indexed**（秒级） | `nodes` + `source_modified_at` | 每天的**文件密度热力图** + 月计数 + 编年层 | 纯 SQL |
-| **analyzed**（分钟–小时） | 图片/视频元数据、缩略图 | 片段、封面、评分 | 按文件数，受速率限制 |
-| **curated**（持续） | 用户编辑、跨源融合、ML | 稳定的精选结果 | 增量 |
+| **indexed** (seconds) | `nodes` + `source_modified_at` | per-day **file density heatmap** + month counts + the chronicle layer | pure SQL |
+| **analyzed** (minutes–hours) | image/video metadata, thumbnails | moments, covers, scores | per file count, rate-limited |
+| **curated** (continuous) | user edits, cross-source fusion, ML | stable curated results | incremental |
 
-所以「backfill 自动发生」的正确体验是：**先看到十年的轮廓（哪里有东西、哪里是空的），再看到细节逐月长出来**。而不是一个转圈。
+So the correct experience of "backfill happens automatically" is: **first see the outline of ten years (where things are, where it's empty), then watch the detail grow month by month**. Not a spinner.
 
-### 7.3 任务队列
+### 7.3 Job queue
 
 ```sql
 create table if not exists timeline_jobs (
   id bigserial primary key,
   user_id uuid not null,
   kind text not null,              -- probe | group | fuse | publish
-  node_id uuid,                    -- probe 用
-  month date,                      -- publish 用
+  node_id uuid,                    -- used by probe
+  month date,                      -- used by publish
   status text not null default 'pending',  -- pending|running|done|failed|skipped
   attempts int not null default 0,
   available_at timestamptz not null default now(),
@@ -473,22 +473,22 @@ create table if not exists timeline_jobs (
 create index timeline_jobs_ready on timeline_jobs (status, available_at);
 ```
 
-- Go 后台 worker（2–4 并发），`FOR UPDATE SKIP LOCKED` 抢任务，`lease_until` 防卡死；
-- 失败指数退避，超过 5 次进 dead-letter（保留原因，UI 显示「12 个文件无法解析」）；
-- 全局速率限制（COS / 万象 QPS），单用户公平调度，避免一个大库饿死其他用户；
-- 默认**最近 12 个月优先**（默认视图先完整），然后从近到远回填；用户可以对某个月点「优先整理」；
-- 上传风暴去抖：一次 500 张上传只在最后一个事件后 30s 触发一次月重算。
+- A Go background worker (2–4 concurrent) claims jobs with `FOR UPDATE SKIP LOCKED`, and `lease_until` prevents stuck leases;
+- Failures back off exponentially; after 5 attempts they go to dead-letter (keeping the reason, and the UI shows "12 files could not be parsed");
+- Global rate limits (COS / CI QPS), with fair scheduling per user so one big library cannot starve the others;
+- **The most recent 12 months go first** by default (so the default view is complete), then backfill from recent to old; the user can mark a month "organize first";
+- Upload storms are debounced: 500 uploads in one go trigger one monthly recompute, 30s after the last event.
 
-### 7.4 幂等与可重算
+### 7.4 Idempotency and recomputability
 
-- `content_sig = etag + size + pipeline_version`；处理结果写回 `asset_facts`，重复任务直接跳过；
-- 月快照整体替换（一个事务里 upsert `timeline_snapshots`），读路径永远看到完整旧版或完整新版，不会读到半成品；
-- 重跑必须得到**逐字节相同**的快照（同样输入 + 同版本），用 golden test 保证；
-- 用户删除文件 → 级联删 `asset_facts` / `moment_items`，下一次月重算会自动调整；derived 缩略图按 node_id 删除。
+- `content_sig = etag + size + pipeline_version`; results are written back to `asset_facts`, and duplicate jobs are skipped outright;
+- A monthly snapshot is replaced wholesale (upsert `timeline_snapshots` in one transaction), so the read path always sees the complete old version or the complete new version, never a half-built one;
+- A rerun must produce a **byte-identical** snapshot (same input + same version), guaranteed by a golden test;
+- The user deletes a file → `asset_facts` / `moment_items` cascade, and the next monthly recompute adjusts automatically; derived thumbnails are deleted by node_id.
 
-### 7.5 覆盖状态要能看见
+### 7.5 Coverage state must be visible
 
-每个月、每个来源都要有覆盖状态。稀疏的 2013 年和「还没整理」的 2013 年，在 UI 上必须长得不一样，否则用户会以为数据丢了：
+Every month and every source needs a coverage state. A sparse 2013 and a 2013 that "hasn't been organized yet" must look different in the UI, or the user will think data was lost:
 
 ```
 2025 年 6 月 · 1,284 个文件 · 6 个片段        ✅ 已整理
@@ -496,24 +496,24 @@ create index timeline_jobs_ready on timeline_jobs (status, available_at);
 2013 年 2 月 · 0 个文件                       — 没有内容
 ```
 
-`GET /api/timeline/status` 返回 `{coverage, progress, throughput, eta, failed}`。
+`GET /api/timeline/status` returns `{coverage, progress, throughput, eta, failed}`.
 
 ---
 
-## 8. 稳定性：不要每次刷新都换一批
+## 8. Stability: don't hand back a different set on every refresh
 
-时间线一旦开始「每次看都不一样」，用户就不会信任它。规则：
+Once the timeline starts "looking different every time", the user stops trusting it. Rules:
 
-1. **已发布的月快照不可变**，只在新内容 / 版本升级 / 用户编辑时重算；
-2. **陈旧月份冻结**：> 30 天的月份不因为后台补细节而重排；只有当新片段价值比已选的边际片段高 **15% 以上**（hysteresis）才替换；
-3. **确定性**：所有并列打分用 `hash(user_id, month, moment_id)` 决胜，不引入随机；
-4. **用户编辑是最高优先级**：置顶/隐藏/改标题/换封面写进 `locked_fields`，重算只增不减；
-5. **重算可撤销**：`pipeline_version` 变了先影子生成，用户点「重新整理」再切换；
-6. **读路径只读快照**：任何分析都在后台完成，页面不会因为一张坏图卡住。
+1. **Published monthly snapshots are immutable**; they are recomputed only for new content, a version bump, or a user edit;
+2. **Old months are frozen**: months > 30 days old are not reordered because the background filled in detail; a new moment replaces a selected one only when its value is more than **15% higher** (hysteresis);
+3. **Determinism**: all ties are broken with `hash(user_id, month, moment_id)`, never randomness;
+4. **User edits have the highest priority**: pin/hide/retitle/replace cover are written to `locked_fields`, and recomputes only add, never remove;
+5. **Recomputes are reversible**: when `pipeline_version` changes, generate in the shadow first, and switch only after the user clicks "organize again";
+6. **The read path reads only snapshots**: all analysis happens in the background, so a page never hangs on one bad image.
 
 ---
 
-## 9. 接口
+## 9. API
 
 ```http
 GET /api/timeline?before=2025-06-01&months=2&tz=Asia/Shanghai
@@ -524,13 +524,13 @@ GET /api/timeline?before=2025-06-01&months=2&tz=Asia/Shanghai
       "coverage": "analyzed",
       "generated_at": "...",
       "items": [
-        {"type":"moment","id":"...","layout":"mosaic","title":"西湖 · 徒步","status":"published",
+        {"type":"moment","id":"...","layout":"mosaic","title":"West Lake · hike","status":"published",
          "starts_at":"...","ends_at":"...","cost":5,
          "cover":{"path":"Photos/2025/06/15/a.jpg","thumb":"<signed>","w":1200,"h":900},
          "grid":[{"path":"...","thumb":"<signed>"}, ...],
          "more": 78, "item_count": 87, "sources":["photo","gps"],
-         "why":"新地点 + 87 张 + 海拔爬升 620m"},
-        {"type":"ambient","metrics":[{"key":"resting_hr","label":"静息心率","unit":"bpm",
+         "why":"new place + 87 photos + 620m of ascent"},
+        {"type":"ambient","metrics":[{"key":"resting_hr","label":"Resting HR","unit":"bpm",
          "values":[54,55,...],"baseline":54,"delta":"+2"}]},
         {"type":"gap","from":"2025-05-20","to":"2025-06-01","file_count":214}
       ]
@@ -539,29 +539,29 @@ GET /api/timeline?before=2025-06-01&months=2&tz=Asia/Shanghai
     "backfill": {"running":true,"from":"2014-01","progress":0.43,"eta_seconds":360}
   }
 
-GET /api/timeline/moments/{id}        → 片段详情（全部文件、会话、证据、来源链接）
-GET /api/timeline/day/2025-06-15      → 这一天的全量网格（完整性入口）
-GET /api/timeline/status              → 覆盖 / 进度 / 失败 / 版本
+GET /api/timeline/moments/{id}        → moment detail (all files, sessions, evidence, source links)
+GET /api/timeline/day/2025-06-15      → the full grid for that day (the completeness entry point)
+GET /api/timeline/status              → coverage / progress / failures / version
 PATCH /api/timeline/moments/{id}      → {title?, cover?, pinned?, hidden?}
 POST /api/timeline/moments/{id}/merge → {ids:[]}
 POST /api/timeline/moments/{id}/split → {day?}
-POST /api/timeline/rebuild            → {from,to}（owner only）
-GET  /api/timeline/rules             → 来源策略
-PUT  /api/timeline/rules             → 目录级 timeline|ambient|series|off
+POST /api/timeline/rebuild            → {from,to} (owner only)
+GET  /api/timeline/rules             → source policies
+PUT  /api/timeline/rules             → directory-level timeline|ambient|series|off
 ```
 
-要点：
+Key points:
 
-- 以**月**为分页单位（`before` + `months`），因为密度是月级预算，按月取才能保证每页高度一致；
-- 缩略图 URL 在**响应时**预签名（10 分钟），快照里只存 path；
-- 失败降级：快照缺失时返回 `coverage: "indexed"` + 文件热力图，前端显示骨架，而不是 500；
-- 对外 API（Bearer token）先只给 `GET /timeline`，写操作以后再说。
+- Paging is **by month** (`before` + `months`), because density is a monthly budget, and only month-based paging keeps every page the same height;
+- Thumbnail URLs are presigned **at response time** (10 minutes); the snapshot stores only paths;
+- Degraded failure: when a snapshot is missing, return `coverage: "indexed"` + the file heatmap so the frontend can show a skeleton instead of a 500;
+- The public API (Bearer token) exposes only `GET /timeline` for now; writes come later.
 
 ---
 
-## 10. 前端
+## 10. Frontend
 
-路由 `/`（内容流），文件浏览器退到 `/drive`；移动端内容流就是主入口。界面上不出现"时间线/事件/片段"，只有月份、卡片和数据带。
+Route `/` (the stream), with the file browser demoted to `/drive`; on mobile the stream is the main entry point. The UI never says "timeline / event / moment" — only months, cards, and the data band.
 
 ```
 ┌───────────────────────────────────────────────────────────┐
@@ -583,38 +583,38 @@ PUT  /api/timeline/rules             → 目录级 timeline|ambient|series|off
 └───────────────────────────────────────────────────────────┘
 ```
 
-- **月分组吸顶**，右侧年份导航（滚动条 minimap），`?m=2025-06` 可分享/刷新；
-- **骨架**：`indexed` 阶段直接渲染文件密度热力条，`analyzed` 逐月替换；
-- **卡片类型**：hero / mosaic / series / metric / note / compact / gap，高度就是成本；
-- **数据带**：桌面贴左侧时间轴，移动端顶部可折叠；点开抽屉看图表；
-- **交互**：点击进片段详情（所有文件、会话、地图、健康曲线）；长按/菜单置顶、隐藏、改标题、换封面、合并；
-- **「为什么看到这个」**：详情页角落一个 `?`，展开评分信号（透明度换信任，也是调试开关）；
-- **最近整理**：页面顶部一条可折叠条，只列最近 7 天新解析出的内容，**不参与**叙事层的密度预算；
-- **性能**：按月虚拟滚动，图片 `loading="lazy"` + 固定宽高比（避免抖动）；首屏只签当前月前 6 个封面的 URL；
-- **空态/backfill**：显示进度、预计时间、失败的 12 个文件入口，永远不留白屏。
+- **Month headings stick**, with a year navigator on the right (a scrollbar minimap); `?m=2025-06` is shareable and survives refresh;
+- **Skeleton**: during `indexed`, render the file density bars directly; `analyzed` replaces them month by month;
+- **Card types**: hero / mosaic / series / metric / note / compact / gap; height is the cost;
+- **Data band**: sticks to the left of the time axis on desktop, collapsible at the top on mobile; click to open a drawer with charts;
+- **Interaction**: click through to moment detail (all files, sessions, map, health curves); long-press/menu to pin, hide, retitle, replace cover, merge;
+- **"Why am I seeing this"**: a `?` in the corner of the detail page expands the scoring signals (transparency buys trust, and it doubles as a debug switch);
+- **Recently organized**: a collapsible strip at the top of the page that lists only what was newly parsed in the last 7 days; it does **not** participate in the narrative layer's density budget;
+- **Performance**: virtual scrolling by month, images with `loading="lazy"` + fixed aspect ratios (no jitter); the first screen signs URLs for only the first 6 covers of the current month;
+- **Empty state/backfill**: show progress, estimated time, and an entry point for the 12 failed files; never leave a blank screen.
 
 ---
 
-## 11. 技术实现
+## 11. Implementation
 
-| 项 | 选择 | 理由 |
+| Item | Choice | Rationale |
 |---|---|---|
-| 迁移 | `sql/012_timeline.sql` | 沿用现有迁移机制 |
-| 后端 | `backend/internal/timeline/`（service / ingest / group / score / select / snapshot） | 与 `nodes`、`jobs` 平级，独立可测 |
-| Worker | 进程内 goroutine pool + `timeline_jobs` 表 | 与 `fs_jobs` 同样的单实例假设；多实例时换心跳 |
-| 图片元数据 / 缩略图 | 优先 COS 数据万象 `imageInfo` + `imageMogr2/thumbnail/320x` | 不下载原图，TB 级才现实 |
-| 视频 | 万象视频信息；需要章节时才取片段；`ffprobe` 作为兜底 | 避免本地转码 |
-| 感知哈希 | 320px 缩略图 + DCT pHash，纯 Go | 不需要 GPU |
-| 派生对象 | `_derived/<user>/thumbs/<node_id>.jpg`、`mosaic/<moment_id>.jpg` | 可重建、不进 `nodes` 索引、reconcile 时按前缀跳过 |
-| 健康解析 | 流式 XML（Apple Health）、CSV/JSON 长表；单文件上限 + 跳过原因 | 十年 export.xml 可能上 GB |
-| 反向地理编码 | P1 再接地图 API，MVP 用文件夹/文件名 + 手工标题 | 控制外部依赖 |
-| 标题 | 模板（地点 · 时段 · 活动），P2 用 LLM 生成一句话 + 缓存 | 不阻塞、可回退 |
-| 测试 | fixture 库（1 视频/天、500 照片/天、健康日更、旅行、空月）+ golden 快照 | 密度参数必须可回归 |
+| Migration | `sql/012_timeline.sql` | reuse the existing migration mechanism |
+| Backend | `backend/internal/timeline/` (service / ingest / group / score / select / snapshot) | peer to `nodes` and `jobs`, independently testable |
+| Worker | in-process goroutine pool + the `timeline_jobs` table | same single-instance assumption as `fs_jobs`; switch to heartbeats with multiple instances |
+| Image metadata / thumbnails | prefer COS CI `imageInfo` + `imageMogr2/thumbnail/320x` | never download originals; the only realistic option at TB scale |
+| Video | CI video info; fetch segments only when chapters are needed; `ffprobe` as the fallback | avoid local transcoding |
+| Perceptual hash | 320px thumbnail + DCT pHash, pure Go | no GPU needed |
+| Derived objects | `_derived/<user>/thumbs/<node_id>.jpg`, `mosaic/<moment_id>.jpg` | rebuildable, not in the `nodes` index, skipped by prefix during reconcile |
+| Health parsing | streaming XML (Apple Health), CSV/JSON long tables; per-file cap + skip reason | ten years of export.xml can be gigabytes |
+| Reverse geocoding | wire up a map API in P1; MVP uses folder/filename + manual titles | keep external dependencies in check |
+| Titles | templates (place · time of day · activity); in P2 an LLM writes one sentence, cached | never blocks, always falls back |
+| Tests | fixture library (1 video/day, 500 photos/day, daily health, a trip, an empty month) + golden snapshots | density parameters must be regression-tested |
 
-参数先做成常量，P1 再抽到配置 / 用户偏好：
+Parameters start as constants; in P1 they move to config / user preferences:
 
 ```
-TIMELINE_ENABLED=false         # 默认关，灰度
+TIMELINE_ENABLED=false         # off by default, canary
 TIMELINE_WORKERS=2
 TIMELINE_MONTH_BUDGET=24
 TIMELINE_PROFILE=standard      # calm|standard|rich
@@ -622,137 +622,137 @@ TIMELINE_PIPELINE_VERSION=1
 TIMELINE_MAX_FILES_PER_MIN=120
 ```
 
-### 性能与成本
+### Performance and cost
 
-- 读：每两个月 1 条快照查询 + N 个预签名（N ≤ 30），P99 应 < 50ms；
-- 写：一次月重算 = 读当月 facts + DP + upsert，1 万文件量级 < 1s；
-- 分析：按文件计费（万象请求 + 缩略图存储），先给用户看「预计处理 N 个文件」再开跑；
-- 存储：缩略图 320px ≈ 20–40KB/张，1 万张 ≈ 300MB，可接受；`_derived` 可整目录清理重建。
+- Read: one snapshot query per two months + N presigned URLs (N ≤ 30); P99 should be < 50ms;
+- Write: one monthly recompute = read that month's facts + DP + upsert; under 1s for 10,000 files;
+- Analysis: billed per file (CI requests + thumbnail storage); always show "about to process N files" before starting;
+- Storage: a 320px thumbnail is ≈ 20–40KB, so 10,000 of them ≈ 300MB — acceptable; `_derived` can be wiped and rebuilt as a whole directory.
 
 ---
 
-## 12. 分期
+## 12. Phases
 
-| 阶段 | 内容 | 工作量（估） | 验收 |
+| Phase | Scope | Effort (est.) | Acceptance |
 |---|---|---|---|
-| **P0** | `source_modified_at`、`asset_facts`、`moments`、`timeline_jobs`、EXIF/基本元数据、会话化 + 去重 + pHash、评分 v1、月快照 + DP 选择、`/timeline` 页（hero/mosaic/gap/月标题）、backfill 状态、文件密度热力图 | 1.5–2 周 | 导入 1 万张照片，10 分钟内出时间线；一天 500 张 = 1–2 个片段 |
-| **P1** | series/视频、ambient 数据带 + 健康解析、trip 跨天合并、来源策略、用户编辑（置顶/隐藏/改标题/合并）、跨源融合（GPS+健康）、预合成 mosaic | 2–3 周 | 每天一个 vlog 只占 1 张卡；健康数据不产生卡片 |
-| **P2** | 人脸聚类、OCR/场景标签、LLM 标题和摘要、周年回顾、分享、对外 API | 持续 | 标题可读性明显提升，且可一键关掉 |
+| **P0** | `source_modified_at`, `asset_facts`, `moments`, `timeline_jobs`, EXIF/basic metadata, sessionizing + dedupe + pHash, scoring v1, monthly snapshots + DP selection, the `/timeline` page (hero/mosaic/gap/month headings), backfill status, file density heatmap | 1.5–2 weeks | import 10,000 photos and get a timeline within 10 minutes; 500 photos in a day = 1–2 moments |
+| **P1** | series/video, ambient data band + health parsing, cross-day trip merging, source policies, user edits (pin/hide/retitle/merge), cross-source fusion (GPS+health), pre-composed mosaic | 2–3 weeks | a daily vlog takes 1 card; health data produces no cards |
+| **P2** | face clustering, OCR/scene tags, LLM titles and summaries, anniversary recaps, sharing, public API | ongoing | titles are clearly more readable, and can be switched off in one click |
 
-**P0 的取舍**：先把「结构 + 取舍 + backfill」做对，视觉上用启发式标题（`西湖 · 下午 · 87 张`）就够。
+**The P0 trade-off**: get "structure + judgment + backfill" right; visually, heuristic titles (`West Lake · afternoon · 87 photos`) are enough.
 
 ---
 
-## 13. 被否决的方案
+## 13. Rejected approaches
 
-| 方案 | 为什么不做 |
+| Approach | Why not |
 |---|---|
-| 按天列表 + 截断前 N 个 | 500 张时截断是随机的，vlog 时又太空；无法表达跨天事件 |
-| 全局一个价值阈值 | 密度不可控：某个月全是高分内容会爆炸，某个月全是低分会消失 |
-| 每天固定 N 条 | 会逼着算法「凑数」，垃圾内容挤掉真正有趣的 |
-| 不做快照，读时现算 | 慢、贵、每次刷新不一样，且无法做 backfill 进度和用户编辑 |
-| 全量 ML/LLM 先上 | 贵且慢，而且解释不了「为什么选这张」；P2 再作为增益 |
-| 把时间线做成所有文件的流水账 | 网盘 80% 是收藏，会把真正的记忆淹没；流水账用文件浏览器 |
-| 给健康数据每天生成一张卡 | 一年 365 条噪音；观测应该用数据带，不是事件卡 |
-| 只展示「值得」的，不给全量入口 | 用户会怀疑丢数据；必须每层都能展开回原始文件 |
+| A per-day list truncated to the first N | at 500 photos the truncation is random, and with vlogs it's too empty; cross-day events are inexpressible |
+| One global value threshold | density gets out of control: a month full of high scores explodes, a month full of low scores vanishes |
+| A fixed N items per day | it forces the algorithm to "pad the numbers", and junk crowds out what is genuinely interesting |
+| No snapshots, compute on read | slow, expensive, different on every refresh, and it makes backfill progress and user edits impossible |
+| Lead with full ML/LLM | expensive and slow, and it cannot explain "why this one"; bring it in as a bonus in P2 |
+| Make the timeline a running log of every file | 80% of a drive is collected material, which drowns the real memories; a running log is what the file browser is for |
+| Generate a card per day of health data | 365 noise items a year; observations belong on a data band, not on cards |
+| Show only what's "worth it", with no full entry point | the user suspects data loss; every layer must expand back to the original files |
 
 ---
 
-## 14. 风险
+## 14. Risks
 
-1. **时间不可信**：微信/下载图片的 mtime 是下载时间，EXIF 可能被抹掉。→ `time_confidence` + 待确认列表 + 手动改时间。
-2. **时区/夏令时**：跨时区旅行会串天。→ 存拍摄地 `local_date`，展示不跨天重算。
-3. **重复导入**：同一批照片从手机和电脑各传一次（路径不同、etag 可能不同）。→ phash 去重 + content hash，两只保留一份展示。
-4. **截图噪音**：手机截图占相册 30%。→ 默认过滤 + 用户可调。
-5. **隐私**：健康、位置、人脸都是高敏感。→ 本地处理、文件夹级关闭、不默认第三方、时间线默认私有、可整目录删除派生数据。
-6. **成本失控**：百万文件的万象调用。→ 分级（先元数据后图片）、速率限制、预估提示、可暂停。
-7. **审美偏移**：算法选出的「精选」不合用户口味。→ 用户编辑优先、可调 profile、`why` 透明、P1 用收藏/隐藏反馈微调权重。
-8. **多用户公平**：一个大库拖垮所有 worker。→ 排队按用户轮转 + 单用户速率上限。
-
----
-
-## 15. 开放问题
-
-1. **时间线是不是首页？** 现在的首页是文件浏览器。如果时间线成为 `/`，文件浏览器退成第二入口，导航和心智都会变；也可以先 `/timeline` 并存。
-2. **内容边界**：只做照片/视频 + 健康，还是也要工作文档？后者需要「项目/作品」模型，和「经历」是两种叙事。
-3. **云端 AI 的接受度**：标题、摘要、审美打分如果调用外部 API，涉及照片内容出域；可接受吗？还是只做本地启发式？
-4. **单用户还是多用户产品**：影响后台调度的公平性、配额、以及要不要做「分享时间线」。
-5. **现有数据规模**：现在桶里是空的、几千张，还是已经 TB 级？backfill 的优先级和成本控制会完全不同。
-6. **健康数据来源**：Apple Health 导出、手环 CSV、还是每天一个手工文件？解析器的范围差别很大。
+1. **Untrustworthy time**: the mtime of WeChat/downloaded images is the download time, and EXIF may be stripped. → `time_confidence` + an unconfirmed list + manual time editing.
+2. **Time zones/daylight saving**: traveling across zones drifts days. → store `local_date` at the shooting location and never recompute days for display.
+3. **Duplicate imports**: the same batch uploaded once from the phone and once from the desktop (different paths, possibly different etags). → pHash dedupe + content hash; show only one copy.
+4. **Screenshot noise**: phone screenshots are 30% of a camera roll. → filter by default + user-adjustable.
+5. **Privacy**: health, location, and faces are all highly sensitive. → local processing, folder-level opt-out, no third parties by default, the timeline is private by default, and derived data can be deleted by directory.
+6. **Runaway cost**: CI calls across a million files. → tiering (metadata before images), rate limits, estimates up front, pausable.
+7. **Aesthetic drift**: the algorithm's "selections" don't match the user's taste. → user edits win, adjustable profile, transparent `why`, and in P1 favorites/hides nudge the weights.
+8. **Multi-user fairness**: one big library drags down every worker. → round-robin queueing per user + a per-user rate cap.
 
 ---
 
-## 16. 实现状态（P0）
+## 15. Open questions
 
-已落地：
-
-- `sql/012_timeline.sql`：`nodes.source_modified_at`、`timeline_assets`、`timeline_moments`、`timeline_snapshots`、`timeline_jobs`、`timeline_series` / `timeline_points`；
-- `backend/internal/timeline/`：`HeuristicAnalyzer`（路径日期 + 类型 + 截图过滤）、`SessionGrouper`（按天 + 25 分钟切会话、每日视频成系列）、`HeuristicScorer`、`TemplateNarrator`、`CSVAmbientExtractor`、按月预算选择、快照读写、`scan` / `backfill` / `month` 三种后台任务；
-- 可插拔接口：`Analyzer`、`Grouper`、`Scorer`、`Narrator`、`AmbientExtractor`。接多模态/LLM 时替换 `Engine` 里的字段，上层不用改；
-- 接口：`GET /api/timeline`、`GET /api/timeline/status`、`POST /api/timeline/rebuild`；
-- 前端：`web/src/pages/StreamPage.tsx`（月度流、hero/mosaic/series/ambient/gap、无限滚动、整理进度、移动端）；
-- 上传/删除/改名后自动 `Notify`；启动时自动回填；sweeper 每 20 分钟兜底。
-
-还没做（P1/P2）：
-
-- EXIF 拍摄时间、GPS、场景/人脸/审美、视频关键帧；
-- 跨天 trip 合并、来源策略（文件夹级 timeline/ambient/off）、用户编辑（置顶/隐藏/合并）；
-- LLM 标题和摘要、预算 profile、预合成拼贴图；
-- 多模态接入后 `pipelineVersion` 需要 +1 触发重算。
-
-界面截图（合成数据）：[桌面](stream-desktop.jpg) · [移动端](stream-mobile.jpg)。
+1. **Is the timeline the home page?** The home page is the file browser today. If the timeline becomes `/`, the file browser drops to a second entry point, and navigation and mental models both change; alternatively ship `/timeline` alongside it first.
+2. **Content boundaries**: photos/videos + health only, or work documents too? The latter needs a "project/work" model, which is a different narrative from "experiences".
+3. **Appetite for cloud AI**: titles, summaries, and aesthetic scoring would send photo content off-domain if they call an external API. Acceptable? Or stay with local heuristics only?
+4. **Single-user or multi-user product**: it affects background scheduling fairness, quotas, and whether to build "share a timeline".
+5. **Existing data scale**: is the bucket empty, a few thousand files, or already TB-scale? Backfill priority and cost control differ completely.
+6. **Health data sources**: Apple Health exports, a band's CSV, or one manual file per day? The parser's scope varies enormously.
 
 ---
 
-## 17. 事件卡（v0.3 · 当前方向）
+## 16. Implementation status (P0)
 
-> 状态：2026-10 · **已落地**（`web/src/pages/StreamPage.tsx`）· 可点稿：[mocks/timeline.html](mocks/timeline.html)
-> 截图：[桌面](mocks/shots/timeline-desktop.png) · [文字事件 + 健康变化](mocks/shots/timeline-events.png) · [移动](mocks/shots/timeline-mobile.png) · [深色](mocks/shots/timeline-dark.png)
+Shipped:
 
-结论：**时间轴是一层扁平的事件卡**。没有仪表盘，也没有年 / 月的层级。
-§2 的编年层、§4 的预算、§5 的评分仍然可以留在后台，但不再画到用户面前。
+- `sql/012_timeline.sql`: `nodes.source_modified_at`, `timeline_assets`, `timeline_moments`, `timeline_snapshots`, `timeline_jobs`, `timeline_series` / `timeline_points`;
+- `backend/internal/timeline/`: `HeuristicAnalyzer` (path dates + type + screenshot filtering), `SessionGrouper` (sessions split by day + 25 minutes, daily videos become series), `HeuristicScorer`, `TemplateNarrator`, `CSVAmbientExtractor`, monthly budget selection, snapshot reads and writes, three kinds of background job: `scan` / `backfill` / `month`;
+- Pluggable interfaces: `Analyzer`, `Grouper`, `Scorer`, `Narrator`, `AmbientExtractor`. When wiring in multimodal/LLM, swap the fields on `Engine`; nothing above changes;
+- API: `GET /api/timeline`, `GET /api/timeline/status`, `POST /api/timeline/rebuild`;
+- Frontend: `web/src/pages/StreamPage.tsx` (monthly stream, hero/mosaic/series/ambient/gap, infinite scroll, organizing progress, mobile);
+- Automatic `Notify` after upload/delete/rename; automatic backfill at startup; a sweeper as a safety net every 20 minutes.
 
-### 17.1 页面结构
+Not done yet (P1/P2):
 
-- 一条从上往下的**扁平列表**，只有事件卡；
-- 每张卡自带完整日期（含年份），按时间倒序；
-- 没有年标题、月标题，也没有「N 个文件 / N 个事件」这类统计；
-- 没有事件的日子不占版面。
+- EXIF capture time, GPS, scenes/faces/aesthetics, video key frames;
+- cross-day trip merging, source policies (folder-level timeline/ambient/off), user edits (pin/hide/merge);
+- LLM titles and summaries, budget profiles, pre-composed collage images;
+- once multimodal lands, `pipelineVersion` must be bumped by 1 to trigger a recompute.
 
-### 17.2 卡片是类型化的
+UI screenshots (synthetic data): [desktop](stream-desktop.jpg) · [mobile](stream-mobile.jpg).
 
-内置四种：`photo`（1–4 张图 + 一句话）、`note`（纯文字）、`metric`（一行数字 + 一句话）、
-`html`（应用自己的版式，沙箱渲染，注入设计 token，可以跟随明暗主题）。
-共享的只有三样：标题、时间、一个可选的详情链接。类型清单和 payload 见 [events.md](events.md)。
+---
 
-### 17.3 健康：变了才说话
+## 17. Event cards (v0.3 · current direction)
 
-每天都有数据，不等于每天都要看。健康只在**真的变了**的时候出现一张卡，
-例如「8 月平均 6.7 小时，比前三个月少 42 分钟」。
+> Status: 2026-10 · **shipped** (`web/src/pages/StreamPage.tsx`) · clickable mock: [mocks/timeline.html](mocks/timeline.html)
+> Screenshots: [desktop](mocks/shots/timeline-desktop.png) · [text events + health change](mocks/shots/timeline-events.png) · [mobile](mocks/shots/timeline-mobile.png) · [dark](mocks/shots/timeline-dark.png)
 
-没有每月图表，也没有年度总览面板——「年度总览」会把「年」这个层级重新带回来，和 17.1 冲突，先撤。
-日均数据留在文件里，要看再点进去。
+Conclusion: **the timeline is one flat layer of event cards**. No dashboard, no year/month hierarchy.
+The chronicle layer in §2, the budget in §4, and the scoring in §5 can stay in the backend, but they are no longer drawn in front of the user.
 
-### 17.4 被否决的两版
+### 17.1 Page structure
 
-**v0.2（仪表盘）**：年带 + 月头三条轨道（片段轨 / 文件轨 / 数据带）+ 31 格密度条 + 右侧档案图 + 档案热力图。
-信息是全的，但一页里有四套图表，读它之前得先学会图表。
+- A single **flat list** from top to bottom, containing only event cards;
+- Each card carries the full date (including the year), newest first;
+- No year headings, no month headings, and no statistics like "N files / N events";
+- Days without events take up no space.
 
-**v0.3 初版（有层级）**：年 → 月 → 事件三级，年带一张总览，月标签带文件数和事件数。
-层级、统计、图表都清掉之后，页面只剩卡片——滚起来没有停顿，卡片是唯一的内容单位。
+### 17.2 Cards are typed
 
-代价：「哪个月安静」「这一年有多少」不再一眼可见。需要的时候用搜索或筛选解决，不要用图解决。
+Four built-in types: `photo` (1–4 images + one sentence), `note` (text only), `metric` (one row of numbers + one sentence),
+`html` (the app's own layout, rendered in a sandbox with design tokens injected, may follow the light/dark theme).
+Only three things are shared: a title, a time, and an optional detail link. The type list and payloads are in [events.md](events.md).
 
-### 17.5 事件从哪来
+### 17.3 Health: speak only when something changed
 
-三种来源写同一张表：站内自己写（`native`）、文件流水线自动聚（`auto`）、三方应用用 token 写（`app`）。
-卡片有类型（`photo` / `note` / `metric` / `html`），来源只出现在日期那一行。
-**没有编辑**；也没有「查看详情」按钮（有 `detail_url` 时标题才是链接，没有就不可点）。
-表结构、写入 API、生命周期见 [events.md](events.md)。
+Having data every day does not mean looking at it every day. Health surfaces one card only when something **actually changed**,
+for example "August averaged 6.7 hours, 42 minutes less than the previous three months".
 
-还没定：合并——同一天的照片和跑步要不要合成一条（P2，只留了 `merged_into` 字段）。
+No monthly charts, and no annual overview panel — an "annual overview" would bring the "year" hierarchy right back, conflicting with 17.1, so it is out for now.
+Daily averages stay in the files; click through when you want them.
 
-## 附：一句话总结给未来的自己
+### 17.4 Two rejected versions
 
-> 时间线 = 一层扁平的事件卡（有损的叙事层）+ 明细（无损、随手可查）；
-> 没有年/月标题，没有统计数字；健康不常驻，变了才说一句；没有编辑。
+**v0.2 (dashboard)**: a year band + three month-head tracks (moment track / file track / data band) + a 31-cell density strip + an archive panel on the right + an archive heatmap.
+The information was complete, but a page with four chart systems requires learning the charts before reading the page.
+
+**The first v0.3 (hierarchical)**: year → month → event, three levels, a year band with one overview, month labels carrying file and event counts.
+Once the hierarchy, the statistics, and the charts were gone, the page held nothing but cards — scrolling has no pauses, and the card is the only unit of content.
+
+The cost: "which month was quiet" and "how much was there this year" are no longer visible at a glance. When you need that, solve it with search or filters, not with a chart.
+
+### 17.5 Where events come from
+
+Three sources write to the same table: the site itself (`native`), the file pipeline clustering automatically (`auto`), and third-party apps writing with a token (`app`).
+Cards have a type (`photo` / `note` / `metric` / `html`); the source appears only on the date line.
+**There is no editing**; there is no "view details" button either (when `detail_url` exists the title is the link, otherwise it isn't clickable).
+The schema, write API, and lifecycle are in [events.md](events.md).
+
+Still undecided: merging — should a day's photos and a run combine into one item (P2; only the `merged_into` field exists so far).
+
+## Appendix: one-line summary for my future self
+
+> Timeline = one flat layer of event cards (the lossy narrative layer) + detail (lossless, always at hand);
+> no year/month headings, no statistics; health is not a permanent fixture, it speaks up only when something changed; no editing.

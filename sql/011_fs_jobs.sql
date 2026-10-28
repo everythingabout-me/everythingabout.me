@@ -1,8 +1,9 @@
--- 目录移动 / 复制的后台作业。
+-- Background jobs for directory moves and copies.
 --
--- 目录没有“一次性改名”的原语：key 就是路径，所以搬 N 个对象 = N 次服务端复制。
--- 这张表只给服务端看：对外没有“任务”这个概念，进度地址就是动作自己的子路径
--- （/move/{id}、/copy/{id}），所以表里一个 op 列区分两个动作就够。
+-- There is no "rename in one shot" primitive for a directory: the key is the path, so moving N
+-- objects costs N server-side copies. This table is server-side only: there is no public "job"
+-- concept, and the progress URL is the action's own subpath (/move/{id}, /copy/{id}), so one op
+-- column is enough to tell the two actions apart.
 
 do $$
 begin
@@ -13,7 +14,7 @@ begin
 end $$;
 
 create table if not exists fs_jobs (
-  id                  text primary key,                -- m_<24 位十六进制> / c_<24 位>
+  id                  text primary key,                -- m_<24 hex chars> / c_<24 hex chars>
   user_id             uuid not null references users(id) on delete cascade,
   op                  text not null default 'move',    -- move / copy
   from_path           text not null,
@@ -28,13 +29,13 @@ create table if not exists fs_jobs (
   finished_at         timestamptz
 );
 
--- 老库从 move_jobs 改名过来的，补齐新列。
+-- Renamed from move_jobs on old databases; backfill the new columns.
 alter table fs_jobs add column if not exists op text not null default 'move';
 alter table fs_jobs add column if not exists cancel_requested_at timestamptz;
 
--- 索引跟着表改名，避免每次迁移都多建一套。
--- 索引跟着表改名，避免每次迁移都多建一套。
--- 008 每次都会把 move_jobs 重新建出来，所以改名要判断目标索引是否已存在。
+-- Rename the indexes along with the table so each migration does not create another set.
+-- Rename the indexes along with the table so each migration does not create another set.
+-- 008 recreates move_jobs every time, so only rename when the target index is still missing.
 do $$
 begin
   if to_regclass('public.move_jobs_user_time') is not null
@@ -50,8 +51,8 @@ end $$;
 create index if not exists fs_jobs_user_time on fs_jobs (user_id, created_at desc);
 create index if not exists fs_jobs_active on fs_jobs (status) where status in ('pending', 'running');
 
--- 008 每次 migrate 都会把 move_jobs 重新 create 出来（if not exists）。
--- 如果它已经是空壳了，就清掉，别在库里留一张没用的表。
+-- 008 re-creates move_jobs on every migrate (if not exists).
+-- If it is already an empty shell, drop it rather than leave a dead table in the database.
 do $$
 begin
   if to_regclass('public.fs_jobs') is not null

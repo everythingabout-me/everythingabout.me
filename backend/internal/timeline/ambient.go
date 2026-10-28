@@ -11,18 +11,19 @@ import (
 	"time"
 )
 
-// CSVAmbientExtractor 处理最简单的健康/运动数据：
+// CSVAmbientExtractor handles the simplest health and fitness data:
 //
 //	date,resting_hr,sleep_hours,steps
 //	2025-06-01,54,7.2,6840
 //
-// 或长表：
+// or the long form:
 //
 //	date,metric,value,unit
 //	2025-06-01,resting_hr,54,bpm
 //
-// 它不负责 Apple Health 的 export.xml、手环私有格式。那些接入时实现
-// AmbientExtractor 接口再注册即可，timeline 的其它部分不用动。
+// It does not handle Apple Health's export.xml or vendor-specific wearable formats.
+// For those, implement the AmbientExtractor interface and register it; nothing else
+// in the timeline changes.
 type CSVAmbientExtractor struct{}
 
 func (CSVAmbientExtractor) Name() string { return "csv" }
@@ -87,7 +88,7 @@ func (CSVAmbientExtractor) Extract(
 			break
 		}
 		if err != nil {
-			// 单行坏掉不影响其它行；CSV 里这种情况很常见。
+			// One bad row must not kill the rest; it is common in CSVs.
 			continue
 		}
 		rows++
@@ -186,7 +187,7 @@ func cleanMetric(value string) string {
 	return truncateRunes(value, 32)
 }
 
-// splitUnit 把 "resting_hr(bpm)" 拆成 "resting_hr" + "bpm"。
+// splitUnit splits "resting_hr(bpm)" into "resting_hr" + "bpm".
 func splitUnit(header string) (label, unit string) {
 	header = strings.TrimSpace(header)
 	open := strings.LastIndexAny(header, "(（")

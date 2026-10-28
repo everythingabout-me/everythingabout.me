@@ -20,15 +20,15 @@ import (
 )
 
 const (
-	// 预签名上传地址的有效期，也是上传会话的有效期。
+	// lifetime of the presigned upload URLs, and of the upload session itself.
 	uploadTTL = time.Hour
-	// 单次 PutObject 的上限；超过这个就走分片。
+	// limit for a single PutObject; past this, go multipart.
 	uploadSingleMax = int64(5) << 30
-	// 单个对象的上限，给个保守值。
+	// per-object cap, kept conservative.
 	uploadMaxObject = int64(5) << 40 // 5 TiB
-	// 分片大小下限（COS 要求除最后一片外不小于 1 MiB）。
+	// minimum part size (COS wants at least 1 MiB for every part but the last).
 	uploadMinPartSize = int64(5) << 20
-	// 一次响应里最多给多少个分片地址，控制响应体积。
+	// caps how many part URLs one response carries, to keep the response small.
 	uploadMaxParts = 1000
 	isoFormat      = "2006-01-02T15:04:05.000Z"
 )
@@ -69,7 +69,7 @@ func newUploadID() (string, error) {
 	return "u_" + hex.EncodeToString(buf), nil
 }
 
-// partSizeFor 选一个分片大小，让分片数不超过 uploadMaxParts。
+// partSizeFor picks a part size that keeps the part count at or below uploadMaxParts.
 func (s *Server) partSizeFor(size int64) int64 {
 	partSize := s.cfg.UploadPartSize
 	if partSize < uploadMinPartSize {
@@ -84,8 +84,8 @@ func (s *Server) partSizeFor(size int64) int64 {
 	return partSize
 }
 
-// handleAPIUpload 建一个上传会话，下发预签名地址。
-// 小文件给一个 PUT 地址；超过阈值的给一组分片地址。
+// handleAPIUpload creates an upload session and hands out presigned URLs.
+// Small files get one PUT URL; files over the threshold get a set of part URLs.
 func (s *Server) handleAPIUpload(w http.ResponseWriter, r *http.Request) error {
 	p, err := s.principal(r)
 	if err != nil {
@@ -134,9 +134,9 @@ func (s *Server) handleAPIUpload(w http.ResponseWriter, r *http.Request) error {
 	if err := s.checkQuota(r.Context(), p.User.ID, body.Size, existing); err != nil {
 		return err
 	}
-	// 同一个路径有历史软删除记录时，先挪走，否则新对象会覆盖它。
+	// move aside any historical soft-deleted row on this path, or the new object overwrites it.
 
-	// 同一路径只允许一个未完成的上传。
+	// only one unfinished upload per path.
 	if err := s.cancelPendingUploads(r.Context(), p.User.ID, path); err != nil {
 		return err
 	}
@@ -182,7 +182,7 @@ func (s *Server) handleAPIUpload(w http.ResponseWriter, r *http.Request) error {
 		return nil
 	}
 
-	// 分片上传：先在 COS 建 multipart，再给每一片签一个 PUT 地址。
+	// multipart upload: create the multipart in COS first, then sign one PUT URL per part.
 	partSize := s.partSizeFor(body.Size)
 	count := int((body.Size + partSize - 1) / partSize)
 	providerID, err := s.storage.InitiateMultipart(r.Context(), key)
@@ -196,7 +196,7 @@ func (s *Server) handleAPIUpload(w http.ResponseWriter, r *http.Request) error {
 			r.Context(), key, providerID, number, int(uploadTTL.Seconds()),
 		)
 		if err != nil {
-			// 签不出来就别留一个半死不活的 multipart 在桶里。
+			// if signing fails, do not leave a half-dead multipart behind in the bucket.
 			_ = s.storage.AbortMultipart(context.Background(), key, providerID)
 			return err
 		}
@@ -228,7 +228,7 @@ func (s *Server) handleAPIUpload(w http.ResponseWriter, r *http.Request) error {
 	return nil
 }
 
-// handleAPIComplete 在客户端传完字节后调用：校验对象、落索引。
+// handleAPIComplete runs after the client has sent all bytes: verify the object, then index it.
 func (s *Server) handleAPIComplete(w http.ResponseWriter, r *http.Request) error {
 	p, err := s.principal(r)
 	if err != nil {
@@ -246,7 +246,7 @@ func (s *Server) handleAPIComplete(w http.ResponseWriter, r *http.Request) error
 	if err != nil {
 		return err
 	}
-	// 别人的会话也返回 404，不泄露存在性。
+	// someone else's session is also 404, so existence never leaks.
 	if session == nil || session.UserID != p.User.ID {
 		return httpx.NotFound("upload session not found")
 	}
@@ -327,7 +327,8 @@ func (s *Server) handleAPIComplete(w http.ResponseWriter, r *http.Request) error
 
 	if _, err := s.db.Pool().Exec(r.Context(),
 		`update upload_sessions set completed_at = now() where id = $1`, session.ID); err != nil {
-		// 索引已经写了，这里失败只影响幂等判断，不值得把请求判失败。
+		// the index is already written; failing here only weakens idempotency checks,
+		// not worth failing the request over
 		slog.Warn("upload: failed to mark session complete", "uploadId", session.ID, "error", err)
 	}
 
@@ -371,8 +372,8 @@ func completeParts(raw []struct {
 	return parts, nil
 }
 
-// cancelPendingUploads 把同一路径没完成的会话标成取消，并 abort 掉 COS 侧的
-// multipart（否则碎片会一直占空间）。
+// cancelPendingUploads marks unfinished sessions for the same path as cancelled and aborts
+// the COS multipart (otherwise the parts keep taking up space).
 func (s *Server) cancelPendingUploads(ctx context.Context, userID, path string) error {
 	rows, err := s.db.Pool().Query(ctx,
 		`select id, provider_upload_id from upload_sessions
@@ -410,7 +411,8 @@ func (s *Server) cancelPendingUploads(ctx context.Context, userID, path string) 
 	return err
 }
 
-// cleanupExpiredUploads 清掉一天前过期、还没完成的分片会话，顺手 abort。
+// cleanupExpiredUploads clears multipart sessions that expired more than a day ago and
+// aborts them along the way.
 func (s *Server) cleanupExpiredUploads(ctx context.Context) {
 	rows, err := s.db.Pool().Query(ctx,
 		`select id, path, user_id::text, provider_upload_id from upload_sessions
@@ -467,8 +469,8 @@ func (s *Server) loadUploadSession(ctx context.Context, id string) (*uploadSessi
 
 // ---- GET /upload/{id} ----
 
-// handleAPIUploadStatus 让客户端断了之后先问"传到哪了"，再补剩下的分片。
-// 服务端不记分片，直接问 COS（ListParts）。
+// handleAPIUploadStatus lets a client that lost the connection ask "how far did this get?"
+// before sending the remaining parts. The server tracks no parts; it asks COS directly (ListParts).
 func (s *Server) handleAPIUploadStatus(w http.ResponseWriter, r *http.Request) error {
 	p, err := s.principal(r)
 	if err != nil {
@@ -478,7 +480,7 @@ func (s *Server) handleAPIUploadStatus(w http.ResponseWriter, r *http.Request) e
 	if err != nil {
 		return err
 	}
-	// 别人的会话也返回 404，不泄露存在性。
+	// someone else's session is also 404, so existence never leaks.
 	if session == nil || session.UserID != p.User.ID {
 		return httpx.NotFound("upload session not found")
 	}

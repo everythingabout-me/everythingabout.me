@@ -1,4 +1,4 @@
--- 分片上传：记住 COS 那边的 uploadId，complete 时用它合并分片。
+-- Multipart upload: remember the uploadId on the COS side and use it to merge parts on complete.
 
 alter table upload_sessions
   add column if not exists provider_upload_id text not null default '';

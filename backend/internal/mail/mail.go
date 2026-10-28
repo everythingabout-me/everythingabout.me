@@ -1,4 +1,4 @@
-// Package mail 发送邮箱验证码（腾讯云 SES）。
+// Package mail sends email verification codes (Tencent Cloud SES).
 package mail
 
 import (
@@ -31,11 +31,13 @@ type sendEmailResponse struct {
 	RequestID string `json:"RequestId"`
 }
 
-// SendVerificationCode 发验证码。
-//   - 配好 SES：真实发信
-//   - 没配且是开发环境：打印到服务端日志，并把验证码返回给页面自动填入
-//   - 没配且是生产环境：明确报错，不静默
-func (s *Sender) SendVerificationCode(ctx context.Context, to, code string) (string, error) {
+// SendVerificationCode sends a verification code in the given locale ("zh" or "en"; anything else
+// falls back to English, the default template).
+//   - SES configured: send real mail
+//   - Not configured and in development: log it on the server and return the code so the
+//     page can fill it in automatically
+//   - Not configured and in production: report an error explicitly, never stay silent
+func (s *Sender) SendVerificationCode(ctx context.Context, to, code, locale string) (string, error) {
 	if !s.Configured() {
 		if s.cfg.IsProduction() {
 			return "", httpx.ServiceUnavailable("email service is not configured; cannot send verification codes")
@@ -44,6 +46,8 @@ func (s *Sender) SendVerificationCode(ctx context.Context, to, code string) (str
 		return code, nil
 	}
 
+	subject, templateID := s.emailTemplate(locale)
+
 	templateData, err := templateDataJSON(s.cfg.SES.TemplateVar, code)
 	if err != nil {
 		return "", err
@@ -51,13 +55,13 @@ func (s *Sender) SendVerificationCode(ctx context.Context, to, code string) (str
 
 	payload := map[string]any{
 		"FromEmailAddress": s.cfg.SES.FromEmailAddress,
-		"Subject":          s.cfg.SES.Subject,
+		"Subject":          subject,
 		"Destination":      []string{to},
 		"Template": map[string]any{
-			"TemplateID":   s.cfg.SES.TemplateID,
+			"TemplateID":   templateID,
 			"TemplateData": templateData,
 		},
-		// 1 = 触发类邮件（验证码这类即时邮件）
+		// 1 = triggered mail (instant mail such as a verification code)
 		"TriggerType": 1,
 	}
 	if s.cfg.SES.ReplyTo != "" {
@@ -72,7 +76,21 @@ func (s *Sender) SendVerificationCode(ctx context.Context, to, code string) (str
 	return "", nil
 }
 
-// templateDataJSON 生成 {"<var>":"<code>"}，对编码后的值做最小转义。
+// emailTemplate returns the subject and SES template id for a locale. The default pair is English;
+// the Chinese overrides are optional, and anything Chinese requests cannot resolve falls back to
+// the default so a half-configured deployment still sends mail.
+func (s *Sender) emailTemplate(locale string) (string, int64) {
+	if locale != "zh" || s.cfg.SES.TemplateIDZh <= 0 {
+		return s.cfg.SES.Subject, s.cfg.SES.TemplateID
+	}
+	subject := s.cfg.SES.SubjectZh
+	if subject == "" {
+		subject = s.cfg.SES.Subject
+	}
+	return subject, s.cfg.SES.TemplateIDZh
+}
+
+// templateDataJSON builds {"<var>":"<code>"}, minimally escaping the value.
 func templateDataJSON(name, code string) (string, error) {
 	if name == "" {
 		name = "code"

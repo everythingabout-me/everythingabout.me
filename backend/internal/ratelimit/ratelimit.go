@@ -1,5 +1,6 @@
-// Package ratelimit 是单进程内存限流，够挡住暴力猜密码和批量注册。
-// 多实例部署时每个实例各算各的，真要严格限流得换 Redis。
+// Package ratelimit is in-process, in-memory rate limiting: enough to stop password guessing
+// and bulk registration. With multiple instances each one keeps its own count; strict
+// limiting would need Redis.
 package ratelimit
 
 import (
@@ -30,7 +31,7 @@ func New() *Limiter {
 	}
 }
 
-// Allow 返回是否放行以及建议的重试秒数。
+// Allow reports whether the request passes, along with the suggested retry delay in seconds.
 func (l *Limiter) Allow(key string, limit int, window time.Duration) (bool, int) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -63,7 +64,7 @@ func (l *Limiter) Allow(key string, limit int, window time.Duration) (bool, int)
 	return true, 0
 }
 
-// Enforce 在超限时返回 429。
+// Enforce returns a 429 once the limit is exceeded.
 func (l *Limiter) Enforce(key string, limit int, window time.Duration) error {
 	ok, retryAfter := l.Allow(key, limit, window)
 	if !ok {

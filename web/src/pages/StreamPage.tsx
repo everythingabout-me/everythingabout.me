@@ -16,13 +16,14 @@ import { formatEventDate } from "../i18n/format";
 import styles from "./StreamPage.module.css";
 
 /**
- * 时间线：一层扁平的事件流。
+ * The timeline: one flat stream of events.
  *
- * 设计见 docs/design/timeline.md §17 和 docs/design/events.md。三条硬规则：
- *   1. 没有年 / 月标题，也没有「N 个文件 / N 个事件」——每张卡自带完整日期；
- *   2. 卡片按 type 渲染：photo / note / metric 用我们的版式，html 是应用自己的，
- *      跑在 sandbox iframe 里（脚本禁掉 + 注入设计 token）；
- *   3. 没有编辑，也没有「查看详情」按钮：有 detail_url 时只有标题是链接。
+ * See docs/design/timeline.md section 17 and docs/design/events.md. Three hard rules:
+ *   1. No year/month headings and no "N files / N events" counters — every card carries its own
+ *      full date;
+ *   2. Cards render by type: photo / note / metric use our layout, while html comes from the app
+ *      and runs in a sandboxed iframe (scripts disabled + design tokens injected);
+ *   3. No editing and no "view details" button: when detail_url exists, only the title is a link.
  */
 export function StreamPage() {
   const { user } = useLoaderData() as { user: AuthUser };
@@ -99,7 +100,7 @@ export function StreamPage() {
     void loadInitial();
   }, [loadInitial]);
 
-  // 整理进行中时轮询状态；结束时自动刷新一次，让新事件出现。
+  // Poll status while organization is running; refresh once when it ends so new events show up.
   useEffect(() => {
     const pending = status?.pending ?? 0;
     if (pending > 0) {
@@ -120,7 +121,7 @@ export function StreamPage() {
         const latest = await api.streamStatus();
         if (!cancelled) setStatus(latest);
       } catch {
-        // 状态轮询失败不打扰阅读。
+        // A failed status poll should not interrupt reading.
       }
     }, 4000);
     return () => {
@@ -295,13 +296,15 @@ function EventCard({ event }: { event: TimelineEvent }) {
 }
 
 /**
- * HtmlCard 把三方应用的 HTML 放在 sandbox iframe 里渲染。
+ * HtmlCard renders a third-party app's HTML inside a sandboxed iframe.
  *
- * - sandbox 不带 allow-scripts：脚本、表单、顶层跳转全部禁掉；
- * - 文档里只注入一组设计 token（--eam-*），卡片可以跟随明暗主题，也可以完全不用；
- * - 高度由 payload 给，服务端 clamp 过（40–640）。
+ * - The sandbox omits allow-scripts: scripts, forms and top-level navigation are all blocked;
+ * - The document only receives a set of design tokens (--eam-*); a card may follow the light/dark
+ *   theme or ignore it entirely;
+ * - The height comes from the payload and is clamped server-side (40–640).
  *
- * 不要把它改成 dangerouslySetInnerHTML：样式、事件、暗色模式会一起漏进来。
+ * Do not turn this into dangerouslySetInnerHTML: styles, event handling and dark mode would leak
+ * in along with it.
  */
 function HtmlCard({ event }: { event: TimelineEvent }) {
   const tokens = useCardTokens();

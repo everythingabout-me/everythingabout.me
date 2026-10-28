@@ -12,10 +12,12 @@ import (
 	"everythingabout.me/backend/internal/store"
 )
 
-// New 构造内容流服务。Enabled=false 时接口仍可读，但不会启动整理器。
+// New builds the stream service. With Enabled=false the API stays readable, but the
+// organizer never starts.
 //
-// eventPublisher 是事件的写入口（internal/events）。流水线不直接写表：
-// 事件的校验、去重、媒体解析都在那个包里，这里只负责"选哪些片段"。
+// eventPublisher is the write path for events (internal/events). The pipeline never
+// writes those tables itself: validation, deduplication and media resolution live in
+// that package; this one only decides which segments are published.
 func New(db *store.DB, objectStorage storage.Storage, cfg config.Timeline, eventPublisher *events.Service) *Service {
 	return &Service{
 		db:      db,
@@ -26,9 +28,10 @@ func New(db *store.DB, objectStorage storage.Storage, cfg config.Timeline, event
 	}
 }
 
-// Notify 在文件变动后调用。只排一个 scan：它处理最近三天变化的文件。
-// 缺失历史数据由启动时和每 20 分钟的 sweeper 排 backfill，避免每次上传都做一次
-// "整个库有没有漏文件"的重查询。
+// Notify is called after files change. It queues only a scan, which handles files
+// modified in the last three days. Missing history is queued as backfill at startup
+// and by the 20-minute sweeper, so an upload never triggers a whole-library
+// "did we miss a file" query.
 func (s *Service) Notify(userID string) {
 	if !s.cfg.Enabled {
 		return
@@ -40,12 +43,13 @@ func (s *Service) Notify(userID string) {
 	}
 }
 
-// Status 返回"还有多少在整理"。
+// Status reports how much organizing is still in flight.
 func (s *Service) Status(ctx context.Context, userID string) (Status, error) {
 	return s.status(ctx, userID)
 }
 
-// Feed 读取从 before 往前的若干个月。只返回"有内容"的月份，中间的空档交给前端表达。
+// Feed reads a few months back from before. Only months with content are returned;
+// the gaps in between are the frontend's to express.
 func (s *Service) Feed(ctx context.Context, userID string, before string, months int) (*Feed, error) {
 	status, err := s.status(ctx, userID)
 	if err != nil {
@@ -117,7 +121,8 @@ func (s *Service) month(ctx context.Context, userID string, month time.Time) (*M
 		return nil, err
 	}
 	if snapshot == nil {
-		// 还没轮到整理：先给一个月标题 + 文件数，前端显示骨架/整理中。
+		// Not organized yet: return a month header plus the file count, and the frontend
+		// shows a skeleton / in-progress state.
 		count, _, err := s.monthStats(ctx, userID, month, monthEnd(month))
 		if err != nil {
 			return nil, err
@@ -160,8 +165,8 @@ func (s *Service) signMonth(ctx context.Context, userID string, month *Month) {
 	}
 }
 
-// Rebuild 是给用户/开发用的强制重算：丢掉这个用户的分析结果，从头再来。
-// 正常路径不需要它；它的代价是 O(文件数)。
+// Rebuild is the forced recompute for users and developers: drop this user's analysis
+// results and start over. The normal path never needs it; it costs O(file count).
 func (s *Service) Rebuild(ctx context.Context, userID string) error {
 	tx, err := s.db.Pool().Begin(ctx)
 	if err != nil {
@@ -169,7 +174,7 @@ func (s *Service) Rebuild(ctx context.Context, userID string) error {
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
-	// 正在跑的回填直接作废，避免它把旧游标停在半路。
+	// Void any running backfill so it cannot park an old cursor halfway through.
 	if _, err := tx.Exec(ctx,
 		`update timeline_jobs
 		    set status = 'done', lease_until = null, error = 'superseded by rebuild'
@@ -189,7 +194,7 @@ func (s *Service) Rebuild(ctx context.Context, userID string) error {
 	return tx.Commit(ctx)
 }
 
-// ---------- 月快照构建（worker 调用） ----------
+// ---------- month snapshot build (called by the worker) ----------
 
 func (s *Service) rebuildMonth(ctx context.Context, userID string, month time.Time) error {
 	start := month
@@ -233,8 +238,9 @@ func (s *Service) rebuildMonth(ctx context.Context, userID string, month time.Ti
 		return err
 	}
 
-	// 选中的片段写成事件——这是时间线真正读的东西（v0.4 起）。
-	// 同一批照片重跑不会重复：producer_key 唯一，冲突时只更新。
+	// The selected segments become events — the only thing the stream actually reads
+	// (since v0.4). Re-running the same photos creates no duplicates: producer_key is
+	// unique, so a conflict only updates.
 	if err := s.events.PublishAuto(ctx, userID, autoEvents(selected, assets, s.engine.Location)); err != nil {
 		return err
 	}
@@ -247,20 +253,23 @@ func (s *Service) rebuildMonth(ctx context.Context, userID string, month time.Ti
 	if err := s.saveSnapshot(ctx, userID, month, payload, fileCount, sourceRev); err != nil {
 		return err
 	}
-	// 下面这段是 v0.3 的月快照。前端已经改读 events，这里暂时保留写入，
-	// 等确认没人读之后再删（见 sql/013_events.sql 的注释）。
+	// The month snapshot is v0.3 legacy. The frontend reads events now; the write stays
+	// for the moment and can go once nothing reads it (see sql/013_events.sql).
 	slog.Debug("timeline: month rebuilt",
 		"user", userID, "month", month.Format("2006-01"),
 		"files", fileCount, "candidates", len(candidates), "selected", len(selected))
 	return nil
 }
 
-// autoEvents 把选中的片段映射成事件投稿。
+// autoEvents maps the selected segments into event submissions.
 //
-// 取舍：
-//   - 媒体最多 4 张（photo 类型的上限）。九宫格留给以后的类型，不要为一个格子放宽约束。
-//   - 标题用 Narrator 生成的标题，副标题进 meta（"5 月 3 日 · 9 张"这种）。
-//   - 正文留空：启发式写不出一句话，宁可没有，也不要废话。
+// Tradeoffs:
+//   - At most 4 media (the photo type's cap). The 9-cell grid belongs to a future
+//     type; do not loosen the constraint for one layout.
+//   - The title is the one the Narrator produced; the subtitle goes into meta (a
+//     rendered date plus a count).
+//   - The body stays empty: heuristics cannot write a sentence, and nothing beats no
+//     filler.
 func autoEvents(selected []Moment, assets []Asset, loc *time.Location) []events.AutoInput {
 	byPath := make(map[string]Asset, len(assets))
 	byID := make(map[string]Asset, len(assets))
@@ -333,7 +342,8 @@ func (s *Service) buildPayload(
 		item := momentItem(*moment, assetByID)
 		items = append(items, item)
 
-		// 跨天事件把中间的日期也标成"有内容"，避免再插一条空白。
+		// A multi-day moment also marks the days in between as covered, so no extra gap
+		// row gets inserted.
 		for day := moment.LocalDate; ; day = day.AddDate(0, 0, 1) {
 			covered[day.Format("2006-01-02")] = true
 			if !day.Before(momentEndDay(*moment)) {
@@ -342,7 +352,7 @@ func (s *Service) buildPayload(
 		}
 	}
 
-	// 没被任何片段覆盖、且确实有文件的日子，攒成一条压缩空白行。
+	// Days with files that no segment covers accumulate into one collapsed gap row.
 	monthFirst := month
 	monthLast := monthEnd(month).AddDate(0, 0, -1)
 	runStart := time.Time{}
@@ -419,7 +429,8 @@ func momentItem(moment Moment, assets map[string]Asset) Item {
 		Score:     moment.Score,
 	}
 
-	// 封面优先；其余按"照片优先、视频靠后"排，避免九宫格第一屏全是视频占位。
+	// Cover first; the rest sort photos ahead of videos so the grid's first screen is
+	// not all video placeholders.
 	ordered := make([]Asset, 0, len(moment.ItemIDs))
 	if cover, ok := assets[moment.CoverNodeID]; ok {
 		ordered = append(ordered, cover)

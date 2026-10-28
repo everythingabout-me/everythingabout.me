@@ -37,7 +37,7 @@ export const router = createBrowserRouter([
       {
         path: "/login",
         element: <LoginPage />,
-        // 已经登录的人不该再看到登录页
+        // Someone already signed in should not see the login page again
         loader: async () => {
           if (await api.me()) throw redirect("/");
           return null;
@@ -55,7 +55,7 @@ export const router = createBrowserRouter([
           }
         },
       },
-      // 登录和注册已经合并到 /login
+      // Sign-in and sign-up are merged into /login
       { path: "/register", loader: () => redirect("/login") },
       { path: "*", loader: () => redirect("/") },
     ],

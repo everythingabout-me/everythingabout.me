@@ -6,13 +6,14 @@ import (
 	"everythingabout.me/backend/internal/config"
 )
 
-// Engine 把可替换的四个环节串起来。默认全是启发式实现；
-// 接多模态 / 大模型时只需要在构造后替换字段：
+// Engine wires the four replaceable stages together. All of them default to
+// heuristics; to plug in multimodal models or an LLM, swap the fields after
+// construction:
 //
 //	engine.Analyzer = multimodal.New(...)
 //	engine.Scorer   = llmScorer.New(...)
 //
-// 上层（worker、快照、接口）不感知实现。
+// Callers above (worker, snapshots, API) never see the implementation.
 type Engine struct {
 	Analyzer Analyzer
 	Grouper  Grouper
@@ -23,7 +24,7 @@ type Engine struct {
 	Budget   int
 }
 
-// NewEngine 用配置文件构造默认引擎。
+// NewEngine builds the default engine from config.
 func NewEngine(cfg config.Timeline) *Engine {
 	location, err := time.LoadLocation(cfg.Timezone)
 	if err != nil || location == nil {
@@ -44,7 +45,7 @@ func NewEngine(cfg config.Timeline) *Engine {
 	}
 }
 
-// localDate 把事件时间落到"用户所在时区的那一天"。
+// localDate snaps an event time to the day it falls on in the user's timezone.
 func (e *Engine) localDate(event time.Time) time.Time {
 	loc := e.Location
 	if loc == nil {

@@ -1,14 +1,14 @@
 /**
- * 哪些扩展名值得进预览。
+ * Which extensions are worth previewing.
  *
- * 这份清单必须和 `FilePreview.tsx` 里启用的插件保持一致：多写会让用户在“空预览”
- * 上白等一次 190KB 的 chunk，少写则是明明能看却打不开。
+ * This list must match the plugins enabled in `FilePreview.tsx`: too many entries make users wait
+ * on a 190KB chunk for an empty preview, too few leave viewable files unopenable.
  *
- * 这里刻意不 import `@open-file-viewer/core`——DrivePage 每次渲染都要判断，
- * 一旦静态引用核心包，按需加载就白做了。所以清单是手写的。
+ * It deliberately does not import `@open-file-viewer/core` — DrivePage checks on every render, so
+ * a static reference to the core package would defeat lazy loading. Hence the hand-written list.
  */
 const previewableExtensions: ReadonlySet<string> = new Set([
-  // 图片（imagePlugin，含 heic/heif 的 wasm 解码）
+  // Images (imagePlugin, including the wasm decoder for heic/heif)
   "jpg",
   "jpeg",
   "png",
@@ -22,9 +22,9 @@ const previewableExtensions: ReadonlySet<string> = new Set([
   "tiff",
   "heic",
   "heif",
-  // PDF（pdfPlugin，pdfjs 懒加载）
+  // PDF (pdfPlugin, pdfjs loaded lazily)
   "pdf",
-  // Office（officePlugin：docx / xlsx / pptx 各有独立渲染器）
+  // Office (officePlugin: docx / xlsx / pptx each get their own renderer)
   "doc",
   "docx",
   "docm",
@@ -58,7 +58,7 @@ const previewableExtensions: ReadonlySet<string> = new Set([
   "fodp",
   "key",
   "dps",
-  // 纯文本 / 源码 / 结构化文本（textPlugin）
+  // Plain text / source code / structured text (textPlugin)
   "txt",
   "text",
   "log",
@@ -113,7 +113,7 @@ const previewableExtensions: ReadonlySet<string> = new Set([
   "srt",
   "vtt",
   "lrc",
-  // 音视频（videoPlugin / audioPlugin，hls 和 mpegts 按需加载）
+  // Audio and video (videoPlugin / audioPlugin; hls and mpegts load on demand)
   "mp4",
   "m4v",
   "mov",
@@ -135,7 +135,7 @@ const previewableExtensions: ReadonlySet<string> = new Set([
   "weba",
 ]);
 
-/** 文件名 → 扩展名，大小写不敏感；没有扩展名（或像 .bashrc 这种纯后缀）一律不预览。 */
+/** Filename -> extension, case-insensitive; a missing extension (e.g. .bashrc) means no preview. */
 export function canPreviewFile(name: string): boolean {
   const dot = name.lastIndexOf(".");
   if (dot <= 0 || dot === name.length - 1) return false;

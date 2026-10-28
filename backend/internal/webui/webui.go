@@ -1,4 +1,4 @@
-// Package webui 服务前端构建产物，并为 React Router 做 SPA 回退。
+// Package webui serves the built frontend and does the SPA fallback for React Router.
 package webui
 
 import (
@@ -31,7 +31,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
-	// 只接受 GET / HEAD，其余方法交给 404
+	// Only GET and HEAD are accepted; other methods fall through to a 404
 	if r.Method != http.MethodGet && r.Method != http.MethodHead {
 		http.NotFound(w, r)
 		return
@@ -55,7 +55,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			http.ServeFile(w, r, full)
 			return
 		}
-		// 带扩展名的资源找不到就是 404，不要把 index.html 当成 js 返回
+		// A missing asset with an extension is a 404; never return index.html in place of a .js file
 		if strings.Contains(path.Base(clean), ".") {
 			http.NotFound(w, r)
 			return

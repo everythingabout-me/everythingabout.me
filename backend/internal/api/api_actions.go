@@ -16,22 +16,22 @@ import (
 )
 
 const (
-	// 没带 Prefer 时，服务端最多同步等这么久；超过就回 202。
+	// without Prefer, the server waits synchronously this long at most; past that, 202.
 	defaultSyncBudget = 30 * time.Second
-	// Prefer: respond-async, wait=N 里 N 的上限。
+	// upper bound for N in Prefer: respond-async, wait=N.
 	maxAsyncWait = 60 * time.Second
 )
 
-// preferAsync 是 RFC 7240 的 Prefer: respond-async[, wait=N]。
-// 服务端允许忽略它（RFC 也这么写），所以客户端必须两种响应都认。
+// preferAsync is RFC 7240's Prefer: respond-async[, wait=N].
+// Servers are allowed to ignore it (the RFC says as much), so clients must handle both responses.
 type preferAsync struct {
 	Requested bool
 	Wait      time.Duration
 }
 
-// parsePrefer 只认 respond-async 和 wait=N，其余偏好一律忽略。
-// wait 既可以写在同一个 preference 里（respond-async; wait=10），
-// 也可以像 RFC 例子那样平铺（respond-async, wait=10）。
+// parsePrefer understands only respond-async and wait=N; every other preference is ignored.
+// wait may ride inside the same preference (respond-async; wait=10), or be flat
+// like the RFC example (respond-async, wait=10).
 func parsePrefer(header string) preferAsync {
 	var pref preferAsync
 	for _, item := range strings.Split(header, ",") {
@@ -68,7 +68,7 @@ func (p *preferAsync) applyParam(param string) {
 	p.Wait = wait
 }
 
-// Budget 是这次请求愿意同步等多久。0 表示"别等，立刻回 202"。
+// Budget is how long this request is willing to wait synchronously. 0 means "don't wait, 202 now".
 func (p preferAsync) Budget() time.Duration {
 	if p.Requested {
 		return p.Wait
@@ -76,8 +76,8 @@ func (p preferAsync) Budget() time.Duration {
 	return defaultSyncBudget
 }
 
-// writeJobResult 把一个动作的结果写回去：做完了 200，没做完 202 + Location。
-// 两边的 body 同形，客户端一个解析器就够。
+// writeJobResult writes an action's result back: 200 when done, 202 + Location when not.
+// Both bodies share a shape, so one client parser covers both.
 func writeJobResult(w http.ResponseWriter, action string, job *jobs.Job) {
 	if job.Status == "failed" {
 		httpx.WriteJSON(w, http.StatusInternalServerError, map[string]any{
@@ -107,7 +107,7 @@ func auditStatus(job *jobs.Job) int {
 	return http.StatusAccepted
 }
 
-// runJob 起一个后台作业，然后按 Prefer 的预算等一会儿。
+// runJob starts a background job, then waits for the Prefer budget.
 func (s *Server) runJob(
 	r *http.Request,
 	op jobs.Op,
@@ -121,7 +121,7 @@ func (s *Server) runJob(
 	return s.jobs.Wait(r.Context(), userID, job.ID, pref.Budget())
 }
 
-// assertParentDirs 防止在文件底下长出一棵子树（POSIX 也不允许）。
+// assertParentDirs stops a subtree from growing under a file (POSIX forbids that too).
 func (s *Server) assertParentDirs(ctx context.Context, userID, path string) error {
 	for _, dir := range paths.AncestorsOf(path) {
 		node, err := s.nodes.Live(ctx, dir, userID)
@@ -172,12 +172,12 @@ func (s *Server) handleAPIMkdir(w http.ResponseWriter, r *http.Request) error {
 		if !existing.IsDir {
 			return httpx.Conflict("a file with the same name already exists")
 		}
-		// 已经在了就是幂等的：agent 重试不该收到 409。
+		// already there means idempotent: an agent retry should not get a 409.
 		httpx.WriteJSON(w, http.StatusOK, toAPINode(existing))
 		return nil
 	}
 
-	// mkdir -p：父目录没有就一起建。
+	// mkdir -p: create missing parents along the way.
 	if err := s.nodes.EnsureParents(r.Context(), path, p.User.ID); err != nil {
 		return err
 	}
@@ -190,7 +190,7 @@ func (s *Server) handleAPIMkdir(w http.ResponseWriter, r *http.Request) error {
 		return err
 	}
 	if node == nil {
-		// 并发建同一个目录，别人先落了库。
+		// a concurrent create of the same directory won the insert.
 		if node, err = s.nodes.Live(r.Context(), path, p.User.ID); err != nil {
 			return err
 		}
@@ -263,7 +263,7 @@ func (s *Server) handleAPICopy(w http.ResponseWriter, r *http.Request) error {
 		if !body.Overwrite {
 			return httpx.Conflict("target path already exists")
 		}
-		// 覆盖 = 把目标彻底删掉，没有回收站可言。
+		// overwrite means the target is purged outright; there is no trash.
 		if _, err := s.nodes.Purge(r.Context(), to, p.User.ID); err != nil {
 			return err
 		}
@@ -311,7 +311,8 @@ func (s *Server) handleAPICopy(w http.ResponseWriter, r *http.Request) error {
 	return nil
 }
 
-// sourceAndTarget 校验 from/to：都不是根、不相等、不互相包含，并且都在令牌范围内。
+// sourceAndTarget validates from/to: neither is root, they differ, neither contains
+// the other, and both stay inside the token's scope.
 func sourceAndTarget(rawFrom, rawTo string, p *auth.Principal) (string, string, error) {
 	from, err := paths.Normalize(rawFrom)
 	if err != nil {
@@ -345,7 +346,7 @@ func sourceAndTarget(rawFrom, rawTo string, p *auth.Principal) (string, string, 
 	return from, to, nil
 }
 
-// sourceMeta 把源文件的 meta（sha256 之类）带过去，内容一样，指纹也一样。
+// sourceMeta carries the source's meta (sha256 and the like) over: same bytes, same fingerprint.
 func sourceMeta(row *nodes.Row) map[string]any {
 	if len(row.Meta) == 0 {
 		return nil

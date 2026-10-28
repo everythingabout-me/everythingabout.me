@@ -2,7 +2,10 @@ import { isRouteErrorResponse, useRouteError } from "react-router";
 import { t } from "../i18n";
 import styles from "../styles/auth.module.css";
 
-/** 路由错误不一定是 Error：也可能是 react-router 的 ErrorResponse 或 loader 抛出的任意值。 */
+/**
+ * A route error is not always an Error: it can be react-router's ErrorResponse, or anything
+ * a loader threw.
+ */
 function errorMessage(error: unknown): string {
   if (isRouteErrorResponse(error)) {
     const status = `${error.status} ${error.statusText}`.trim();

@@ -15,12 +15,13 @@ import (
 	"time"
 )
 
-// ---------- 默认实现：只看索引元数据，不下载原图 ----------
+// ---------- default implementation: index metadata only, no image downloads ----------
 
-// HeuristicAnalyzer 是 P0 的分析器。它只读文件路径、大小、mime 和修改时间。
+// HeuristicAnalyzer is the P0 analyzer. It reads only path, size, mime and mtime.
 //
-// 它明确不做的事（以后由多模态 Analyzer 接）：EXIF 拍摄时间、GPS、画面内容、
-// 清晰度/审美、人脸、视频关键帧。接口保持不变，所以可以逐个替换。
+// What it deliberately skips (a multimodal Analyzer takes over later): EXIF capture
+// time, GPS, image content, sharpness and aesthetics, faces, video keyframes. The
+// interface stays put, so each of those can be swapped in on its own.
 type HeuristicAnalyzer struct {
 	Location *time.Location
 }
@@ -42,8 +43,9 @@ func (a HeuristicAnalyzer) Analyze(_ context.Context, file FileInput) (Facts, er
 		confidence = 0.2
 	}
 
-	// 路径里带日期（Photos/2025/09/14、2025-9-14 第三届…）通常比
-	// "今天上传"更接近真实发生的时间。差得远才采用，避免覆盖正常拍摄时间。
+	// A date in the path (Photos/2025/09/14, 2025-9-14 ...) is usually closer to when
+	// things actually happened than "uploaded today". Only take it when the two are far
+	// apart, so a normal capture time is never overwritten.
 	loc := a.Location
 	if loc == nil {
 		loc = time.UTC
@@ -85,17 +87,19 @@ func (a HeuristicAnalyzer) Analyze(_ context.Context, file FileInput) (Facts, er
 	}, nil
 }
 
-// SessionGrouper 按「同一天 + 相邻间隔 < 25 分钟」切会话。
+// SessionGrouper cuts sessions by "same day + adjacent gap < 25 minutes".
 //
-// 它刻意不按文件数截断：500 张照片仍然是一个 Moment 的成员，
-// 只是展示时只取 9 张代表。这样"全部照片"永远找得到。
+// It deliberately never truncates by file count: all 500 photos still belong to one
+// moment, and only 9 representatives are shown. That way "all the photos" are always
+// findable.
 type SessionGrouper struct {
 	Location *time.Location
 }
 
 func (SessionGrouper) Name() string { return "session-by-day" }
 
-// sessionGap 是一次会话内允许的最大空档。拍照时吃饭、坐车都可能停顿。
+// sessionGap is the largest hole allowed inside one session. Meals and car rides can
+// pause a shoot.
 const sessionGap = 25 * time.Minute
 
 func (g SessionGrouper) Group(_ context.Context, assets []Asset) ([]Moment, error) {
@@ -104,8 +108,9 @@ func (g SessionGrouper) Group(_ context.Context, assets []Asset) ([]Moment, erro
 		loc = time.UTC
 	}
 
-	// 先认"每日视频"：同一个目录里、跨 ≥7 天、≥7 个视频 → 一个系列。
-	// 它不该按天占 30 张卡。这个判断以后可以换成模型，接口不变。
+	// First detect "daily videos": same directory, spanning ≥7 days, ≥7 videos → one
+	// series. It should not take 30 cards, one per day. This check can become a model
+	// later; the interface stays put.
 	seriesAssets := make(map[string][]Asset)
 	for _, asset := range assets {
 		if asset.Narrative && asset.MediaType == "video" && asset.Parent != "" {
@@ -239,7 +244,8 @@ func buildMoment(items []Asset) Moment {
 	}
 }
 
-// preferCover 优先图片，其次体积更大的；视频只在前者没有时当封面。
+// preferCover prefers photos, then larger files; a video is only the cover when
+// neither exists.
 func preferCover(candidate, current Asset) bool {
 	if (candidate.MediaType == "photo") != (current.MediaType == "photo") {
 		return candidate.MediaType == "photo"
@@ -247,8 +253,9 @@ func preferCover(candidate, current Asset) bool {
 	return candidate.Size > current.Size
 }
 
-// HeuristicScorer 是 P0 的价值模型。分数只用于排序和预算取舍，
-// 不追求绝对准确；reason 里保留每个信号，方便以后校准。
+// HeuristicScorer is the P0 value model. Scores only drive ordering and budget
+// tradeoffs, not absolute accuracy; every signal is kept in reason so it can be
+// calibrated later.
 type HeuristicScorer struct {
 	Location *time.Location
 }
@@ -262,17 +269,19 @@ func (s HeuristicScorer) Score(_ context.Context, moment *Moment) error {
 	}
 	reason := map[string]any{}
 
-	// 基线：一张普通照片也值得被看见，但不一定能挤进预算。
+	// Baseline: an ordinary photo still deserves to be seen, though it may not fit the
+	// budget.
 	score := 0.42
 	reason["base"] = 0.42
 
-	// 规模：500 张照片的会话比 3 张的更像一件事，但增长要饱和。
+	// Scale: a 500-photo session reads more like an event than a 3-photo one, but the
+	// growth has to saturate.
 	n := float64(moment.ItemCount)
 	scale := math.Log10(n+1) / 2.7
 	score += 0.16 * math.Min(1, scale)
 	reason["scale"] = round3(0.16 * math.Min(1, scale))
 
-	// 文件夹语义：旅行、婚礼、毕业这类名字本身就是强信号。
+	// Folder semantics: names like trip or wedding are strong signals on their own.
 	if label := folderLabel(moment.Folder); label != "" {
 		if eventWord(label) {
 			score += 0.13
@@ -292,7 +301,8 @@ func (s HeuristicScorer) Score(_ context.Context, moment *Moment) error {
 		reason["many_items"] = 0.03
 	}
 
-	// 周末/晚上稍微加分，但权重很小，不能让"时间"决定内容。
+	// Weekends and evenings add a little, weighted small enough that time never
+	// decides content.
 	local := moment.StartsAt.In(loc)
 	if local.Weekday() == time.Saturday || local.Weekday() == time.Sunday {
 		score += 0.015
@@ -303,7 +313,8 @@ func (s HeuristicScorer) Score(_ context.Context, moment *Moment) error {
 		reason["evening"] = 0.01
 	}
 
-	// 确定性抖动：同分时避免永远选同一条，也不引入随机刷新。
+	// Deterministic jitter: stands in for a tie-break so the same item is not always
+	// picked, without introducing random refresh.
 	jitter := hashUnit(moment.DedupeKey) * 0.03
 	score += jitter
 	reason["tie_break"] = round3(jitter)
@@ -313,10 +324,10 @@ func (s HeuristicScorer) Score(_ context.Context, moment *Moment) error {
 	return nil
 }
 
-// TemplateNarrator 用路径和时段生成标题。
+// TemplateNarrator builds titles from the path and the time of day.
 //
-// 以后换成 LLM 时，这里能拿到 Score 阶段的 reason、来源类型、时间、文件数，
-// 输出仍然是 Title/Subtitle 两个字段，前端完全不用改。
+// An LLM replacement gets the same Score-stage reason, source kinds, time and file
+// count, and still only fills Title/Subtitle, so the frontend never changes.
 type TemplateNarrator struct {
 	Location *time.Location
 }
@@ -354,14 +365,15 @@ func (n TemplateNarrator) Narrate(_ context.Context, moment *Moment) error {
 		span = start + "–" + end
 	}
 
-	// 月份标题已经给了月份，但卡片本身必须能回答"这是哪天"。
+	// The month header already gives the month, but every card must answer "which day
+	// is this".
 	date := fmt.Sprintf("%d 月 %d 日", startLocal.Month(), startLocal.Day())
 	if startLocal.Format("2006-01-02") != endLocal.Format("2006-01-02") {
 		date = fmt.Sprintf("%d 月 %d 日 – %d 月 %d 日",
 			startLocal.Month(), startLocal.Day(), endLocal.Month(), endLocal.Day())
 	}
 
-	// 系列：一个目录里的连续视频，只占一张卡。
+	// Series: consecutive videos in one directory, worth a single card.
 	if moment.Kind == "series" {
 		moment.Subtitle = fmt.Sprintf("%s · %d 个视频", date, moment.ItemCount)
 		moment.Layout = "series"
@@ -391,7 +403,7 @@ func (n TemplateNarrator) Narrate(_ context.Context, moment *Moment) error {
 	return nil
 }
 
-// ---------- 小工具 ----------
+// ---------- small helpers ----------
 
 func mediaTypeOf(name, mime string) string {
 	ext := strings.ToLower(path.Ext(name))
@@ -444,7 +456,7 @@ func looksLikeAmbient(itemPath string) bool {
 	return false
 }
 
-// genericSegments 是路径里没有叙事价值的目录名。
+// genericSegments are directory names with no narrative value in a path.
 var genericSegments = map[string]bool{
 	"photos": true, "photo": true, "pictures": true, "picture": true,
 	"camera": true, "dcim": true, "images": true, "image": true, "img": true,
@@ -456,7 +468,7 @@ var genericSegments = map[string]bool{
 	"我的图片": true, "camera roll": true, "camera-roll": true,
 }
 
-// folderLabel 从父目录里找最近一个"像名字"的目录。
+// folderLabel walks up the parent path for the nearest segment that reads like a name.
 func folderLabel(folder string) string {
 	segments := strings.Split(folder, "/")
 	for i := len(segments) - 1; i >= 0; i-- {
@@ -524,14 +536,15 @@ func eventWord(label string) bool {
 }
 
 var (
-	// 前后都要卡住数字，否则 "2025/06/2025-06-01" 会被读成 2025/06/20。
+	// Anchor digits on both sides, or "2025/06/2025-06-01" would read as 2025/06/20.
 	dateWithSep = regexp.MustCompile(`(?:^|[^0-9])((?:19|20)\d{2})[-_/.](\d{1,2})[-_/.](\d{1,2})(?:[^0-9]|$)`)
 	dateCompact = regexp.MustCompile(`(?:^|[^0-9])((?:19|20)\d{2})(\d{2})(\d{2})(?:[^0-9]|$)`)
 	datePrefix  = regexp.MustCompile(`^(?:(?:19|20)\d{2}[-_/.]\d{1,2}[-_/.]\d{1,2}|(?:19|20)\d{6})[\s_-]*`)
 )
 
-// dateFromPath 从路径里找一个完整日期（年月日），返回当天中午。
-// 只认 19xx / 20xx，且会校验月日合法，避免把 "100APPLE/1234" 当成日期。
+// dateFromPath finds one full date (year, month, day) in a path and returns that day
+// at noon. It accepts only 19xx / 20xx and validates month and day, so a segment like
+// "100APPLE/1234" is not mistaken for a date.
 func dateFromPath(itemPath string, loc *time.Location) (time.Time, bool) {
 	match := dateWithSep.FindStringSubmatch(itemPath)
 	if len(match) != 4 {

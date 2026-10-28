@@ -1,4 +1,4 @@
-// Package api 提供 HTTP 接口和前端静态文件服务。
+// Package api serves the HTTP API and the frontend's static files.
 package api
 
 import (
@@ -40,7 +40,7 @@ type Server struct {
 	web       http.Handler
 }
 
-// New 组装依赖。web 是前端构建产物（SPA）的处理器，可以是 nil。
+// New wires dependencies. web is the handler for the frontend build (SPA) and may be nil.
 func New(cfg *config.Config, db *store.DB, objectStorage storage.Storage, web http.Handler) *Server {
 	nodeService := nodes.New(db, objectStorage)
 	eventService := events.New(db, objectStorage, nodeService)
@@ -60,14 +60,14 @@ func New(cfg *config.Config, db *store.DB, objectStorage storage.Storage, web ht
 	}
 }
 
-// StartTimeline 启动后台整理器。放在 server 启动之后调用，避免拖慢监听。
+// StartTimeline starts the background organizer. Run it after listen, so startup is not delayed.
 func (s *Server) StartTimeline(ctx context.Context) {
 	s.timeline.Start(ctx)
 }
 
 type handlerFunc func(http.ResponseWriter, *http.Request) error
 
-// Handler 返回完整的 http.Handler（接口 + SPA）。
+// Handler returns the full http.Handler (API + SPA).
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 
@@ -105,8 +105,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/fs/rename", s.wrap(s.handleRename))
 	mux.HandleFunc("POST /api/fs/delete", s.wrap(s.handleDelete))
 
-	// 对外 API：路径就是功能本身，不带 /v1 或 /api 前缀。
-	// 事件：和文件 API 一样，路径就是功能、不带 /api 前缀。
+	// Public API: the path is the feature, with no /v1 or /api prefix.
+	// Events: like the file API, the path is the feature and carries no /api prefix.
 	mux.HandleFunc("POST /events", s.api(s.handleAPICreateEvent))
 	mux.HandleFunc("GET /events", s.api(s.handleAPIListEvents))
 	mux.HandleFunc("GET /events/{id}", s.api(s.handleAPIGetEvent))
@@ -133,8 +133,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("PUT /files/{path...}", s.api(s.handleAPIPutFile))
 	mux.HandleFunc("DELETE /files/{path...}", s.api(s.handleAPIDeleteFile))
 
-	// 保存链接只是一页说明书；保存走已有的 /files 和 /upload。
-	// 子路由只注册 GET，POST 由 ServeMux 自己回 405，不写业务 handler。
+	// A save link is just a page of instructions; saving uses the existing /files and /upload.
+	// The sub-router registers GET only; ServeMux answers 405 for POST, with no business handler.
 	saveMux := http.NewServeMux()
 	saveMux.HandleFunc("GET /{code}", s.wrap(s.handleSaveLinkPage))
 	mux.Handle("/s/", http.StripPrefix("/s", saveMux))
@@ -159,7 +159,7 @@ func (s *Server) ok(w http.ResponseWriter, data any) error {
 	return nil
 }
 
-// wrap 把返回 error 的 handler 变成标准 http.HandlerFunc。
+// wrap turns an error-returning handler into a standard http.HandlerFunc.
 func (s *Server) wrap(fn handlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if err := fn(w, r); err != nil {
@@ -173,7 +173,7 @@ func (s *Server) wrap(fn handlerFunc) http.HandlerFunc {
 	}
 }
 
-// api 是对外 API 的包装：限流 + {"error","message"} 的错误体（不是网页那套 {ok,...}）。
+// api wraps the public API: rate limit + {"error","message"} bodies (not the web {ok,...} shape).
 func (s *Server) api(fn handlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if err := s.limitAPI(w, r); err != nil {
@@ -188,7 +188,7 @@ func (s *Server) api(fn handlerFunc) http.HandlerFunc {
 
 const apiRatePerMinute = 600
 
-// limitAPI 按令牌（没有令牌就按 IP）做粗粒度限流，顺带给出 Retry-After。
+// limitAPI does coarse rate limiting per token (per IP without one), plus a Retry-After.
 func (s *Server) limitAPI(w http.ResponseWriter, r *http.Request) error {
 	key := "ip:" + httpx.ClientIP(r)
 	if header := strings.TrimSpace(r.Header.Get("Authorization")); strings.HasPrefix(header, "Bearer ") {
@@ -205,7 +205,7 @@ func (s *Server) limitAPI(w http.ResponseWriter, r *http.Request) error {
 	return nil
 }
 
-// isAPIPath 判断是否是对外 API 的路径，用于 CORS 和预检。
+// isAPIPath reports whether a path belongs to the public API, for CORS and preflight.
 func isAPIPath(path string) bool {
 	switch path {
 	case "/capabilities", "/list", "/me", "/mkdir", "/move", "/copy",
@@ -230,7 +230,8 @@ func setCORSHeaders(w http.ResponseWriter) {
 	w.Header().Set("Access-Control-Max-Age", "86400")
 }
 
-// cors 只作用于对外 API：允许浏览器跨域带 Bearer 调用，并直接回预检。
+// cors applies to the public API only: browsers may call cross-origin with a Bearer token,
+// and preflight is answered right here.
 func (s *Server) cors(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if isAPIPath(r.URL.Path) {

@@ -1,4 +1,4 @@
-/** 和 Go 后端通信的唯一入口。接口统一返回 {ok, data|error} 信封。 */
+/** The only entry point to the Go backend. Responses use the {ok, data|error} envelope. */
 
 export class ApiError extends Error {
   constructor(
@@ -61,7 +61,7 @@ export interface EventMetric {
   unit?: string;
 }
 
-/** 卡片内容。type 决定哪些字段有值，见 docs/design/events.md §3。 */
+/** Card content. `type` decides which fields are set; see docs/design/events.md section 3. */
 export interface EventPayload {
   body?: string;
   meta?: string;
@@ -79,7 +79,7 @@ export interface EventSource {
   disconnected?: boolean;
 }
 
-/** 时间线上的一条事件。 */
+/** One event on the timeline. */
 export interface TimelineEvent {
   id: string;
   type: EventType;
@@ -152,7 +152,10 @@ export interface CodeResult {
   devCode?: string;
 }
 
-/** 响应不是后端的信封时：多半是后端没起，或 /api 代理指到的端口上跑着别的服务。 */
+/**
+ * When the response is not the envelope: the backend is probably down, or something else listens
+ * on the port the /api proxy targets.
+ */
 function httpError(status: number): ApiError {
   return new ApiError(
     `unexpected response from the API (HTTP ${status}); is the backend running?`,
@@ -160,7 +163,10 @@ function httpError(status: number): ApiError {
   );
 }
 
-/** 解包信封；形状不对时给出能定位问题的错误，而不是把对象拼成 "[object Object]"。 */
+/**
+ * Unwrap the envelope; a bad shape raises a locatable error instead of stringifying to
+ * "[object Object]".
+ */
 function unpack<T>(payload: unknown, status: number): T {
   if (typeof payload !== "object" || payload === null || !("ok" in payload)) {
     throw httpError(status);
@@ -189,7 +195,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   try {
     payload = await response.json();
   } catch {
-    // 后端没起时 Vite 代理会返回 HTML 错误页，这里不能当成信封去读。
+    // With the backend down the Vite proxy returns an HTML error page, not an envelope.
     throw httpError(response.status);
   }
   return unpack<T>(payload, response.status);
@@ -279,7 +285,10 @@ export const api = {
     return post<UploadSignResult>("/api/fs/upload/sign", { path, size, overwrite });
   },
 
-  /** 传完字节后让服务端校验对象并落索引；返回新文件节点，可直接插进列表。 */
+  /**
+   * After the bytes land, have the server verify the object and write the index; returns the new
+   * file node, ready to insert into the list.
+   */
   async confirmUpload(
     path: string,
     mime?: string,
@@ -307,7 +316,7 @@ export const api = {
     await post("/api/fs/delete", { path });
   },
 
-  /** 时间线：一层扁平的事件流，keyset 分页。 */
+  /** Timeline: one flat event stream with keyset pagination. */
   events(cursor?: string, limit = 20): Promise<EventPage> {
     const params = new URLSearchParams();
     if (cursor) params.set("cursor", cursor);
@@ -319,7 +328,7 @@ export const api = {
     return request<StreamStatus>("/api/timeline/status");
   },
 
-  /** 302 到 COS 预签名地址；直接当 <a href> 用。 */
+  /** 302s to a presigned COS URL; use it directly as an <a href>. */
   downloadHref(path: string): string {
     return `/api/fs/download?path=${encodeURIComponent(path)}`;
   },

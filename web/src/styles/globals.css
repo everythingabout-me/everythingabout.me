@@ -1,5 +1,5 @@
 :root {
-  /* 纸 / 面 */
+  /* Paper / surface */
   --bg: #faf8f4;
   --bg-top: #fcfaf6;
   --surface: #fffdfb;
@@ -7,30 +7,30 @@
   --border: #e8e3da;
   --border-strong: #d6cec2;
 
-  /* 文字 */
+  /* Text */
   --text: #1a1714;
   --text-2: #615b52;
   --text-3: #786f65;
 
-  /* 蓝：浅蓝做图标底，深蓝做主按钮 / 图标线 */
+  /* Blue: light blue fills icon backgrounds, deep blue drives buttons and icon strokes */
   --blue: #13a7f5;
   --blue-ink: #0b7bc4;
   --blue-light: #eaf6fe;
   --ring: rgba(19, 167, 245, 0.18);
 
-  /* 危险：低饱和砖红，只给不可逆操作 */
+  /* Danger: a muted brick red, only for irreversible actions */
   --danger: #b4483f;
   --danger-soft: #fbedec;
   --danger-fg: #ffffff;
 
-  /* 兼容旧语义：旧的 --accent* 现在都映射到蓝 */
+  /* Backward compatibility: the old --accent* tokens now map to blue */
   --accent: var(--blue-ink);
   --accent-light: var(--blue);
   --accent-deep: var(--blue-ink);
   --accent-soft: var(--blue-light);
   --accent-tint: var(--blue-light);
 
-  /* 主按钮 */
+  /* Primary button */
   --btn-bg: var(--blue);
   --btn-fg: #ffffff;
   --btn-from: var(--blue);

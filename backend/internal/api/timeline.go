@@ -18,7 +18,7 @@ func (s *Server) handleTimelineStatus(w http.ResponseWriter, r *http.Request) er
 	return s.ok(w, status)
 }
 
-// handleTimelineRebuild 是手动"重新整理"的入口，正常使用不需要。
+// handleTimelineRebuild is the manual "reorganize now" entry point; normal use never needs it.
 func (s *Server) handleTimelineRebuild(w http.ResponseWriter, r *http.Request) error {
 	if err := httpx.AssertSameOrigin(r); err != nil {
 		return err

@@ -11,13 +11,16 @@ import (
 )
 
 const (
-	// 单次处理多少个文件。太大会长时间占着事务/租约，太小会多跑几轮。
+	// How many files one pass handles. Too large and it holds the transaction and
+	// lease too long; too small and it takes more rounds.
 	fileBatch = 200
-	// 健康 CSV 的读取上限。再大的文件不适合在后台随手读进内存。
+	// Read cap for health CSVs. Anything bigger should not be casually pulled into
+	// memory in the background.
 	maxAmbientBytes = 8 << 20
 )
 
-// Start 启动后台整理器。单实例假设；多实例需要把租约换成心跳。
+// Start launches the background organizer. It assumes a single instance; multiple
+// instances would need leases backed by heartbeats.
 func (s *Service) Start(ctx context.Context) {
 	if !s.cfg.Enabled {
 		slog.Info("timeline: disabled")
@@ -37,7 +40,8 @@ func (s *Service) Start(ctx context.Context) {
 }
 
 func (s *Service) recoverJobs(ctx context.Context) {
-	// 上个进程留下的 running 任务放回队列；单实例部署下这是安全的。
+	// Put jobs left running by the previous process back in the queue; safe for a
+	// single instance.
 	if _, err := s.db.Pool().Exec(ctx,
 		`update timeline_jobs
 		    set status = 'pending', lease_until = null
@@ -46,9 +50,10 @@ func (s *Service) recoverJobs(ctx context.Context) {
 	}
 }
 
-// bootstrap 启动时把还没整理过的用户排进队列。已有数据的库会从这里开始回填。
+// bootstrap queues users that were never organized at startup. A database with
+// existing data backfills from here.
 func (s *Service) bootstrap(ctx context.Context) {
-	// 给 HTTP 服务一点启动时间，避免启动瞬间抢连接。
+	// Give the HTTP server a moment to come up so we do not fight it for connections.
 	select {
 	case <-ctx.Done():
 		return
@@ -68,9 +73,9 @@ func (s *Service) bootstrap(ctx context.Context) {
 		slog.Warn("timeline: failed to enqueue startup backfill", "error", err)
 	}
 
-	// 013 把 events 变成读模型后，老库里的快照 source_rev 会是 null。
-	// 这里直接把那些月份排进队列，不依赖 scan：否则库里没有新文件时，
-	// 时间线会一直空着，直到下一次文件变动才重算。
+	// Since 013 made events the read model, snapshots in older databases have a null
+	// source_rev. Queue those months right here instead of relying on a scan: otherwise
+	// a library with no new files keeps an empty stream until the next file change.
 	tag, err := s.db.Pool().Exec(ctx,
 		`insert into timeline_jobs (user_id, kind, month)
 		 select s.user_id, 'month', s.month
@@ -84,8 +89,8 @@ func (s *Service) bootstrap(ctx context.Context) {
 	}
 }
 
-// sweeper 兜底扫描：CLI reconcile、外部 API 写入这类不经过 Notify 的变更，
-// 靠"最近更新过的用户"补上。
+// sweeper is the safety net: changes that never pass through Notify (CLI reconcile,
+// writes from the public API) get picked up via users with recently updated rows.
 func (s *Service) sweeper(ctx context.Context) {
 	ticker := time.NewTicker(20 * time.Minute)
 	defer ticker.Stop()
@@ -158,7 +163,8 @@ func (s *Service) runJob(parent context.Context, item *job) {
 
 	if err != nil {
 		if parent.Err() != nil {
-			// 进程正在退出，把任务留在 running，下次启动会恢复。
+			// The process is shutting down; leave the job running so the next start
+			// recovers it.
 			return
 		}
 		slog.Warn("timeline: job failed", "job", item.ID, "kind", item.Kind, "error", err)
@@ -169,7 +175,7 @@ func (s *Service) runJob(parent context.Context, item *job) {
 }
 
 func (s *Service) runScan(ctx context.Context, item *job) error {
-	// 一次 scan 最多处理这么多轮，防止异常数据把 worker 卡死。
+	// Cap the rounds per scan so bad data cannot wedge the worker.
 	for round := 0; round < 50; round++ {
 		files, err := s.recentFiles(ctx, item.UserID, 300)
 		if err != nil {
@@ -230,8 +236,9 @@ func (s *Service) runMonth(ctx context.Context, item *job) error {
 	return s.rebuildMonth(ctx, item.UserID, month)
 }
 
-// processFile 把一个文件变成 timeline_assets 里的一行。
-// 这是唯一会碰对象字节的地方（而且只对健康 CSV 这类小文件）。
+// processFile turns one file into a row in timeline_assets.
+// It is the only place that touches object bytes (and only for small files such as
+// health CSVs).
 func (s *Service) processFile(ctx context.Context, file FileInput) error {
 	facts, err := s.engine.Analyzer.Analyze(ctx, file)
 	if err != nil {
@@ -289,8 +296,9 @@ func (s *Service) extractAmbient(
 	return extractor.Extract(ctx, file, data)
 }
 
-// saveSamples 把日粒度观测写进 timeline_series / timeline_points。
-// 同一份数据重复导入是幂等的（按 series + 日期 upsert）。
+// saveSamples writes day-granularity observations into timeline_series /
+// timeline_points. Importing the same data twice is idempotent (upsert by series +
+// day).
 func (s *Service) saveSamples(ctx context.Context, file FileInput, samples []SeriesSample) error {
 	source := file.Parent
 	if source == "" {

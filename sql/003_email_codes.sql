@@ -1,7 +1,7 @@
--- 邮箱验证码：目前用于注册，后续也可复用到改邮箱
+-- Email verification codes: used for sign-up today, reusable for email changes later
 --
--- 只存验证码的 scrypt 哈希，不存明文；验证码 10 分钟过期，
--- 最多尝试 5 次，发送新码时旧码自动作废。
+-- Only the scrypt hash of a code is stored, never the plaintext; a code expires after 10 minutes,
+-- allows at most 5 attempts, and issuing a new one invalidates the old one.
 
 create table if not exists email_codes (
   id          uuid primary key default gen_random_uuid(),

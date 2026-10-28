@@ -1,5 +1,5 @@
-// Package paths 处理逻辑路径：归一化、父子关系，以及逻辑路径和
-// COS 对象 key 之间的映射。
+// Package paths handles logical paths: normalization, parent/child relations, and the
+// mapping between a logical path and a COS object key.
 package paths
 
 import (
@@ -10,7 +10,7 @@ import (
 	"golang.org/x/text/unicode/norm"
 )
 
-// 可见文件统一放在 drive/ 前缀下，其余前缀是系统私有区。
+// Visible files always live under the drive/ prefix; the other prefixes are system-private.
 const (
 	DrivePrefix     = "drive/"
 	InventoryPrefix = "_inventory/"
@@ -19,7 +19,7 @@ const (
 	MaxNameLength = 200
 )
 
-// Error 表示路径不合法，接口层映射成 400。
+// Error means the path is invalid; the API layer maps it to a 400.
 type Error struct {
 	Message string
 }
@@ -28,8 +28,9 @@ func (e *Error) Error() string { return e.Message }
 
 func pathError(message string) error { return &Error{Message: message} }
 
-// Normalize 归一化为 NFC、去掉首尾斜杠、折叠重复斜杠。
-// macOS 上传的文件名是 NFD，不归一化会和 Linux 侧产生“同名两个文件”。
+// Normalize converts to NFC, trims leading and trailing slashes, and collapses repeated
+// slashes. Filenames uploaded from macOS are NFD, and without normalization they turn into
+// "two files with the same name" against the Linux side.
 func Normalize(input string) (string, error) {
 	value := norm.NFC.String(strings.ReplaceAll(input, "\\", "/"))
 	value = strings.TrimSpace(value)
@@ -81,12 +82,14 @@ func IsInside(path, ancestor string) bool {
 	return path == ancestor || strings.HasPrefix(path, ancestor+"/")
 }
 
-// KeyFor 文件对象 key：每个用户一个独立前缀，避免不同用户同名路径在桶里撞车。
+// KeyFor is a file's object key: one prefix per user, so the same path from two different
+// users never collides in the bucket.
 func KeyFor(path, ownerID string) string {
 	return DrivePrefix + ownerID + "/" + path
 }
 
-// DirKeyFor 目录标记对象 key（以 / 结尾，方便 coscli / rclone 识别空目录）。
+// DirKeyFor is the directory marker object key (trailing /, so coscli / rclone sees empty
+// directories).
 func DirKeyFor(path, ownerID string) string {
 	if path == "" {
 		return DrivePrefix + ownerID + "/"
@@ -94,12 +97,13 @@ func DirKeyFor(path, ownerID string) string {
 	return DrivePrefix + ownerID + "/" + path + "/"
 }
 
-// OwnerPrefix 是某个用户在桶里的前缀，以 / 结尾。
+// OwnerPrefix is a user's prefix in the bucket, ending in /.
 func OwnerPrefix(ownerID string) string {
 	return DrivePrefix + ownerID + "/"
 }
 
-// PathFromKey 从对象 key 还原逻辑路径；不属于该用户的返回 false。
+// PathFromKey recovers the logical path from an object key; a key that does not belong to
+// this user returns false.
 func PathFromKey(key string, ownerID string) (string, bool) {
 	prefix := DrivePrefix
 	if ownerID != "" {
@@ -113,8 +117,8 @@ func PathFromKey(key string, ownerID string) (string, bool) {
 
 var uuidRe = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
 
-// OwnerSegmentOf 判断 key 的第二段像不像用户 ID，
-// 用于区分 drive/<path> 和 drive/<ownerID>/<path>。
+// OwnerSegmentOf checks whether the second segment of a key looks like a user ID, which
+// distinguishes drive/<path> from drive/<ownerID>/<path>.
 func OwnerSegmentOf(key string) string {
 	if !strings.HasPrefix(key, DrivePrefix) {
 		return ""
@@ -127,7 +131,7 @@ func OwnerSegmentOf(key string) string {
 	return ""
 }
 
-// AncestorsOf 返回从最顶层到直接父目录的列表。
+// AncestorsOf returns the directories from the topmost down to the immediate parent.
 func AncestorsOf(path string) []string {
 	var reversed []string
 	for current := ParentOf(path); current != ""; current = ParentOf(current) {

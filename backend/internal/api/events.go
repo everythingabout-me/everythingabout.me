@@ -10,16 +10,17 @@ import (
 	"everythingabout.me/backend/internal/httpx"
 )
 
-// ---------- 网页：读时间线 ----------
+// ---------- web: read the timeline ----------
 
-// handleTimeline 是网页的时间线：一层扁平的事件流，按时间倒序。
+// handleTimeline is the web timeline: one flat event stream, newest first.
 //
-// 参数：
+// Parameters:
 //
-//	cursor=...  上一页最后一条的游标（opaque）
-//	limit=20    本页条数，1..50
+//	cursor=...  cursor of the last item on the previous page (opaque)
+//	limit=20    page size, 1..50
 //
-// 不再有"按月分页"和"月标题"：那是 v0.2 仪表盘时代的东西，见 docs/design/timeline.md §17。
+// There is no more "pagination by month" or "month heading": that was the v0.2 dashboard era, see
+// docs/design/timeline.md §17.
 func (s *Server) handleTimeline(w http.ResponseWriter, r *http.Request) error {
 	user, err := s.requireUser(r)
 	if err != nil {
@@ -47,9 +48,9 @@ func (s *Server) handleTimeline(w http.ResponseWriter, r *http.Request) error {
 	})
 }
 
-// ---------- 网页：删除一条事件 ----------
+// ---------- web: delete one event ----------
 
-// handleDeleteEvent 是用户删除：写墓碑、清内容（见 events.DeleteOwned 的注释）。
+// handleDeleteEvent is the user delete: tombstone plus content wipe (see events.DeleteOwned).
 func (s *Server) handleDeleteEvent(w http.ResponseWriter, r *http.Request) error {
 	if err := httpx.AssertSameOrigin(r); err != nil {
 		return err
@@ -64,7 +65,7 @@ func (s *Server) handleDeleteEvent(w http.ResponseWriter, r *http.Request) error
 	return s.ok(w, map[string]any{"deleted": true})
 }
 
-// ---------- 对外 API：写事件 ----------
+// ---------- public API: write events ----------
 
 type createEventRequest struct {
 	ExternalID string     `json:"external_id"`
@@ -85,11 +86,11 @@ type createEventRequest struct {
 	} `json:"payload"`
 }
 
-// handleAPICreateEvent 是三方应用的投稿入口。
+// handleAPICreateEvent is where third-party apps submit events.
 //
-//   - 幂等：同一个 (token, external_id) 再来一次是整体替换，返回同一个 id；
-//   - 媒体路径必须在 token 的前缀里（复用文件 API 的越界规则）；
-//   - 用户删过的事件再推 → 410，应用应停止重试。
+//   - idempotent: the same (token, external_id) again replaces it and returns the same id;
+//   - media paths must sit under the token's prefix (the file API's scope rule, reused);
+//   - pushing an event the user deleted returns 410, and the app should stop retrying.
 func (s *Server) handleAPICreateEvent(w http.ResponseWriter, r *http.Request) error {
 	p, err := s.principal(r)
 	if err != nil {
@@ -154,7 +155,7 @@ func (s *Server) handleAPICreateEvent(w http.ResponseWriter, r *http.Request) er
 	return nil
 }
 
-// handleAPIDeleteEvent 是应用侧删除：内容保留、外链清空（state=detached）。
+// handleAPIDeleteEvent is the app-side delete: content stays, link cleared (state=detached).
 func (s *Server) handleAPIDeleteEvent(w http.ResponseWriter, r *http.Request) error {
 	p, err := s.principal(r)
 	if err != nil {
@@ -174,7 +175,7 @@ func (s *Server) handleAPIDeleteEvent(w http.ResponseWriter, r *http.Request) er
 	return nil
 }
 
-// handleAPIListEvents 给应用对账：只返回它自己写过的事件。
+// handleAPIListEvents is for app-side reconciliation: only events the app itself wrote.
 func (s *Server) handleAPIListEvents(w http.ResponseWriter, r *http.Request) error {
 	p, err := s.principal(r)
 	if err != nil {
@@ -211,7 +212,7 @@ func (s *Server) handleAPIListEvents(w http.ResponseWriter, r *http.Request) err
 	return nil
 }
 
-// handleAPIGetEvent 返回单条事件（应用渲染自己的分享页用）。
+// handleAPIGetEvent returns one event (so an app can render its own share page).
 func (s *Server) handleAPIGetEvent(w http.ResponseWriter, r *http.Request) error {
 	p, err := s.principal(r)
 	if err != nil {

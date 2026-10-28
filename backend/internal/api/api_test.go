@@ -16,7 +16,7 @@ import (
 	"everythingabout.me/backend/internal/nodes"
 )
 
-// 确认 /files/{path...} 的几件事：斜杠保留、%20 解码、HEAD 优先于 GET。
+// checks a few things about /files/{path...}: slashes kept, %20 decoded, HEAD routed before GET.
 func TestFilesRoute(t *testing.T) {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /files/{path...}", func(w http.ResponseWriter, r *http.Request) {
@@ -291,7 +291,7 @@ func TestWriteJobResult(t *testing.T) {
 	}
 }
 
-// Handler 里 ServeMux 的路由冲突会 panic，这个测试就是那道闸。
+// ServeMux panics on a route conflict inside Handler; this test is the gate for that.
 func TestHandlerRegistersRoutes(t *testing.T) {
 	if handler := (&Server{}).Handler(); handler == nil {
 		t.Fatal("Handler returned nil")

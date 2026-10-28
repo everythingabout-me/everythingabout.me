@@ -1,20 +1,26 @@
-// Package events 是时间线的读写模型。
+// Package events is the stream's read/write model.
 //
-// 一条事件 = 一段时间 + 一张卡（type + payload）+ 一个可选的详情链接。
-// 设计见 docs/design/events.md，这里只记录实现层面的取舍：
+// One event = one time range + one card (type + payload) + an optional detail link.
+// The design lives in docs/design/events.md; only implementation tradeoffs are
+// recorded here:
 //
-//   - 卡片类型固定四种：photo / note / metric / html。type 决定 payload 的形状，
-//     校验在 Validate 里，渲染在前端。没有"任意 HTML 卡片"，html 是其中一类，
-//     而且前端用 sandbox iframe 渲染（见 web/src/pages/StreamPage.tsx）。
-//   - 没有用户编辑。事件由生产者创建；生产者重推同一个 external_id 就是整体替换。
-//     用户只能删除——删除写 state='deleted'（墓碑），而不是真删：生产者重跑、或者
-//     应用重推同一个 external_id 时，要能认出"这条被用户删了"，否则会把它复活。
-//     payload 会被清空，只留去重键。
-//   - 时间线拥有事件，应用只是投稿：token 撤销、应用删除都不带走内容。
-//   - 应用调 DELETE → state='detached'（内容保留，外链清空）
-//   - 用户删除 → state='deleted'（内容清空，防止复活）
-//   - 媒体只能引用盘里的文件（payload 里写路径，落库时解析成 node_id）。
-//     不做外链图片：防盗链、失效、审核、SSRF 都是问题。
+//   - Exactly four card types: photo / note / metric / html. type fixes the payload
+//     shape; validation lives in Validate, rendering in the frontend. There is no
+//     "arbitrary HTML card" — html is one of the four, and the frontend renders it in a
+//     sandbox iframe (see web/src/pages/StreamPage.tsx).
+//   - No user editing. Producers create events; re-pushing the same external_id
+//     replaces the whole thing. Users can only delete, and deletion writes
+//     state='deleted' (a tombstone) instead of removing the row: when a producer
+//     re-runs, or an app re-pushes the same external_id, we still have to recognize
+//     "the user deleted this one", or it comes back to life. The payload is cleared,
+//     leaving only the dedupe key.
+//   - The stream owns events; apps only submit. Revoking a token or deleting an app
+//     never takes content away.
+//   - App calls DELETE → state='detached' (content kept, external link cleared)
+//   - User deletes → state='deleted' (content cleared, so it cannot be revived)
+//   - Media may only reference files on the drive (the payload holds paths, resolved
+//     to node_id on write). No hotlinked images: hotlink protection, link rot,
+//     moderation and SSRF are all problems.
 package events
 
 import (
@@ -37,7 +43,7 @@ import (
 	"everythingabout.me/backend/internal/store"
 )
 
-// 卡片类型。
+// Card types.
 const (
 	TypePhoto  = "photo"
 	TypeNote   = "note"
@@ -45,21 +51,23 @@ const (
 	TypeHTML   = "html"
 )
 
-// 来源。
+// Origins.
 const (
 	OriginNative = "native"
 	OriginAuto   = "auto"
 	OriginApp    = "app"
 )
 
-// 状态。deleted 是墓碑：不出现在读路径，但保住去重键。
+// States. deleted is the tombstone: gone from the read path, but the dedupe key
+// survives.
 const (
 	StatePublished = "published"
 	StateDetached  = "detached"
 	StateDeleted   = "deleted"
 )
 
-// 限额。改这里要同步 docs/design/events.md §6.4 和 GET /capabilities。
+// Limits. Changing these means updating docs/design/events.md §6.4 and
+// GET /capabilities.
 const (
 	MaxTitle    = 80
 	MaxBody     = 500
@@ -72,14 +80,15 @@ const (
 	MaxURLLen   = 2000
 )
 
-// Metric 是一个数字槽位。
+// Metric is one numeric slot.
 type Metric struct {
 	Label string `json:"label"`
 	Value string `json:"value"`
 	Unit  string `json:"unit,omitempty"`
 }
 
-// Media 是读路径上的媒体：path 是盘里的路径，url 是响应时预签名的地址。
+// Media is media on the read path: path is the drive path, url is presigned when the
+// response is built.
 type Media struct {
 	Path  string `json:"path"`
 	URL   string `json:"url,omitempty"`
@@ -87,7 +96,8 @@ type Media struct {
 	Video bool   `json:"video,omitempty"`
 }
 
-// Payload 是读路径上返回的卡片内容。写路径的 payload 结构见 PayloadIn。
+// Payload is the card content returned on the read path. For the write-path shape,
+// see PayloadIn.
 type Payload struct {
 	Body    string   `json:"body,omitempty"`
 	Meta    string   `json:"meta,omitempty"`
@@ -97,7 +107,8 @@ type Payload struct {
 	Height  int      `json:"height,omitempty"`
 }
 
-// PayloadIn 是写路径的 payload（也是落库的形状）。和读路径唯一的区别是媒体存路径。
+// PayloadIn is the write-path payload (also the stored shape). The one difference from
+// the read path is that media is stored as paths.
 type PayloadIn struct {
 	Body    string   `json:"body,omitempty"`
 	Meta    string   `json:"meta,omitempty"`
@@ -107,14 +118,14 @@ type PayloadIn struct {
 	Height  int      `json:"height,omitempty"`
 }
 
-// Source 是归因。native / auto 不显示名称；app 显示 token 名。
+// Source is attribution. native / auto show no name; app shows the token name.
 type Source struct {
 	Kind         string `json:"kind"`
 	Name         string `json:"name,omitempty"`
 	Disconnected bool   `json:"disconnected,omitempty"`
 }
 
-// Event 是对外的事件形状。
+// Event is the public event shape.
 type Event struct {
 	ID        string  `json:"id"`
 	Type      string  `json:"type"`
@@ -128,7 +139,7 @@ type Event struct {
 	Payload   Payload `json:"payload"`
 }
 
-// AutoInput 是文件流水线投稿的一条事件。
+// AutoInput is one event submitted by the file pipeline.
 type AutoInput struct {
 	ProducerKey string
 	StartsAt    time.Time
@@ -141,14 +152,15 @@ type AutoInput struct {
 	Media       []AutoMedia
 }
 
-// AutoMedia 是流水线已经解析好的媒体。
+// AutoMedia is media the pipeline has already resolved.
 type AutoMedia struct {
 	NodeID string
 	Path   string
 	Video  bool
 }
 
-// AppInput 是三方应用投稿的一条事件。媒体是路径，落库时解析成 node。
+// AppInput is one event submitted by a third-party app. Media arrives as paths and is
+// resolved to nodes on write.
 type AppInput struct {
 	ExternalID string
 	DetailURL  string
@@ -161,7 +173,7 @@ type AppInput struct {
 	Payload    PayloadIn
 }
 
-// Service 是事件的读写入口。
+// Service is the read/write entry point for events.
 type Service struct {
 	db      *store.DB
 	storage storage.Storage
@@ -172,9 +184,10 @@ func New(db *store.DB, objectStorage storage.Storage, nodeService *nodes.Service
 	return &Service{db: db, storage: objectStorage, nodes: nodeService}
 }
 
-// ---------- 读 ----------
+// ---------- reads ----------
 
-// List 按时间倒序返回一页事件。cursor 是上一页最后一条的 opaque 游标。
+// List returns one page of events, newest first. cursor is the opaque cursor of the
+// last event on the previous page.
 func (s *Service) List(ctx context.Context, userID, cursor string, limit int) ([]Event, string, error) {
 	if limit <= 0 {
 		limit = 20
@@ -226,7 +239,8 @@ func (s *Service) List(ctx context.Context, userID, cursor string, limit int) ([
 	return list, next, nil
 }
 
-// Get 读一条事件。只返回本人的、未被删除的。
+// Get reads one event. Only the owner's own events that were not deleted are
+// returned.
 func (s *Service) Get(ctx context.Context, userID, id string) (*Event, error) {
 	rows, err := s.db.Pool().Query(ctx,
 		`select e.id::text, e.type, e.title, e.payload, coalesce(e.detail_url, ''),
@@ -253,7 +267,8 @@ func (s *Service) Get(ctx context.Context, userID, id string) (*Event, error) {
 	return &list[0], nil
 }
 
-// ListByToken 给应用对账：返回它自己写过的事件的外部 id。
+// ListByToken supports app-side reconciliation: it returns the external ids of the
+// events this app wrote.
 func (s *Service) ListByToken(ctx context.Context, userID, tokenID string, from, to *time.Time) ([]Event, error) {
 	rows, err := s.db.Pool().Query(ctx,
 		`select e.id::text, e.type, e.title, e.payload, coalesce(e.detail_url, ''),
@@ -276,7 +291,7 @@ func (s *Service) ListByToken(ctx context.Context, userID, tokenID string, from,
 		return nil, err
 	}
 	for i := range list {
-		list[i].Payload = Payload{} // 对账只要 id / external_id
+		list[i].Payload = Payload{} // reconciliation only needs id / external_id
 	}
 	return list, nil
 }
@@ -286,7 +301,8 @@ func scanEvents(rows interface {
 	Scan(dest ...any) error
 	Err() error
 }) ([]Event, error) {
-	// 空页也要返回 []，不能是 nil：JSON 里 null 会让前端把列表当对象用。
+	// An empty page must still be [] rather than nil: JSON null makes the frontend treat
+	// the list as an object.
 	list := make([]Event, 0)
 	for rows.Next() {
 		var (
@@ -330,7 +346,7 @@ func scanEvents(rows interface {
 	return list, rows.Err()
 }
 
-// attachMedia 补齐媒体的 URL / 视频标记。一次查完一页，避免 N+1。
+// attachMedia fills in media URLs and video flags. One query per page, no N+1.
 func (s *Service) attachMedia(ctx context.Context, userID string, list []Event) error {
 	if len(list) == 0 {
 		return nil
@@ -380,7 +396,7 @@ func (s *Service) attachMedia(ctx context.Context, userID string, list []Event) 
 		event := &list[i]
 		media := byEvent[event.ID]
 		if len(media) == 0 {
-			// 文件删了：卡片退化成没有图，不报错。
+			// The file was deleted: the card degrades to no image instead of erroring.
 			event.Payload.Media = nil
 			continue
 		}
@@ -406,10 +422,11 @@ func (s *Service) attachMedia(ctx context.Context, userID string, list []Event) 
 	return nil
 }
 
-// ---------- 写：流水线 ----------
+// ---------- writes: pipeline ----------
 
-// PublishAuto 把一个月里选中的片段写成 origin='auto' 的事件。
-// 同一个 producer_key 重跑只更新，不新增；用户删过的（墓碑）不会被复活。
+// PublishAuto writes the segments selected for one month as origin='auto' events.
+// The same producer_key only updates instead of inserting, and a user tombstone is
+// never resurrected.
 func (s *Service) PublishAuto(ctx context.Context, userID string, items []AutoInput) error {
 	tx, err := s.db.Pool().Begin(ctx)
 	if err != nil {
@@ -448,7 +465,7 @@ func (s *Service) PublishAuto(ctx context.Context, userID string, items []AutoIn
 			item.Precision, item.Title, raw).Scan(&eventID)
 		if err != nil {
 			if errors.Is(err, pgx.ErrNoRows) {
-				// 墓碑：用户删过，不要再出现。
+				// Tombstone: the user deleted it, so leave it gone.
 				continue
 			}
 			return err
@@ -471,10 +488,11 @@ func (s *Service) PublishAuto(ctx context.Context, userID string, items []AutoIn
 	return tx.Commit(ctx)
 }
 
-// ---------- 写：三方应用 ----------
+// ---------- writes: third-party apps ----------
 
-// CreateApp 幂等创建 / 更新一条应用事件。
-// created=false 表示覆盖了已有事件；410 表示这条被用户删了。
+// CreateApp idempotently creates or updates one app event.
+// created=false means an existing event was overwritten; 410 means the user deleted
+// this one.
 func (s *Service) CreateApp(ctx context.Context, userID, tokenID, prefix string, in AppInput) (*Event, bool, error) {
 	if in.ExternalID == "" {
 		return nil, false, httpx.BadRequest("external_id is required")
@@ -555,7 +573,7 @@ func (s *Service) CreateApp(ctx context.Context, userID, tokenID, prefix string,
 	return ev, created, err
 }
 
-// DetachApp 是应用侧删除：保留内容，清掉外链。
+// DetachApp is the app-side delete: keep the content, clear the external link.
 func (s *Service) DetachApp(ctx context.Context, userID, tokenID, eventID string) error {
 	tag, err := s.db.Pool().Exec(ctx,
 		`update events set state = 'detached', detail_url = null, updated_at = now()
@@ -570,7 +588,8 @@ func (s *Service) DetachApp(ctx context.Context, userID, tokenID, eventID string
 	return nil
 }
 
-// DeleteOwned 是用户在网页上删除：墓碑 + 清空内容，防止流水线或应用复活。
+// DeleteOwned is a user deleting from the web: tombstone plus cleared content, so
+// neither the pipeline nor an app can revive it.
 func (s *Service) DeleteOwned(ctx context.Context, userID, eventID string) error {
 	tx, err := s.db.Pool().Begin(ctx)
 	if err != nil {
@@ -594,10 +613,11 @@ func (s *Service) DeleteOwned(ctx context.Context, userID, eventID string) error
 	return tx.Commit(ctx)
 }
 
-// ---------- 校验 ----------
+// ---------- validation ----------
 
-// ValidateApp 校验三方投稿。所有限制集中在这里，改限额只改这一个地方。
-// 指针：html 卡片没给高度时，这里补默认值，让落库的 payload 是完整的。
+// ValidateApp checks third-party submissions. Every limit lives here, so a limit change
+// touches one place. Pointer receiver: when an html card omits its height, the default
+// is filled in here so the stored payload is complete.
 func ValidateApp(in *AppInput) error {
 	if in.Title == "" || len([]rune(in.Title)) > MaxTitle {
 		return httpx.BadRequest("title must be 1-80 characters")
@@ -671,7 +691,7 @@ func ValidateApp(in *AppInput) error {
 	return nil
 }
 
-// ---------- 游标 ----------
+// ---------- cursors ----------
 
 func encodeCursor(startsAt, id string) string {
 	return base64.RawURLEncoding.EncodeToString([]byte(startsAt + "|" + id))

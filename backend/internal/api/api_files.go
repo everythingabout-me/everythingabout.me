@@ -23,11 +23,11 @@ import (
 const (
 	apiDefaultLimit = 1000
 	apiMaxLimit     = 5000
-	// 单次 PUT 的上限。更大的文件走 POST /upload 拿预签名地址。
+	// limit for a single PUT; bigger files go through POST /upload for presigned URLs.
 	apiMaxPutSize = 32 << 20
 )
 
-// apiNode 是对外 API 的文件/目录形状。
+// apiNode is the file/directory shape of the public API.
 type apiNode struct {
 	Name       string  `json:"name"`
 	Path       string  `json:"path"`
@@ -76,7 +76,7 @@ func toAPINodes(rows []nodes.Row) []apiNode {
 	return out
 }
 
-// ---- 错误 ----
+// ---- errors ----
 
 func codeForStatus(status int) string {
 	switch status {
@@ -107,7 +107,7 @@ func codeForStatus(status int) string {
 	}
 }
 
-// writeAPIError 写对外 API 的错误体：{"error":"code","message":"..."}。
+// writeAPIError writes the public API error body: {"error":"code","message":"..."}.
 func writeAPIError(w http.ResponseWriter, err error) {
 	status := http.StatusInternalServerError
 	code := "internal"
@@ -132,7 +132,7 @@ func writeAPIError(w http.ResponseWriter, err error) {
 	httpx.WriteJSON(w, status, map[string]string{"error": code, "message": message})
 }
 
-// ---- 分页游标 ----
+// ---- pagination cursors ----
 
 type cursorPayload struct {
 	IsDir bool   `json:"d"`
@@ -171,7 +171,7 @@ func parseLimit(raw string) int {
 	return value
 }
 
-// principal 解析 Bearer token 或 cookie 会话。
+// principal resolves a Bearer token or the cookie session.
 func (s *Server) principal(r *http.Request) (*auth.Principal, error) {
 	return s.auth.Authenticate(r.Context(), r)
 }
@@ -196,7 +196,7 @@ func (s *Server) handleAPIList(w http.ResponseWriter, r *http.Request) error {
 	}
 
 	limit := parseLimit(r.URL.Query().Get("limit"))
-	// 多取一条判断还有没有下一页。
+	// fetch one extra row to know whether there is a next page.
 	items, err := s.nodes.ListPage(r.Context(), p.User.ID, path, limit+1, cursor)
 	if err != nil {
 		return err
@@ -253,7 +253,7 @@ func (s *Server) handleAPIMe(w http.ResponseWriter, r *http.Request) error {
 
 // ---- /files/<path> ----
 
-// filePath 取出并归一化 URL 里的路径。
+// filePath extracts and normalizes the path from the URL.
 func filePath(r *http.Request) (string, error) {
 	path, err := paths.Normalize(r.PathValue("path"))
 	if err != nil {
@@ -291,7 +291,7 @@ func (s *Server) handleAPIGetFile(w http.ResponseWriter, r *http.Request) error 
 
 	query := r.URL.Query()
 	if query.Get("meta") == "1" {
-		// 同一个东西两个入口是 API 最容易长出来的脂肪，已经砍掉。
+		// two entry points for one thing is the easiest fat an API grows; this one is cut.
 		return httpx.BadRequest("?meta=1 was removed; use HEAD /files/<path> for metadata")
 	}
 
@@ -382,7 +382,7 @@ func (s *Server) handleAPIPutFile(w http.ResponseWriter, r *http.Request) error 
 		return httpx.Conflict("a directory with the same name already exists")
 	}
 
-	// 默认不覆盖：要么显式 ?overwrite=1，要么带匹配的 If-Match。
+	// no overwrite by default: either an explicit ?overwrite=1 or a matching If-Match.
 	overwrite := r.URL.Query().Get("overwrite") == "1"
 	match := strings.TrimSpace(r.Header.Get("If-Match"))
 	if strings.TrimSpace(r.Header.Get("If-None-Match")) == "*" && existing != nil {
@@ -559,7 +559,7 @@ func (s *Server) handleAPIMove(w http.ResponseWriter, r *http.Request) error {
 		if target.IsDir {
 			return httpx.Conflict("target is a directory")
 		}
-		// 覆盖 = 把目标彻底删掉，没有回收站可言。
+		// overwrite means the target is purged outright; there is no trash.
 		if _, err := s.nodes.Purge(r.Context(), to, p.User.ID); err != nil {
 			return err
 		}
@@ -573,7 +573,7 @@ func (s *Server) handleAPIMove(w http.ResponseWriter, r *http.Request) error {
 	if err := s.storage.Copy(r.Context(), source.Key, targetKey); err != nil {
 		return err
 	}
-	// 先复制再删源：复制失败时源还在，不会丢数据。
+	// copy first, delete the source after: if the copy fails, the source is still there.
 	if err := s.storage.Remove(r.Context(), source.Key); err != nil {
 		slog.Warn("move: failed to delete source object", "key", source.Key, "error", err)
 	}
@@ -587,7 +587,8 @@ func (s *Server) handleAPIMove(w http.ResponseWriter, r *http.Request) error {
 	return nil
 }
 
-// checkQuota 检查写入后是否超出配额。existing 是即将被覆盖的旧文件（没有就传 nil）。
+// checkQuota reports whether a write would exceed the quota. existing is the file about to be
+// overwritten (pass nil if none).
 func (s *Server) checkQuota(ctx context.Context, userID string, incoming int64, existing *nodes.Row) error {
 	quota := s.cfg.QuotaBytes
 	if quota <= 0 {

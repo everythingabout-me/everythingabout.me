@@ -1,196 +1,196 @@
-# 个人数据平台：网盘基座选型调研
+# Personal data platform: drive base selection research
 
-> 调研时间：2026-10　｜　目标：以网盘为基座，长期叠加自定义功能，承载"我的全部个人数据"
+> Researched: 2026-10 | Goal: use a drive as the base, keep layering custom features on it long term, and carry "all of my personal data"
 
-## 0. 一句话结论
+## 0. One-line conclusion
 
-没有"最全能"的网盘，只有两种基座形态：
+There is no "most capable" drive, only two shapes of base:
 
-- **产品型基座**（Cloudreve / Nextcloud / Seafile）：拿现成网盘做文件层，额外功能外挂。
-- **自建薄基座**（S3 + Postgres + 自己的 API）：自由但工作量大。
+- **A product-shaped base** (Cloudreve / Nextcloud / Seafile): take an off-the-shelf drive as the file layer and bolt extra features onto it.
+- **A thin self-built base** (S3 + Postgres + your own API): total freedom, but a lot of work.
 
-个人项目默认推荐 **Cloudreve 4 做文件基座 + 自己的服务做业务层**；
-若要"全平台双向同步 + 照片/日历/联系人全家桶 + 裸文件可迁移"，选 **Nextcloud**。
+For a personal project the default recommendation is **Cloudreve 4 as the file base + your own service as the business layer**;
+if you want "cross-platform two-way sync + a full photos/calendar/contacts suite + plain files you can migrate away with", choose **Nextcloud**.
 
 ---
 
-## 1. "网盘当基座"其实要选三层
+## 1. "A drive as the base" actually means choosing three layers
 
-| 层 | 职责 | 可选 |
+| Layer | Responsibility | Options |
 |---|---|---|
-| 存储层 | 字节落在哪 | 云 OSS/S3、本地磁盘、SeaweedFS / Garage / RustFS |
-| 文件层 | 目录、版本、分享、权限、同步、检索 | Cloudreve / Nextcloud / Seafile / Pydio |
-| 业务层 | 你的"额外功能" | 自己写（推荐独立服务，不要塞进网盘） |
+| Storage layer | Where the bytes live | cloud OSS/S3, a local disk, SeaweedFS / Garage / RustFS |
+| File layer | Directory, versions, sharing, permissions, sync, search | Cloudreve / Nextcloud / Seafile / Pydio |
+| Business layer | Your "extra features" | write it yourself (a separate service is recommended; don't cram it into the drive) |
 
-**最容易踩的坑**：把业务逻辑塞进网盘。网盘负责"文件 + 权限 + 分享"，结构化数据（账本、健康、地点、人脉、时间线）应该在自己的 Postgres 里，用文件 URI 关联。
-
----
-
-## 2. 评估维度（针对"基座 + 长期扩展"重新定义）
-
-普通网盘评测比的是"好不好用"；基座要比的是：
-
-1. **扩展点**：API 是否完备、有没有事件、能不能换前端、能不能写插件
-2. **元数据与检索**：后续所有功能都要靠"给文件挂属性 + 查属性"
-3. **文件落地形态**：裸文件（可 rsync / 随时跑路）还是 blob（依赖 DB 解释）
-4. **客户端覆盖**：Web / 桌面同步 / 手机 / WebDAV
-5. **运维成本**：几个进程、几个中间件、升级频率
-6. **许可与商业风险**：Pro 门槛、公司是否稳定、前端源码授权
+**The trap that is easiest to fall into**: stuffing business logic into the drive. The drive handles "files + permissions + sharing"; structured data (ledger, health, places, contacts, timeline) belongs in your own Postgres, correlated through file URIs.
 
 ---
 
-## 3. 候选对比（2026-10 实测数据）
+## 2. Evaluation dimensions (redefined for "base + long-term extension")
 
-| 项目 | 版本 | 技术栈 | 文件落地 | 扩展方式 | 元数据/检索 | 客户端 | 许可 | 运维 |
+An ordinary drive review compares "is it pleasant to use"; a base compares:
+
+1. **Extension points**: is the API complete, are there events, can you replace the frontend, can you write plugins
+2. **Metadata and search**: everything later depends on "attach attributes to files + query attributes"
+3. **On-disk shape**: plain files (rsync-able, you can walk away any time) or blobs (meaning depends on the DB)
+4. **Client coverage**: Web / desktop sync / mobile / WebDAV
+5. **Operational cost**: how many processes, how many middlewares, how often it upgrades
+6. **Licensing and commercial risk**: Pro paywalls, is the company stable, the frontend source license
+
+---
+
+## 3. Candidate comparison (measured data, 2026-10)
+
+| Project | Version | Stack | On-disk | Extension | Metadata/search | Clients | License | Ops |
 |---|---|---|---|---|---|---|---|---|
-| **Cloudreve** | 4.19.1 | Go + React | blob（S3/本地/OneDrive/远程节点），原名不存 | REST `/api/v4` + SSE 事件 + WebDAV + WOPI + 可替换前端 | 元数据命名空间 `key:value`，可直接作为查询条件；Meilisearch 全文 + Tika 正文抽取 + AI 语义检索 | Web、iOS、Windows（Pro）、WebDAV | GPL-3.0 + Pro 付费 | ★ 单二进制 + DB（+可选 Redis/Meilisearch） |
-| **Nextcloud** | 35.0.2 | PHP + Vue | **裸文件** `data/<user>/files` | PHP App + **AppAPI ExApp（后端可用任意语言，容器化微服务）** | 标签/评论/版本；全文检索靠 fulltextsearch + ES 插件 | 全平台官方客户端（Win/mac/Linux/iOS/Android）+ WebDAV | AGPL | ★★★ PHP-FPM + nginx + DB + Redis + cron |
-| **Seafile** | 13.0（14 测试中） | C + Go | 块存储（库/commit 模型），加密库 | REST API + WebDAV，插件生态弱 | 13 起有"文件属性 + 视图"；全文检索偏 Pro | 全平台，**同步最强**（块级增量、断点续传、冲突副本） | AGPL / 商业双版 | ★★ 需 seafile + seahub + DB + 缓存 |
-| **Pydio Cells** | 5.1.0 | Go 微服务 + gRPC | 本地/S3 抽象 | REST / gRPC / 多语言 SDK | 有 | Web + 同步客户端 | AGPL | ★★★ 微服务多进程，偏企业 |
-| **FileBrowser Quantum** | 活跃 | Go 单二进制 | 直接映射目录（裸文件） | 基本无扩展点 | 索引搜索 | Web | Apache-2.0 | ★ 极轻 |
-| **OpenList**（AList 继任） | 活跃 | Go | 虚拟 FS，聚合 30+ 云盘 | API / WebDAV | 继承云盘元数据 | Web + WebDAV | AGPL | ★★ |
+| **Cloudreve** | 4.19.1 | Go + React | blob (S3/local/OneDrive/remote nodes), original filenames not stored | REST `/api/v4` + SSE events + WebDAV + WOPI + replaceable frontend | metadata namespace `key:value`, directly usable as a query condition; Meilisearch full text + Tika body extraction + AI semantic search | Web, iOS, Windows (Pro), WebDAV | GPL-3.0 + paid Pro | ★ single binary + DB (+ optional Redis/Meilisearch) |
+| **Nextcloud** | 35.0.2 | PHP + Vue | **plain files** under `data/<user>/files` | PHP App + **AppAPI ExApp (backend in any language, containerized microservices)** | tags/comments/versions; full-text search via fulltextsearch + the ES plugin | official clients on every platform (Win/mac/Linux/iOS/Android) + WebDAV | AGPL | ★★★ PHP-FPM + nginx + DB + Redis + cron |
+| **Seafile** | 13.0 (14 in testing) | C + Go | block storage (library/commit model), encrypted libraries | REST API + WebDAV; weak plugin ecosystem | "file attributes + views" since 13; full-text search is mostly Pro | all platforms, **the strongest sync** (block-level delta, resumable transfer, conflict copies) | AGPL / dual commercial | ★★ needs seafile + seahub + DB + cache |
+| **Pydio Cells** | 5.1.0 | Go microservices + gRPC | local/S3 abstraction | REST / gRPC / multi-language SDKs | yes | Web + a sync client | AGPL | ★★★ many microservice processes, enterprise-leaning |
+| **FileBrowser Quantum** | active | Go, single binary | maps a directory directly (plain files) | essentially no extension points | indexed search | Web | Apache-2.0 | ★ extremely light |
+| **OpenList** (AList's successor) | active | Go | virtual FS aggregating 30+ drives | API / WebDAV | inherits the drive's metadata | Web + WebDAV | AGPL | ★★ |
 
-社区热度参考：Nextcloud ~37.2k★，SeaweedFS ~35.7k★，Cloudreve ~28.9k★，OpenList ~25.2k★，Seafile ~15.4k★，FileBrowser Quantum ~8.9k★，Pydio Cells ~2.2k★。
-
----
-
-## 4. 逐个点评
-
-### Cloudreve 4 —— "API 优先"的现代网盘，最适合自己写上层
-
-**强项**
-- 数据模型干净：`File` / `File Blob`（不可变）/ `Metadata` / `Storage Policy`，文件有版本、缩略图、Live Photo；
-- **元数据即查询条件**：`meta_music:album=Deluxe`、`exact_meta_*`，还能自定义 `props:<key>`——等于白送一个"给文件挂结构化属性"的能力；
-- 全文检索（Meilisearch + Apache Tika 抽 PDF/Office 正文）+ **AI 语义检索**（embedding 打给 OpenAI/HF）；
-- File Apps：内置 PDF/ePub/视频/音乐/Markdown，可加 WOPI（OnlyOffice）和嵌入式网页应用；
-- 有 SSE 文件变更事件、OIDC 登录、从节点、存储策略矩阵（S3/OSS/COS/OneDrive/R2/B2/本地）；
-- 部署就是一个二进制 + 一个数据库，运维成本比 Nextcloud 低一个数量级；
-- 前端是独立 React 仓库，可直接换掉（Pro 用户可拿前端源码）。
-
-**硬伤**
-- 文件在存储桶里是 **blob（哈希路径），不是原文件名**；脱离 Cloudreve 后需要 DB 才能还原目录结构 → 备份必须 DB + bucket 同时快照；
-- 官方桌面同步客户端 **只有 Windows，且需要 Pro**；Mac/Linux 只能 WebDAV 或 rclone；
-- 无后端插件系统，扩展只能"走 API"；
-- 社区版前端仓库没有 LICENSE 文件，深度改 UI 前要先确认授权；
-- 多存储策略自由切换、WebDAV 分目录策略等落在 Pro。
-
-### Nextcloud 35 —— 全家桶 + 裸文件 + 全平台客户端，但重
-
-**强项**
-- **文件就是普通文件**，落在 `data/<user>/files/`，rsync/restic 直接备份，随时能跑路——对"存几十年的个人数据"这是最大优势；
-- 生态最大：Photos、Calendar、Contacts、Mail、Talk、Office、Notes、Deck……很多"额外功能"直接装；
-- 扩展性其实不差：PHP App，以及 **AppAPI ExApp**——后端可以用 Python/Go/Node 写成容器微服务，前端 Vue，挂进 Nextcloud 菜单；
-- 客户端覆盖无死角（Win/mac/Linux/iOS/Android），WebDAV 实现成熟。
-
-**硬伤**
-- 重：PHP-FPM + nginx + DB + Redis + cron，升级频繁，大版本升级偶有坑；
-- 文件量大时（单目录数万文件）列表/扫描会慢，DB filecache 是瓶颈；
-- 想改核心 = 改 PHP，心智负担大；AppAPI 需要 Docker 环境。
-
-### Seafile 13/14 —— 同步王者，扩展性最弱
-
-**强项**
-- 块级增量同步、断点续传、冲突副本、加密库，多设备同步体验是这几个里最好的；
-- 13 起有"文件属性 + 灵活视图"，往"文件即数据库"方向走了一步；
-- 桌面/移动客户端成熟。
-
-**硬伤**
-- 数据是块存储 + commit 模型，**最封闭**，脱离 Seafile 需要专用导出工具；
-- 扩展点是 REST/WebDAV，没有插件体系，想加功能基本只能外挂；
-- 社区版与 Pro 差距明显（全文检索、在线 Office、高级权限在 Pro）。
-
-### Pydio Cells 5 —— 架构先进，社区偏小
-
-Go 微服务 + gRPC，有 Cells Flows 自动化，SDK 齐全；但多进程运维复杂、社区规模小，个人项目性价比不高。
-
-### FileBrowser Quantum —— 适合"够用就好"
-
-单二进制、映射真实目录、索引搜索，几分钟能跑起来。没有版本、没有像样的分享权限体系，只能当轻量文件浏览器，不是基座。
-
-### OpenList —— 不是基座，是"入口"
-
-AList 因商业纠纷被社区分叉为 OpenList（原版已不可信）。它把 30+ 云盘挂成统一虚拟文件系统 + WebDAV，非常适合"聚合外部云"，但**没有版本、没有一致性保证、不做主存储**。定位：并存的第二入口，不是底座。
+Community popularity for reference: Nextcloud ~37.2k★, SeaweedFS ~35.7k★, Cloudreve ~28.9k★, OpenList ~25.2k★, Seafile ~15.4k★, FileBrowser Quantum ~8.9k★, Pydio Cells ~2.2k★.
 
 ---
 
-## 5. 三种推荐架构
+## 4. One by one
 
-### A. Cloudreve 为核（推荐：能写代码、要 API、轻运维）
+### Cloudreve 4 — the "API-first" modern drive, the best fit for building your own layer on top
+
+**Strengths**
+- Clean data model: `File` / `File Blob` (immutable) / `Metadata` / `Storage Policy`; files have versions, thumbnails, Live Photo;
+- **Metadata is a query condition**: `meta_music:album=Deluxe`, `exact_meta_*`, plus custom `props:<key>` — effectively a free "attach structured attributes to files" capability;
+- Full-text search (Meilisearch + Apache Tika extracting PDF/Office bodies) + **AI semantic search** (embeddings sent to OpenAI/HF);
+- File Apps: built-in PDF/ePub/video/music/Markdown, plus WOPI (OnlyOffice) and embedded web apps;
+- SSE file-change events, OIDC login, slave nodes, a matrix of storage policies (S3/OSS/COS/OneDrive/R2/B2/local);
+- Deployment is one binary + one database, an order of magnitude less ops work than Nextcloud;
+- The frontend is a separate React repo and can be swapped out outright (Pro users get the frontend source).
+
+**Hard problems**
+- Files in the bucket are **blobs (hashed paths), not original filenames**; without Cloudreve you need the DB to reconstruct the directory tree → a backup must snapshot the DB and the bucket at the same point in time;
+- The official desktop sync client is **Windows only, and needs Pro**; on Mac/Linux you have WebDAV or rclone;
+- No backend plugin system; extensions can only "go through the API";
+- The community-edition frontend repo has no LICENSE file; confirm the licensing before a deep UI rewrite;
+- Free switching between storage policies, per-directory WebDAV policies, and the like sit behind Pro.
+
+### Nextcloud 35 — full suite + plain files + clients everywhere, but heavy
+
+**Strengths**
+- **The files are just plain files** under `data/<user>/files/`; rsync/restic can back them up directly, and you can walk away any time — for "personal data kept for decades" this is the biggest advantage;
+- The largest ecosystem: Photos, Calendar, Contacts, Mail, Talk, Office, Notes, Deck… a lot of "extra features" install straight away;
+- Extensibility is actually fine: PHP Apps, plus **AppAPI ExApp** — the backend can be a Python/Go/Node container microservice and the frontend Vue, hung into the Nextcloud menu;
+- No gaps in client coverage (Win/mac/Linux/iOS/Android), and the WebDAV implementation is mature.
+
+**Hard problems**
+- Heavy: PHP-FPM + nginx + DB + Redis + cron, frequent upgrades, and the occasional trap on major upgrades;
+- With a lot of files (tens of thousands in one directory) listing/scanning gets slow; the DB filecache is the bottleneck;
+- Changing the core means changing PHP, a big mental load; AppAPI needs a Docker environment.
+
+### Seafile 13/14 — the sync king, the weakest extensibility
+
+**Strengths**
+- Block-level delta sync, resumable transfer, conflict copies, encrypted libraries; multi-device sync is the best of this bunch;
+- Since 13 it has "file attributes + flexible views", a step toward "files as a database";
+- Mature desktop/mobile clients.
+
+**Hard problems**
+- Data is block storage + a commit model, **the most closed**; leaving Seafile requires dedicated export tooling;
+- Extension points are REST/WebDAV with no plugin system, so new features basically have to be bolted on;
+- A clear gap between the community edition and Pro (full-text search, online Office, advanced permissions are Pro).
+
+### Pydio Cells 5 — modern architecture, small community
+
+Go microservices + gRPC, Cells Flows automation, complete SDKs; but multi-process operations are complex and the community is small, so the value for a personal project is poor.
+
+### FileBrowser Quantum — for "good enough is fine"
+
+A single binary, mapping a real directory, indexed search; it runs in minutes. No versions, no decent sharing-permission system; it is only a lightweight file browser, not a base.
+
+### OpenList — not a base, an "entry point"
+
+AList was forked by the community into OpenList after a commercial dispute (the original is no longer trustworthy). It mounts 30+ drives as a unified virtual file system + WebDAV, which is a great fit for "aggregating external clouds", but **it has no versions, no consistency guarantees, and is not primary storage**. Its role: a second entry point running alongside, not the foundation.
+
+---
+
+## 5. Three recommended architectures
+
+### A. Cloudreve at the core (recommended: you can write code, you want an API, you want light ops)
 
 ```
 Web / iOS / WebDAV
         │
-   Cloudreve 4  ── 文件·分享·权限·版本·元数据·全文/语义检索
+   Cloudreve 4  ── files · sharing · permissions · versions · metadata · full-text/semantic search
         │                    ▲ REST + SSE
-   Postgres / S3(或本地)      │
-                       你的业务服务  ── 自己的 Postgres + pgvector
+   Postgres / S3 (or local)  │
+                        your business service  ── its own Postgres + pgvector
 ```
 
-- 业务服务不改 Cloudreve 源码：读目录、拿临时直链、写 `props:*` 元数据、订阅 SSE 做自动处理；
-- 额外功能（相册、时间线、AI 问答、自动归档）都是独立进程，坏了不影响网盘。
+- The business service does not touch Cloudreve's source: it lists directories, gets temporary direct links, writes `props:*` metadata, and subscribes to SSE for automatic processing;
+- Extra features (albums, timeline, AI Q&A, auto-archiving) are all separate processes; if they break, the drive is unaffected.
 
-### B. Nextcloud 为核（推荐：要全家桶 + 多端同步 + 跑路能力）
+### B. Nextcloud at the core (recommended: you want the full suite + multi-device sync + the ability to walk away)
 
 ```
-Win/mac/Linux/iOS/Android 官方客户端
+Win/mac/Linux/iOS/Android official clients
         │
    Nextcloud 35  ── Files/Photos/Calendar/Contacts + AppAPI ExApp
         │
-   data/<user>/files  ←── WebDAV / OCS API ── 你的业务服务
+   data/<user>/files  ←── WebDAV / OCS API ── your business service
 ```
 
-- 文件保持裸文件，十年后不用 Nextcloud 也能读；
-- 额外功能做成 ExApp（任意语言）或独立服务读 WebDAV。
+- Files stay plain files; ten years from now they are still readable without Nextcloud;
+- Extra features become ExApps (any language) or a separate service reading WebDAV.
 
-### C. 自建薄基座（长期主义，工作量最大）
+### C. A thin self-built base (the long-term play, the most work)
 
 ```
-你的前端 → 你的 API → Postgres(元数据/ACL) + S3(RustFS/云 OSS)
-                          ↑ 可选：FileBrowser 作为运维后门 UI（只读挂载）
+your frontend → your API → Postgres (metadata/ACL) + S3 (RustFS/cloud OSS)
+                              ↑ optional: FileBrowser as an ops backdoor UI (read-only mount)
 ```
 
-- 只有你能定义数据模型，跑路能力最强；
-- 注意：**同一个 bucket 只能有一个写者**。Cloudreve/Nextcloud 的 blob 命名与你自己的命名不能混写，否则必冲突。
+- Only you define the data model, and mobility is maximal;
+- Note: **one bucket can only have one writer**. Cloudreve/Nextcloud blob naming and your own naming must not be mixed, or they will collide.
 
 ---
 
-## 6. 避坑清单
+## 6. Pitfall checklist
 
-- **MinIO 的 GitHub 仓库已归档（2026-04）**，社区版事实上停更，新项目别选；S3 层用云 OSS、SeaweedFS、Garage，RustFS 很新（谨慎）。
-- **AList 原版已不可信**（商业纠纷），用 OpenList 社区分支。
-- **ownCloud 公司层面近两年动荡**（业务被收购/重组），oCIS 不建议作为新项目基座。
-- **blob 类网盘（Cloudreve/Seafile）的备份必须 DB + 存储桶同一时点快照**，否则恢复出来是一堆无法解释的哈希。
-- **自建 ≠ 备份**：至少 3-2-1，用 restic 推到另一家对象存储；别让自建盘成为唯一副本。
-- **别把所有东西塞进一个 Seafile 库**：库过大后操作明显变慢，按主题分库。
-- **Cloudreve 桌面同步仅 Windows + Pro**，如果你主力 Mac/iPhone 且要"像 Dropbox 一样同步"，这是否决项。
+- **MinIO's GitHub repo is archived (2026-04)**; the community edition is effectively unmaintained, so don't pick it for a new project. For the S3 layer use cloud OSS, SeaweedFS, or Garage; RustFS is very new (be careful).
+- **The original AList is no longer trustworthy** (commercial dispute); use the community fork OpenList.
+- **ownCloud has been in turmoil at the company level for the last two years** (the business was acquired/restructured); oCIS is not recommended as the base for a new project.
+- **Backups of blob-style drives (Cloudreve/Seafile) must snapshot the DB and the bucket at the same point in time**, or what you restore is a pile of unexplainable hashes.
+- **Self-hosting ≠ backup**: at least 3-2-1, pushing to another object store with restic; never let the self-hosted drive be the only copy.
+- **Don't stuff everything into one Seafile library**: operations slow down noticeably once a library grows; split libraries by topic.
+- **Cloudreve's desktop sync is Windows + Pro only**; if you live on Mac/iPhone and want "syncing like Dropbox", that is a veto.
 
 ---
 
-## 7. 一周验证计划（比看评测靠谱）
+## 7. A one-week validation plan (more reliable than reading reviews)
 
-| 天 | 动作 |
+| Day | Action |
 |---|---|
-| D1 | docker compose 起 `postgres + meilisearch + cloudreve`，跑通上传/分享 |
-| D2 | 灌 5 万文件（脚本造目录树），测列表、搜索、缩略图、大文件断点续传 |
-| D3 | iPhone 客户端 + rclone WebDAV 挂载 + 外链分享，记录体验断点 |
-| D4 | Nextcloud AIO 同机另端口起一套，重复 D2/D3 对照 |
-| D5 | 写 200 行脚本调 Cloudreve API：列目录 → 取直链 → 写 `props:*` → 订阅 SSE |
-| D6 | 备份演练：`pg_dump` + bucket 快照 → 恢复到全新容器，验证文件与目录树完整 |
-| D7 | 决策：按"同步体验 / 扩展顺手度 / 运维痛苦度"三项打分 |
+| D1 | bring up `postgres + meilisearch + cloudreve` with docker compose and get upload/share working |
+| D2 | load 50k files (a script generates the directory tree); test listing, search, thumbnails, resumable large-file upload |
+| D3 | iPhone client + rclone WebDAV mount + external link sharing; write down where the experience breaks |
+| D4 | start a Nextcloud AIO instance on the same machine on another port; repeat D2/D3 for comparison |
+| D5 | write a 200-line script against the Cloudreve API: list a directory → get a direct link → write `props:*` → subscribe to SSE |
+| D6 | backup drill: `pg_dump` + a bucket snapshot → restore into a fresh container; verify files and the directory tree are intact |
+| D7 | decide: score on "sync experience / ease of extending / ops pain" |
 
 ---
 
-## 8. 参考
+## 8. References
 
-- Cloudreve 文档（概念 / File URI / Metadata / File Apps / 语义检索）：https://docs.cloudreve.org/
-- Cloudreve 源码：https://github.com/cloudreve/Cloudreve
-- Nextcloud ExApp 开发：https://docs.nextcloud.com/server/32/developer_manual/exapp_development/development_overview/ExAppOverview.html
-- Nextcloud Server：https://github.com/nextcloud/server
-- Seafile 14 预览：https://blog.seafile.com/seafile-14-0-is-ready-for-testing-620a335e5668
-- Seafile 13：https://blog.seafile.com/seafile-13-0-is-ready-470c5e75f6fc
-- Pydio Cells：https://github.com/pydio/cells
-- OpenList：https://github.com/OpenListTeam/OpenList
-- FileBrowser Quantum：https://github.com/gtsteffaniak/filebrowser
-- MinIO（已归档）：https://github.com/minio/minio
-- RustFS：https://github.com/rustfs/rustfs
-- SeaweedFS：https://github.com/seaweedfs/seaweedfs
+- Cloudreve docs (concepts / File URI / Metadata / File Apps / semantic search): https://docs.cloudreve.org/
+- Cloudreve source: https://github.com/cloudreve/Cloudreve
+- Nextcloud ExApp development: https://docs.nextcloud.com/server/32/developer_manual/exapp_development/development_overview/ExAppOverview.html
+- Nextcloud Server: https://github.com/nextcloud/server
+- Seafile 14 preview: https://blog.seafile.com/seafile-14-0-is-ready-for-testing-620a335e5668
+- Seafile 13: https://blog.seafile.com/seafile-13-0-is-ready-470c5e75f6fc
+- Pydio Cells: https://github.com/pydio/cells
+- OpenList: https://github.com/OpenListTeam/OpenList
+- FileBrowser Quantum: https://github.com/gtsteffaniak/filebrowser
+- MinIO (archived): https://github.com/minio/minio
+- RustFS: https://github.com/rustfs/rustfs
+- SeaweedFS: https://github.com/seaweedfs/seaweedfs

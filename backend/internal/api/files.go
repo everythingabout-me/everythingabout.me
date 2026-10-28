@@ -15,7 +15,7 @@ import (
 const (
 	listLimit   = 5000
 	searchLimit = 200
-	// COS 单对象上限 48.82TB，这里给个保守值。
+	// COS caps one object at 48.82 TB; this stays well below that.
 	maxFileSize = int64(48) * 1024 * 1024 * 1024
 )
 
@@ -33,8 +33,8 @@ type confirmBody struct {
 	Path   string `json:"path"`
 	Mime   string `json:"mime"`
 	SHA256 string `json:"sha256"`
-	// ModifiedAt 是浏览器端 File.lastModified（毫秒）。上传旧照片时它比
-	// 对象存储的 LastModified（= 今天）更接近真实时间。
+	// ModifiedAt is the browser's File.lastModified (milliseconds). When uploading old
+	// photos it is closer to the real time than object storage's LastModified (= today).
 	ModifiedAt int64 `json:"modifiedAt"`
 }
 
@@ -188,7 +188,7 @@ func (s *Server) handleUploadConfirm(w http.ResponseWriter, r *http.Request) err
 		return httpx.Conflict("a directory with the same name already exists")
 	}
 
-	// HeadObject 校验后落库
+	// verify with HeadObject before writing the row
 	info, err := s.storage.Head(r.Context(), paths.KeyFor(path, user.ID))
 	if err != nil {
 		return err
@@ -423,7 +423,7 @@ func (s *Server) handleDelete(w http.ResponseWriter, r *http.Request) error {
 		return err
 	}
 
-	// 永久删除：对象和索引一起删掉。
+	// permanent delete: drop the object and the index row together.
 	count, err := s.nodes.Purge(r.Context(), path, user.ID)
 	if err != nil {
 		return err

@@ -5,15 +5,16 @@ import (
 	"time"
 )
 
-// selectMoments 在一个月的候选里挑出要展示的那些。
+// selectMoments picks what to show from one month's candidates.
 //
-// 规则不是"每天 N 条"，而是：
-//   - 总预算固定（默认 24 单位），给得起的才出现；
-//   - 单日最多 3 条 / 12 单位，防止一天独占；
-//   - 先按价值从高到低，再用一个递减的"最小间隔"补位：
-//     高价值允许挨着，普通内容尽量散开。
+// The rule is not "N per day" but:
+//   - a fixed total budget (24 display units by default); only what fits appears;
+//   - at most 3 per day / 12 units, so one day cannot hog the month;
+//   - highest value first, then a shrinking "minimum gap" backfills the rest:
+//     high-value moments may sit close together, ordinary ones spread out.
 //
-// 这样旅行月会自然变密、平淡月会自然变稀，而整年的滚动节奏保持稳定。
+// A travel month thus grows denser and a quiet month sparser, while the
+// year-round rhythm stays stable.
 func selectMoments(candidates []Moment, budget, ambientCost int) []Moment {
 	if budget <= 0 {
 		return nil
@@ -42,7 +43,7 @@ func selectMoments(candidates []Moment, budget, ambientCost int) []Moment {
 	perDayCost := make(map[string]int)
 	spent := 0
 
-	// 间隔从 2 天放宽到 0 天，尽量把预算用满。
+	// Relax the gap from 2 days to 0 so the budget gets used up.
 	for _, minGap := range []int{2, 1, 0} {
 		for _, candidate := range sorted {
 			if taken[candidate.DedupeKey] {
@@ -72,7 +73,7 @@ func selectMoments(candidates []Moment, budget, ambientCost int) []Moment {
 	return selected
 }
 
-// tooClose 判断候选和已选内容是否在 minGap 天内。
+// tooClose reports whether the candidate sits within minGap days of anything selected.
 func tooClose(candidate Moment, selected []Moment, minGap int) bool {
 	for _, item := range selected {
 		days := int(candidate.LocalDate.Sub(item.LocalDate).Hours() / 24)
@@ -86,7 +87,8 @@ func tooClose(candidate Moment, selected []Moment, minGap int) bool {
 	return false
 }
 
-// gapItem 生成一条压缩的空白行；只有跨度够长、确实有文件时才值得出现。
+// gapItem builds a collapsed blank row; it only earns a slot when the span is long
+// enough and files actually exist.
 func gapItem(from, to time.Time, fileCount int) *Item {
 	if fileCount <= 0 {
 		return nil

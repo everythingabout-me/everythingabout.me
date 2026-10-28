@@ -11,8 +11,9 @@ import (
 	"golang.org/x/crypto/scrypt"
 )
 
-// 参数存在哈希串里，以后调高成本不影响老用户登录。
-// 和改造前 Node 版本保持完全一致，已有账号的密码可以直接验证。
+// The parameters live in the hash string, so raising the cost later does not break
+// existing logins. Kept identical to the pre-rewrite Node version so passwords on
+// existing accounts verify as-is.
 const (
 	scryptN      = 32768
 	scryptR      = 8
@@ -21,7 +22,7 @@ const (
 	scryptMaxMem = 128 * 1024 * 1024
 )
 
-// HashPassword 生成 scrypt$N$r$p$salt$hash 格式的哈希串。
+// HashPassword produces a hash string in scrypt$N$r$p$salt$hash form.
 func HashPassword(password string) (string, error) {
 	salt := make([]byte, 16)
 	if _, err := rand.Read(salt); err != nil {
@@ -41,8 +42,9 @@ func HashPassword(password string) (string, error) {
 	}, "$"), nil
 }
 
-// VerifyPassword 校验密码。哈希串格式不对、算法未知、长度不符都返回 false，
-// 不抛异常，避免把数据库里的脏数据变成 500。
+// VerifyPassword checks a password. A malformed hash string, an unknown algorithm, or a
+// length mismatch all return false rather than an error, so a dirty row in the database
+// never turns into a 500.
 func VerifyPassword(password, stored string) bool {
 	parts := strings.Split(stored, "$")
 	if len(parts) != 6 || parts[0] != "scrypt" {
@@ -55,7 +57,7 @@ func VerifyPassword(password, stored string) bool {
 	if errN != nil || errR != nil || errP != nil {
 		return false
 	}
-	// 防止被篡改的参数把内存打爆：N 上限 2^20，r/p 上限 32
+	// Keep tampered parameters from blowing up memory: N capped at 2^20, r/p at 32.
 	if n < 1024 || n > 1_048_576 || r < 1 || r > 32 || p < 1 || p > 32 {
 		return false
 	}
@@ -85,8 +87,8 @@ var (
 	dummyErr  error
 )
 
-// BurnPasswordCheck 在用户不存在时也跑一次 scrypt，
-// 避免通过响应时间枚举邮箱。
+// BurnPasswordCheck still runs scrypt when the user does not exist, so response
+// timing cannot be used to enumerate email addresses.
 func BurnPasswordCheck(password string) {
 	dummyOnce.Do(func() {
 		random := make([]byte, 24)
@@ -98,7 +100,7 @@ func BurnPasswordCheck(password string) {
 	}
 }
 
-// randomToken 生成 32 字节的 URL-safe token（和 Node 的 base64url 一致）。
+// randomToken returns a 32-byte URL-safe token (same as Node's base64url).
 func randomToken() (string, error) {
 	buf := make([]byte, 32)
 	if _, err := rand.Read(buf); err != nil {

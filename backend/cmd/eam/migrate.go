@@ -12,7 +12,7 @@ import (
 	"everythingabout.me/backend/internal/store"
 )
 
-// findSQLDir 支持从仓库根目录或 backend/ 目录运行。
+// findSQLDir works from either the repo root or the backend/ directory.
 func findSQLDir() (string, error) {
 	if dir := os.Getenv("EAM_SQL_DIR"); dir != "" {
 		return dir, nil
@@ -72,7 +72,7 @@ func runMigrate(args []string) error {
 		if err != nil {
 			return err
 		}
-		// 没有参数时 pgx 会走 simple protocol，可以一次执行多条语句
+		// with no arguments pgx uses the simple protocol, so several statements run at once
 		if _, err := tx.Exec(ctx, string(content)); err != nil {
 			fmt.Println("FAIL")
 			return fmt.Errorf("%s: %w", file, err)

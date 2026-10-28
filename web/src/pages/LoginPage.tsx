@@ -5,7 +5,7 @@ import styles from "../styles/auth.module.css";
 
 export function LoginPage() {
   const [searchParams] = useSearchParams();
-  // 密码登录不再显示入口，只保留 /login?mode=password 直达
+  // Password sign-in has no entry point; only the direct /login?mode=password link remains
   const passwordMode = searchParams.get("mode") === "password";
 
   return (

@@ -6,15 +6,16 @@ export default defineConfig({
   server: {
     host: "127.0.0.1",
     port: 5173,
-    // 端口固定：COS 的 CORS 允许来源是写死的，静默换端口会让直传被拦
+    // Port is fixed: the COS CORS allowlist is hard-coded, so a silently different port
+    // would block direct uploads.
     strictPort: true,
-    // 开发时前端跑在 Vite，接口代理给 Go 后端；生产由 Go 直接托管 dist。
+    // In dev the frontend runs on Vite and proxies the API to Go; in production Go serves dist.
     proxy: {
       "/api": {
         target: "http://127.0.0.1:8080",
         changeOrigin: false,
       },
-      // 保存链接是服务端渲染的页面，开发时也要走 Go，而不是 Vite 的 SPA 兜底。
+      // Save links are server-rendered, so in dev they must reach Go too, not Vite's SPA fallback.
       "/s": {
         target: "http://127.0.0.1:8080",
         changeOrigin: false,

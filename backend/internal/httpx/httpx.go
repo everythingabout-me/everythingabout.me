@@ -1,5 +1,5 @@
-// Package httpx 收敛 HTTP 层的公共细节：统一响应信封、错误类型、
-// Origin 校验、客户端 IP 和 JSON 解码。
+// Package httpx gathers the shared HTTP details: the response envelope, error types,
+// Origin checks, client IPs, and JSON decoding.
 package httpx
 
 import (
@@ -13,7 +13,7 @@ import (
 	"everythingabout.me/backend/internal/paths"
 )
 
-// Error 是会被原样映射到 HTTP 状态码的业务错误。
+// Error is a business error that maps straight onto an HTTP status code.
 type Error struct {
 	Status  int
 	Message string
@@ -45,7 +45,7 @@ type errEnvelope struct {
 	Error string `json:"error"`
 }
 
-// WriteJSON 直接写一个 JSON 响应。
+// WriteJSON writes a JSON response as-is.
 func WriteJSON(w http.ResponseWriter, status int, payload any) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
@@ -53,13 +53,14 @@ func WriteJSON(w http.ResponseWriter, status int, payload any) {
 	_ = json.NewEncoder(w).Encode(payload)
 }
 
-// WriteOK 写 {ok:true,data:...}，和改造前的接口形状保持一致。
+// WriteOK writes {ok:true,data:...}, keeping the response shape from before the rewrite.
 func WriteOK(w http.ResponseWriter, data any) {
 	WriteJSON(w, http.StatusOK, okEnvelope{OK: true, Data: data})
 }
 
-// WriteError 把 error 映射成 {ok:false,error:"..."}。
-// 非业务错误统一 500，并把原始信息放进消息里，方便定位。
+// WriteError maps an error onto {ok:false,error:"..."}.
+// Anything that is not a business error becomes a 500, with the original message kept in
+// the text so it can be traced.
 func WriteError(w http.ResponseWriter, err error) {
 	var apiErr *Error
 	if errors.As(err, &apiErr) {
@@ -74,8 +75,9 @@ func WriteError(w http.ResponseWriter, err error) {
 	WriteJSON(w, http.StatusInternalServerError, errEnvelope{OK: false, Error: err.Error()})
 }
 
-// AssertSameOrigin 比较 Origin 和 Host。没有 Origin 的请求（curl、脚本）放行；
-// SameSite=Lax 已经挡住绝大多数跨站 POST，这里再挡一层同站子域。
+// AssertSameOrigin compares Origin with Host. Requests without an Origin (curl, scripts)
+// pass; SameSite=Lax already blocks the vast majority of cross-site POSTs, and this adds a
+// layer against sibling subdomains.
 func AssertSameOrigin(r *http.Request) error {
 	origin := r.Header.Get("Origin")
 	if origin == "" {
@@ -101,7 +103,7 @@ func forwardedHost(r *http.Request) string {
 	return r.Host
 }
 
-// ReadJSON 解码请求体，限制 1MB，并拒绝 JSON 后面跟多余内容。
+// ReadJSON decodes the request body, capped at 1MB, and rejects content trailing the JSON.
 func ReadJSON[T any](r *http.Request) (T, error) {
 	var value T
 	decoder := json.NewDecoder(io.LimitReader(r.Body, 1<<20))
@@ -115,7 +117,7 @@ func ReadJSON[T any](r *http.Request) (T, error) {
 	return value, nil
 }
 
-// ClientIP 取反向代理传来的第一个地址。
+// ClientIP takes the first address the reverse proxy reports.
 func ClientIP(r *http.Request) string {
 	if forwarded := r.Header.Get("X-Forwarded-For"); forwarded != "" {
 		if first, _, _ := strings.Cut(forwarded, ","); strings.TrimSpace(first) != "" {

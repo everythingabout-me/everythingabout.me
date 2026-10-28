@@ -13,11 +13,11 @@ import (
 	"everythingabout.me/backend/internal/store"
 )
 
-// claim 把多用户改造之前留下的旧文件认领给某个账号。
+// claim assigns files left over from before multi-user support to one account.
 //
-// 旧数据在数据库里 owner_id 为空、COS key 是 drive/<路径>；
-// 新方案是每个用户一个前缀 drive/<用户ID>/<路径>，所以这里同时
-// 复制对象并改写 key。先跑 --dry-run 看清楚再正式执行。
+// Legacy rows have a null owner_id and a COS key of drive/<path>; the new scheme
+// gives every user a prefix, drive/<userID>/<path>, so this copies the object and
+// rewrites the key in one pass. Run --dry-run first to see the plan, then apply.
 func runClaim(args []string) error {
 	flags := flag.NewFlagSet("claim", flag.ContinueOnError)
 	email := flags.String("email", "", "assign legacy files to this email")
@@ -113,7 +113,7 @@ func runClaim(args []string) error {
 		}
 		if source == nil {
 			if item.isDir {
-				// 空目录的占位对象丢了也能补回来
+				// an empty directory's placeholder object is cheap to recreate
 				if err := objectStorage.PutEmpty(ctx, targetKey); err != nil {
 					failed++
 					log.Printf("  failed %s: %v", item.key, err)
@@ -144,7 +144,8 @@ func runClaim(args []string) error {
 			continue
 		}
 		if source != nil && !*keepSource {
-			// 数据库已经指向新 key 之后再删源，失败顶多留个重复对象，不会丢数据
+			// only delete the source once the DB points at the new key: a failure here
+			// at worst leaves a duplicate object, never loses data
 			if err := objectStorage.Remove(ctx, item.key); err != nil {
 				log.Printf("  failed to delete source object %s: %v", item.key, err)
 			}

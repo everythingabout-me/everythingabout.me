@@ -1,10 +1,10 @@
-// Command eam 是 Everything About Me 的后端服务，同时提供维护脚本。
+// Command eam is the Everything About Me backend server and maintenance tool.
 //
-//	eam server                      启动 HTTP 服务（默认）
-//	eam migrate                     按文件名顺序执行 sql/*.sql
-//	eam doctor [--write]            自检配置 / 数据库 / COS
-//	eam reconcile [--owner 邮箱] [--inventory 清单.csv] [--dry-run]
-//	eam claim --email 邮箱 [--dry-run] [--keep-source]
+//	eam server                      start the HTTP server (default)
+//	eam migrate                     run sql/*.sql in filename order
+//	eam doctor [--write]            self-check config / database / COS
+//	eam reconcile [--owner email] [--inventory inventory.csv] [--dry-run]
+//	eam claim --email email [--dry-run] [--keep-source]
 package main
 
 import (
@@ -20,7 +20,7 @@ func main() {
 	})))
 
 	args := os.Args[1:]
-	// eam --help / eam -h 等价于 eam help（否则会被当成 server 的参数）
+	// eam --help / eam -h is the same as eam help (otherwise it parses as a server flag)
 	if len(args) > 0 && (args[0] == "-h" || args[0] == "--help") {
 		usage()
 		return

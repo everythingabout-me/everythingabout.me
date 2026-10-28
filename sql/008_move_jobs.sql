@@ -1,10 +1,11 @@
--- 目录移动的后台任务。
+-- Background jobs for directory moves.
 --
--- 目录没有“一次性改名”的原语：key 就是路径，所以移动 N 个文件 = N 次服务端复制。
--- 这个表记录进度，让 POST /move 立刻返回、客户端再轮询 GET /move/{id}。
+-- There is no "rename in one shot" primitive for a directory: the key is the path, so moving N
+-- files costs N server-side copies. This table tracks progress so POST /move can return
+-- immediately and the client polls GET /move/{id}.
 
 create table if not exists move_jobs (
-  id          text primary key,                 -- m_<24 位十六进制>
+  id          text primary key,                 -- m_<24 hex chars>
   user_id     uuid not null references users(id) on delete cascade,
   from_path   text not null,
   to_path     text not null,

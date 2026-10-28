@@ -33,10 +33,10 @@ type scanned struct {
 	modified     time.Time
 }
 
-// reconcile 把 COS 桶里的对象同步进数据库索引。
+// reconcile syncs the objects in a COS bucket into the database index.
 //
-//  1. 用 coscli / rclone 把文件灌进某个用户的 drive/<用户ID>/ 前缀后，跑这个命令建索引；
-//  2. 也可以读 COS 清单（Inventory）CSV，避免百万对象全量 List。
+//  1. run this to build the index after coscli / rclone fills drive/<userID>/ for a user;
+//  2. it can also read a COS Inventory CSV, avoiding a full List over millions of objects.
 func runReconcile(args []string) error {
 	flags := flag.NewFlagSet("reconcile", flag.ContinueOnError)
 	owner := flags.String("owner", "", "only sync the prefix for this user")
@@ -185,7 +185,8 @@ func runReconcile(args []string) error {
 		if !strings.HasPrefix(key, prefix) {
 			return nil
 		}
-		// 不带 --owner 时只处理旧的无主数据，跳过已有归属的 drive/<用户ID>/
+		// without --owner only legacy unowned rows are touched; keys already under
+		// drive/<userID>/ are skipped
 		if ownerID == "" && paths.OwnerSegmentOf(key) != "" {
 			return nil
 		}
@@ -242,12 +243,12 @@ func runReconcile(args []string) error {
 		return err
 	}
 
-	// 补全父目录
+	// backfill parent directories
 	if err := backfillParents(ctx, tx, ownerID); err != nil {
 		return err
 	}
 
-	// 扫描期间没见过的对象 = 已被外部删除（只影响本次扫描的归属范围）
+	// objects not seen during the scan were deleted outside (only the scope scanned here)
 	var gone int64
 	err = tx.QueryRow(ctx,
 		`with changed as (
@@ -278,7 +279,7 @@ func runReconcile(args []string) error {
 	return nil
 }
 
-// backfillParents 保证树上每一级目录都有记录。
+// backfillParents makes sure every level of the tree has a directory row.
 func backfillParents(ctx context.Context, tx pgx.Tx, ownerID string) error {
 	rows, err := tx.Query(ctx,
 		`select distinct parent
@@ -339,7 +340,8 @@ func backfillParents(ctx context.Context, tx pgx.Tx, ownerID string) error {
 	return err
 }
 
-// readInventory 读 COS 清单 CSV，按表头（或默认列序）取 key / size / etag / 修改时间。
+// readInventory reads a COS inventory CSV, taking key / size / etag / modified time
+// from the header names (or the default column order).
 func readInventory(
 	file string,
 	accept func(key string, size int64, etag, storageClass string, modified time.Time) error,
@@ -387,7 +389,7 @@ func readInventory(
 				}
 				continue
 			}
-			// 无表头时按 COS 清单默认列序
+			// no header: fall back to the COS inventory's default column order
 			header = []string{"bucket", "key", "size", "lastmodifieddate", "etag", "storageclass"}
 		}
 
@@ -420,7 +422,7 @@ func pick(row map[string]string, names ...string) string {
 	return ""
 }
 
-// parseInventoryTime 兼容 COS 清单里常见的几种时间写法。
+// parseInventoryTime accepts the timestamp formats common in COS inventories.
 func parseInventoryTime(value string) time.Time {
 	value = strings.TrimSpace(value)
 	if value == "" {

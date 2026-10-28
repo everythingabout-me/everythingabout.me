@@ -14,7 +14,7 @@ import (
 	"everythingabout.me/backend/internal/store"
 )
 
-// runToken 管理对外 API 的访问令牌。
+// runToken manages access tokens for the public API.
 //
 //	eam token create --email you@example.com --name Obsidian [--prefix Apps/obsidian] [--write=false]
 //	eam token list   --email you@example.com

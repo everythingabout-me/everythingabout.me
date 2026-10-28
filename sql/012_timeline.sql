@@ -1,21 +1,22 @@
--- 内容流（内部叫 timeline / moments，界面上不暴露这些概念）。
+-- The content stream (internally timeline / moments; the UI never exposes those names).
 --
--- 设计见 docs/design/timeline.md。这里只放服务端需要的表：
---   timeline_assets    每个文件的时间、类型和是否参与叙事
---   timeline_moments   内容流的原子单元（可跨天、可多来源）
---   timeline_snapshots 已发布/可读的按月结果（读路径只读它）
---   timeline_jobs      后台整理队列（幂等、可重试）
---   timeline_series   健康等环境数据的日粒度序列
+-- See docs/design/timeline.md. Only the tables the server needs live here:
+--   timeline_assets    each file's time, type and whether it takes part in the narrative
+--   timeline_moments   the atomic unit of the stream (may span days, may have several sources)
+--   timeline_snapshots published, readable per-month results (the read path only uses this)
+--   timeline_jobs      background organization queue (idempotent, retryable)
+--   timeline_series    daily series for ambient data such as health
 
--- 对象的真实修改时间。nodes 原来的 created_at/updated_at 是"写进索引的时间"，
--- 用 reconcile 灌历史数据时会全是今天，时间线需要一个文件自身的时间兜底。
+-- The object's real modification time. nodes' original created_at/updated_at is "when it entered
+-- the index", so backfilling history with reconcile would date everything today; the timeline needs
+-- the file's own time as a fallback.
 alter table nodes add column if not exists source_modified_at timestamptz;
 
 create index if not exists nodes_source_modified
   on nodes (owner_id, source_modified_at)
   where is_dir = false;
 
--- scan 只看"最近三天更新过的文件"，给它一个索引。
+-- scan only looks at files updated in the last three days; give it an index.
 create index if not exists nodes_owner_updated
   on nodes (owner_id, updated_at)
   where is_dir = false;
@@ -28,8 +29,8 @@ create table if not exists timeline_assets (
   time_source      text not null default 'mtime',   -- exif | filename | mtime | ingest
   time_confidence  real not null default 0.5,
   media_type       text not null default 'other',   -- photo | video | audio | doc | data | other
-  is_narrative     boolean not null default false,  -- 是否参与内容流（照片/视频）
-  is_ambient       boolean not null default false,  -- 是否被当作环境数据（健康 CSV 等）
+  is_narrative     boolean not null default false,  -- joins the stream (photos/videos)
+  is_ambient       boolean not null default false,  -- treated as ambient data (health CSVs)
   is_screenshot    boolean not null default false,
   quality          real not null default 0.5,
   source_sig       text not null default '',
@@ -80,8 +81,8 @@ create table if not exists timeline_moment_items (
   primary key (moment_id, node_id)
 );
 
--- 按月的结果。payload 是去规范化的卡片形状（见 internal/timeline/types.go），
--- moments 才是事实源，快照随时可以从 moments 重新生成。
+-- Per-month results. payload is the denormalized card shape (see internal/timeline/types.go);
+-- moments is the source of truth, and a snapshot can be regenerated from it at any time.
 create table if not exists timeline_snapshots (
   user_id      uuid not null references users(id) on delete cascade,
   month        date not null,
@@ -89,20 +90,21 @@ create table if not exists timeline_snapshots (
   coverage     text not null default 'ready',  -- ready | indexing | empty
   file_count   int not null default 0,
   moment_count int not null default 0,
-  source_rev   timestamptz,                    -- 生成时的事实水位，用来判断快照是否过期
+  source_rev   timestamptz,                    -- fact watermark; used to detect staleness
   pipeline_version int not null default 1,
   generated_at timestamptz not null default now(),
   primary key (user_id, month)
 );
 
--- 后台整理队列。同一用户同类任务只保留一个未完成的，避免上传风暴时堆任务。
+-- Background organization queue. At most one unfinished job of each kind per user, so an upload
+-- storm does not pile up jobs.
 create table if not exists timeline_jobs (
   id           bigserial primary key,
   user_id      uuid not null references users(id) on delete cascade,
   kind         text not null,                 -- scan | backfill | month
   node_id      uuid,
   month        date,
-  cursor       text,                          -- backfill 的 keyset 游标，可断点续跑
+  cursor       text,                          -- keyset cursor for backfill; resumes after a break
   status       text not null default 'pending', -- pending | running | done | failed
   attempts     int not null default 0,
   available_at timestamptz not null default now(),
@@ -127,11 +129,12 @@ create index if not exists timeline_jobs_ready
 create index if not exists timeline_jobs_user
   on timeline_jobs (user_id, status);
 
--- 健康/步数/睡眠这类"观测"数据。它们不进内容流，只做数据带。
+-- "Observational" data such as health, steps and sleep. It stays out of the stream and only
+-- feeds data bands.
 create table if not exists timeline_series (
   id       uuid primary key default gen_random_uuid(),
   user_id  uuid not null references users(id) on delete cascade,
-  source   text not null default '',          -- 文件来源，如 health/apple-health.csv
+  source   text not null default '',          -- file source, e.g. health/apple-health.csv
   metric   text not null,
   label    text not null default '',
   unit     text not null default '',

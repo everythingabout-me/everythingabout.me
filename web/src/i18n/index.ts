@@ -1,8 +1,8 @@
 /**
- * 极简 i18n：只跟随系统/浏览器的首选语言，不提供切换入口。
+ * Minimal i18n: follows the system/browser preferred languages only, with no switcher.
  *
- * 支持中文（zh / zh-*）和英文（en / en-*）；首选语言不是这两种时回退英文。
- * 语言在模块加载时确定一次——站点没有"运行时语言"这个概念。
+ * Chinese (zh / zh-*) and English (en / en-*) are supported; anything else falls back to English.
+ * The language is fixed once at module load — the site has no notion of a runtime language.
  */
 import { messages, type MessageKey } from "./messages";
 
@@ -46,13 +46,13 @@ export function formatNumber(value: number, options?: Intl.NumberFormatOptions):
     : numberFormat.format(value);
 }
 
-/** "3 files" / "3 个文件"。数量短语的复数规则留在语言层。 */
+/** "3 files"; zh uses its own counting word. Plural rules stay in the language layer. */
 export function filesText(count: number): string {
   const n = formatNumber(count);
   return locale === "zh" ? `${n} 个文件` : `${n} ${count === 1 ? "file" : "files"}`;
 }
 
-/** 账号页里"旧文件"的说法，保留了中文的"旧"。 */
+/** The "legacy files" wording on the account page; the zh copy keeps its own word for "old". */
 export function legacyFilesText(count: number): string {
   const n = formatNumber(count);
   return locale === "zh" ? `${n} 个旧文件` : `${n} ${count === 1 ? "old file" : "old files"}`;
@@ -78,7 +78,7 @@ export function photosText(count: number): string {
   return locale === "zh" ? `${n} 张照片` : `${n} ${count === 1 ? "photo" : "photos"}`;
 }
 
-/** 封面右下角的"还有 N 张/个"。 */
+/** The "N more" counter in the cover's bottom-right corner, with a zh measure word. */
 export function moreText(count: number, series: boolean): string {
   const n = formatNumber(count);
   if (locale === "zh") return `还有 ${n} ${series ? "个" : "张"}`;

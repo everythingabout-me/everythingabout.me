@@ -19,7 +19,8 @@ import (
 	"everythingabout.me/backend/internal/store"
 )
 
-// Service 是内容流的读写入口。后台整理（worker）和 HTTP 读取共用它。
+// Service is the stream's read/write entry point, shared by the background organizer
+// (worker) and HTTP reads.
 type Service struct {
 	db      *store.DB
 	storage storage.Storage
@@ -38,7 +39,7 @@ type job struct {
 	Attempts int
 }
 
-// ---------- 文件事实 ----------
+// ---------- file facts ----------
 
 func (s *Service) recentFiles(ctx context.Context, userID string, limit int) ([]FileInput, error) {
 	rows, err := s.db.Pool().Query(ctx,
@@ -111,7 +112,8 @@ func scanFileInputs(rows pgx.Rows) ([]FileInput, error) {
 	return files, rows.Err()
 }
 
-// upsertFacts 写入一个文件事实。内容签名没变时返回 false，避免无谓的月重算。
+// upsertFacts writes one file fact. It returns false when the content signature is
+// unchanged, which avoids pointless month rebuilds.
 func (s *Service) upsertFacts(
 	ctx context.Context,
 	file FileInput,
@@ -155,7 +157,7 @@ func sourceSignature(file FileInput) string {
 	return fmt.Sprintf("%s:%d:%d:%s", file.ETag, file.Size, file.UpdatedAt.Unix(), file.Mime)
 }
 
-// ---------- 队列 ----------
+// ---------- queue ----------
 
 func (s *Service) enqueueScan(ctx context.Context, userID string) error {
 	_, err := s.db.Pool().Exec(ctx,
@@ -171,8 +173,9 @@ func (s *Service) enqueueMonth(ctx context.Context, userID string, month time.Ti
 	return err
 }
 
-// enqueueStaleMonths 对比快照和当前事实，把不一致的月份排进队列。
-// 删除文件、换时区、改评分逻辑都能靠它收敛。
+// enqueueStaleMonths compares snapshots against current facts and queues the months
+// that disagree. Deleted files, a timezone change and scoring tweaks all converge
+// through it.
 func (s *Service) enqueueStaleMonths(ctx context.Context, userID string) error {
 	rows, err := s.db.Pool().Query(ctx,
 		`select coalesce(s.month, a.month), a.files, a.rev
@@ -217,7 +220,8 @@ func (s *Service) enqueueStaleMonths(ctx context.Context, userID string) error {
 		}
 	}
 
-	// 事实已经清空的月份，快照也删掉，不要留一个空洞的旧月份。
+	// Drop the snapshot of a month whose facts are gone; never leave a hollow stale
+	// month behind.
 	_, err = s.db.Pool().Exec(ctx,
 		`delete from timeline_snapshots s
 		  where s.user_id = $1::uuid
@@ -298,7 +302,7 @@ func (s *Service) saveCursor(ctx context.Context, id int64, cursor string) {
 	}
 }
 
-// ---------- 月份读取 ----------
+// ---------- month reads ----------
 
 func (s *Service) monthAssets(
 	ctx context.Context,
@@ -355,7 +359,8 @@ func (s *Service) monthStats(
 	return count, *rev, nil
 }
 
-// loadSeries 返回这个月有数据的环境序列。最多取 3 条，避免边栏变图表墙。
+// loadSeries returns the ambient series that have data this month. At most 3, so the
+// sidebar never turns into a wall of charts.
 func (s *Service) loadSeries(
 	ctx context.Context,
 	userID string,
@@ -422,7 +427,7 @@ func (s *Service) loadSeries(
 	return series, nil
 }
 
-// ---------- 快照 ----------
+// ---------- snapshots ----------
 
 func (s *Service) readSnapshot(
 	ctx context.Context,
@@ -482,7 +487,7 @@ func (s *Service) deleteSnapshot(ctx context.Context, userID string, month time.
 	return err
 }
 
-// ---------- moment 写入 ----------
+// ---------- moment writes ----------
 
 func (s *Service) persistMoments(
 	ctx context.Context,
@@ -534,7 +539,7 @@ func (s *Service) persistMoments(
 			moment.ItemCount, moment.SourceKinds, moment.Score, moment.Cost,
 			moment.Layout, string(reason), pipelineVersion).Scan(&id)
 		if errors.Is(err, pgx.ErrNoRows) {
-			// 用户改过的片段不覆盖，也不重建它的明细。
+			// Never overwrite a user-edited segment, nor rebuild its items.
 			continue
 		}
 		if err != nil {
@@ -558,7 +563,8 @@ func (s *Service) persistMoments(
 		}
 	}
 
-	// 这个月不再出现的旧片段隐藏起来，保留深链和用户操作。
+	// Hide old segments that no longer appear this month, keeping deep links and user
+	// actions intact.
 	_, err := s.db.Pool().Exec(ctx,
 		`update timeline_moments
 		    set state = 'hidden', updated_at = now()
@@ -583,7 +589,7 @@ func (s *Service) deleteMonthMoments(
 	return err
 }
 
-// ---------- 状态 ----------
+// ---------- status ----------
 
 func (s *Service) status(ctx context.Context, userID string) (Status, error) {
 	status := Status{Enabled: s.cfg.Enabled}
@@ -622,7 +628,7 @@ func (s *Service) status(ctx context.Context, userID string) (Status, error) {
 	return status, nil
 }
 
-// ---------- 签名 ----------
+// ---------- signing ----------
 
 func (s *Service) signThumb(ctx context.Context, userID string, thumb *Thumb, process string) {
 	if thumb == nil || thumb.Video || thumb.Path == "" {
@@ -640,7 +646,7 @@ func (s *Service) signThumb(ctx context.Context, userID string, thumb *Thumb, pr
 	thumb.URL = url
 }
 
-// ---------- 月份工具 ----------
+// ---------- month helpers ----------
 
 func monthStartOf(value time.Time, loc *time.Location) time.Time {
 	local := value.In(loc)

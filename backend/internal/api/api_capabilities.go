@@ -7,8 +7,8 @@ import (
 	"everythingabout.me/backend/internal/httpx"
 )
 
-// handleAPICapabilities 把服务端的上限亮出来，客户端不用把 32 MiB / 64 MiB
-// 抄进自己的源码。免鉴权，也没有任何用户信息。
+// handleAPICapabilities exposes the server's limits so clients need not copy 32 MiB / 64 MiB
+// into their own source. No auth, and no user information at all.
 func (s *Server) handleAPICapabilities(w http.ResponseWriter, r *http.Request) error {
 	threshold := s.cfg.MultipartThreshold
 	if threshold <= 0 {

@@ -11,8 +11,8 @@ import (
 	"everythingabout.me/backend/internal/paths"
 )
 
-// scopePrefix 把请求里的 path 收窄到令牌允许的范围：
-// 没给 path 就用令牌自己的前缀，给了但不放行就 403。
+// scopePrefix narrows the requested path to what the token allows:
+// no path means the token's own prefix; a path outside it is 403.
 func scopePrefix(p *auth.Principal, requested string) (string, error) {
 	if p.Token != nil && p.Token.Prefix != "" {
 		if requested == "" {
@@ -25,7 +25,7 @@ func scopePrefix(p *auth.Principal, requested string) (string, error) {
 	return requested, nil
 }
 
-// handleAPISearch 搜索文件名和完整路径，支持 path / mime / type 过滤。
+// handleAPISearch searches file names and full paths, with path / mime / type filters.
 func (s *Server) handleAPISearch(w http.ResponseWriter, r *http.Request) error {
 	p, err := s.principal(r)
 	if err != nil {

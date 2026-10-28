@@ -1,4 +1,5 @@
-/* 全屏预览弹层：外壳负责标题栏和留白，里面的 FileViewer 自己管画布。 */
+/* Full-screen preview overlay: the shell owns the title bar and padding;
+   FileViewer manages its own canvas. */
 
 .overlay {
   position: fixed;
@@ -36,7 +37,7 @@
   border-bottom: 1px solid color-mix(in srgb, var(--border) 85%, transparent);
 }
 
-/* 文件名是这一屏的主语，把剩下的宽度全给它，动作按钮靠右。 */
+/* The filename is the subject here: give it the remaining width, actions sit on the right. */
 .title {
   flex: 1 1 auto;
   min-width: 0;
@@ -83,7 +84,7 @@
   color: var(--text);
 }
 
-/* min-height: 0 是让 flex 子项真的能收缩，否则预览器会把外壳顶高。 */
+/* min-height: 0 lets the flex child actually shrink; otherwise the viewer stretches the shell. */
 .viewport {
   flex: 1 1 auto;
   min-height: 0;

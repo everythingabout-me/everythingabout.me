@@ -19,8 +19,9 @@ import { useUploadQueue, type UploadStatus, type UploadTask } from "./useUploadQ
 import styles from "./DrivePage.module.css";
 
 /**
- * 预览器（含 pdfjs、Office 渲染器）是一大坨，只有真的点开文件才下载。
- * 这条 import 必须留在模块顶层，才能在构建时切出一个独立 chunk。
+ * The previewer (pdfjs plus the Office renderers) is a heavy chunk, only fetched when a file is
+ * actually opened. This import must stay at module top level so the build splits it into its own
+ * chunk.
  */
 const FilePreview = lazy(() => import("../components/preview/FilePreview"));
 
@@ -49,7 +50,7 @@ function formatSpeed(bytesPerSecond: number): string {
   return `${formatSize(bytesPerSecond)}/s`;
 }
 
-/** 和后端一致：目录在前，其余按名字小写排序。 */
+/** Matches the backend: directories first, the rest sorted by lowercased name. */
 function compareNames(a: string, b: string): number {
   const left = a.toLowerCase();
   const right = b.toLowerCase();
@@ -127,7 +128,7 @@ const ItemRow = memo(function ItemRow({
             {item.name}
           </button>
         ) : canPreviewFile(item.name) ? (
-          /* 能预览的文件点名字直接开弹层；不认识的类型保持原来的新标签下载。 */
+          /* Previewable files open the overlay on click; other types download in a new tab. */
           <button className={styles.name} onClick={() => onPreview(item)} title={item.name}>
             <span className={styles.nameLink}>{item.name}</span>
           </button>
@@ -175,7 +176,7 @@ const UploadRow = memo(function UploadRow({
       </span>
 
       <div className={styles.uploadInfo}>
-        {/* 进度、速度、已传/总量都挤在状态后面，整行只占两行高度。 */}
+        {/* Progress, speed and sent/total sit after the status; the row stays two lines tall. */}
         <div className={styles.uploadTitle}>
           <span className={styles.name} title={task.name}>
             {task.name}
@@ -260,7 +261,7 @@ const UploadRow = memo(function UploadRow({
 });
 
 
-/** 根面包屑由前端命名，后端返回的「全部文件」只作为 API 数据。 */
+/** The frontend names the root breadcrumb; the backend's "all files" string is API data only. */
 function crumbName(crumb: Crumb): string {
   return crumb.path === "" ? t("drive.root") : crumb.name;
 }
@@ -287,7 +288,7 @@ export function DrivePage() {
   const toastTimer = useRef<number | null>(null);
   const dragDepth = useRef(0);
   const completedUploads = useRef(0);
-  // 上传回调是异步的，完成时可能已经切到别的目录或搜索结果里了。
+  // The upload callback is async: by completion the user may have moved to another directory.
   const listingRef = useRef({ path, searching: false });
   listingRef.current = { path, searching: Boolean(activeQuery) };
 
@@ -322,12 +323,12 @@ export function DrivePage() {
     [navigate, showToast],
   );
 
-  // 路径来自 URL（?path=），前进/后退和直接访问都能正确打开目录
+  // The path comes from the URL (?path=), so back/forward and direct visits open the right place
   useEffect(() => {
     void load(path);
   }, [path, load]);
 
-  /** 一个文件 confirm 成功后，用服务端返回的节点直接替换掉占位行。 */
+  /** Once a file's confirm succeeds, swap its placeholder row for the returned node. */
   const handleUploaded = useCallback((task: UploadTask, item: Item) => {
     completedUploads.current += 1;
     if (listingRef.current.path !== task.dir || listingRef.current.searching) return;
@@ -346,7 +347,7 @@ export function DrivePage() {
     retry: retryUpload,
   } = useUploadQueue(handleUploaded);
 
-  // 整批传完后给一句总结，占位行可能在列表很靠下的位置。
+  // Summarize once the whole batch is done; the placeholder rows may sit far down the list.
   useEffect(() => {
     if (uploads.length > 0 || completedUploads.current === 0) return;
     const count = completedUploads.current;
@@ -433,12 +434,13 @@ export function DrivePage() {
     }
   };
 
-  // 上传中的占位行和真文件放同一条列表里，按同样的规则排序：
-  // 传完之后真文件正好落在占位行原来的位置，不会跳。
+  // In-flight placeholder rows share one list with real files and follow the same ordering:
+  // when an upload finishes, the real file lands where its placeholder was and nothing jumps.
   const { entries, visibleUploads, visibleItems } = useMemo(() => {
     const uploading = uploads.filter((task) => task.dir === path);
     const pendingPaths = new Set(uploading.map((task) => task.path));
-    // 覆盖同名文件时，旧文件先藏起来，只留占位行；目录不受影响。
+    // When overwriting a same-named file, hide the old one and keep only the placeholder row;
+    // directories are unaffected.
     const baseItems = items.filter(
       (item) => item.is_dir || !pendingPaths.has(item.path),
     );

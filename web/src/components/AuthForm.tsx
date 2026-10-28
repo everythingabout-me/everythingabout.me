@@ -71,7 +71,7 @@ export function AuthForm({ initialMode = "code" }: { initialMode?: Mode }) {
       } else {
         await api.loginWithPassword(email, password);
       }
-      // 登录态是 httpOnly cookie；跳回 / 时由 loader 重新确认
+      // The session is an httpOnly cookie; the loader re-confirms it when we navigate back to /
       navigate("/", { replace: true });
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : t("error.operationFailed"));

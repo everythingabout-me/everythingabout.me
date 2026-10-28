@@ -1,6 +1,6 @@
-/* 时间线：一层扁平的事件卡。
-   设计见 docs/design/timeline.md §17 / docs/design/events.md。
-   没有年 / 月标题，没有统计数字；卡片是页面上唯一的内容单位。 */
+/* The timeline: one flat layer of event cards.
+   See docs/design/timeline.md section 17 / docs/design/events.md.
+   No year/month headings and no counters; a card is the only content unit on the page. */
 
 .page {
   min-height: 100vh;
@@ -8,7 +8,7 @@
   flex-direction: column;
 }
 
-/* ---------- 顶栏 ---------- */
+/* ---------- Top bar ---------- */
 
 .topbar {
   position: sticky;
@@ -108,7 +108,7 @@
   white-space: nowrap;
 }
 
-/* ---------- 主体 ---------- */
+/* ---------- Main ---------- */
 
 .main {
   width: 100%;
@@ -158,7 +158,7 @@
   }
 }
 
-/* ---------- 事件卡 ---------- */
+/* ---------- Event card ---------- */
 
 .ev {
   padding: 22px 0 26px;
@@ -200,7 +200,7 @@
   text-underline-offset: 3px;
 }
 
-/* 媒体：1 张大图，2–4 张拼贴。 */
+/* Media: one large image, or a collage of 2–4. */
 .media {
   display: grid;
   gap: 2px;
@@ -280,7 +280,7 @@
   background: linear-gradient(135deg, var(--hover), color-mix(in srgb, var(--border) 70%, var(--hover)));
 }
 
-/* 纯文字事件：落在一块浅色底上，和照片卡区分开。 */
+/* Text-only events sit on a light panel to set them apart from photo cards. */
 .note {
   margin-top: 8px;
   padding: 22px 24px;
@@ -348,7 +348,7 @@
   color: var(--text-3);
 }
 
-/* 三方 HTML 卡片：sandbox iframe，高度由 payload 给。 */
+/* Third-party HTML card: a sandboxed iframe whose height comes from the payload. */
 .htmlCard {
   display: block;
   width: 100%;
@@ -371,7 +371,7 @@
   border: 0;
 }
 
-/* ---------- 空态 / 错误 / 骨架 ---------- */
+/* ---------- Empty state / error / skeleton ---------- */
 
 .empty {
   display: flex;
@@ -501,7 +501,7 @@
   }
 }
 
-/* ---------- 移动 ---------- */
+/* ---------- Mobile ---------- */
 
 @media (max-width: 640px) {
   .topbarInner {

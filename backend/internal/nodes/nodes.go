@@ -1,5 +1,5 @@
-// Package nodes 维护文件索引表。它是索引，不是副本：
-// 对象字节永远只在 COS 里。
+// Package nodes maintains the file index table. It is an index, not a copy: object bytes
+// only ever live in COS.
 package nodes
 
 import (
@@ -16,7 +16,7 @@ import (
 	"everythingabout.me/backend/internal/store"
 )
 
-// Node 是返回给前端的行形状（和改造前一致）。
+// Node is the row shape returned to the frontend (unchanged from before the rewrite).
 type Node struct {
 	ID               string          `json:"id"`
 	Path             string          `json:"path"`
@@ -31,7 +31,7 @@ type Node struct {
 	Meta             json.RawMessage `json:"meta"`
 }
 
-// Row 额外带上对象 key，只给服务端用。
+// Row carries the object key as well; server-side use only.
 type Row struct {
 	Node
 	Key          string  `json:"-"`
@@ -78,7 +78,7 @@ func scanNode(row pgx.Row) (*Row, error) {
 	return &node, nil
 }
 
-// List 只查索引表，不查桶。
+// List reads only the index table, never the bucket.
 func (s *Service) List(ctx context.Context, ownerID, path string, limit int) ([]Row, error) {
 	rows, err := s.db.Pool().Query(ctx,
 		`select `+nodeColumns+`
@@ -103,7 +103,7 @@ func (s *Service) List(ctx context.Context, ownerID, path string, limit int) ([]
 	return items, rows.Err()
 }
 
-// Search 同时匹配文件名和完整路径。
+// Search matches both the file name and the full path.
 func (s *Service) Search(ctx context.Context, ownerID, keyword string, limit int) ([]Row, error) {
 	pattern := "%" + EscapeLike(keyword) + "%"
 	rows, err := s.db.Pool().Query(ctx,
@@ -129,7 +129,7 @@ func (s *Service) Search(ctx context.Context, ownerID, keyword string, limit int
 	return items, rows.Err()
 }
 
-// Live 返回未被删除的单条记录。
+// Live returns a single record that has not been deleted.
 func (s *Service) Live(ctx context.Context, path, ownerID string) (*Row, error) {
 	return scanNode(s.db.Pool().QueryRow(ctx,
 		`select `+nodeColumns+`
@@ -138,7 +138,8 @@ func (s *Service) Live(ctx context.Context, path, ownerID string) (*Row, error) 
 		  limit 1`, ownerID, path))
 }
 
-// EnsureParents 保证祖先目录都有记录（直接写进桶的文件也能自动补全）。
+// EnsureParents makes sure every ancestor directory has a row (files written straight into
+// the bucket get filled in as well).
 func (s *Service) EnsureParents(ctx context.Context, path, ownerID string) error {
 	for _, dir := range paths.AncestorsOf(path) {
 		if _, err := s.db.Pool().Exec(ctx,
@@ -160,8 +161,9 @@ type UpsertInput struct {
 	Mime         *string
 	ETag         *string
 	StorageClass *string
-	// SourceModifiedAt 是对象存储侧的最后修改时间。它和 updated_at 不是一回事：
-	// updated_at 是"写进索引"的时间，reconcile 灌历史数据时全是今天。
+	// SourceModifiedAt is the object's last-modified time on the storage side. It is not the
+	// same thing as updated_at: updated_at is when the row was written into the index, which
+	// is all "today" when reconcile backfills history.
 	SourceModifiedAt *time.Time
 	Meta             map[string]any
 }
@@ -205,7 +207,7 @@ func (s *Service) UpsertFile(ctx context.Context, input UpsertInput) (*Row, erro
 	))
 }
 
-// Purge 彻底删除一棵子树：对象和索引都删掉，没有回收站。
+// Purge deletes a whole subtree for good: objects and index rows both go, and there is no trash.
 func (s *Service) Purge(ctx context.Context, path, ownerID string) (int64, error) {
 	rows, err := s.Subtree(ctx, ownerID, path)
 	if err != nil {
@@ -235,7 +237,7 @@ func (s *Service) Purge(ctx context.Context, path, ownerID string) (int64, error
 	return tag.RowsAffected(), nil
 }
 
-// CreateDirectory 插入一条目录记录（占位对象由调用方写入）。
+// CreateDirectory inserts one directory row (the caller writes the placeholder object).
 func (s *Service) CreateDirectory(ctx context.Context, path, ownerID string) (*Row, error) {
 	return scanNode(s.db.Pool().QueryRow(ctx,
 		`insert into nodes (owner_id, key, path, parent, name, is_dir)
@@ -246,13 +248,13 @@ func (s *Service) CreateDirectory(ctx context.Context, path, ownerID string) (*R
 	))
 }
 
-// Move 改单条记录的路径（对象复制由调用方完成）。
+// Move changes the path of a single record (the object copy is done by the caller).
 func (s *Service) Move(ctx context.Context, id, targetPath, ownerID string) (*Row, error) {
 	return s.MoveNode(ctx, id, targetPath, ownerID, false)
 }
 
-// MoveNode 改一条记录的路径。目录的 key 要带尾斜杠（占位对象约定），
-// 所以不能无脑用 KeyFor。
+// MoveNode changes the path of one record. A directory's key carries a trailing slash (the
+// placeholder-object convention), so KeyFor cannot be used blindly.
 func (s *Service) MoveNode(ctx context.Context, id, targetPath, ownerID string, isDir bool) (*Row, error) {
 	key := paths.KeyFor(targetPath, ownerID)
 	if isDir {
@@ -267,7 +269,7 @@ func (s *Service) MoveNode(ctx context.Context, id, targetPath, ownerID string, 
 		paths.NameOf(targetPath), id, ownerID))
 }
 
-// EscapeLike 转义 LIKE 通配符，否则目录名里的 % 和 _ 会误伤别的路径。
+// EscapeLike escapes LIKE wildcards; otherwise a % or _ in a directory name would hit other paths.
 func EscapeLike(value string) string {
 	var builder strings.Builder
 	builder.Grow(len(value))
@@ -281,7 +283,7 @@ func EscapeLike(value string) string {
 	return builder.String()
 }
 
-// AssertNotRoot 检查路径不是根目录。
+// AssertNotRoot checks that the path is not the root directory.
 func AssertNotRoot(path string) error {
 	if path == "" {
 		return httpx.BadRequest("the root directory cannot be modified")
@@ -289,14 +291,16 @@ func AssertNotRoot(path string) error {
 	return nil
 }
 
-// Cursor 是列目录的 keyset 分页位置：排序键是 (is_dir desc, lower(name), id)。
+// Cursor is the keyset pagination position for listings: the sort key is
+// (is_dir desc, lower(name), id).
 type Cursor struct {
 	IsDir bool
-	Name  string // 已经 lower 过的名字
+	Name  string // name, already lowercased
 	ID    string
 }
 
-// ListPage 按 keyset 分页列目录，limit 由调用方给（一般取 pageSize+1 判断还有没有下一页）。
+// ListPage lists a directory with keyset pagination. The caller supplies limit (usually
+// pageSize+1, to tell whether there is a next page).
 func (s *Service) ListPage(
 	ctx context.Context,
 	ownerID, path string,
@@ -335,7 +339,7 @@ func (s *Service) ListPage(
 	return items, rows.Err()
 }
 
-// Usage 统计一个用户占用的字节数和文件数（不含目录）。
+// Usage counts the bytes and files a user occupies (directories excluded).
 func (s *Service) Usage(ctx context.Context, ownerID string) (bytes, files int64, err error) {
 	err = s.db.Pool().QueryRow(ctx,
 		`select coalesce(sum(size), 0), count(*)
@@ -345,15 +349,15 @@ func (s *Service) Usage(ctx context.Context, ownerID string) (bytes, files int64
 	return bytes, files, err
 }
 
-// SearchOptions 是搜索的过滤条件。
+// SearchOptions holds the filters for a search.
 type SearchOptions struct {
-	Keyword string // 匹配文件名和完整路径
-	Prefix  string // 只在这个目录下找
-	Mime    string // 前缀匹配，如 "video/"
+	Keyword string // matches the file name and the full path
+	Prefix  string // search only under this directory
+	Mime    string // prefix match, e.g. "video/"
 	Kind    string // "" / "file" / "dir"
 }
 
-// SearchPage 按 keyset 分页搜索，排序和 ListPage 一致，游标格式也一致。
+// SearchPage does keyset-paginated search with the same ordering and cursor format as ListPage.
 func (s *Service) SearchPage(
 	ctx context.Context,
 	ownerID string,
@@ -404,8 +408,8 @@ func (s *Service) SearchPage(
 	return items, rows.Err()
 }
 
-// Subtree 返回一个目录下的全部记录（含它自己），父目录在前。
-// 目录移动用它来逐个搬对象。
+// Subtree returns every record under a directory (itself included), parents first.
+// Directory moves use it to carry objects over one by one.
 func (s *Service) Subtree(ctx context.Context, ownerID, path string) ([]Row, error) {
 	rows, err := s.db.Pool().Query(ctx,
 		`select `+nodeColumns+`

@@ -18,13 +18,13 @@ import (
 	"everythingabout.me/backend/internal/paths"
 )
 
-// TokenPrefix 是给外部程序用的访问令牌前缀。
-// 形如 eam_<12 位 id>_<43 位 secret>；库里只存 secret 的 SHA-256。
+// TokenPrefix is the prefix for access tokens handed to external programs.
+// The shape is eam_<12-char id>_<43-char secret>; only the secret's SHA-256 is stored.
 const TokenPrefix = "eam_"
 
 const tokenIDLength = 12
 
-// Token 是对外暴露的令牌形状（永远不含 secret）。
+// Token is the shape exposed for a token (never the secret).
 type Token struct {
 	ID         string  `json:"id"`
 	Name       string  `json:"name"`
@@ -40,14 +40,14 @@ type Token struct {
 	userID string
 }
 
-// Principal 是一次请求的身份：cookie 会话（Token 为 nil，全权限）
-// 或者一个受限的 API token。
+// Principal is the identity of one request: either a cookie session (Token is nil, full
+// access) or a restricted API token.
 type Principal struct {
 	User  *User
 	Token *Token
 }
 
-// FullAccess 表示这是用户本人的会话，不受前缀限制。
+// FullAccess reports that this is the user's own session, so no prefix limit applies.
 func (p *Principal) FullAccess() bool { return p.Token == nil }
 
 func (p *Principal) RequireRead(path string) error {
@@ -63,8 +63,8 @@ func (p *Principal) RequireRead(path string) error {
 	return nil
 }
 
-// CanWrite 判断这个身份能不能写某个目录——列目录时用来告诉客户端
-// "这个位置你可以落笔"，省得它靠撞 403 试错。
+// CanWrite reports whether this identity may write a given directory. Listing uses it to
+// tell the client where it is allowed to write, so it does not have to probe with 403s.
 func (p *Principal) CanWrite(path string) bool {
 	if p.FullAccess() {
 		return true
@@ -75,8 +75,8 @@ func (p *Principal) CanWrite(path string) bool {
 	return paths.IsInside(path, p.Token.Prefix)
 }
 
-// RequireEvents 判断这个身份能不能读写事件。
-// 事件和文件是两个能力位：应用可能只投稿，不碰文件。
+// RequireEvents reports whether this identity may read and write events.
+// Events and files are two separate capability bits: an app may only submit, never touch files.
 func (p *Principal) RequireEvents() error {
 	if p.FullAccess() {
 		return nil
@@ -100,13 +100,13 @@ func (p *Principal) RequireWrite(path string) error {
 	return nil
 }
 
-// ParseToken 拆出 token_id 和 secret；格式不对返回 ok=false。
+// ParseToken splits out token_id and secret; a malformed token returns ok=false.
 func ParseToken(plain string) (id, secret string, ok bool) {
 	rest, found := strings.CutPrefix(strings.TrimSpace(plain), TokenPrefix)
 	if !found {
 		return "", "", false
 	}
-	// secret 用 base64url，可能含 "_"，所以只切第一个下划线。
+	// The secret is base64url, so it may contain "_"; split on the first underscore only.
 	parts := strings.SplitN(rest, "_", 2)
 	if len(parts) != 2 || len(parts[0]) != tokenIDLength || parts[1] == "" {
 		return "", "", false
@@ -127,7 +127,7 @@ func newTokenID() (string, error) {
 	return hex.EncodeToString(buf), nil
 }
 
-// NewTokenInput 是创建令牌的入参。
+// NewTokenInput is the input for creating a token.
 type NewTokenInput struct {
 	UserID    string
 	Name      string
@@ -138,7 +138,8 @@ type NewTokenInput struct {
 	Expiry    *time.Time
 }
 
-// CreateToken 生成令牌并落库，返回明文（只此一次）和展示用的形状。
+// CreateToken mints a token and stores it, returning the plaintext (this once) and the
+// display shape.
 func (s *Service) CreateToken(ctx context.Context, input NewTokenInput) (string, *Token, error) {
 	name := strings.TrimSpace(input.Name)
 	if name == "" {
@@ -195,7 +196,7 @@ func (s *Service) CreateToken(ctx context.Context, input NewTokenInput) (string,
 	return TokenPrefix + id + "_" + secret, &token, nil
 }
 
-// ListTokens 返回某个用户的所有令牌（含已撤销的，便于审计）。
+// ListTokens returns every token for a user, revoked ones included for auditing.
 func (s *Service) ListTokens(ctx context.Context, userID string) ([]Token, error) {
 	rows, err := s.db.Pool().Query(ctx,
 		`select token_id, name, prefix, can_read, can_write, can_events,
@@ -232,7 +233,7 @@ func (s *Service) ListTokens(ctx context.Context, userID string) ([]Token, error
 	return list, rows.Err()
 }
 
-// RevokeToken 撤销一个令牌：立刻不能再换到任何权限。
+// RevokeToken revokes a token: it immediately stops granting any permission.
 func (s *Service) RevokeToken(ctx context.Context, userID, tokenID string) error {
 	tag, err := s.db.Pool().Exec(ctx,
 		`update api_tokens set revoked_at = now()
@@ -247,7 +248,7 @@ func (s *Service) RevokeToken(ctx context.Context, userID, tokenID string) error
 	return nil
 }
 
-// VerifyToken 校验明文令牌；无效返回 (nil, nil)。
+// VerifyToken checks a plaintext token; an invalid one returns (nil, nil).
 func (s *Service) VerifyToken(ctx context.Context, plain string) (*Token, error) {
 	id, secret, ok := ParseToken(plain)
 	if !ok {
@@ -286,7 +287,7 @@ func (s *Service) VerifyToken(ctx context.Context, plain string) (*Token, error)
 	token.LastUsedAt = lastUsed
 	token.ExpiresAt = expires
 
-	// 每分钟最多更新一次，避免每个请求都写库。
+	// Update at most once a minute so every request does not hit the database.
 	_, _ = s.db.Pool().Exec(ctx,
 		`update api_tokens set last_used_at = now()
 		  where token_id = $1
@@ -295,7 +296,7 @@ func (s *Service) VerifyToken(ctx context.Context, plain string) (*Token, error)
 	return &token, nil
 }
 
-// Authenticate 先看 Authorization: Bearer，再退回 cookie 会话。
+// Authenticate tries Authorization: Bearer first, then falls back to the cookie session.
 func (s *Service) Authenticate(ctx context.Context, r *http.Request) (*Principal, error) {
 	if header := strings.TrimSpace(r.Header.Get("Authorization")); header != "" {
 		plain, ok := strings.CutPrefix(header, "Bearer ")
@@ -308,7 +309,7 @@ func (s *Service) Authenticate(ctx context.Context, r *http.Request) (*Principal
 			return nil, err
 		}
 		if token == nil {
-			// 不是 eam_ 前缀的普通 token，再试一次保存链接的短码。
+			// Not an eam_-prefixed token, so try it as a save-link short code instead.
 			link, err := s.VerifySaveLink(ctx, plain)
 			if err != nil {
 				return nil, err
@@ -338,7 +339,7 @@ func (s *Service) Authenticate(ctx context.Context, r *http.Request) (*Principal
 	return &Principal{User: user}, nil
 }
 
-// isoUTC 生成和 nodes 包一致的 ISO-8601 时间字符串。
+// isoUTC builds the same ISO-8601 timestamp string that the nodes package uses.
 func isoUTC(column string) string {
 	return fmt.Sprintf(`to_char(%s at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')`, column)
 }
