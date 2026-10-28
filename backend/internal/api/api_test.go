@@ -302,7 +302,7 @@ func TestSaveLinkPrompt(t *testing.T) {
 	prompt := saveLinkPrompt("https://everythingabout.me", "abcd2345efgh2345")
 	for _, want := range []string{
 		"Token: abcd2345efgh2345",
-		"Save: POST https://everythingabout.me/s/abcd2345efgh2345",
+		"POST https://everythingabout.me/s/abcd2345efgh2345",
 		"Content-Type: text/markdown",
 		"Authorization: Bearer abcd2345efgh2345",
 	} {
@@ -312,6 +312,24 @@ func TestSaveLinkPrompt(t *testing.T) {
 	}
 	if strings.Contains(prompt, "confirmation") {
 		t.Errorf("prompt should not tell the agent what to confirm:\n%s", prompt)
+	}
+	if !strings.Contains(prompt, "/upload") {
+		t.Errorf("prompt should explain the direct upload flow for files:\n%s", prompt)
+	}
+}
+
+func TestSaveLinkAcceptsText(t *testing.T) {
+	yes := []string{"", "text/plain", "text/markdown; charset=utf-8", "application/json"}
+	no := []string{"image/jpeg", "video/mp4", "application/pdf", "application/octet-stream"}
+	for _, value := range yes {
+		if !saveLinkAcceptsText(value) {
+			t.Errorf("%q should be treated as text", value)
+		}
+	}
+	for _, value := range no {
+		if saveLinkAcceptsText(value) {
+			t.Errorf("%q should go through direct upload", value)
+		}
 	}
 }
 

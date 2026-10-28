@@ -96,6 +96,12 @@ func (s *Server) handleSaveLinkCapture(w http.ResponseWriter, r *http.Request) e
 		return httpx.NotFound("save link not found")
 	}
 
+	contentType := strings.ToLower(strings.TrimSpace(r.Header.Get("Content-Type")))
+	if !saveLinkAcceptsText(contentType) {
+		return httpx.NewError(http.StatusUnsupportedMediaType,
+			"binary files must use the direct upload flow (POST /upload with this link's Bearer token); see the link prompt")
+	}
+
 	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, saveLinkMaxBody))
 	if err != nil {
 		var tooLarge *http.MaxBytesError
@@ -106,7 +112,7 @@ func (s *Server) handleSaveLinkCapture(w http.ResponseWriter, r *http.Request) e
 	}
 
 	var req saveLinkRequest
-	if strings.HasPrefix(strings.ToLower(r.Header.Get("Content-Type")), "application/json") {
+	if strings.HasPrefix(contentType, "application/json") {
 		if err := json.Unmarshal(body, &req); err != nil {
 			return httpx.BadRequest("invalid JSON body")
 		}
@@ -268,22 +274,39 @@ func fileSlug(title string) string {
 	return slug
 }
 
+// saveLinkAcceptsText 区分“文本走 /s”和“文件走直传”。
+// 没有 Content-Type 的请求按文本处理，方便 curl --data-binary。
+func saveLinkAcceptsText(contentType string) bool {
+	return contentType == "" ||
+		strings.HasPrefix(contentType, "text/") ||
+		strings.HasPrefix(contentType, "application/json")
+}
+
 func saveLinkPrompt(base, code string) string {
 	return fmt.Sprintf(`# everythingabout.me
 
 Connected to this drive.
 
 Token: %s
-Save: POST %s/s/%s
-Content-Type: text/markdown
+
+Text:
+  POST %s/s/%s
+  Content-Type: text/markdown
 
   <content>
 
-Optional query: ?title=...
-Response: {"path": "Inbox/2026/10/27/....md", "url": "..."}
+  Optional query: ?title=...
+  Response: {"path": "Inbox/2026/10/28/....md", "url": "..."}
+
+Files (image, video, PDF):
+  POST %s/upload
+  {"path": "Inbox/2026/10/28/photo.jpg", "size": 12345, "mime": "image/jpeg"}
+
+  PUT the bytes to each returned part URL, then:
+  POST %s/upload/complete
 
 Full API: Authorization: Bearer %s
-`, code, base, code, code)
+`, code, base, code, base, base, code)
 }
 
 func requestBaseURL(r *http.Request) string {

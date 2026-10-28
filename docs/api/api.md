@@ -526,18 +526,27 @@ GET /s/abcd2345efgh2345
 Connected to this drive.
 
 Token: abcd2345efgh2345
-Save: POST https://everythingabout.me/s/abcd2345efgh2345
-Content-Type: text/markdown
+
+Text:
+  POST https://everythingabout.me/s/abcd2345efgh2345
+  Content-Type: text/markdown
 
   <content>
 
-Optional query: ?title=...
-Response: {"path": "Inbox/2026/10/27/....md", "url": "..."}
+  Optional query: ?title=...
+  Response: {"path": "Inbox/2026/10/28/....md", "url": "..."}
+
+Files (image, video, PDF):
+  POST https://everythingabout.me/upload
+  {"path": "Inbox/2026/10/28/photo.jpg", "size": 12345, "mime": "image/jpeg"}
+
+  PUT the bytes to each returned part URL, then:
+  POST https://everythingabout.me/upload/complete
 
 Full API: Authorization: Bearer abcd2345efgh2345
 ```
 
-保存就是往同一个 URL POST 正文：
+文本就是往同一个 URL POST 正文：
 
 ```http
 POST /s/abcd2345efgh2345
@@ -552,7 +561,8 @@ Content-Type: text/markdown
 
 - 短码是 16 位小写 base32，**不带 `eam_` 前缀**；`Authorization: Bearer <短码>` 也能直接走完整文件 API。
 - 保存链接和用户本人同权：不设前缀、不设能力位、默认不过期。
-- 正文可以是原始 `text/markdown`，也可以是 `{"text","title","source"}` JSON。
+- **文本和文件分开走**：`POST /s/<code>` 只收 `text/*` 或 JSON 文本；图片、视频、PDF 用同一把 token 调 `/upload` 拿预签名地址，字节直传 COS，不经过服务器。把二进制 POST 到 `/s` 会返回 `415`，并指向这条直传流程。
+- 文本正文可以是原始 `text/markdown`，也可以是 `{"text","title","source"}` JSON。
 - 文件名由标题 + 正文 SHA-256 决定：同一天重复提交同一段内容返回 `200` + `duplicate:true`，不会存两份。
 - 落盘为 `Inbox/YYYY/MM/DD/<title>-<hash>.md`，**文件里只有正文，没有 frontmatter**；标题、来源、时间写在 `nodes.meta` 里，不塞进 Markdown。
 - 每次保存都写 `audit_log`（action=`capture`），和文件 API 的写操作一样可追溯。
@@ -592,6 +602,7 @@ Content-Type: text/markdown
 | 409 | 同名冲突、非空目录、移动/复制对象过多 |
 | 412 | 条件写失败 |
 | 413 | 超过 32 MiB，请用 `/upload` |
+| 415 | 保存链接收到二进制；图片/视频/PDF 请走 `/upload` 直传 |
 | 429 | 限流，带 `Retry-After` |
 | 500 | 服务端错误；`job_failed` 时带 `id`，可以 `POST /{动作}/{id}/retry` |
 | 507 | 配额用尽 |
