@@ -1,4 +1,14 @@
-import { Suspense, lazy, memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  Suspense,
+  lazy,
+  memo,
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { Link, useLoaderData, useNavigate, useParams } from "react-router";
 import { ApiError, api, type AuthUser, type Crumb, type Item, type Job } from "../api/client";
 import { AppHeader } from "../components/AppHeader";
@@ -376,6 +386,18 @@ export function FilesPage() {
   // The upload callback is async: by completion the user may have moved to another directory.
   const listingRef = useRef({ path, searching: false });
   listingRef.current = { path, searching: Boolean(activeQuery) };
+  const panelRef = useRef<HTMLElement>(null);
+  // The card's height just before a switch, so it can resize instead of jumping.
+  const heightFrom = useRef<{ key: string; height: number } | null>(null);
+  // A first paint has no previous listing to grow from.
+  const loadedPathRef = useRef<string | null>(null);
+  loadedPathRef.current = loadedPath;
+
+  const rememberPanelHeight = useCallback((key: string) => {
+    const panel = panelRef.current;
+    if (!panel || loadedPathRef.current === null) return;
+    heightFrom.current = { key, height: panel.getBoundingClientRect().height };
+  }, []);
 
   const showToast = useCallback(
     (text: string, kind: "info" | "error" = "info", sticky = false) => {
@@ -394,6 +416,7 @@ export function FilesPage() {
       try {
         const data = await api.list(target);
         if (requestId.current !== request) return;
+        rememberPanelHeight(`${target}|`);
         setItems(data.items);
         setCurrent(data.node);
         setCrumbTrail(data.breadcrumb);
@@ -412,7 +435,7 @@ export function FilesPage() {
         if (requestId.current === request) setLoading(false);
       }
     },
-    [navigate],
+    [navigate, rememberPanelHeight],
   );
 
   // The path is the URL (/files/Photos/2024), so back/forward and direct visits open the right place.
@@ -515,6 +538,7 @@ export function FilesPage() {
     try {
       const data = await api.search(value);
       if (requestId.current !== request) return;
+      rememberPanelHeight(`${path}|${value}`);
       setItems(data.items);
       setActiveQuery(value);
       // Search results stand in for the folder listing; mark the path settled so the skeleton
@@ -589,6 +613,40 @@ export function FilesPage() {
   }, [activeQuery, items, listPath, uploads]);
 
   const listKey = `${loadedPath ?? ""}|${activeQuery}`;
+
+  // A folder switch changes the card's height by whole rows (six folders to an empty state is
+  // over 200px), and that jump reads as a blink even when the rows fade. Resize the card along
+  // with the fade, from the height measured just before the new listing rendered.
+  useLayoutEffect(() => {
+    const panel = panelRef.current;
+    const from = heightFrom.current;
+    if (!panel || from === null || from.key !== listKey) return;
+    if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
+      heightFrom.current = null;
+      return;
+    }
+    const to = panel.getBoundingClientRect().height;
+    if (Math.abs(to - from.height) < 2) {
+      heightFrom.current = null;
+      return;
+    }
+    panel.style.transition = "none";
+    panel.style.height = `${from.height}px`;
+    // Flush the starting height before handing the change to the transition.
+    void panel.offsetHeight;
+    panel.style.transition = "height 0.24s cubic-bezier(0.22, 1, 0.36, 1)";
+    panel.style.height = `${to}px`;
+    const timer = window.setTimeout(() => {
+      panel.style.transition = "";
+      panel.style.height = "";
+      if (heightFrom.current === from) heightFrom.current = null;
+    }, 260);
+    return () => {
+      window.clearTimeout(timer);
+      panel.style.transition = "";
+      panel.style.height = "";
+    };
+  }, [listKey]);
 
   // Nothing worth keeping on screen (first paint, or an empty folder): show the skeleton instead.
   const showSkeleton = firstLoad || (navigating && entries.length === 0);
@@ -969,7 +1027,7 @@ export function FilesPage() {
           </>
         ) : (
           <>
-            <section className={styles.panel} aria-busy={pending}>
+            <section ref={panelRef} className={styles.panel} aria-busy={pending}>
               {/* A switch has no skeleton to show, so a hairline at the card's edge carries the wait. */}
               {pending && !firstLoad && <span className={styles.loadLine} aria-hidden="true" />}
 

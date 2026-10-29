@@ -958,12 +958,13 @@ a.crumb:hover {
 
 /*
  * A switch treats the listing as one surface: the outgoing rows dim in place, then the new
- * listing fades in. Only opacity animates, so nothing shifts under the cursor and the work
- * stays on the compositor. 180ms sits in Material's small-transition range (its short
- * duration tokens stop at 200ms): slower reads as lag once the data is there, faster flickers.
+ * listing fades in while the card resizes to its height. A decelerate curve is too front-loaded
+ * for opacity at short durations (the rows are readable in two frames, which reads as a blink),
+ * so the fade takes 240ms on the CSS ease curve. The card height is animated from
+ * FilesPage.tsx with the same duration.
  */
 .enter {
-  animation: fade-in 0.18s cubic-bezier(0.22, 1, 0.36, 1);
+  animation: fade-in 0.24s cubic-bezier(0.25, 0.1, 0.25, 1);
   transition: opacity 0.12s ease;
 }
 
