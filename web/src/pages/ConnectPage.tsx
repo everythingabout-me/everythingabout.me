@@ -9,6 +9,7 @@ import {
   type CreatedConnection,
 } from "../api/client";
 import { AppHeader } from "../components/AppHeader";
+import { PathPicker } from "../components/PathPicker";
 import { AppIcon, CheckIcon, CopyIcon, KeyIcon } from "../components/icons";
 import { t, type MessageKey } from "../i18n";
 import { formatRelativeTime, formatUntil } from "../i18n/format";
@@ -18,9 +19,13 @@ type Mode = ConnectionKind;
 
 const DAY = 86_400;
 
+// An app is long-lived: the app names itself, so the page only chooses how much it may reach
+// and for how long. A token is short-lived and must expire.
 const LIFETIMES: Record<Mode, { value: number; key: MessageKey }[]> = {
   app: [
-    { value: 90 * DAY, key: "connect.lifetime90d" },
+    { value: 60 * 60, key: "connect.lifetime1h" },
+    { value: DAY, key: "connect.lifetime1d" },
+    { value: 30 * DAY, key: "connect.lifetime30d" },
     { value: 365 * DAY, key: "connect.lifetime1y" },
     { value: 0, key: "connect.noExpiry" },
   ],
@@ -32,6 +37,8 @@ const LIFETIMES: Record<Mode, { value: number; key: MessageKey }[]> = {
     { value: 7 * DAY, key: "connect.lifetime7d" },
   ],
 };
+
+const DEFAULT_LIFETIME: Record<Mode, number> = { app: 0, token: 60 * 60 };
 
 function isExpired(connection: Connection): boolean {
   return connection.expiresAt !== null && new Date(connection.expiresAt).getTime() <= Date.now();
@@ -51,6 +58,12 @@ function touched(connection: Connection): number {
 function scopeLabel(connection: Connection): string {
   if (!connection.prefix) return t("connect.wholeDrive");
   return `${connection.prefix.replace(/\/+$/, "")}/`;
+}
+
+/** An app is minted without a name and names itself later; until then, say so. */
+function displayName(connection: Connection): string {
+  if (connection.name.trim()) return connection.name;
+  return connection.kind === "app" ? t("connect.unnamedApp") : t("connect.unnamedToken");
 }
 
 function accessLabel(connection: Connection): string {
@@ -255,12 +268,12 @@ function CreatePanel({
   const [prefix, setPrefix] = useState("");
   const [read, setRead] = useState(true);
   const [write, setWrite] = useState(true);
-  const [events, setEvents] = useState(false);
-  const [lifetime, setLifetime] = useState(mode === "app" ? 90 * DAY : 60 * 60);
+  const [events, setEvents] = useState(mode === "app");
+  const [lifetime, setLifetime] = useState(DEFAULT_LIFETIME[mode]);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const scope = prefix.trim() ? `${prefix.trim().replace(/\/+$/, "")}/` : t("connect.wholeDrive");
+  const scope = prefix ? `${prefix.replace(/\/+$/, "")}/` : t("connect.wholeDrive");
   const access = read && write
     ? t("connect.accessReadWrite")
     : read
@@ -274,23 +287,21 @@ function CreatePanel({
       : t("connect.expires", {
           when: formatUntil(new Date(Date.now() + lifetime * 1000).toISOString()),
         });
-  const summary = !name.trim()
+  // An app starts nameless: the app reports its name through PATCH /me after scanning. A
+  // token is copied by hand, so name it while minting.
+  const needsName = mode === "token" && !name.trim();
+  const hasPermission = read || write || events;
+  const valid = hasPermission && !needsName;
+  const summary = needsName
     ? t("connect.needName")
-    : !read && !write && !events
+    : !hasPermission
       ? t("connect.needPermission")
       : `${access}${events && (read || write) ? ` + ${t("connect.events")}` : ""} · ${scope} · ${expiry}`;
-  const valid = Boolean(name.trim()) && (read || write || events);
 
   function toggle(next: "read" | "write" | "events") {
-    if (next === "write") {
-      setWrite(!write);
-      if (!write) setRead(true);
-    } else if (next === "read") {
-      setRead(!read);
-      if (read) setWrite(false);
-    } else {
-      setEvents(!events);
-    }
+    if (next === "read") setRead(!read);
+    else if (next === "write") setWrite(!write);
+    else setEvents(!events);
   }
 
   async function submit() {
@@ -299,9 +310,9 @@ function CreatePanel({
     setBusy(true);
     try {
       const result = await api.createConnection({
-        name: name.trim(),
+        name: mode === "app" ? undefined : name.trim(),
         kind: mode,
-        prefix: prefix.trim(),
+        prefix,
         read,
         write,
         events,
@@ -331,73 +342,46 @@ function CreatePanel({
         </button>
       </div>
 
-      <div className={styles.grid}>
-        <label className={styles.field}>
-          <span className={styles.label}>{t("connect.name")}</span>
-          <input
-            className={styles.input}
-            value={name}
-            maxLength={80}
-            autoFocus
-            spellCheck={false}
-            placeholder={
-              mode === "app" ? t("connect.nameAppPlaceholder") : t("connect.nameTokenPlaceholder")
-            }
-            onChange={(event) => setName(event.target.value)}
-          />
-        </label>
-        <label className={styles.field}>
-          <span className={styles.label}>{t("connect.scope")}</span>
-          <input
-            className={styles.input}
-            value={prefix}
-            spellCheck={false}
-            placeholder={t("connect.scopePlaceholder")}
-            onChange={(event) => setPrefix(event.target.value)}
-          />
-        </label>
+      <div className={styles.form}>
+        {mode === "token" && (
+          <label className={styles.field}>
+            <span className={styles.label}>{t("connect.name")}</span>
+            <input
+              className={styles.input}
+              value={name}
+              maxLength={80}
+              autoFocus
+              spellCheck={false}
+              placeholder={t("connect.nameTokenPlaceholder")}
+              onChange={(event) => setName(event.target.value)}
+            />
+          </label>
+        )}
+
+        <div className={styles.field}>
+          <span className={styles.label}>{t("connect.path")}</span>
+          <PathPicker value={prefix} onChange={setPrefix} />
+        </div>
+
         <div className={styles.field}>
           <span className={styles.label}>{t("connect.access")}</span>
-          <div className={styles.chips}>
-            <button
-              className={`${styles.chip} ${read ? styles.chipOn : ""}`}
-              type="button"
-              aria-pressed={read}
-              onClick={() => toggle("read")}
-            >
-              {t("connect.read")}
-            </button>
-            <button
-              className={`${styles.chip} ${write ? styles.chipOn : ""}`}
-              type="button"
-              aria-pressed={write}
-              onClick={() => toggle("write")}
-            >
-              {t("connect.write")}
-            </button>
-            <button
-              className={`${styles.chip} ${events ? styles.chipOn : ""}`}
-              type="button"
-              aria-pressed={events}
-              onClick={() => toggle("events")}
-            >
-              {t("connect.events")}
-            </button>
+          <div className={styles.options}>
+            <CheckBox label={t("connect.read")} checked={read} onChange={() => toggle("read")} />
+            <CheckBox label={t("connect.write")} checked={write} onChange={() => toggle("write")} />
+            <CheckBox label={t("connect.events")} checked={events} onChange={() => toggle("events")} />
           </div>
         </div>
+
         <div className={styles.field}>
           <span className={styles.label}>{t("connect.lifetime")}</span>
-          <div className={styles.chips}>
+          <div className={styles.options}>
             {LIFETIMES[mode].map((option) => (
-              <button
+              <CheckBox
                 key={option.value}
-                className={`${styles.chip} ${lifetime === option.value ? styles.chipOn : ""}`}
-                type="button"
-                aria-pressed={lifetime === option.value}
-                onClick={() => setLifetime(option.value)}
-              >
-                {t(option.key)}
-              </button>
+                label={t(option.key)}
+                checked={lifetime === option.value}
+                onChange={() => setLifetime(option.value)}
+              />
             ))}
           </div>
         </div>
@@ -419,6 +403,21 @@ function CreatePanel({
         </button>
       </div>
     </section>
+  );
+}
+
+/** One permission or lifetime. Selected is a check in a blue box, not just a tinted pill. */
+function CheckBox({ label, checked, onChange }: { label: string; checked: boolean; onChange: () => void }) {
+  return (
+    <button
+      className={`${styles.option} ${checked ? styles.optionOn : ""}`}
+      type="button"
+      aria-pressed={checked}
+      onClick={onChange}
+    >
+      <span className={styles.check}>{checked && <CheckIcon size={11} />}</span>
+      <span>{label}</span>
+    </button>
   );
 }
 
@@ -569,8 +568,8 @@ function ConnectionRow({
         {connection.kind === "app" ? <AppIcon size={15} /> : <KeyIcon size={15} />}
       </span>
       <div className={styles.rowMain}>
-        <div className={styles.rowName} title={connection.name}>
-          {connection.name}
+        <div className={styles.rowName} title={displayName(connection)}>
+          {displayName(connection)}
         </div>
         <div className={styles.rowMeta}>
           {finished && (

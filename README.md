@@ -251,6 +251,7 @@ endpoint stays at the root.
 | GET | `/upload/{id}` | See how far it got (the parts already received) and resume after a disconnect |
 | POST | `/upload/complete` | Confirm the upload; verifies the size, then writes the index |
 | GET | `/me` | Current account, token permissions, usage |
+| PATCH | `/me` | `{"name"}` names the connection this token belongs to (an app names itself after scanning) |
 | GET | `/s/<code>` | Save link for agents: returns only a token and a prompt; saving goes through `/api/files` or `/upload` |
 
 Large file flow: `POST /upload` for URLs → PUT straight to COS (never through this server) → `POST /upload/complete`.
@@ -284,7 +285,9 @@ eam token revoke --email you@example.com --id <token ID>
 
 The browser has the same thing at `/connect`: an **App** is handed over as a QR code containing a small JSON
 payload, a **Token** is handed over as a copyable setup block. Both are backed by `api_tokens` and can be
-revoked from the list. The payload and the page design are in [docs/design/connect.md](docs/design/connect.md).
+revoked from the list. An app is minted nameless — only a path, permissions and a lifetime are chosen — and
+names itself with `PATCH /me` after scanning. The payload and the page design are in
+[docs/design/connect.md](docs/design/connect.md).
 
 ### The API the web UI uses
 

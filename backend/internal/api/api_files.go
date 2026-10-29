@@ -239,6 +239,7 @@ func (s *Server) handleAPIMe(w http.ResponseWriter, r *http.Request) error {
 			"prefix":    p.Token.Prefix,
 			"read":      p.Token.CanRead,
 			"write":     p.Token.CanWrite,
+			"events":    p.Token.CanEvents,
 			"expiresAt": p.Token.ExpiresAt,
 		}
 	}

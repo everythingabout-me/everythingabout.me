@@ -146,10 +146,10 @@
   color: var(--text-3);
 }
 
-.grid {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 14px 18px;
+.form {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
   margin-top: 18px;
 }
 
@@ -193,17 +193,20 @@
   box-shadow: 0 0 0 4px var(--ring);
 }
 
-.chips {
+.options {
   display: flex;
   flex-wrap: wrap;
-  gap: 6px;
+  gap: 7px;
 }
 
-.chip {
-  height: 30px;
-  padding: 0 11px;
+.option {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  height: 32px;
+  padding: 0 12px 0 8px;
   border: 1px solid var(--border);
-  border-radius: 8px;
+  border-radius: 9px;
   background: var(--surface);
   color: var(--text-2);
   font-size: 12.5px;
@@ -211,15 +214,35 @@
   transition: background 0.14s ease, border-color 0.14s ease, color 0.14s ease;
 }
 
-.chip:hover {
+.option:hover {
   border-color: var(--border-strong);
   color: var(--text);
 }
 
-.chipOn {
+.optionOn,
+.optionOn:hover {
+  border-color: var(--blue);
   background: var(--blue-light);
-  border-color: transparent;
   color: var(--text);
+}
+
+.check {
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: 15px;
+  height: 15px;
+  border: 1px solid var(--border-strong);
+  border-radius: 4px;
+  background: var(--surface);
+  color: var(--btn-fg);
+  transition: background 0.14s ease, border-color 0.14s ease;
+}
+
+.optionOn .check {
+  border-color: var(--blue);
+  background: var(--blue);
+  color: var(--btn-fg);
 }
 
 .submitRow {
@@ -604,9 +627,8 @@ details[open] > .finishedSummary::before {
     padding: 16px;
   }
 
-  .grid {
-    grid-template-columns: 1fr;
-    gap: 12px;
+  .form {
+    gap: 14px;
   }
 
   .submitRow {

@@ -4,6 +4,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"net/http"
+	"strings"
 	"time"
 
 	qrcode "github.com/skip2/go-qrcode"
@@ -14,7 +15,8 @@ import (
 
 // The Connect page creates two kinds of connection: an app, handed over with a QR code,
 // and a token, copied as a text block. Both are rows in api_tokens; kind only changes the
-// defaults, the copy and the lifetime cap.
+// defaults, the copy and the lifetime cap. An app is minted nameless and names itself
+// through PATCH /me; a token is named while it is minted.
 
 const (
 	connectLimitPerUser = 50
@@ -184,4 +186,43 @@ func (s *Server) handleConnectRevoke(w http.ResponseWriter, r *http.Request) err
 		"id": id,
 	})
 	return s.ok(w, map[string]any{"revoked": true})
+}
+
+// connectSelfBody is the only field a credential can change about itself. Basic info stays
+// server-owned; the name is what the page shows in Connected apps.
+type connectSelfBody struct {
+	Name string `json:"name"`
+}
+
+// handleAPIPatchMe lets a client name the connection it authenticated with. An app is minted
+// without a name, scans the QR, and reports its name here; the page then shows it.
+func (s *Server) handleAPIPatchMe(w http.ResponseWriter, r *http.Request) error {
+	p, err := s.principal(r)
+	if err != nil {
+		return err
+	}
+	if p.Token == nil {
+		return httpx.BadRequest("PATCH /me needs a Bearer token")
+	}
+	if strings.HasPrefix(p.Token.ID, auth.SaveLinkTokenPrefix) {
+		return httpx.BadRequest("a save link cannot set a connection name")
+	}
+	body, err := httpx.ReadJSON[connectSelfBody](r)
+	if err != nil {
+		return err
+	}
+	token, err := s.auth.SetTokenName(r.Context(), p.User.ID, p.Token.ID, body.Name)
+	if err != nil {
+		return err
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	httpx.WriteJSON(w, http.StatusOK, map[string]any{
+		"name":      token.Name,
+		"prefix":    token.Prefix,
+		"read":      token.CanRead,
+		"write":     token.CanWrite,
+		"events":    token.CanEvents,
+		"expiresAt": token.ExpiresAt,
+	})
+	return nil
 }

@@ -147,6 +147,26 @@ func TestNormalizeKind(t *testing.T) {
 	}
 }
 
+func TestNormalizeName(t *testing.T) {
+	name, err := normalizeName(KindApp, "   ")
+	if err != nil || name != "" {
+		t.Fatalf("an app may start nameless: (%q, %v)", name, err)
+	}
+	if _, err := normalizeName(KindToken, "  "); err == nil {
+		t.Fatal("a token needs a name")
+	}
+	name, err = normalizeName(KindToken, "  Claude Code  ")
+	if err != nil || name != "Claude Code" {
+		t.Fatalf("a name should be trimmed: (%q, %v)", name, err)
+	}
+	if _, err := normalizeName(KindApp, strings.Repeat("界", 81)); err == nil {
+		t.Fatal("a name longer than 80 runes should be rejected")
+	}
+	if _, err := normalizeName(KindApp, strings.Repeat("界", 80)); err != nil {
+		t.Fatalf("80 runes should be allowed regardless of byte size: %v", err)
+	}
+}
+
 func TestValidateLifetime(t *testing.T) {
 	now := time.Date(2026, 10, 29, 12, 0, 0, 0, time.UTC)
 	hour := now.Add(time.Hour)

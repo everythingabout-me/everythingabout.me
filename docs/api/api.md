@@ -90,6 +90,7 @@ internally, but it never enters JSON — see §8.4 for why.
 ```
 GET    /capabilities                      limits and capabilities (no auth)
 GET    /me                                who am I
+PATCH  /me        {name}                  name this connection
 GET    /list?path=                        list a directory
 GET    /api/files/<path>                  read a file
 HEAD   /api/files/<path>                  look at metadata
@@ -406,12 +407,31 @@ GET /me
 ```json
 {
   "user": {"email": "you@example.com"},
-  "token": {"name":"badminton","prefix": "Apps/badminton", "read": true, "write": true},
+  "token": {"name":"badminton","prefix": "Apps/badminton", "read": true, "write": true, "events": false},
   "usage": {"bytes": 1823412231, "files": 20481}
 }
 ```
 
 For agents to self-check: confirm your own prefix and permissions.
+
+A connection may name itself. This is the only field a Bearer token can write about itself, and it is
+what the Connect page shows in its list; the rest of the token stays server-owned:
+
+```http
+PATCH /me
+Authorization: Bearer eam_...
+Content-Type: application/json
+
+{"name": "Obsidian"}
+```
+
+```json
+{"name": "Obsidian", "prefix": "", "read": true, "write": true, "events": false, "expiresAt": null}
+```
+
+The name is trimmed and capped at 80 characters; empty is a `400`. A cookie session or a save link gets a
+`400` too: this endpoint is for the credential itself, not for managing connections (that is the web page's
+`/api/connect/tokens`).
 
 ```http
 GET /capabilities        # no auth, you do not even need to bring a token
@@ -619,20 +639,22 @@ documented above.
   "api": "https://everythingabout.me",
   "id": "ab12cd34ef56",
   "token": "eam_...",
-  "name": "Obsidian",
+  "name": "",
   "scope": "Apps/obsidian",
   "read": true,
   "write": true,
   "events": false,
-  "expiresAt": "2027-01-27T04:00:00.000Z"
+  "expiresAt": null
 }
 ```
 
 - `api` is the base URL; `token` is the Bearer secret. Those two are all an app needs to store.
 - `v` is the payload version and `type` is always `eam.connect`; if either is not understood, say "update the
   app" / "not an Everything About Me code" and stop.
-- `name` / `scope` / `read` / `write` / `events` are display metadata. Confirm them with
-  `GET /me` before trusting them; a `401` means the connection was revoked or expired.
+- `name` may be empty: the page mints an app nameless, and the app is expected to call `PATCH /me` with its own
+  name after scanning. Until then `GET /me` also returns an empty name.
+- `scope` / `read` / `write` / `events` are display metadata. Confirm them with `GET /me` before trusting
+  them; a `401` means the connection was revoked or expired.
 - `expiresAt` is ISO-8601 UTC, or `null` for an App created without an expiry.
 - The QR contains the actual token. It is shown once and can be revoked from the same page; treat a screenshot
   as a credential.

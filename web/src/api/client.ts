@@ -276,7 +276,8 @@ export const api = {
   },
 
   createConnection(input: {
-    name: string;
+    /** Required for a token; an app may start nameless and name itself through PATCH /me. */
+    name?: string;
     kind: ConnectionKind;
     prefix: string;
     read: boolean;

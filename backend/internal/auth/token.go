@@ -188,21 +188,32 @@ func validateLifetime(kind string, expiry *time.Time, now time.Time) error {
 	return nil
 }
 
+// normalizeName trims and validates the display name. An app may start nameless: the page
+// only mints the credential and the app names itself through PATCH /me after scanning. A
+// token is named by whoever mints it, because it is handed over by hand.
+func normalizeName(kind, raw string) (string, error) {
+	name := strings.TrimSpace(raw)
+	if name == "" && kind != KindApp {
+		return "", httpx.BadRequest("a token needs a name")
+	}
+	if utf8.RuneCountInString(name) > 80 {
+		return "", httpx.BadRequest("the name is too long")
+	}
+	return name, nil
+}
+
 // CreateToken mints a token and stores it, returning the plaintext (this once) and the
 // display shape.
 func (s *Service) CreateToken(ctx context.Context, input NewTokenInput) (string, *Token, error) {
-	name := strings.TrimSpace(input.Name)
-	if name == "" {
-		return "", nil, httpx.BadRequest("token name cannot be empty")
-	}
-	if utf8.RuneCountInString(name) > 80 {
-		return "", nil, httpx.BadRequest("token name is too long")
-	}
 	if !input.CanRead && !input.CanWrite && !input.CanEvents {
 		return "", nil, httpx.BadRequest("at least one of read, write or events is required")
 	}
 
 	kind, err := normalizeKind(input.Kind)
+	if err != nil {
+		return "", nil, err
+	}
+	name, err := normalizeName(kind, input.Name)
 	if err != nil {
 		return "", nil, err
 	}
@@ -252,6 +263,44 @@ func (s *Service) CreateToken(ctx context.Context, input NewTokenInput) (string,
 	token.ExpiresAt = expires
 
 	return TokenPrefix + id + "_" + secret, &token, nil
+}
+
+// SetTokenName renames one token the user owns. It is the only field a Bearer token may
+// write about itself: an app created without a name reports one after scanning the QR.
+func (s *Service) SetTokenName(ctx context.Context, userID, tokenID, raw string) (*Token, error) {
+	if strings.TrimSpace(raw) == "" {
+		return nil, httpx.BadRequest("the name cannot be empty")
+	}
+	name, err := normalizeName(KindApp, raw)
+	if err != nil {
+		return nil, err
+	}
+
+	var (
+		token    Token
+		lastUsed *string
+		expires  *string
+	)
+	err = s.db.Pool().QueryRow(ctx,
+		`update api_tokens set name = $3
+		  where user_id = $1::uuid and token_id = $2 and revoked_at is null
+		 returning token_id, name, kind, prefix, can_read, can_write, can_events,
+		           `+isoUTC("created_at")+`,
+		           case when last_used_at is null then null else `+isoUTC("last_used_at")+` end,
+		           case when expires_at is null then null else `+isoUTC("expires_at")+` end`,
+		userID, tokenID, name).
+		Scan(&token.ID, &token.Name, &token.Kind, &token.Prefix, &token.CanRead, &token.CanWrite, &token.CanEvents,
+			&token.CreatedAt, &lastUsed, &expires)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, httpx.NotFound("token not found")
+		}
+		return nil, err
+	}
+	token.userID = userID
+	token.LastUsedAt = lastUsed
+	token.ExpiresAt = expires
+	return &token, nil
 }
 
 // ListTokens returns every token for a user, revoked ones included for auditing.

@@ -121,6 +121,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /capabilities", s.api(s.handleAPICapabilities))
 	mux.HandleFunc("GET /list", s.api(s.handleAPIList))
 	mux.HandleFunc("GET /me", s.api(s.handleAPIMe))
+	mux.HandleFunc("PATCH /me", s.api(s.handleAPIPatchMe))
 	mux.HandleFunc("GET /search", s.api(s.handleAPISearch))
 	mux.HandleFunc("POST /mkdir", s.api(s.handleAPIMkdir))
 	mux.HandleFunc("POST /move", s.api(s.handleAPIMove))
@@ -228,7 +229,7 @@ func isAPIPath(path string) bool {
 
 func setCORSHeaders(w http.ResponseWriter) {
 	w.Header().Set("Access-Control-Allow-Origin", "*")
-	w.Header().Set("Access-Control-Allow-Methods", "GET, HEAD, PUT, DELETE, POST, OPTIONS")
+	w.Header().Set("Access-Control-Allow-Methods", "GET, HEAD, PUT, PATCH, DELETE, POST, OPTIONS")
 	w.Header().Set("Access-Control-Allow-Headers",
 		"Authorization, Content-Type, If-Match, If-None-Match, Prefer")
 	w.Header().Set("Access-Control-Expose-Headers",

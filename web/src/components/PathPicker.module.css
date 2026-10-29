@@ -1,0 +1,198 @@
+.wrap {
+  position: relative;
+  display: inline-block;
+  max-width: 100%;
+}
+
+.trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 280px;
+  max-width: 100%;
+  height: 38px;
+  padding: 0 12px 0 11px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg);
+  color: var(--text);
+  font-size: 13.5px;
+  text-align: left;
+  transition: border-color 0.14s ease, box-shadow 0.14s ease, background 0.14s ease;
+}
+
+.trigger:hover {
+  border-color: var(--border-strong);
+}
+
+.triggerOpen,
+.triggerOpen:hover {
+  border-color: var(--blue);
+  background: var(--surface);
+  box-shadow: 0 0 0 4px var(--ring);
+}
+
+.triggerIcon {
+  flex: none;
+  color: var(--text-3);
+}
+
+.triggerValue {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.triggerChevron {
+  flex: none;
+  color: var(--text-3);
+}
+
+.popover {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  z-index: 40;
+  width: 340px;
+  max-width: min(340px, calc(100vw - 48px));
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--surface);
+  box-shadow: var(--shadow-pop);
+  overflow: hidden;
+}
+
+.crumbs {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 1px;
+  max-height: 74px;
+  overflow: auto;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg);
+}
+
+.crumb {
+  max-width: 130px;
+  overflow: hidden;
+  padding: 2px 4px;
+  border-radius: 5px;
+  color: var(--text-2);
+  font-size: 11.5px;
+  font-weight: 500;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.crumb:hover {
+  background: var(--hover);
+  color: var(--text);
+}
+
+.crumbHere {
+  color: var(--text);
+  font-weight: 600;
+}
+
+.crumbSep {
+  flex: none;
+  color: var(--text-3);
+}
+
+.folders {
+  max-height: 236px;
+  overflow: auto;
+  padding: 6px;
+}
+
+.folder {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 7px 8px;
+  border-radius: 7px;
+  color: var(--text);
+  font-size: 12.5px;
+  text-align: left;
+}
+
+.folder:hover {
+  background: var(--hover);
+}
+
+.folderIcon {
+  flex: none;
+  color: var(--text-3);
+}
+
+.folderName {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.folderChevron {
+  flex: none;
+  color: var(--text-3);
+}
+
+.state {
+  margin: 0;
+  padding: 12px 10px;
+  font-size: 12px;
+  color: var(--text-3);
+}
+
+.foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 9px 10px;
+  border-top: 1px solid var(--border);
+  background: var(--bg);
+}
+
+.footPath {
+  min-width: 0;
+  overflow: hidden;
+  font-size: 11.5px;
+  color: var(--text-3);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.choose {
+  flex: none;
+  height: 28px;
+  padding: 0 10px;
+  border-radius: 7px;
+  background: var(--btn-bg);
+  color: var(--btn-fg);
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.choose:hover {
+  filter: brightness(0.97);
+}
+
+@media (max-width: 720px) {
+  .trigger {
+    min-width: 0;
+    width: 100%;
+  }
+
+  .popover {
+    width: 100%;
+    max-width: none;
+  }
+}
