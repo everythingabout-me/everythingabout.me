@@ -321,11 +321,11 @@ func TestSaveLinkPrompt(t *testing.T) {
 
 func TestSaveLinkHTML(t *testing.T) {
 	var buf bytes.Buffer
-	err := saveLinkTemplate.Execute(&buf, map[string]any{
-		"Code":      "abcd2345efgh2345",
-		"URL":       "https://everythingabout.me/s/abcd2345efgh2345",
+	err := linkTemplate.Execute(&buf, map[string]any{
+		"Title":     "保存链接",
+		"Hint":      "把这个链接发给 agent。它打开后拿到 token 和保存方式。",
 		"Prompt":    saveLinkPrompt("https://everythingabout.me", "abcd2345efgh2345"),
-		"LastUsed":  nil,
+		"LastUsed":  "",
 		"CreatedAt": "2026-10-27T23:00:00Z",
 	})
 	if err != nil {
@@ -388,5 +388,38 @@ func TestConnectPayload(t *testing.T) {
 	}
 	if strings.Contains(payload, "user@example.com") {
 		t.Fatal("the payload must not carry account identity")
+	}
+}
+
+func TestTokenPrompt(t *testing.T) {
+	expires := "2026-10-29T13:45:00.000Z"
+	scoped := &auth.Token{
+		Prefix:    "Apps/obsidian",
+		CanRead:   true,
+		CanWrite:  true,
+		CanEvents: true,
+		ExpiresAt: &expires,
+	}
+	prompt := tokenPrompt("https://everythingabout.me", "eam_ab12cd34ef56_secret", scoped)
+	for _, want := range []string{
+		"API:     https://everythingabout.me",
+		"Token:   eam_ab12cd34ef56_secret",
+		"Access:  read + write + events",
+		"Scope:   Apps/obsidian/",
+		"Expires: 2026-10-29T13:45:00.000Z",
+		"/list?path=Apps%2Fobsidian",
+		"/api/files/Apps/obsidian/note.md",
+		"First call GET /me",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Errorf("the prompt is missing %q:\n%s", want, prompt)
+		}
+	}
+
+	whole := tokenPrompt("https://everythingabout.me", "eam_plain", &auth.Token{CanRead: true})
+	for _, want := range []string{"Access:  read\n", "Scope:   the whole drive", "Expires: never", `"https://everythingabout.me/list"`} {
+		if !strings.Contains(whole, want) {
+			t.Errorf("the whole-drive prompt is missing %q:\n%s", want, whole)
+		}
 	}
 }

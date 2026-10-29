@@ -252,7 +252,7 @@ endpoint stays at the root.
 | POST | `/upload/complete` | Confirm the upload; verifies the size, then writes the index |
 | GET | `/me` | Current account, token permissions, usage |
 | PATCH | `/me` | `{"name"}` names the connection this token belongs to (an app names itself after scanning) |
-| GET | `/s/<code>` | Save link for agents: returns only a token and a prompt; saving goes through `/api/files` or `/upload` |
+| GET | `/s/<code>` | Agent instructions: a save-link code returns the save prompt; a Connect token (`eam_...`) returns that connection's prompt, live |
 
 Large file flow: `POST /upload` for URLs → PUT straight to COS (never through this server) → `POST /upload/complete`.
 Writes are recorded in `audit_log`; the rate limit is 600 requests per minute per token.
@@ -284,10 +284,11 @@ eam token revoke --email you@example.com --id <token ID>
 ```
 
 The browser has the same thing at `/connect`: clicking **Add app** mints a connection with the defaults and
-shows a QR code plus an agent prompt, while its path, permissions and lifetime stay editable in the same panel.
-A **Token** is handed over as a copyable setup block. Both are backed by `api_tokens` and can be revoked from
-the list. An app starts nameless and names itself with `PATCH /me` after scanning. The payload and the page
-design are in [docs/design/connect.md](docs/design/connect.md).
+shows a QR code plus a one-line prompt, while its path, permissions and lifetime stay editable in the same
+panel. A **Token** is handed over as the same one-line prompt. The prompt links to `/s/<token>`, which returns
+the full instructions from the live row. Both are backed by `api_tokens` and can be revoked from the list. An
+app starts nameless and names itself with `PATCH /me` after scanning. The payload and the page design are in
+[docs/design/connect.md](docs/design/connect.md).
 
 ### The API the web UI uses
 

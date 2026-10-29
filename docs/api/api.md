@@ -566,6 +566,15 @@ GET /s/abcd2345efgh2345
 - `?format=json` returns `{token, url, api, files, upload, prompt, ...}`.
 - `POST` to `/s/<code>` returns `405`.
 
+The same route also accepts a **Connect token** (`eam_...`) as the code. It then returns the connection's
+instructions instead of the save-link prompt — same Markdown / HTML / JSON shapes, built from the live
+`api_tokens` row, so the scope, permissions and expiry are current. The one-line prompt in the Connect handoff
+is exactly this URL; see §4.15. The code in the URL is a credential, like the save-link code.
+
+```http
+GET /s/eam_ab12cd34ef56_...
+```
+
 ```markdown
 # everythingabout.me
 
@@ -628,9 +637,10 @@ POST /upload/complete                # verify the size and write the index
 
 ### 4.15 Connect: the QR payload
 
-The web app's `/connect` page mints the same Bearer tokens as the CLI. An **App** is handed over as a QR code;
-a **Token** is handed over as a copyable text block. The QR is only a transport — the API calls are the ones
-documented above.
+The web app's `/connect` page mints the same Bearer tokens as the CLI. An **App** is handed over as a QR code
+plus a one-line prompt; a **Token** gets the same one-line prompt. The prompt points at `/s/<token>`, which
+returns the full instructions from the live row (see §4.14). The QR and the link are only transports — the API
+calls are the ones documented above.
 
 ```json
 {
@@ -641,6 +651,10 @@ documented above.
   "token": "eam_..."
 }
 ```
+
+- The handoff prompt is one sentence, in the page language: `Use my drive as described at
+  <base>/s/<token>` / `按照 <base>/s/<token> 使用我的盘。`. Following it returns the markdown prompt with the
+  current access, scope and expiry; revoking the token makes the URL 404. Treat the URL as a credential.
 
 - `api` is the base URL; `token` is the Bearer secret. Those two are all an app needs to store.
 - `v` is the payload version and `type` is always `eam.connect`; if either is not understood, say "update the

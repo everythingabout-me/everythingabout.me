@@ -280,9 +280,14 @@ func (s *Server) logger(next http.Handler) http.Handler {
 		started := time.Now()
 		recorder := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
 		next.ServeHTTP(recorder, r)
+		// /s/<code> is a credential in the path: never write it to the log.
+		path := r.URL.Path
+		if strings.HasPrefix(path, "/s/") {
+			path = "/s/<redacted>"
+		}
 		slog.Info("request",
 			"method", r.Method,
-			"path", r.URL.Path,
+			"path", path,
 			"status", recorder.status,
 			"duration", time.Since(started).Round(time.Millisecond).String(),
 		)

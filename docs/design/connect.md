@@ -3,7 +3,8 @@
 > Status: shipped · 2026-10-29
 >
 > One line: **Connect is the one page that hands out a credential and shows what can touch the drive.** An App
-> gets a QR code; an agent, skill or script gets a block of text. Both are the same `api_tokens` row underneath.
+> gets a QR code and a one-line prompt; an agent, skill or script gets the same one-line prompt, with the
+> instructions behind a `/s/` link. Both are the same `api_tokens` row underneath.
 
 ---
 
@@ -14,7 +15,7 @@ Two delivery formats, two lists. Everything else is deliberately absent.
 | | App | Token |
 |---|---|---|
 | Who | a service or a device that can scan | an agent, a skill, a one-off script |
-| Delivered as | a QR code containing JSON | a copyable text block with the token |
+| Delivered as | a QR code and a one-line `/s/` prompt | a copyable one-line `/s/` prompt |
 | Lifetime | 1 hour, 1 day, 1 month, 1 year, or no expiry | 15 min, 1 h, 8 h, 24 h, 7 days |
 | Appears under | Connected apps | Active tokens |
 | Default lifetime | no expiry | 1 hour |
@@ -92,16 +93,28 @@ token never goes to a third-party QR service and the browser needs no QR depende
 `Cache-Control: no-store`.
 
 **Known tradeoff:** the QR contains the actual token. A screenshot of the code is a working credential until it
-is revoked or expires. This is the same exposure as the copy block, and the reasons to accept it now are
+is revoked or expires. This is the same exposure as the prompt link, and the reasons to accept it now are
 simplicity and zero extra moving parts. The `v` field leaves room for a `code` payload plus a short-lived
 `/redeem` exchange later; that is the security upgrade, not a v1 requirement.
 
 ## 3. The prompt
 
-Both handoffs hand over the same block. An app shows it next to the QR as the **Agent prompt**; a token shows
-it as its main handoff. It is one copyable block:
+The handoff shows one sentence:
 
 ```text
+Use my drive as described at https://everythingabout.me/s/eam_ab12cd34ef56_...
+```
+
+The URL is the same `/s/` route save links use, and it accepts a Connect token (`eam_...`) as the code.
+Opening it returns the full instructions below; the page reads the live row, so scope, permissions and expiry
+are always current. An agent can fetch it, and a human can open it in a browser (an instruction page with a
+copy button). The one-liner follows the page language (zh / en); the artifact behind the link stays in English.
+
+The page returns Markdown by default, an HTML instruction page for a browser, and `?format=json`.
+
+```text
+# everythingabout.me
+
 You can access my drive through the Everything About Me API.
 
 API:     https://everythingabout.me
@@ -120,9 +133,10 @@ Use it as a Bearer token:
 First call GET /me to confirm the token and its scope.
 ```
 
-The app version is rebuilt from the live token whenever the configuration changes, so `Access`, `Scope` and
-`Expires` always match what the server will enforce. This is an API artifact, not localized UI copy: it stays
-in English like the save-link prompt. The page around it is bilingual.
+The URL is a credential, not a bookmark: it contains the token, exactly like the QR. The page sends
+`Cache-Control: no-store`, the request logger redacts `/s/<code>`, and revoking the connection makes the page
+404. This is the save-link tradeoff applied to a scoped connection: one short sentence instead of a block,
+with the block one click away.
 
 ## 4. The page
 
@@ -142,13 +156,8 @@ The secret is shown once and cannot be shown again.
   Scan it, or copy the prompt.         Lifetime
                                        [ 1 hour ] [ 1 day ] [ 1 month ] [ 1 year ] [✓ No expiry]
   AGENT PROMPT                  Copy
-  You can access my drive...           Changes apply immediately.
-  API:     https://everythingabout.me
-  Token:   eam_...
-  Access:  read + write + events
-  Scope:   the whole drive
-  Expires: never
-  ...
+  Use my drive as described     Changes apply immediately.
+  at https://.../s/eam_...      (the link page shows the latest config)
 
 Connected apps  1
   [window] Obsidian   Read + write · Whole drive
@@ -166,11 +175,13 @@ Finished  1  ▸
   list while the QR is on screen.
 - **The handoff is two columns.** Left: the QR, the prompt, and the credential JSON behind "Can't scan? Copy
   the JSON". Right: path, permissions and lifetime. `Done` closes the panel; the connection stays in the list.
-- **The configuration is live.** Each change `PATCH`es the token and the prompt is rebuilt from the result; the
-  list row updates too. The QR does not change, because it carries only the credential. The secret, the name
-  and the kind are not editable here.
-- **The prompt is for an agent.** It is the same block the token handoff copies, rebuilt from the live token,
-  so scanning is optional: copy this into an agent and it has the credential, the scope and the calls.
+- **The configuration is live.** Each change `PATCH`es the token and the list row updates. The QR does not
+  change (it carries only the credential) and neither does the one-line prompt; the link page it points at
+  always renders the current scope, permissions and expiry. The secret, the name and the kind are not editable
+  here.
+- **The prompt is for an agent.** It is one sentence with the `/s/<token>` link. Following the link returns
+  the token, the scope and the calls, so scanning is optional and the chat message stays short. The URL is a
+  credential; see §3.
 - **A token form still has a name.** A token is copied by hand for one agent, so naming it at minting is the
   point; it uses the same folder picker and the same option control, with the short lifetimes.
 - **Selection is a check, not a tint.** Every option is a checkbox-style pill: a box with a tick inside, a blue
@@ -217,8 +228,12 @@ DELETE /api/connect/tokens/{id}     → {revoked: true}
 `GET` returns every row (revoked and expired included) so the page can show Finished; the client splits them.
 
 `PATCH` is the live configuration: a full policy replacement with `{prefix, read, write, events, expiresIn}`.
-It never changes the name, the kind or the secret, so the QR and the prompt stay valid. The kind is read from
-the row, so the lifetime cap still matches it; a revoked or unknown id is a 404.
+It never changes the name, the kind or the secret, so the QR and the one-line prompt stay valid. The kind is
+read from the row, so the lifetime cap still matches it; a revoked or unknown id is a 404.
+
+The prompt link is not part of the web API: `GET /s/<code>` is public and accepts either a save-link code or
+the connection's token secret. It returns the Markdown prompt by default, an HTML page for browsers, and JSON
+with `?format=json`; it is documented with save links in [docs/api/api.md](../api/api.md) §4.14–4.15.
 
 The app side has one endpoint of its own: `PATCH /me` with the Bearer token (documented in
 [docs/api/api.md](../api/api.md) §4.11) sets the display name of that token. It cannot touch scope,
@@ -279,9 +294,11 @@ kind, the rune-counted name and the lifetime; an app may pass an empty name, a t
 | A scoped Bearer token mints a full-drive token | management is session-only (`requireUser` → `SessionUser`) |
 | A scoped Bearer token widens itself | `PATCH /api/connect/tokens/{id}` is session + same-origin only; a Bearer token can only `PATCH /me`, its own name |
 | CSRF from another site | `AssertSameOrigin` on POST/PATCH/DELETE; SameSite=Lax cookie |
-| Secret leaks from the page | one-time display, unmounted after Done, `Cache-Control: no-store`, never in a GET or audit |
+| Secret leaks from the page | one-time display, unmounted after Done, `Cache-Control: no-store`; the only GET that carries it is the prompt link itself |
 | Secret in the QR | scoped, revocable, and expiring unless the user chose no expiry; one-time-display warning; return path documented in §2 |
+| Secret in the prompt URL | the URL is a credential; `no-store`, redacted in the request log, 404 once the connection is revoked, and only ever shown in the one-time handoff |
 | A QR outlives the policy it was minted with | the QR carries no policy; the app reads `/me`, which always returns the current row |
+| A link page shows an old policy | the page reads the token row on every request, so it always renders the current scope, permissions and expiry |
 | A token renames another connection or grants itself more | `PATCH /me` updates only its own `name`, matched by `token_id` and `user_id`; scope, permissions and lifetime are not writable |
 | A leaked token lives forever | every Token expires; every App can be revoked; expiry checked at verification |
 | Brute force / abuse | 30 creates/hour/user + 50 active cap + login required |
@@ -297,12 +314,12 @@ counts separately.
 - **The page scanning the app's QR** (camera). The App scans the page; the page never asks for camera access.
 - **OAuth / per-app consent, app logos, a directory of integrations.** A personal drive has no developer
   ecosystem to justify it.
-- **Pairing without copy-paste (`eam connect`).** The previous draft's device flow. The copy block is the v1
-  answer.
+- **Pairing without copy-paste (`eam connect`).** The previous draft's device flow. The one-line prompt is
+  the v1 answer.
 - **Renaming from the page**, filtering, pruning finished rows, usage charts. An app names itself; the page
   never renames a connection. The lists stay readable at personal scale.
-- **Moving save links here.** They remain on the account page; the copy block overlaps, so a future cleanup can
-  retire one of them.
+- **Moving save links here.** They remain on the account page; the `/s/` link page overlaps, so a future cleanup
+  can retire one of them.
 - **App-side SDK / spec page.** The JSON schema above plus `GET /me` is the whole integration; it is documented
   in [docs/api/api.md](../api/api.md) §4.15.
 
@@ -310,9 +327,10 @@ counts separately.
 
 - `make test` (Go + `tsc --noEmit`); `make build`.
 - Unit tests: kind normalization, name rules (empty app allowed, empty token not), lifetime caps, the QR
-  payload (only `v`, `type`, `api`, `id`, `token`; no policy fields, no account identity).
-- Manual: `Add app` → the QR, the prompt and the new row appear at once; change the path, a permission and the
-  lifetime on the right → the prompt and the row update, the QR does not change; `PATCH /me` with the QR's
-  token renames the row; create a Token → the block is copyable; revoke is two clicks and moves the row to
-  Finished; an expired/revoked token returns 401 from the public API; the page looks right at 390 px and in
-  dark mode.
+  payload (only `v`, `type`, `api`, `id`, `token`; no policy fields, no account identity), and the token
+  prompt behind `/s/<token>` (API, token, access, scope, expiry, `GET /me`).
+- Manual: `Add app` → the QR, the one-line prompt and the new row appear at once; follow the link → the full
+  prompt with the live scope/permissions/expiry, Markdown for curl and an HTML page for a browser; change the
+  path, a permission and the lifetime on the right → the link page reflects it and the row updates, while the
+  QR and the sentence stay the same; `PATCH /me` with the QR's token renames the row; revoke → the link 404s;
+  a Token handoff shows the same one-liner; the page looks right at 390 px and in dark mode.

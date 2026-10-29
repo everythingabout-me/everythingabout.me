@@ -104,33 +104,13 @@ function lifeLabel(connection: Connection): string {
   return lastUsedLabel(connection);
 }
 
-/** The one block a human copies to an agent: the credential, what it reaches and how to use it. */
-function agentPrompt(created: CreatedConnection, token: Connection): string {
-  const scope = token.prefix ? `${token.prefix.replace(/\/+$/, "")}/` : "the whole drive";
-  const parts: string[] = [];
-  if (token.read) parts.push("read");
-  if (token.write) parts.push("write");
-  if (token.events) parts.push("events");
-  const access = parts.join(" + ") || "no access";
-  const listPath = token.prefix ? `/list?path=${encodeURIComponent(token.prefix)}` : "/list";
-  const writePath = token.prefix ? `${token.prefix}/note.md` : "Inbox/note.md";
-
-  return `You can access my drive through the Everything About Me API.
-
-API:     ${created.api}
-Token:   ${created.secret}
-Access:  ${access}
-Scope:   ${scope}
-Expires: ${token.expiresAt ? new Date(token.expiresAt).toISOString().replace(/\.\d{3}Z$/, "Z") : "never"}
-
-Use it as a Bearer token:
-  curl -H "Authorization: Bearer ${created.secret}" \\
-       "${created.api}${listPath}"
-
-  curl -X PUT -H "Authorization: Bearer ${created.secret}" \\
-       --data-binary @note.md "${created.api}/api/files/${writePath}"
-
-First call GET /me to confirm the token and its scope.`;
+/**
+ * The one-line prompt for an agent. The details live on the /s/<token> page, which reads the
+ * live token, so the sentence itself never has to change when the configuration does.
+ */
+function agentPrompt(created: CreatedConnection): string {
+  const url = `${created.api}/s/${encodeURIComponent(created.secret)}`;
+  return t("connect.promptLine", { url });
 }
 
 export function ConnectPage() {
@@ -496,7 +476,7 @@ function AppHandoff({
   const [configError, setConfigError] = useState<string | null>(null);
   const savingRef = useRef(false);
   const { copied, error: copyError, copy } = useCopy();
-  const prompt = agentPrompt(created, token);
+  const prompt = agentPrompt(created);
 
   async function configure(next: {
     prefix?: string;
@@ -634,16 +614,16 @@ function AppHandoff({
 function TokenHandoff({ created, onDone }: { created: CreatedConnection; onDone: () => void }) {
   const { copied, error, copy } = useCopy();
   const token = created.token;
-  const text = agentPrompt(created, token);
+  const text = agentPrompt(created);
 
   return (
     <section className={styles.handoff}>
       <HandoffHead title={t("connect.createdTokenTitle")} onDone={onDone} />
       <CodeBlock
-        label={t("connect.setupLabel")}
+        label={t("connect.promptLabel")}
         text={text}
-        copied={copied === "setup"}
-        onCopy={() => void copy(text, "setup")}
+        copied={copied === "prompt"}
+        onCopy={() => void copy(text, "prompt")}
       />
       <p className={styles.scopeLine}>
         {accessLabel(token)} · {scopeLabel(token)} · {expiryLabel(token)}
