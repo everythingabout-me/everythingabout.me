@@ -358,6 +358,12 @@ function AppHandoff({
             </div>
           </div>
 
+          <div className={styles.orSeparator}>
+            <span className={styles.orLine} aria-hidden="true" />
+            <span className={styles.orText}>{t("connect.or")}</span>
+            <span className={styles.orLine} aria-hidden="true" />
+          </div>
+
           <CodeBlock
             label={t("connect.promptLabel")}
             text={prompt}
@@ -366,6 +372,8 @@ function AppHandoff({
           />
           {copyError && <p className={styles.error}>{copyError}</p>}
         </div>
+
+        <div className={styles.vSeparator} role="separator" aria-orientation="vertical" />
 
         <aside className={styles.configPane}>
           <h3 className={styles.configTitle}>{t("connect.configTitle")}</h3>

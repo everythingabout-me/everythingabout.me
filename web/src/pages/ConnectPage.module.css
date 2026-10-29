@@ -166,7 +166,7 @@
 
 .handoffGrid {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 360px;
+  grid-template-columns: minmax(0, 1fr) 1px 360px;
   gap: 24px;
   margin-top: 18px;
   align-items: start;
@@ -174,6 +174,34 @@
 
 .handoffLeft {
   min-width: 0;
+}
+
+/* The shadcn Separator look: one hairline in the border color, no decoration. */
+.vSeparator {
+  align-self: stretch;
+  width: 1px;
+  background: var(--border);
+}
+
+.orSeparator {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 14px 0;
+}
+
+.orLine {
+  flex: 1;
+  height: 1px;
+  background: var(--border);
+}
+
+.orText {
+  flex: none;
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.04em;
+  color: var(--text-3);
 }
 
 .qrWrap {
@@ -474,6 +502,10 @@ details[open] > .finishedSummary::before {
   .handoffGrid {
     grid-template-columns: 1fr;
     gap: 18px;
+  }
+
+  .vSeparator {
+    display: none;
   }
 }
 

@@ -175,6 +175,9 @@ Finished  1  ▸
   list while the QR is on screen.
 - **The handoff is two columns.** Left: the QR and the prompt. Right: path, permissions and lifetime. `Done`
   closes the panel; the connection stays in the list.
+- **Two hairline separators.** A vertical rule (a shadcn-`Separator`-style 1px `--border`) sits between the
+  handoff and the configuration; an `or` rule sits between the QR and the prompt, because scanning and copying
+  are alternatives. The vertical rule is hidden when the columns stack; the `or` rule stays.
 - **The configuration is live.** Each change `PATCH`es the token and the list row updates. The QR does not
   change (it carries only the credential) and neither does the one-line prompt; the link page it points at
   always renders the current scope, permissions and expiry. The secret, the name and the kind are not editable
