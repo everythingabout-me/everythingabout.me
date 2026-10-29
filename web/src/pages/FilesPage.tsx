@@ -37,11 +37,6 @@ function normalizePath(value: string): string {
   return value.normalize("NFC").replace(/^\/+|\/+$/g, "");
 }
 
-/** Only used to pick which way a directory switch slides: deeper means "forward". */
-function pathDepth(path: string): number {
-  return path === "" ? 0 : path.split("/").length;
-}
-
 function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${Math.max(0, Math.round(bytes))} B`;
   const units = ["KB", "MB", "GB", "TB"];
@@ -381,10 +376,6 @@ export function FilesPage() {
   // The upload callback is async: by completion the user may have moved to another directory.
   const listingRef = useRef({ path, searching: false });
   listingRef.current = { path, searching: Boolean(activeQuery) };
-  // Where the listing on screen came from, so the next switch knows which way to slide.
-  const settledPath = useRef<string | null>(null);
-  // The entry side chosen for the listing that is currently mounted.
-  const entered = useRef<{ key: string; back: boolean } | null>(null);
 
   const showToast = useCallback(
     (text: string, kind: "info" | "error" = "info", sticky = false) => {
@@ -428,11 +419,6 @@ export function FilesPage() {
   useEffect(() => {
     void load(path);
   }, [path, load]);
-
-  // Remember the settled directory after the switch has been animated into place.
-  useEffect(() => {
-    if (loadedPath !== null) settledPath.current = loadedPath;
-  }, [loadedPath]);
 
   useEffect(() => {
     setRenaming(false);
@@ -604,22 +590,6 @@ export function FilesPage() {
 
   const listKey = `${loadedPath ?? ""}|${activeQuery}`;
 
-  // Deep links open forward; climbing to a parent slides in from the left. The side is frozen
-  // with the listing key: a later render (upload progress, a toast) must not flip the class,
-  // because changing the animation name would replay the slide.
-  let entry = entered.current;
-  if (entry === null || entry.key !== listKey) {
-    const previous = settledPath.current;
-    entry = {
-      key: listKey,
-      back:
-        previous !== null &&
-        !activeQuery &&
-        pathDepth(loadedPath ?? "") < pathDepth(previous),
-    };
-    entered.current = entry;
-  }
-
   // Nothing worth keeping on screen (first paint, or an empty folder): show the skeleton instead.
   const showSkeleton = firstLoad || (navigating && entries.length === 0);
 
@@ -635,8 +605,6 @@ export function FilesPage() {
   // The current path may be a file even while search results are on screen; never upload to it.
   const canUpload =
     !pending && !loadError && !file && !notFound && !(current !== null && !current.is_dir);
-
-  const enterClass = `${styles.enter} ${entry.back ? styles.enterBack : ""}`;
 
   // A rename only ever changes the last segment, so the parent stays put.
   const parentPath = path.includes("/") ? path.slice(0, path.lastIndexOf("/")) : "";
@@ -980,7 +948,7 @@ export function FilesPage() {
           <div
             key={file.path}
             inert={navigating}
-            className={`${enterClass} ${navigating ? styles.dim : ""}`}
+            className={`${styles.enter} ${navigating ? styles.dim : ""}`}
           >
             <FileDetail file={file} />
           </div>
@@ -1050,12 +1018,12 @@ export function FilesPage() {
                   ))}
                 </>
               ) : (
-                // The key is the directory (or query), so a new listing mounts once and slides in;
+                // The key is the directory (or query), so a new listing mounts once and fades in;
                 // an in-place refresh of the same listing keeps the rows it already has.
                 <div
                   key={listKey}
                   inert={navigating}
-                  className={`${styles.list} ${enterClass} ${navigating ? styles.dim : ""}`}
+                  className={`${styles.list} ${styles.enter} ${navigating ? styles.dim : ""}`}
                 >
                   {entries.map((entry) =>
                     entry.kind === "upload" ? (

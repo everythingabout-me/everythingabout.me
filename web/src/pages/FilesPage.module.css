@@ -958,41 +958,25 @@ a.crumb:hover {
 
 /*
  * A switch treats the listing as one surface: the outgoing rows dim in place, then the new
- * listing fades in with a short slide from the side it came from (a parent slides the other
- * way). Only opacity and transform animate, so a long folder still moves on the compositor.
+ * listing fades in. Only opacity animates, so nothing shifts under the cursor and the work
+ * stays on the compositor. 180ms sits in Material's small-transition range (its short
+ * duration tokens stop at 200ms): slower reads as lag once the data is there, faster flickers.
  */
 .enter {
-  animation: enter-forward 0.22s cubic-bezier(0.22, 1, 0.36, 1);
-  transition: opacity 0.16s ease;
+  animation: fade-in 0.18s cubic-bezier(0.22, 1, 0.36, 1);
+  transition: opacity 0.12s ease;
 }
 
 .list {
   display: block;
 }
 
-.enterBack {
-  animation-name: enter-back;
-}
-
-@keyframes enter-forward {
+@keyframes fade-in {
   from {
     opacity: 0;
-    transform: translateX(12px);
   }
   to {
     opacity: 1;
-    transform: translateX(0);
-  }
-}
-
-@keyframes enter-back {
-  from {
-    opacity: 0;
-    transform: translateX(-12px);
-  }
-  to {
-    opacity: 1;
-    transform: translateX(0);
   }
 }
 
