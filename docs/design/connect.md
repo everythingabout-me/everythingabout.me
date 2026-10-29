@@ -10,19 +10,21 @@
 
 ## 1. The shape
 
-Two delivery formats, two lists. Everything else is deliberately absent.
+The page mints **apps** only, and hands one over in two ways: a QR code for the app and a one-line prompt for
+an agent. The `token` kind still exists in `api_tokens` for the CLI and scripts; the page lists those rows
+under Active tokens so they can be revoked, but it does not mint them.
 
 | | App | Token |
 |---|---|---|
-| Who | a service or a device that can scan | an agent, a skill, a one-off script |
-| Delivered as | a QR code and a one-line `/s/` prompt | a copyable one-line `/s/` prompt |
-| Lifetime | 1 hour, 1 day, 1 month, 1 year, or no expiry | 15 min, 1 h, 8 h, 24 h, 7 days |
+| Minted by | `Add app` on this page | the CLI / the web API |
+| Delivered as | a QR code and a one-line `/s/` prompt | the raw token |
+| Lifetime | 1 hour, 1 day, 1 month, 1 year, or no expiry | required, 1 min … 7 days |
 | Appears under | Connected apps | Active tokens |
-| Default lifetime | no expiry | 1 hour |
-| Named by | the app itself, after scanning (`PATCH /me`) | the user, when minting |
+| Default lifetime | no expiry | required |
+| Named by | the app itself, after scanning (`PATCH /me`) | the caller |
 
-A **skill** is a Token. An **agent session** is a Token. There is no third kind and no separate pairing flow in
-this version.
+A **skill** can use an app's prompt; an **agent session** can use the same one. There is no separate token form
+on the page any more.
 
 `kind` (`app` / `token`) is a **label**, not a permission: `prefix` + `read` / `write` / `events` remain the
 security boundary. A client may create either kind with either lifetime the server allows; the lists are a way
@@ -99,7 +101,7 @@ simplicity and zero extra moving parts. The `v` field leaves room for a `code` p
 
 ## 3. The prompt
 
-The handoff shows one sentence:
+The app handoff shows one sentence:
 
 ```text
 Use my drive as described at https://everythingabout.me/s/eam_ab12cd34ef56_...
@@ -142,18 +144,16 @@ with the block one click away.
 
 ```
 Connect
-Give an app long-term access with a QR code, or hand an agent a temporary token.
-                                              [Add app]  [New token]
+                                                         [Add app]
 
 Scan this with the app                                              Done
-The secret is shown once and cannot be shown again.
 
   ┌──────────────┐                     Configuration
   │              │                     Path
   │      QR      │                     [ folder  Whole drive        ▾ ]
   │              │                     Permissions
   └──────────────┘                     [✓ Read]  [✓ Write]  [✓ Events]
-  Scan it, or copy the prompt.         Lifetime
+                                       Lifetime
                                        [ 1 hour ] [ 1 day ] [ 1 month ] [ 1 year ] [✓ No expiry]
   AGENT PROMPT                  Copy
   Use my drive as described     Changes apply immediately.
@@ -173,8 +173,8 @@ Finished  1  ▸
 - **One click mints an app.** `Add app` creates it with the defaults (whole drive, all three permissions, no
   expiry) and opens the handoff at once; there is no app form and no name field, and the row is already in the
   list while the QR is on screen.
-- **The handoff is two columns.** Left: the QR, the prompt, and the credential JSON behind "Can't scan? Copy
-  the JSON". Right: path, permissions and lifetime. `Done` closes the panel; the connection stays in the list.
+- **The handoff is two columns.** Left: the QR and the prompt. Right: path, permissions and lifetime. `Done`
+  closes the panel; the connection stays in the list.
 - **The configuration is live.** Each change `PATCH`es the token and the list row updates. The QR does not
   change (it carries only the credential) and neither does the one-line prompt; the link page it points at
   always renders the current scope, permissions and expiry. The secret, the name and the kind are not editable
@@ -182,8 +182,8 @@ Finished  1  ▸
 - **The prompt is for an agent.** It is one sentence with the `/s/<token>` link. Following the link returns
   the token, the scope and the calls, so scanning is optional and the chat message stays short. The URL is a
   credential; see §3.
-- **A token form still has a name.** A token is copied by hand for one agent, so naming it at minting is the
-  point; it uses the same folder picker and the same option control, with the short lifetimes.
+- **The page no longer mints tokens.** The Active tokens list stays for rows minted by the CLI or the web API,
+  so they can still be revoked; there is no token form and no second handoff.
 - **Selection is a check, not a tint.** Every option is a checkbox-style pill: a box with a tick inside, a blue
   border and a light blue fill when selected. Permissions allow several; lifetime allows one. No free-text
   scope, no hidden write-implies-read rule.
@@ -196,8 +196,8 @@ Finished  1  ▸
 - **A row is three lines:** name; access + scope; life (expiry and last use). An app shows `Unnamed app` until
   it names itself. `Revoke` is a two-click inline action, no dialog. `Finished` is a collapsed group of expired
   and revoked rows, with the kind shown because the two lists share it.
-- **Empty states** are one quiet line in each list. The page does not add a tutorial; the subtitle and the
-  buttons are the teaching.
+- **Empty states** are one quiet line in each list. The page does not add a tutorial; the button and the
+  panel are the teaching.
 - **"Connected" is not a lie:** a new App shows `Never used` until the first API call (`last_used_at`). Closing
   the handoff without scanning leaves an unused row on purpose; it is revocable like any other.
 
@@ -206,7 +206,7 @@ Finished  1  ▸
 | Kind | Presets | Server rule |
 |---|---|---|
 | App | 1 hour, 1 day, 1 month, 1 year, no expiry | expiry ≤ 365 days, or none |
-| Token | 15 min, 1 h, 8 h, 24 h, 7 days | expiry required, 1 min … 7 days |
+| Token | — (CLI / API only) | expiry required, 1 min … 7 days |
 
 Limits enforced on create: name 1–80 runes (an app may start empty; a token may not); at least one of read /
 write / events; prefix normalized by `paths.Normalize`; at most **50 active** connections; at most
@@ -253,9 +253,9 @@ permissions or lifetime, and it is the only write a credential has about itself.
 }
 ```
 
-`Add app` sends the app shape instead: `{"kind": "app", "prefix": "", "read": true, "write": true, "events":
-true, "expiresIn": 0}`. `name` is required for `kind: "token"` and may be omitted for an app, which starts
-nameless. `expiresIn` is seconds; `0` means never and is only valid for `app`. The server computes `expiresAt`
+The page only sends the app shape: `{"kind": "app", "prefix": "", "read": true, "write": true, "events":
+true, "expiresIn": 0}`. The token body above remains for scripts calling the web API. `name` is required for
+`kind: "token"` and may be omitted for an app, which starts nameless. `expiresIn` is seconds; `0` means never and is only valid for `app`. The server computes `expiresAt`
 from its own clock. The response is the only time `secret` exists outside the hash; there is no reveal
 endpoint. The `payload` is the exact credential-only JSON encoded into `qr`; both are returned once for the
 handoff.
@@ -333,4 +333,5 @@ counts separately.
   prompt with the live scope/permissions/expiry, Markdown for curl and an HTML page for a browser; change the
   path, a permission and the lifetime on the right → the link page reflects it and the row updates, while the
   QR and the sentence stay the same; `PATCH /me` with the QR's token renames the row; revoke → the link 404s;
-  a Token handoff shows the same one-liner; the page looks right at 390 px and in dark mode.
+  a token row minted elsewhere shows under Active tokens and can be revoked; the page looks right at 390 px
+  and in dark mode.

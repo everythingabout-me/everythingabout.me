@@ -637,10 +637,10 @@ POST /upload/complete                # verify the size and write the index
 
 ### 4.15 Connect: the QR payload
 
-The web app's `/connect` page mints the same Bearer tokens as the CLI. An **App** is handed over as a QR code
-plus a one-line prompt; a **Token** gets the same one-line prompt. The prompt points at `/s/<token>`, which
-returns the full instructions from the live row (see §4.14). The QR and the link are only transports — the API
-calls are the ones documented above.
+The web app's `/connect` page mints the same Bearer tokens as the CLI. It mints **apps** only, and hands one
+over as a QR code plus a one-line prompt. The token kind remains available through the API/CLI as a raw token.
+The prompt points at `/s/<token>`, which returns the full instructions from the live row (see §4.14). The QR
+and the link are only transports — the API calls are the ones documented above.
 
 ```json
 {
