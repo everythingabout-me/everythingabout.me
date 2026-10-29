@@ -1,8 +1,15 @@
 import { createBrowserRouter, redirect, type LoaderFunctionArgs } from "react-router";
-import { ApiError, api, type AccountSummary, type AuthUser } from "./api/client";
+import {
+  ApiError,
+  api,
+  type AccountSummary,
+  type AuthUser,
+  type ConnectData,
+} from "./api/client";
 import { filesHref } from "./filesPath";
 import { AuthLayout } from "./layouts/AuthLayout";
 import { AccountPage } from "./pages/AccountPage";
+import { ConnectPage } from "./pages/ConnectPage";
 import { FilesPage } from "./pages/FilesPage";
 import { StreamPage } from "./pages/StreamPage";
 import { LoginPage } from "./pages/LoginPage";
@@ -52,6 +59,19 @@ export const router = createBrowserRouter([
   {
     path: "/drive/*",
     loader: legacyDriveRedirect,
+    ...pageBoundary,
+  },
+  {
+    path: "/connect",
+    element: <ConnectPage />,
+    loader: async (): Promise<{ user: AuthUser; data: ConnectData }> => {
+      try {
+        return { user: await requireUser(), data: await api.connect() };
+      } catch (error) {
+        if (error instanceof ApiError && error.status === 401) throw redirect("/login");
+        throw error;
+      }
+    },
     ...pageBoundary,
   },
   {

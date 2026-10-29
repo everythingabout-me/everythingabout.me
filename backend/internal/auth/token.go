@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/jackc/pgx/v5"
 
@@ -24,10 +25,24 @@ const TokenPrefix = "eam_"
 
 const tokenIDLength = 12
 
+// Connection kinds. "app" is long-lived and handed over with a QR code; "token" is
+// temporary and copied as a text block. Kind is a label, not a permission.
+const (
+	KindApp   = "app"
+	KindToken = "token"
+)
+
+const (
+	minTokenTTL = time.Minute
+	maxAppTTL   = 365 * 24 * time.Hour
+	maxTokenTTL = 7 * 24 * time.Hour
+)
+
 // Token is the shape exposed for a token (never the secret).
 type Token struct {
 	ID         string  `json:"id"`
 	Name       string  `json:"name"`
+	Kind       string  `json:"kind"`
 	Prefix     string  `json:"prefix"`
 	CanRead    bool    `json:"read"`
 	CanWrite   bool    `json:"write"`
@@ -36,6 +51,7 @@ type Token struct {
 	LastUsedAt *string `json:"lastUsedAt"`
 	ExpiresAt  *string `json:"expiresAt"`
 	Revoked    bool    `json:"revoked"`
+	RevokedAt  *string `json:"revokedAt"`
 
 	userID string
 }
@@ -131,11 +147,45 @@ func newTokenID() (string, error) {
 type NewTokenInput struct {
 	UserID    string
 	Name      string
+	Kind      string
 	Prefix    string
 	CanRead   bool
 	CanWrite  bool
 	CanEvents bool
 	Expiry    *time.Time
+}
+
+// normalizeKind maps an empty kind to "app", which is the historical CLI default.
+func normalizeKind(kind string) (string, error) {
+	switch strings.TrimSpace(kind) {
+	case "", KindApp:
+		return KindApp, nil
+	case KindToken:
+		return KindToken, nil
+	default:
+		return "", httpx.BadRequest("kind must be app or token")
+	}
+}
+
+// validateLifetime enforces the two product lifetimes. An app may be permanent; a token
+// must expire, and within a week. A small minimum keeps "expires immediately" impossible.
+func validateLifetime(kind string, expiry *time.Time, now time.Time) error {
+	if expiry == nil {
+		if kind == KindToken {
+			return httpx.BadRequest("a token needs an expiry")
+		}
+		return nil
+	}
+	if !expiry.After(now.Add(minTokenTTL)) {
+		return httpx.BadRequest("the expiry must be at least 1 minute away")
+	}
+	if kind == KindApp && expiry.After(now.Add(maxAppTTL)) {
+		return httpx.BadRequest("an app can last at most 365 days")
+	}
+	if kind == KindToken && expiry.After(now.Add(maxTokenTTL)) {
+		return httpx.BadRequest("a token can last at most 7 days")
+	}
+	return nil
 }
 
 // CreateToken mints a token and stores it, returning the plaintext (this once) and the
@@ -145,11 +195,19 @@ func (s *Service) CreateToken(ctx context.Context, input NewTokenInput) (string,
 	if name == "" {
 		return "", nil, httpx.BadRequest("token name cannot be empty")
 	}
-	if len(name) > 80 {
+	if utf8.RuneCountInString(name) > 80 {
 		return "", nil, httpx.BadRequest("token name is too long")
 	}
 	if !input.CanRead && !input.CanWrite && !input.CanEvents {
 		return "", nil, httpx.BadRequest("at least one of read, write or events is required")
+	}
+
+	kind, err := normalizeKind(input.Kind)
+	if err != nil {
+		return "", nil, err
+	}
+	if err := validateLifetime(kind, input.Expiry, time.Now()); err != nil {
+		return "", nil, err
 	}
 
 	prefix, err := paths.Normalize(input.Prefix)
@@ -177,14 +235,14 @@ func (s *Service) CreateToken(ctx context.Context, input NewTokenInput) (string,
 		expires  *string
 	)
 	err = s.db.Pool().QueryRow(ctx,
-		`insert into api_tokens (token_id, token_hash, user_id, name, prefix, can_read, can_write, can_events, expires_at)
-		 values ($1, $2, $3::uuid, $4, $5, $6, $7, $8, $9)
-		 returning token_id, name, prefix, can_read, can_write, can_events,
+		`insert into api_tokens (token_id, token_hash, user_id, name, kind, prefix, can_read, can_write, can_events, expires_at)
+		 values ($1, $2, $3::uuid, $4, $5, $6, $7, $8, $9, $10)
+		 returning token_id, name, kind, prefix, can_read, can_write, can_events,
 		           `+isoUTC("created_at")+`,
 		           case when last_used_at is null then null else `+isoUTC("last_used_at")+` end,
 		           case when expires_at is null then null else `+isoUTC("expires_at")+` end`,
-		id, hashSecret(secret), input.UserID, name, prefix, input.CanRead, input.CanWrite, input.CanEvents, expiresAt).
-		Scan(&token.ID, &token.Name, &token.Prefix, &token.CanRead, &token.CanWrite, &token.CanEvents,
+		id, hashSecret(secret), input.UserID, name, kind, prefix, input.CanRead, input.CanWrite, input.CanEvents, expiresAt).
+		Scan(&token.ID, &token.Name, &token.Kind, &token.Prefix, &token.CanRead, &token.CanWrite, &token.CanEvents,
 			&token.CreatedAt, &lastUsed, &expires)
 	if err != nil {
 		return "", nil, err
@@ -199,11 +257,12 @@ func (s *Service) CreateToken(ctx context.Context, input NewTokenInput) (string,
 // ListTokens returns every token for a user, revoked ones included for auditing.
 func (s *Service) ListTokens(ctx context.Context, userID string) ([]Token, error) {
 	rows, err := s.db.Pool().Query(ctx,
-		`select token_id, name, prefix, can_read, can_write, can_events,
+		`select token_id, name, kind, prefix, can_read, can_write, can_events,
 		        `+isoUTC("created_at")+`,
 		        case when last_used_at is null then null else `+isoUTC("last_used_at")+` end,
 		        case when expires_at is null then null else `+isoUTC("expires_at")+` end,
-		        revoked_at is not null
+		        revoked_at is not null,
+		        case when revoked_at is null then null else `+isoUTC("revoked_at")+` end
 		   from api_tokens
 		  where user_id = $1::uuid
 		  order by created_at desc`, userID)
@@ -212,25 +271,38 @@ func (s *Service) ListTokens(ctx context.Context, userID string) ([]Token, error
 	}
 	defer rows.Close()
 
-	var list []Token
+	list := make([]Token, 0, 8)
 	for rows.Next() {
 		var (
-			token    Token
-			lastUsed *string
-			expires  *string
-			revoked  bool
+			token     Token
+			lastUsed  *string
+			expires   *string
+			revoked   bool
+			revokedAt *string
 		)
-		if err := rows.Scan(&token.ID, &token.Name, &token.Prefix,
+		if err := rows.Scan(&token.ID, &token.Name, &token.Kind, &token.Prefix,
 			&token.CanRead, &token.CanWrite, &token.CanEvents, &token.CreatedAt,
-			&lastUsed, &expires, &revoked); err != nil {
+			&lastUsed, &expires, &revoked, &revokedAt); err != nil {
 			return nil, err
 		}
 		token.LastUsedAt = lastUsed
 		token.ExpiresAt = expires
 		token.Revoked = revoked
+		token.RevokedAt = revokedAt
 		list = append(list, token)
 	}
 	return list, rows.Err()
+}
+
+// CountActiveTokens counts unrevoked, unexpired connections, for the create cap.
+func (s *Service) CountActiveTokens(ctx context.Context, userID string) (int, error) {
+	var count int
+	err := s.db.Pool().QueryRow(ctx,
+		`select count(*) from api_tokens
+		  where user_id = $1::uuid
+		    and revoked_at is null
+		    and (expires_at is null or expires_at > now())`, userID).Scan(&count)
+	return count, err
 }
 
 // RevokeToken revokes a token: it immediately stops granting any permission.
@@ -262,7 +334,7 @@ func (s *Service) VerifyToken(ctx context.Context, plain string) (*Token, error)
 		expires  *string
 	)
 	err := s.db.Pool().QueryRow(ctx,
-		`select user_id::text, token_id, name, prefix, can_read, can_write, can_events,
+		`select user_id::text, token_id, name, kind, prefix, can_read, can_write, can_events,
 		        `+isoUTC("created_at")+`,
 		        case when last_used_at is null then null else `+isoUTC("last_used_at")+` end,
 		        case when expires_at is null then null else `+isoUTC("expires_at")+` end,
@@ -272,7 +344,7 @@ func (s *Service) VerifyToken(ctx context.Context, plain string) (*Token, error)
 		    and revoked_at is null
 		    and (expires_at is null or expires_at > now())
 		  limit 1`, id).
-		Scan(&token.userID, &token.ID, &token.Name, &token.Prefix,
+		Scan(&token.userID, &token.ID, &token.Name, &token.Kind, &token.Prefix,
 			&token.CanRead, &token.CanWrite, &token.CanEvents, &token.CreatedAt,
 			&lastUsed, &expires, &hash)
 	if err != nil {

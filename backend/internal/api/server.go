@@ -91,6 +91,10 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/save-links", s.wrap(s.handleCreateSaveLink))
 	mux.HandleFunc("DELETE /api/save-links/{id}", s.wrap(s.handleRevokeSaveLink))
 
+	mux.HandleFunc("GET /api/connect/tokens", s.wrap(s.handleConnectList))
+	mux.HandleFunc("POST /api/connect/tokens", s.wrap(s.handleConnectCreate))
+	mux.HandleFunc("DELETE /api/connect/tokens/{id}", s.wrap(s.handleConnectRevoke))
+
 	mux.HandleFunc("GET /api/timeline", s.wrap(s.handleTimeline))
 	mux.HandleFunc("GET /api/timeline/status", s.wrap(s.handleTimelineStatus))
 	mux.HandleFunc("POST /api/timeline/rebuild", s.wrap(s.handleTimelineRebuild))

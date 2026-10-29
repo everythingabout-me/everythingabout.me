@@ -606,6 +606,39 @@ POST /upload/complete                # verify the size and write the index
 - The MAC in the short code is derived from a server secret; replacing `COS_SECRET_KEY` invalidates existing save
   links.
 
+### 4.15 Connect: the QR payload
+
+The web app's `/connect` page mints the same Bearer tokens as the CLI. An **App** is handed over as a QR code;
+a **Token** is handed over as a copyable text block. The QR is only a transport — the API calls are the ones
+documented above.
+
+```json
+{
+  "v": 1,
+  "type": "eam.connect",
+  "api": "https://everythingabout.me",
+  "id": "ab12cd34ef56",
+  "token": "eam_...",
+  "name": "Obsidian",
+  "scope": "Apps/obsidian",
+  "read": true,
+  "write": true,
+  "events": false,
+  "expiresAt": "2027-01-27T04:00:00.000Z"
+}
+```
+
+- `api` is the base URL; `token` is the Bearer secret. Those two are all an app needs to store.
+- `v` is the payload version and `type` is always `eam.connect`; if either is not understood, say "update the
+  app" / "not an Everything About Me code" and stop.
+- `name` / `scope` / `read` / `write` / `events` are display metadata. Confirm them with
+  `GET /me` before trusting them; a `401` means the connection was revoked or expired.
+- `expiresAt` is ISO-8601 UTC, or `null` for an App created without an expiry.
+- The QR contains the actual token. It is shown once and can be revoked from the same page; treat a screenshot
+  as a credential.
+- `/api/connect/tokens` (the page's own create/list/revoke endpoint) is **cookie-session only**; third-party
+  apps never need it and cannot call it with a Bearer token.
+
 ---
 
 ## 5. Things the server does behind your back

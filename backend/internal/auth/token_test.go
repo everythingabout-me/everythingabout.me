@@ -3,6 +3,7 @@ package auth
 import (
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestParseToken(t *testing.T) {
@@ -130,5 +131,48 @@ func TestParseSaveLinkCode(t *testing.T) {
 				t.Fatalf("ok = %v, want %v", ok, tc.ok)
 			}
 		})
+	}
+}
+
+func TestNormalizeKind(t *testing.T) {
+	cases := map[string]string{"": KindApp, "app": KindApp, "token": KindToken}
+	for input, want := range cases {
+		got, err := normalizeKind(input)
+		if err != nil || got != want {
+			t.Fatalf("normalizeKind(%q) = (%q, %v), want %q", input, got, err, want)
+		}
+	}
+	if _, err := normalizeKind("agent"); err == nil {
+		t.Fatal("an unknown kind should be rejected")
+	}
+}
+
+func TestValidateLifetime(t *testing.T) {
+	now := time.Date(2026, 10, 29, 12, 0, 0, 0, time.UTC)
+	hour := now.Add(time.Hour)
+	week := now.Add(7 * 24 * time.Hour)
+	year := now.Add(366 * 24 * time.Hour)
+
+	if err := validateLifetime(KindApp, nil, now); err != nil {
+		t.Fatalf("an app may be permanent: %v", err)
+	}
+	if err := validateLifetime(KindToken, nil, now); err == nil {
+		t.Fatal("a token must expire")
+	}
+	if err := validateLifetime(KindToken, &hour, now); err != nil {
+		t.Fatalf("a one-hour token should be allowed: %v", err)
+	}
+	if err := validateLifetime(KindToken, &week, now); err != nil {
+		t.Fatalf("a seven-day token should be allowed: %v", err)
+	}
+	if err := validateLifetime(KindToken, &year, now); err == nil {
+		t.Fatal("a token longer than seven days should be rejected")
+	}
+	if err := validateLifetime(KindApp, &year, now); err == nil {
+		t.Fatal("an app longer than 365 days should be rejected")
+	}
+	past := now.Add(-time.Minute)
+	if err := validateLifetime(KindApp, &past, now); err == nil {
+		t.Fatal("an expiry in the past should be rejected")
 	}
 }

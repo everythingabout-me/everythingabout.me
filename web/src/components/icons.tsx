@@ -171,6 +171,46 @@ export function PencilIcon(props: IconProps) {
   );
 }
 
+/** A window: an app connection. */
+export function AppIcon(props: IconProps) {
+  return (
+    <svg {...base(props)}>
+      <rect x="2.25" y="3" width="11.5" height="10" rx="1.5" />
+      <path d="M2.25 6h11.5" />
+      <path d="M4.5 4.5h.01M6 4.5h.01" />
+    </svg>
+  );
+}
+
+/** A key: a temporary token. */
+export function KeyIcon(props: IconProps) {
+  return (
+    <svg {...base(props)}>
+      <circle cx="5.5" cy="5.5" r="2.5" />
+      <path d="m7.3 7.3 6.2 6.2" />
+      <path d="m10.6 10.6 1.5-1.5" />
+      <path d="m12.2 12.2 1.2-1.2" />
+    </svg>
+  );
+}
+
+export function CopyIcon(props: IconProps) {
+  return (
+    <svg {...base(props)}>
+      <rect x="5.25" y="5.25" width="8" height="8.5" rx="1.5" />
+      <path d="M10.75 5.25v-1.5c0-.55-.45-1-1-1h-6c-.55 0-1 .45-1 1v7c0 .55.45 1 1 1h1.5" />
+    </svg>
+  );
+}
+
+export function CheckIcon(props: IconProps) {
+  return (
+    <svg {...base(props)}>
+      <path d="m3.75 8.25 2.75 2.75 5.75-5.75" />
+    </svg>
+  );
+}
+
 /** Pick an icon by extension, keeping the visuals restrained */
 export function GlyphFor({ name, mime, isDir }: { name: string; mime?: string | null; isDir: boolean }) {
   if (isDir) return <FolderIcon />;

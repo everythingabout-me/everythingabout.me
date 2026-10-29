@@ -16,6 +16,8 @@ const actionKeys: Record<string, MessageKey> = {
   "event.delete": "activity.action.eventDelete",
   "save_link.create": "activity.action.linkCreate",
   "save_link.revoke": "activity.action.linkRevoke",
+  "connection.create": "activity.action.connectionCreate",
+  "connection.revoke": "activity.action.connectionRevoke",
   cancel: "activity.action.cancel",
   retry: "activity.action.retry",
 };

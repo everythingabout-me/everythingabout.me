@@ -149,6 +149,37 @@ export interface ActivityItem {
   createdAt: string;
 }
 
+/** One Connect credential: an app (QR) or a temporary token (text). */
+export type ConnectionKind = "app" | "token";
+
+export interface Connection {
+  id: string;
+  name: string;
+  kind: ConnectionKind;
+  prefix: string;
+  read: boolean;
+  write: boolean;
+  events: boolean;
+  createdAt: string;
+  lastUsedAt: string | null;
+  expiresAt: string | null;
+  revoked: boolean;
+  revokedAt: string | null;
+}
+
+export interface ConnectData {
+  tokens: Connection[];
+  api: string;
+}
+
+export interface CreatedConnection {
+  token: Connection;
+  secret: string;
+  api: string;
+  payload: string;
+  qr: string;
+}
+
 export interface AccountSummary {
   user: AuthUser;
   legacyCount: number;
@@ -238,6 +269,26 @@ export const api = {
 
   async account(): Promise<AccountSummary> {
     return request<AccountSummary>("/api/account");
+  },
+
+  connect(): Promise<ConnectData> {
+    return request<ConnectData>("/api/connect/tokens");
+  },
+
+  createConnection(input: {
+    name: string;
+    kind: ConnectionKind;
+    prefix: string;
+    read: boolean;
+    write: boolean;
+    events: boolean;
+    expiresIn: number;
+  }): Promise<CreatedConnection> {
+    return post<CreatedConnection>("/api/connect/tokens", input);
+  },
+
+  async revokeConnection(id: string): Promise<void> {
+    await request(`/api/connect/tokens/${encodeURIComponent(id)}`, { method: "DELETE" });
   },
 
   createSaveLink(): Promise<{ link: SaveLink }> {

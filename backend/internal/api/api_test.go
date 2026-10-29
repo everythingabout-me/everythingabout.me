@@ -348,3 +348,38 @@ func TestSaveLinkPostIsRejected(t *testing.T) {
 		t.Fatalf("status = %d, want 405", recorder.Code)
 	}
 }
+
+func TestConnectPayload(t *testing.T) {
+	token := &auth.Token{
+		ID:       "ab12cd34ef56",
+		Name:     "Obsidian",
+		Kind:     auth.KindApp,
+		Prefix:   "Apps/obsidian",
+		CanRead:  true,
+		CanWrite: true,
+	}
+	payload, err := buildConnectPayload("https://everythingabout.me", token, "eam_ab12cd34ef56_secret")
+	if err != nil {
+		t.Fatalf("build failed: %v", err)
+	}
+
+	var decoded connectPayload
+	if err := json.Unmarshal([]byte(payload), &decoded); err != nil {
+		t.Fatalf("payload is not JSON: %v", err)
+	}
+	if decoded.V != 1 || decoded.Type != "eam.connect" {
+		t.Fatalf("unexpected envelope: %+v", decoded)
+	}
+	if decoded.API != "https://everythingabout.me" || decoded.Token != "eam_ab12cd34ef56_secret" {
+		t.Fatalf("api/token missing: %+v", decoded)
+	}
+	if decoded.Scope != "Apps/obsidian" || !decoded.Read || !decoded.Write || decoded.Events {
+		t.Fatalf("scope/permissions wrong: %+v", decoded)
+	}
+	if decoded.ExpiresAt != nil {
+		t.Fatalf("a permanent app should encode expiresAt as null: %+v", decoded.ExpiresAt)
+	}
+	if strings.Contains(payload, "user@example.com") {
+		t.Fatal("the payload must not carry account identity")
+	}
+}

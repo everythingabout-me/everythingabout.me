@@ -282,6 +282,10 @@ eam token list   --email you@example.com
 eam token revoke --email you@example.com --id <token ID>
 ```
 
+The browser has the same thing at `/connect`: an **App** is handed over as a QR code containing a small JSON
+payload, a **Token** is handed over as a copyable setup block. Both are backed by `api_tokens` and can be
+revoked from the list. The payload and the page design are in [docs/design/connect.md](docs/design/connect.md).
+
 ### The API the web UI uses
 
 Every `/api/fs/*` endpoint requires a session and only touches the current account's own files (an anonymous

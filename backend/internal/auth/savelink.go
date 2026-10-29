@@ -196,6 +196,7 @@ func (s *Service) VerifySaveLink(ctx context.Context, code string) (*Principal, 
 	}
 
 	token.ID = SaveLinkTokenPrefix + linkID
+	token.Kind = KindApp
 	token.Prefix = ""
 	token.CanRead = true
 	token.CanWrite = true

@@ -6,7 +6,7 @@
  * this module only lays them out in the UI language. Never recompute the date from starts_at in
  * the browser, or cross-time-zone events will land on the wrong day.
  */
-import { locale, t } from "./index";
+import { intlLocale, locale, t } from "./index";
 
 const dayShortYear = new Intl.DateTimeFormat("en", {
   month: "short",
@@ -57,4 +57,20 @@ export function formatRelativeTime(iso: string): string {
     return `${then.getFullYear()}-${month}-${dayOfMonth}`;
   }
   return dayShortYear.format(then);
+}
+
+const relativeUntil = new Intl.RelativeTimeFormat(intlLocale, { numeric: "always" });
+
+/** A future duration for an expiry label: "in 1 hour" / "1 小时后". */
+export function formatUntil(iso: string): string {
+  const target = new Date(iso).getTime();
+  if (Number.isNaN(target)) return iso;
+  const diff = target - Date.now();
+  const abs = Math.abs(diff);
+  if (abs < 60_000) return t("time.lessThanMinute");
+  // Switch to the next unit at the top of its range, so a fresh 1-hour token reads
+  // "in 1 hour" rather than "in 60 minutes".
+  if (diff <= 3_600_000 - 60_000) return relativeUntil.format(Math.ceil(diff / 60_000), "minute");
+  if (diff <= 86_400_000 - 3_600_000) return relativeUntil.format(Math.ceil(diff / 3_600_000), "hour");
+  return relativeUntil.format(Math.ceil(diff / 86_400_000), "day");
 }
