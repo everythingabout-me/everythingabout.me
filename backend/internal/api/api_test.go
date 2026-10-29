@@ -363,21 +363,28 @@ func TestConnectPayload(t *testing.T) {
 		t.Fatalf("build failed: %v", err)
 	}
 
-	var decoded connectPayload
+	var decoded map[string]any
 	if err := json.Unmarshal([]byte(payload), &decoded); err != nil {
 		t.Fatalf("payload is not JSON: %v", err)
 	}
-	if decoded.V != 1 || decoded.Type != "eam.connect" {
-		t.Fatalf("unexpected envelope: %+v", decoded)
+	if decoded["v"] != float64(1) || decoded["type"] != "eam.connect" {
+		t.Fatalf("unexpected envelope: %s", payload)
 	}
-	if decoded.API != "https://everythingabout.me" || decoded.Token != "eam_ab12cd34ef56_secret" {
-		t.Fatalf("api/token missing: %+v", decoded)
+	if decoded["api"] != "https://everythingabout.me" || decoded["token"] != "eam_ab12cd34ef56_secret" {
+		t.Fatalf("api/token missing: %s", payload)
 	}
-	if decoded.Scope != "Apps/obsidian" || !decoded.Read || !decoded.Write || decoded.Events {
-		t.Fatalf("scope/permissions wrong: %+v", decoded)
+	if decoded["id"] != "ab12cd34ef56" {
+		t.Fatalf("id missing: %s", payload)
 	}
-	if decoded.ExpiresAt != nil {
-		t.Fatalf("a permanent app should encode expiresAt as null: %+v", decoded.ExpiresAt)
+	// The page can change these after the QR exists, so they come from GET /me instead of
+	// being frozen into the code.
+	for _, key := range []string{"name", "scope", "read", "write", "events", "expiresAt"} {
+		if _, ok := decoded[key]; ok {
+			t.Errorf("the QR must not carry %q; it can change after the QR is drawn", key)
+		}
+	}
+	if len(decoded) != 5 {
+		t.Fatalf("unexpected payload shape: %s", payload)
 	}
 	if strings.Contains(payload, "user@example.com") {
 		t.Fatal("the payload must not carry account identity")

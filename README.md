@@ -283,11 +283,11 @@ eam token list   --email you@example.com
 eam token revoke --email you@example.com --id <token ID>
 ```
 
-The browser has the same thing at `/connect`: an **App** is handed over as a QR code containing a small JSON
-payload, a **Token** is handed over as a copyable setup block. Both are backed by `api_tokens` and can be
-revoked from the list. An app is minted nameless — only a path, permissions and a lifetime are chosen — and
-names itself with `PATCH /me` after scanning. The payload and the page design are in
-[docs/design/connect.md](docs/design/connect.md).
+The browser has the same thing at `/connect`: clicking **Add app** mints a connection with the defaults and
+shows a QR code plus an agent prompt, while its path, permissions and lifetime stay editable in the same panel.
+A **Token** is handed over as a copyable setup block. Both are backed by `api_tokens` and can be revoked from
+the list. An app starts nameless and names itself with `PATCH /me` after scanning. The payload and the page
+design are in [docs/design/connect.md](docs/design/connect.md).
 
 ### The API the web UI uses
 

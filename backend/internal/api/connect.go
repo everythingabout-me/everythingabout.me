@@ -34,35 +34,24 @@ type connectBody struct {
 	ExpiresIn int64  `json:"expiresIn"` // seconds; 0 = never (apps only)
 }
 
-// connectPayload is the JSON encoded into the QR code. The app only needs api + token;
-// the rest is display metadata and is verified again through GET /me.
+// connectPayload is the JSON encoded into the QR code. It is a credential, not a policy
+// snapshot: the page can change the scope, permissions and lifetime after the QR exists,
+// and the app reads the current values from GET /me. Keeping them here would go stale.
 type connectPayload struct {
-	V         int     `json:"v"`
-	Type      string  `json:"type"`
-	API       string  `json:"api"`
-	ID        string  `json:"id"`
-	Token     string  `json:"token"`
-	Name      string  `json:"name"`
-	Scope     string  `json:"scope"`
-	Read      bool    `json:"read"`
-	Write     bool    `json:"write"`
-	Events    bool    `json:"events"`
-	ExpiresAt *string `json:"expiresAt"`
+	V     int    `json:"v"`
+	Type  string `json:"type"`
+	API   string `json:"api"`
+	ID    string `json:"id"`
+	Token string `json:"token"`
 }
 
 func buildConnectPayload(api string, token *auth.Token, secret string) (string, error) {
 	encoded, err := json.Marshal(connectPayload{
-		V:         1,
-		Type:      "eam.connect",
-		API:       api,
-		ID:        token.ID,
-		Token:     secret,
-		Name:      token.Name,
-		Scope:     token.Prefix,
-		Read:      token.CanRead,
-		Write:     token.CanWrite,
-		Events:    token.CanEvents,
-		ExpiresAt: token.ExpiresAt,
+		V:     1,
+		Type:  "eam.connect",
+		API:   api,
+		ID:    token.ID,
+		Token: secret,
 	})
 	if err != nil {
 		return "", err
@@ -168,6 +157,57 @@ func (s *Server) handleConnectCreate(w http.ResponseWriter, r *http.Request) err
 		},
 	})
 	return nil
+}
+
+// connectUpdateBody is the whole policy of an existing connection. The page can change all
+// of it after the QR exists: the QR is only the credential, so nothing in it goes stale.
+type connectUpdateBody struct {
+	Prefix    string `json:"prefix"`
+	Read      bool   `json:"read"`
+	Write     bool   `json:"write"`
+	Events    bool   `json:"events"`
+	ExpiresIn int64  `json:"expiresIn"` // seconds; 0 = never (apps only)
+}
+
+func (s *Server) handleConnectUpdate(w http.ResponseWriter, r *http.Request) error {
+	if err := httpx.AssertSameOrigin(r); err != nil {
+		return err
+	}
+	user, err := s.requireUser(r)
+	if err != nil {
+		return err
+	}
+
+	body, err := httpx.ReadJSON[connectUpdateBody](r)
+	if err != nil {
+		return err
+	}
+	if body.ExpiresIn < 0 {
+		return httpx.BadRequest("expiresIn cannot be negative")
+	}
+	if body.ExpiresIn > int64((366 * 24 * time.Hour).Seconds()) {
+		return httpx.BadRequest("expiresIn is too large")
+	}
+
+	var expiry *time.Time
+	if body.ExpiresIn > 0 {
+		at := time.Now().Add(time.Duration(body.ExpiresIn) * time.Second)
+		expiry = &at
+	}
+
+	token, err := s.auth.UpdateToken(r.Context(), user.ID, r.PathValue("id"), auth.UpdateTokenInput{
+		Prefix:    body.Prefix,
+		CanRead:   body.Read,
+		CanWrite:  body.Write,
+		CanEvents: body.Events,
+		Expiry:    expiry,
+	})
+	if err != nil {
+		return err
+	}
+
+	w.Header().Set("Cache-Control", "no-store")
+	return s.ok(w, map[string]any{"token": token})
 }
 
 func (s *Server) handleConnectRevoke(w http.ResponseWriter, r *http.Request) error {

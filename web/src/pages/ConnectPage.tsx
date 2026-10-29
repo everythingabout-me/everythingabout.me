@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useLoaderData } from "react-router";
 import {
   api,
@@ -38,7 +38,7 @@ const LIFETIMES: Record<Mode, { value: number; key: MessageKey }[]> = {
   ],
 };
 
-const DEFAULT_LIFETIME: Record<Mode, number> = { app: 0, token: 60 * 60 };
+const TOKEN_LIFETIME = 60 * 60;
 
 function isExpired(connection: Connection): boolean {
   return connection.expiresAt !== null && new Date(connection.expiresAt).getTime() <= Date.now();
@@ -104,9 +104,9 @@ function lifeLabel(connection: Connection): string {
   return lastUsedLabel(connection);
 }
 
-function setupText(created: CreatedConnection): string {
-  const token = created.token;
-  const scope = token.prefix ? `${token.prefix}/` : "the whole drive";
+/** The one block a human copies to an agent: the credential, what it reaches and how to use it. */
+function agentPrompt(created: CreatedConnection, token: Connection): string {
+  const scope = token.prefix ? `${token.prefix.replace(/\/+$/, "")}/` : "the whole drive";
   const parts: string[] = [];
   if (token.read) parts.push("read");
   if (token.write) parts.push("write");
@@ -119,7 +119,8 @@ function setupText(created: CreatedConnection): string {
 
 API:     ${created.api}
 Token:   ${created.secret}
-Scope:   ${access} inside ${scope}
+Access:  ${access}
+Scope:   ${scope}
 Expires: ${token.expiresAt ? new Date(token.expiresAt).toISOString().replace(/\.\d{3}Z$/, "Z") : "never"}
 
 Use it as a Bearer token:
@@ -135,8 +136,9 @@ First call GET /me to confirm the token and its scope.`;
 export function ConnectPage() {
   const { user, data } = useLoaderData() as { user: AuthUser; data: ConnectData };
   const [tokens, setTokens] = useState<Connection[]>(data.tokens ?? []);
-  const [mode, setMode] = useState<Mode | null>(null);
+  const [tokenForm, setTokenForm] = useState(false);
   const [created, setCreated] = useState<CreatedConnection | null>(null);
+  const [adding, setAdding] = useState(false);
   const [revoking, setRevoking] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -158,16 +160,46 @@ export function ConnectPage() {
       return rightAt - leftAt;
     });
 
-  function start(next: Mode) {
+  // "Add app" mints a connection with the defaults and opens the handoff at once: the page
+  // configures it while the QR exists, instead of asking for a name before the QR exists.
+  async function addApp() {
+    if (adding) return;
     setError(null);
     setCreated(null);
-    setMode(next);
+    setTokenForm(false);
+    setAdding(true);
+    try {
+      const result = await api.createConnection({
+        kind: "app",
+        prefix: "",
+        read: true,
+        write: true,
+        events: true,
+        expiresIn: 0,
+      });
+      setTokens((current) => [result.token, ...current]);
+      setCreated(result);
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : t("error.operationFailed"));
+    } finally {
+      setAdding(false);
+    }
+  }
+
+  function startToken() {
+    setError(null);
+    setCreated(null);
+    setTokenForm(true);
   }
 
   function onCreated(result: CreatedConnection) {
     setTokens((current) => [result.token, ...current]);
     setCreated(result);
-    setMode(null);
+    setTokenForm(false);
+  }
+
+  function onUpdated(connection: Connection) {
+    setTokens((current) => current.map((item) => (item.id === connection.id ? connection : item)));
   }
 
   async function revoke(connection: Connection) {
@@ -198,24 +230,28 @@ export function ConnectPage() {
             <p className={styles.subtitle}>{t("connect.subtitle")}</p>
           </div>
           <div className={styles.actions}>
-            <button className={styles.secondary} type="button" onClick={() => start("app")}>
-              {t("connect.addApp")}
+            <button className={styles.secondary} type="button" disabled={adding} onClick={() => void addApp()}>
+              {adding ? t("connect.creating") : t("connect.addApp")}
             </button>
-            <button className={styles.secondary} type="button" onClick={() => start("token")}>
+            <button className={styles.secondary} type="button" onClick={startToken}>
               {t("connect.newToken")}
             </button>
           </div>
         </header>
 
         {created ? (
-          <Handoff created={created} onDone={() => setCreated(null)} />
-        ) : mode ? (
-          <CreatePanel
-            key={mode}
-            mode={mode}
-            onCancel={() => setMode(null)}
-            onCreated={onCreated}
-          />
+          created.token.kind === "app" ? (
+            <AppHandoff
+              key={created.token.id}
+              created={created}
+              onUpdated={onUpdated}
+              onDone={() => setCreated(null)}
+            />
+          ) : (
+            <TokenHandoff created={created} onDone={() => setCreated(null)} />
+          )
+        ) : tokenForm ? (
+          <TokenPanel onCancel={() => setTokenForm(false)} onCreated={onCreated} />
         ) : null}
 
         {error && <p className={styles.error}>{error}</p>}
@@ -255,12 +291,10 @@ export function ConnectPage() {
   );
 }
 
-function CreatePanel({
-  mode,
+function TokenPanel({
   onCancel,
   onCreated,
 }: {
-  mode: Mode;
   onCancel: () => void;
   onCreated: (result: CreatedConnection) => void;
 }) {
@@ -268,8 +302,8 @@ function CreatePanel({
   const [prefix, setPrefix] = useState("");
   const [read, setRead] = useState(true);
   const [write, setWrite] = useState(true);
-  const [events, setEvents] = useState(mode === "app");
-  const [lifetime, setLifetime] = useState(DEFAULT_LIFETIME[mode]);
+  const [events, setEvents] = useState(false);
+  const [lifetime, setLifetime] = useState(TOKEN_LIFETIME);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -287,9 +321,8 @@ function CreatePanel({
       : t("connect.expires", {
           when: formatUntil(new Date(Date.now() + lifetime * 1000).toISOString()),
         });
-  // An app starts nameless: the app reports its name through PATCH /me after scanning. A
-  // token is copied by hand, so name it while minting.
-  const needsName = mode === "token" && !name.trim();
+  // A token is copied by hand for one agent, so it is named while it is minted.
+  const needsName = !name.trim();
   const hasPermission = read || write || events;
   const valid = hasPermission && !needsName;
   const summary = needsName
@@ -310,8 +343,8 @@ function CreatePanel({
     setBusy(true);
     try {
       const result = await api.createConnection({
-        name: mode === "app" ? undefined : name.trim(),
-        kind: mode,
+        name: name.trim(),
+        kind: "token",
         prefix,
         read,
         write,
@@ -330,12 +363,8 @@ function CreatePanel({
     <section className={styles.panel}>
       <div className={styles.panelHead}>
         <div>
-          <h2 className={styles.panelTitle}>
-            {mode === "app" ? t("connect.formAppTitle") : t("connect.formTokenTitle")}
-          </h2>
-          <p className={styles.panelHint}>
-            {mode === "app" ? t("connect.formAppHint") : t("connect.formTokenHint")}
-          </p>
+          <h2 className={styles.panelTitle}>{t("connect.formTokenTitle")}</h2>
+          <p className={styles.panelHint}>{t("connect.formTokenHint")}</p>
         </div>
         <button className={styles.ghost} type="button" onClick={onCancel}>
           {t("common.cancel")}
@@ -343,20 +372,18 @@ function CreatePanel({
       </div>
 
       <div className={styles.form}>
-        {mode === "token" && (
-          <label className={styles.field}>
-            <span className={styles.label}>{t("connect.name")}</span>
-            <input
-              className={styles.input}
-              value={name}
-              maxLength={80}
-              autoFocus
-              spellCheck={false}
-              placeholder={t("connect.nameTokenPlaceholder")}
-              onChange={(event) => setName(event.target.value)}
-            />
-          </label>
-        )}
+        <label className={styles.field}>
+          <span className={styles.label}>{t("connect.name")}</span>
+          <input
+            className={styles.input}
+            value={name}
+            maxLength={80}
+            autoFocus
+            spellCheck={false}
+            placeholder={t("connect.nameTokenPlaceholder")}
+            onChange={(event) => setName(event.target.value)}
+          />
+        </label>
 
         <div className={styles.field}>
           <span className={styles.label}>{t("connect.path")}</span>
@@ -375,7 +402,7 @@ function CreatePanel({
         <div className={styles.field}>
           <span className={styles.label}>{t("connect.lifetime")}</span>
           <div className={styles.options}>
-            {LIFETIMES[mode].map((option) => (
+            {LIFETIMES.token.map((option) => (
               <CheckBox
                 key={option.value}
                 label={t(option.key)}
@@ -395,11 +422,7 @@ function CreatePanel({
           <span>{summary}</span>
         </p>
         <button className={styles.primary} type="button" disabled={!valid || busy} onClick={() => void submit()}>
-          {busy
-            ? t("connect.creating")
-            : mode === "app"
-              ? t("connect.createApp")
-              : t("connect.createToken")}
+          {busy ? t("connect.creating") : t("connect.createToken")}
         </button>
       </div>
     </section>
@@ -421,12 +444,9 @@ function CheckBox({ label, checked, onChange }: { label: string; checked: boolea
   );
 }
 
-function Handoff({ created, onDone }: { created: CreatedConnection; onDone: () => void }) {
-  const { token } = created;
+function useCopy() {
   const [copied, setCopied] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const isApp = token.kind === "app";
-  const text = isApp ? created.payload : setupText(created);
 
   async function copy(value: string, key: string) {
     setError(null);
@@ -439,48 +459,192 @@ function Handoff({ created, onDone }: { created: CreatedConnection; onDone: () =
     }
   }
 
+  return { copied, error, copy };
+}
+
+function HandoffHead({ title, onDone }: { title: string; onDone: () => void }) {
+  return (
+    <div className={styles.panelHead}>
+      <div>
+        <h2 className={styles.panelTitle}>{title}</h2>
+        <p className={styles.panelHint}>{t("connect.createdHint")}</p>
+      </div>
+      <button className={styles.secondary} type="button" onClick={onDone}>
+        {t("connect.done")}
+      </button>
+    </div>
+  );
+}
+
+/**
+ * An app is minted first and configured while the handoff is open: the QR on the left is the
+ * credential, the prompt is that credential written out for an agent, and the right pane edits
+ * the connection in place. The QR carries no policy, so editing it can never make it stale.
+ */
+function AppHandoff({
+  created,
+  onUpdated,
+  onDone,
+}: {
+  created: CreatedConnection;
+  onUpdated: (connection: Connection) => void;
+  onDone: () => void;
+}) {
+  const [token, setToken] = useState(created.token);
+  const [lifetime, setLifetime] = useState(0);
+  const [saving, setSaving] = useState(false);
+  const [configError, setConfigError] = useState<string | null>(null);
+  const savingRef = useRef(false);
+  const { copied, error: copyError, copy } = useCopy();
+  const prompt = agentPrompt(created, token);
+
+  async function configure(next: {
+    prefix?: string;
+    read?: boolean;
+    write?: boolean;
+    events?: boolean;
+    lifetime?: number;
+  }) {
+    if (savingRef.current) return;
+    const prefix = next.prefix ?? token.prefix;
+    const read = next.read ?? token.read;
+    const write = next.write ?? token.write;
+    const events = next.events ?? token.events;
+    const life = next.lifetime ?? lifetime;
+    if (!read && !write && !events) {
+      setConfigError(t("connect.needPermission"));
+      return;
+    }
+    if (
+      prefix === token.prefix &&
+      read === token.read &&
+      write === token.write &&
+      events === token.events &&
+      life === lifetime
+    ) {
+      return;
+    }
+
+    // The controls answer immediately; the request only confirms the computed expiry.
+    const previous = token;
+    const previousLifetime = lifetime;
+    const expiresAt = life === 0 ? null : new Date(Date.now() + life * 1000).toISOString();
+    setToken({ ...token, prefix, read, write, events, expiresAt });
+    setLifetime(life);
+    savingRef.current = true;
+    setSaving(true);
+    setConfigError(null);
+    try {
+      const saved = await api.updateConnection(token.id, { prefix, read, write, events, expiresIn: life });
+      setToken(saved.token);
+      onUpdated(saved.token);
+    } catch (caught) {
+      setToken(previous);
+      setLifetime(previousLifetime);
+      setConfigError(caught instanceof Error ? caught.message : t("error.operationFailed"));
+    } finally {
+      savingRef.current = false;
+      setSaving(false);
+    }
+  }
+
   return (
     <section className={styles.handoff}>
-      <div className={styles.panelHead}>
-        <div>
-          <h2 className={styles.panelTitle}>
-            {isApp ? t("connect.createdAppTitle") : t("connect.createdTokenTitle")}
-          </h2>
-          <p className={styles.panelHint}>{t("connect.createdHint")}</p>
-        </div>
-        <button className={styles.secondary} type="button" onClick={onDone}>
-          {t("connect.done")}
-        </button>
-      </div>
+      <HandoffHead title={t("connect.createdAppTitle")} onDone={onDone} />
 
-      {isApp && (
-        <div className={styles.qrWrap}>
-          <div className={styles.qrCard}>
-            <img className={styles.qr} src={created.qr} width={220} height={220} alt={t("connect.createdAppTitle")} />
+      <div className={styles.handoffGrid}>
+        <div className={styles.handoffLeft}>
+          <div className={styles.qrWrap}>
+            <div className={styles.qrCard}>
+              <img className={styles.qr} src={created.qr} width={220} height={220} alt={t("connect.createdAppTitle")} />
+            </div>
+            <p className={styles.qrHint}>{t("connect.scanHint", { api: created.api })}</p>
           </div>
-          <p className={styles.qrHint}>{t("connect.scanHint", { api: created.api })}</p>
-        </div>
-      )}
 
-      {isApp ? (
-        <details className={styles.jsonDetails}>
-          <summary className={styles.jsonSummary}>{t("connect.jsonDetails")}</summary>
           <CodeBlock
-            label="JSON"
-            text={created.payload}
-            copied={copied === "json"}
-            onCopy={() => void copy(created.payload, "json")}
+            label={t("connect.promptLabel")}
+            text={prompt}
+            copied={copied === "prompt"}
+            onCopy={() => void copy(prompt, "prompt")}
           />
-        </details>
-      ) : (
-        <CodeBlock
-          label={t("connect.setupLabel")}
-          text={text}
-          copied={copied === "setup"}
-          onCopy={() => void copy(text, "setup")}
-        />
-      )}
 
+          <details className={styles.jsonDetails}>
+            <summary className={styles.jsonSummary}>{t("connect.jsonDetails")}</summary>
+            <CodeBlock
+              label="JSON"
+              text={created.payload}
+              copied={copied === "json"}
+              onCopy={() => void copy(created.payload, "json")}
+            />
+          </details>
+          {copyError && <p className={styles.error}>{copyError}</p>}
+        </div>
+
+        <aside className={styles.configPane}>
+          <h3 className={styles.configTitle}>{t("connect.configTitle")}</h3>
+          <div className={styles.configFields}>
+            <div className={styles.field}>
+              <span className={styles.label}>{t("connect.path")}</span>
+              <PathPicker value={token.prefix} onChange={(prefix) => void configure({ prefix })} />
+            </div>
+
+            <div className={styles.field}>
+              <span className={styles.label}>{t("connect.access")}</span>
+              <div className={styles.options}>
+                <CheckBox
+                  label={t("connect.read")}
+                  checked={token.read}
+                  onChange={() => void configure({ read: !token.read })}
+                />
+                <CheckBox
+                  label={t("connect.write")}
+                  checked={token.write}
+                  onChange={() => void configure({ write: !token.write })}
+                />
+                <CheckBox
+                  label={t("connect.events")}
+                  checked={token.events}
+                  onChange={() => void configure({ events: !token.events })}
+                />
+              </div>
+            </div>
+
+            <div className={styles.field}>
+              <span className={styles.label}>{t("connect.lifetime")}</span>
+              <div className={styles.options}>
+                {LIFETIMES.app.map((option) => (
+                  <CheckBox
+                    key={option.value}
+                    label={t(option.key)}
+                    checked={lifetime === option.value}
+                    onChange={() => void configure({ lifetime: option.value })}
+                  />
+                ))}
+              </div>
+            </div>
+          </div>
+          {configError && <p className={styles.error}>{configError}</p>}
+          <p className={styles.configHint}>{saving ? t("connect.saving") : t("connect.configHint")}</p>
+        </aside>
+      </div>
+    </section>
+  );
+}
+
+function TokenHandoff({ created, onDone }: { created: CreatedConnection; onDone: () => void }) {
+  const { copied, error, copy } = useCopy();
+  const token = created.token;
+  const text = agentPrompt(created, token);
+
+  return (
+    <section className={styles.handoff}>
+      <HandoffHead title={t("connect.createdTokenTitle")} onDone={onDone} />
+      <CodeBlock
+        label={t("connect.setupLabel")}
+        text={text}
+        copied={copied === "setup"}
+        onCopy={() => void copy(text, "setup")}
+      />
       <p className={styles.scopeLine}>
         {accessLabel(token)} · {scopeLabel(token)} · {expiryLabel(token)}
       </p>

@@ -638,28 +638,22 @@ documented above.
   "type": "eam.connect",
   "api": "https://everythingabout.me",
   "id": "ab12cd34ef56",
-  "token": "eam_...",
-  "name": "",
-  "scope": "Apps/obsidian",
-  "read": true,
-  "write": true,
-  "events": false,
-  "expiresAt": null
+  "token": "eam_..."
 }
 ```
 
 - `api` is the base URL; `token` is the Bearer secret. Those two are all an app needs to store.
 - `v` is the payload version and `type` is always `eam.connect`; if either is not understood, say "update the
   app" / "not an Everything About Me code" and stop.
-- `name` may be empty: the page mints an app nameless, and the app is expected to call `PATCH /me` with its own
-  name after scanning. Until then `GET /me` also returns an empty name.
-- `scope` / `read` / `write` / `events` are display metadata. Confirm them with `GET /me` before trusting
-  them; a `401` means the connection was revoked or expired.
-- `expiresAt` is ISO-8601 UTC, or `null` for an App created without an expiry.
+- The payload is **only the credential**. The page can change a connection's scope, permissions and lifetime
+  after the QR is drawn, and the server cannot redraw the code (it does not keep the secret), so policy is not
+  in the QR. Read the current values from `GET /me`; a `401` means the connection was revoked or expired.
+- `name` is not in the QR either: the page mints an app nameless, and the app may call `PATCH /me` with its own
+  name. Until then `GET /me` returns an empty name.
 - The QR contains the actual token. It is shown once and can be revoked from the same page; treat a screenshot
   as a credential.
-- `/api/connect/tokens` (the page's own create/list/revoke endpoint) is **cookie-session only**; third-party
-  apps never need it and cannot call it with a Bearer token.
+- `/api/connect/tokens` (the page's own create/list/edit/revoke endpoint) is **cookie-session only**;
+  third-party apps never need it and cannot call it with a Bearer token.
 
 ---
 

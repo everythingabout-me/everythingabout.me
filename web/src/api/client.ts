@@ -288,6 +288,18 @@ export const api = {
     return post<CreatedConnection>("/api/connect/tokens", input);
   },
 
+  /** Rewrite an existing connection's policy. The secret, name and kind cannot change. */
+  updateConnection(
+    id: string,
+    input: { prefix: string; read: boolean; write: boolean; events: boolean; expiresIn: number },
+  ): Promise<{ token: Connection }> {
+    return request<{ token: Connection }>(`/api/connect/tokens/${encodeURIComponent(id)}`, {
+      method: "PATCH",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(input),
+    });
+  },
+
   async revokeConnection(id: string): Promise<void> {
     await request(`/api/connect/tokens/${encodeURIComponent(id)}`, { method: "DELETE" });
   },

@@ -303,6 +303,74 @@ func (s *Service) SetTokenName(ctx context.Context, userID, tokenID, raw string)
 	return &token, nil
 }
 
+// UpdateTokenInput is the mutable policy of a connection: everything except its name, kind
+// and secret.
+type UpdateTokenInput struct {
+	Prefix    string
+	CanRead   bool
+	CanWrite  bool
+	CanEvents bool
+	Expiry    *time.Time // nil = never
+}
+
+// UpdateToken rewrites the policy of one token the user owns. The credential and the name
+// are untouched; the kind is read from the row so the lifetime cap stays correct.
+func (s *Service) UpdateToken(ctx context.Context, userID, tokenID string, input UpdateTokenInput) (*Token, error) {
+	if !input.CanRead && !input.CanWrite && !input.CanEvents {
+		return nil, httpx.BadRequest("at least one of read, write or events is required")
+	}
+	prefix, err := paths.Normalize(input.Prefix)
+	if err != nil {
+		return nil, err
+	}
+
+	var kind string
+	err = s.db.Pool().QueryRow(ctx,
+		`select kind from api_tokens
+		  where user_id = $1::uuid and token_id = $2 and revoked_at is null`, userID, tokenID).Scan(&kind)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, httpx.NotFound("token not found")
+		}
+		return nil, err
+	}
+	if err := validateLifetime(kind, input.Expiry, time.Now()); err != nil {
+		return nil, err
+	}
+
+	var expiresAt any
+	if input.Expiry != nil {
+		expiresAt = *input.Expiry
+	}
+
+	var (
+		token    Token
+		lastUsed *string
+		expires  *string
+	)
+	err = s.db.Pool().QueryRow(ctx,
+		`update api_tokens
+		    set prefix = $3, can_read = $4, can_write = $5, can_events = $6, expires_at = $7
+		  where user_id = $1::uuid and token_id = $2 and revoked_at is null
+		 returning token_id, name, kind, prefix, can_read, can_write, can_events,
+		           `+isoUTC("created_at")+`,
+		           case when last_used_at is null then null else `+isoUTC("last_used_at")+` end,
+		           case when expires_at is null then null else `+isoUTC("expires_at")+` end`,
+		userID, tokenID, prefix, input.CanRead, input.CanWrite, input.CanEvents, expiresAt).
+		Scan(&token.ID, &token.Name, &token.Kind, &token.Prefix, &token.CanRead, &token.CanWrite, &token.CanEvents,
+			&token.CreatedAt, &lastUsed, &expires)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, httpx.NotFound("token not found")
+		}
+		return nil, err
+	}
+	token.userID = userID
+	token.LastUsedAt = lastUsed
+	token.ExpiresAt = expires
+	return &token, nil
+}
+
 // ListTokens returns every token for a user, revoked ones included for auditing.
 func (s *Service) ListTokens(ctx context.Context, userID string) ([]Token, error) {
 	rows, err := s.db.Pool().Query(ctx,

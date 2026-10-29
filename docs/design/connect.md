@@ -27,14 +27,17 @@ this version.
 security boundary. A client may create either kind with either lifetime the server allows; the lists are a way
 to read the page, not an authorization rule.
 
-**An app is a slot, not a form.** The page mints it nameless and immediately hands over the QR; the app reports
-its own name and knows its own basic information. Nothing is typed before the QR exists, so pairing starts in
-one click.
+**An app is a slot, not a form.** Clicking `Add app` mints it with the defaults — whole drive, all three
+permissions, no expiry — and opens the handoff at once. The handoff is two columns: the credential on the
+left (QR + agent prompt), the live configuration on the right. The app reports its own name and reads its
+policy from `/me`; nothing is typed before the QR exists.
 
 ## 2. The QR JSON (v1)
 
-The app scans the code, parses the JSON, and starts using `api` + `token`. The other fields are display metadata
-and must be re-checked against `GET /me`.
+The QR is a **credential transport, not a snapshot of the connection**. It carries only what cannot change:
+the API base, the token id and the secret. The page can edit the scope, permissions and lifetime after the
+code is drawn, and the server does not keep the secret to redraw it; carrying policy here would freeze the
+defaults into the code.
 
 ```json
 {
@@ -42,13 +45,7 @@ and must be re-checked against `GET /me`.
   "type": "eam.connect",
   "api": "https://everythingabout.me",
   "id": "ab12cd34ef56",
-  "token": "eam_ab12cd34ef56_9Qm2vX7pLk3RtYbN8sWdFgHjKcZaE4uPoI1nM6qS0tU",
-  "name": "",
-  "scope": "Apps/obsidian",
-  "read": true,
-  "write": true,
-  "events": false,
-  "expiresAt": null
+  "token": "eam_ab12cd34ef56_9Qm2vX7pLk3RtYbN8sWdFgHjKcZaE4uPoI1nM6qS0tU"
 }
 ```
 
@@ -59,18 +56,20 @@ and must be re-checked against `GET /me`.
 | `api` | public base URL, no trailing slash; all calls go here |
 | `id` | `token_id`, non-secret, for support and display |
 | `token` | the Bearer secret; the only sensitive field |
-| `name` | empty when the page minted the app (`""`); the app sets it, see below |
-| `scope` / `read` / `write` / `events` | display metadata; verify with `/me` |
-| `expiresAt` | ISO-8601 UTC, or `null` for no expiry |
 
-The app's first calls after scanning should be:
+The app's first call after scanning is:
 
 ```http
 GET {api}/me
 Authorization: Bearer {token}
 ```
 
-and then, with its own name:
+`/me` returns the name, the prefix, `read` / `write` / `events` and `expiresAt` — the values the right-hand
+pane edits. A 401 means revoked or expired; the app should ask the user for a new connection rather than
+retrying. If `v` is unsupported, or the JSON is not `type: eam.connect`, show "not an Everything About Me
+code"; do not post the token anywhere.
+
+Then, with its own name:
 
 ```http
 PATCH {api}/me
@@ -80,13 +79,13 @@ Content-Type: application/json
 {"name": "Obsidian"}
 ```
 
-`/me` confirms the token, its scope and its permissions. A 401 means revoked or expired; the app should ask the
-user for a new connection rather than retrying. If `v` is unsupported, or the JSON is not `type: eam.connect`,
-show "not an Everything About Me code"; do not post the token anywhere.
-
 Naming itself is the only write a credential has about itself: a token can change only its own `name` (matched
-by `token_id` **and** `user_id`), never its scope, permissions or lifetime. That is what keeps the page's list
-useful without asking the user to type anything before the QR exists.
+by `token_id` **and** `user_id`), never its scope, permissions or lifetime. The page's session-only
+`PATCH /api/connect/tokens/{id}` is the other half: it edits policy without touching the secret, the name or
+the kind.
+
+Because the QR carries no policy, it never goes stale: cut a permission off after the app scanned, and the
+next `/me` call already says so.
 
 The QR is rendered by the server (`skip2/go-qrcode`, PNG, error correction M, 512 px, displayed at 220 px) so the
 token never goes to a third-party QR service and the browser needs no QR dependency. The response is
@@ -97,16 +96,18 @@ is revoked or expires. This is the same exposure as the copy block, and the reas
 simplicity and zero extra moving parts. The `v` field leaves room for a `code` payload plus a short-lived
 `/redeem` exchange later; that is the security upgrade, not a v1 requirement.
 
-## 3. The copy block
+## 3. The prompt
 
-A Token is handed over as one block, copied with one button:
+Both handoffs hand over the same block. An app shows it next to the QR as the **Agent prompt**; a token shows
+it as its main handoff. It is one copyable block:
 
 ```text
 You can access my drive through the Everything About Me API.
 
 API:     https://everythingabout.me
 Token:   eam_...
-Scope:   read + write inside Inbox/
+Access:  read + write
+Scope:   Inbox/
 Expires: 2026-10-29T13:45:00Z
 
 Use it as a Bearer token:
@@ -119,8 +120,9 @@ Use it as a Bearer token:
 First call GET /me to confirm the token and its scope.
 ```
 
-This is an API artifact, not localized UI copy: it stays in English like the save-link prompt. The page around
-it is bilingual.
+The app version is rebuilt from the live token whenever the configuration changes, so `Access`, `Scope` and
+`Expires` always match what the server will enforce. This is an API artifact, not localized UI copy: it stays
+in English like the save-link prompt. The page around it is bilingual.
 
 ## 4. The page
 
@@ -129,17 +131,24 @@ Connect
 Give an app long-term access with a QR code, or hand an agent a temporary token.
                                               [Add app]  [New token]
 
-Add an app
-Choose what it can reach, then scan the QR. The app names itself.        Cancel
+Scan this with the app                                              Done
+The secret is shown once and cannot be shown again.
 
-  Path
-  [ folder  Whole drive                                        ▾ ]
-  Permissions
-  [✓ Read]  [✓ Write]  [✓ Events]
-  Lifetime
-  [ 1 hour ]  [ 1 day ]  [ 1 month ]  [ 1 year ]  [✓ No expiry]
-
-  Read + write + events · Whole drive · No expiry          [Create app]
+  ┌──────────────┐                     Configuration
+  │              │                     Path
+  │      QR      │                     [ folder  Whole drive        ▾ ]
+  │              │                     Permissions
+  └──────────────┘                     [✓ Read]  [✓ Write]  [✓ Events]
+  Scan it, or copy the prompt.         Lifetime
+                                       [ 1 hour ] [ 1 day ] [ 1 month ] [ 1 year ] [✓ No expiry]
+  AGENT PROMPT                  Copy
+  You can access my drive...           Changes apply immediately.
+  API:     https://everythingabout.me
+  Token:   eam_...
+  Access:  read + write + events
+  Scope:   the whole drive
+  Expires: never
+  ...
 
 Connected apps  1
   [window] Obsidian   Read + write · Whole drive
@@ -152,9 +161,16 @@ Active tokens  1
 Finished  1  ▸
 ```
 
-- **An app form is three choices, no typing.** Path, permissions and lifetime are prefilled (whole drive,
-  all three permissions, no expiry), so `Create app` works immediately; it mints the token and replaces the
-  panel with the QR. There is no name field: the app reports its name through `PATCH /me`.
+- **One click mints an app.** `Add app` creates it with the defaults (whole drive, all three permissions, no
+  expiry) and opens the handoff at once; there is no app form and no name field, and the row is already in the
+  list while the QR is on screen.
+- **The handoff is two columns.** Left: the QR, the prompt, and the credential JSON behind "Can't scan? Copy
+  the JSON". Right: path, permissions and lifetime. `Done` closes the panel; the connection stays in the list.
+- **The configuration is live.** Each change `PATCH`es the token and the prompt is rebuilt from the result; the
+  list row updates too. The QR does not change, because it carries only the credential. The secret, the name
+  and the kind are not editable here.
+- **The prompt is for an agent.** It is the same block the token handoff copies, rebuilt from the live token,
+  so scanning is optional: copy this into an agent and it has the credential, the scope and the calls.
 - **A token form still has a name.** A token is copied by hand for one agent, so naming it at minting is the
   point; it uses the same folder picker and the same option control, with the short lifetimes.
 - **Selection is a check, not a tint.** Every option is a checkbox-style pill: a box with a tick inside, a blue
@@ -163,9 +179,6 @@ Finished  1  ▸
 - **The folder picker is a popover**, not a text field: it starts at your folders, shows a breadcrumb, and
   `Use this folder` commits the level you are in. "Whole drive" (empty prefix) is the first entry and the
   default. It reads the same `/api/fs/list` as the file page.
-- **Handoff replaces the form.** An App shows the QR with "Scan this with the app", the JSON behind
-  "Can't scan? Copy the JSON", and the scope line. A Token shows the copy block. Both say the secret is shown
-  once. `Done` returns to the lists.
 - **The lists are split by kind.** Apps and temporary tokens answer different questions ("what is connected"
   vs "what is running right now"), so they get separate headings and counts. Both are sorted by most recently
   created or used; a new connection lands on top.
@@ -174,8 +187,8 @@ Finished  1  ▸
   and revoked rows, with the kind shown because the two lists share it.
 - **Empty states** are one quiet line in each list. The page does not add a tutorial; the subtitle and the
   buttons are the teaching.
-- **"Connected" is not a lie:** a new App shows `Never used` until the first API call (`last_used_at`). The page
-  does not claim more than it knows.
+- **"Connected" is not a lie:** a new App shows `Never used` until the first API call (`last_used_at`). Closing
+  the handoff without scanning leaves an unused row on purpose; it is revocable like any other.
 
 ### Lifetimes
 
@@ -191,16 +204,21 @@ token stops working at the second it expires.
 
 ## 5. API
 
-All three endpoints are **web-only**: the httpOnly session cookie, never a Bearer token. Mutations also require
-the same-origin check. This matters: a leaked scoped token must not be able to mint a wider one.
+All four endpoints are **web-only**: the httpOnly session cookie, never a Bearer token. Mutations also require
+the same-origin check. This matters: a leaked scoped token must not be able to mint or widen one.
 
 ```http
 GET    /api/connect/tokens          → {tokens, api}
 POST   /api/connect/tokens          → {token, secret, api, payload, qr}
+PATCH  /api/connect/tokens/{id}     → {token}
 DELETE /api/connect/tokens/{id}     → {revoked: true}
 ```
 
 `GET` returns every row (revoked and expired included) so the page can show Finished; the client splits them.
+
+`PATCH` is the live configuration: a full policy replacement with `{prefix, read, write, events, expiresIn}`.
+It never changes the name, the kind or the secret, so the QR and the prompt stay valid. The kind is read from
+the row, so the lifetime cap still matches it; a revoked or unknown id is a 404.
 
 The app side has one endpoint of its own: `PATCH /me` with the Bearer token (documented in
 [docs/api/api.md](../api/api.md) §4.11) sets the display name of that token. It cannot touch scope,
@@ -220,13 +238,16 @@ permissions or lifetime, and it is the only write a credential has about itself.
 }
 ```
 
-`name` is required for `kind: "token"` and may be omitted for `kind: "app"`, which starts nameless.
-`expiresIn` is seconds; `0` means never and is only valid for `app`. The server computes `expiresAt` from its own
-clock. The response is the only time `secret` exists outside the hash; there is no reveal endpoint. The `payload`
-is the exact JSON encoded into `qr`; both are returned once for the handoff.
+`Add app` sends the app shape instead: `{"kind": "app", "prefix": "", "read": true, "write": true, "events":
+true, "expiresIn": 0}`. `name` is required for `kind: "token"` and may be omitted for an app, which starts
+nameless. `expiresIn` is seconds; `0` means never and is only valid for `app`. The server computes `expiresAt`
+from its own clock. The response is the only time `secret` exists outside the hash; there is no reveal
+endpoint. The `payload` is the exact credential-only JSON encoded into `qr`; both are returned once for the
+handoff.
 
 Errors use the normal `{ok:false,error}` envelope: 400 for an empty token name, no permission bit, an unknown
-kind, a bad prefix or a lifetime outside the kind's range; 409 at 50 active; 429 over the creation rate limit.
+kind, a bad prefix or a lifetime outside the kind's range; 404 for an unknown or revoked id on PATCH; 409 at
+50 active; 429 over the creation rate limit.
 
 ## 6. Schema
 
@@ -246,17 +267,21 @@ security issue.
 
 `auth.Token` now carries `Kind` and `RevokedAt`; `NewTokenInput` carries `Kind`. `CreateToken` validates the
 kind, the rune-counted name and the lifetime; an app may pass an empty name, a token may not.
-`SetTokenName` updates only `name` for one `(user_id, token_id)` pair, which is what `PATCH /me` calls. The CLI
-keeps working unchanged: `eam token create` omits `kind` and gets `app`, and those rows show under Connected apps.
+`SetTokenName` updates only `name` for one `(user_id, token_id)` pair, which is what `PATCH /me` calls.
+`UpdateToken` rewrites prefix / permissions / expiry for one pair, which is what the page's `PATCH
+/api/connect/tokens/{id}` calls. The CLI keeps working unchanged: `eam token create` omits `kind` and gets
+`app`, and those rows show under Connected apps.
 
 ## 7. Security
 
 | Threat | Control |
 |---|---|
 | A scoped Bearer token mints a full-drive token | management is session-only (`requireUser` → `SessionUser`) |
-| CSRF from another site | `AssertSameOrigin` on POST/DELETE; SameSite=Lax cookie |
+| A scoped Bearer token widens itself | `PATCH /api/connect/tokens/{id}` is session + same-origin only; a Bearer token can only `PATCH /me`, its own name |
+| CSRF from another site | `AssertSameOrigin` on POST/PATCH/DELETE; SameSite=Lax cookie |
 | Secret leaks from the page | one-time display, unmounted after Done, `Cache-Control: no-store`, never in a GET or audit |
 | Secret in the QR | scoped, revocable, and expiring unless the user chose no expiry; one-time-display warning; return path documented in §2 |
+| A QR outlives the policy it was minted with | the QR carries no policy; the app reads `/me`, which always returns the current row |
 | A token renames another connection or grants itself more | `PATCH /me` updates only its own `name`, matched by `token_id` and `user_id`; scope, permissions and lifetime are not writable |
 | A leaked token lives forever | every Token expires; every App can be revoked; expiry checked at verification |
 | Brute force / abuse | 30 creates/hour/user + 50 active cap + login required |
@@ -284,10 +309,10 @@ counts separately.
 ## 9. Verification
 
 - `make test` (Go + `tsc --noEmit`); `make build`.
-- Unit tests: kind normalization, name rules (empty app allowed, empty token not), lifetime caps, the JSON
-  payload (`v`, `type`, `api`, `token`, `scope`, null expiry, no account identity).
-- Manual: `Add app` → `Create app` with the prefilled choices → the QR renders immediately and the JSON is
-  copyable; `PATCH /me` with the QR's token renames the row and the page shows the new name after a reload;
-  create a Token → the block is copyable; the new row is on top; revoke is two clicks and moves the row to
+- Unit tests: kind normalization, name rules (empty app allowed, empty token not), lifetime caps, the QR
+  payload (only `v`, `type`, `api`, `id`, `token`; no policy fields, no account identity).
+- Manual: `Add app` → the QR, the prompt and the new row appear at once; change the path, a permission and the
+  lifetime on the right → the prompt and the row update, the QR does not change; `PATCH /me` with the QR's
+  token renames the row; create a Token → the block is copyable; revoke is two clicks and moves the row to
   Finished; an expired/revoked token returns 401 from the public API; the page looks right at 390 px and in
   dark mode.

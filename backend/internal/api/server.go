@@ -93,6 +93,7 @@ func (s *Server) Handler() http.Handler {
 
 	mux.HandleFunc("GET /api/connect/tokens", s.wrap(s.handleConnectList))
 	mux.HandleFunc("POST /api/connect/tokens", s.wrap(s.handleConnectCreate))
+	mux.HandleFunc("PATCH /api/connect/tokens/{id}", s.wrap(s.handleConnectUpdate))
 	mux.HandleFunc("DELETE /api/connect/tokens/{id}", s.wrap(s.handleConnectRevoke))
 
 	mux.HandleFunc("GET /api/timeline", s.wrap(s.handleTimeline))
