@@ -37,6 +37,11 @@ function normalizePath(value: string): string {
   return value.normalize("NFC").replace(/^\/+|\/+$/g, "");
 }
 
+/** Only used to pick which way a directory switch slides: deeper means "forward". */
+function pathDepth(path: string): number {
+  return path === "" ? 0 : path.split("/").length;
+}
+
 function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${Math.max(0, Math.round(bytes))} B`;
   const units = ["KB", "MB", "GB", "TB"];
@@ -376,6 +381,10 @@ export function FilesPage() {
   // The upload callback is async: by completion the user may have moved to another directory.
   const listingRef = useRef({ path, searching: false });
   listingRef.current = { path, searching: Boolean(activeQuery) };
+  // Where the listing on screen came from, so the next switch knows which way to slide.
+  const settledPath = useRef<string | null>(null);
+  // The entry side chosen for the listing that is currently mounted.
+  const entered = useRef<{ key: string; back: boolean } | null>(null);
 
   const showToast = useCallback(
     (text: string, kind: "info" | "error" = "info", sticky = false) => {
@@ -419,6 +428,11 @@ export function FilesPage() {
   useEffect(() => {
     void load(path);
   }, [path, load]);
+
+  // Remember the settled directory after the switch has been animated into place.
+  useEffect(() => {
+    if (loadedPath !== null) settledPath.current = loadedPath;
+  }, [loadedPath]);
 
   useEffect(() => {
     setRenaming(false);
@@ -556,10 +570,18 @@ export function FilesPage() {
     }
   };
 
+  // A switch keeps the outgoing listing on screen until the next one arrives, so the card never
+  // collapses into a skeleton; a reload of the same directory must not dim what is already there.
+  const pending = loading || loadedPath !== path;
+  const firstLoad = loadedPath === null;
+  // The URL already moved on, so the rows on screen belong to the directory being left.
+  const navigating = loadedPath !== null && loadedPath !== path;
+  const listPath = navigating ? (loadedPath ?? path) : path;
+
   // In-flight placeholder rows share one list with real files and follow the same ordering:
   // when an upload finishes, the real file lands where its placeholder was and nothing jumps.
   const { entries, visibleUploads } = useMemo(() => {
-    const uploading = uploads.filter((task) => task.dir === path);
+    const uploading = uploads.filter((task) => task.dir === listPath);
     const pendingPaths = new Set(uploading.map((task) => task.path));
     // When overwriting a same-named file, hide the old one and keep only the placeholder row;
     // directories are unaffected.
@@ -578,7 +600,28 @@ export function FilesPage() {
     ];
     if (!activeQuery) list.sort(compareEntries);
     return { entries: list, visibleUploads: uploading };
-  }, [activeQuery, items, path, uploads]);
+  }, [activeQuery, items, listPath, uploads]);
+
+  const listKey = `${loadedPath ?? ""}|${activeQuery}`;
+
+  // Deep links open forward; climbing to a parent slides in from the left. The side is frozen
+  // with the listing key: a later render (upload progress, a toast) must not flip the class,
+  // because changing the animation name would replay the slide.
+  let entry = entered.current;
+  if (entry === null || entry.key !== listKey) {
+    const previous = settledPath.current;
+    entry = {
+      key: listKey,
+      back:
+        previous !== null &&
+        !activeQuery &&
+        pathDepth(loadedPath ?? "") < pathDepth(previous),
+    };
+    entered.current = entry;
+  }
+
+  // Nothing worth keeping on screen (first paint, or an empty folder): show the skeleton instead.
+  const showSkeleton = firstLoad || (navigating && entries.length === 0);
 
   // Before the first listing arrives, build the trail from the URL so the title and breadcrumbs
   // do not flash "all files" on a deep link.
@@ -587,12 +630,13 @@ export function FilesPage() {
   const currentName = currentCrumb ? crumbName(currentCrumb) : t("drive.root");
 
   const activeUploadCount = visibleUploads.filter((task) => task.status !== "failed").length;
-  const pending = loading || loadedPath !== path;
   const file = !activeQuery && current && !current.is_dir ? current : null;
   const notFound = !pending && !loadError && !activeQuery && !file && current === null && path !== "";
   // The current path may be a file even while search results are on screen; never upload to it.
   const canUpload =
     !pending && !loadError && !file && !notFound && !(current !== null && !current.is_dir);
+
+  const enterClass = `${styles.enter} ${entry.back ? styles.enterBack : ""}`;
 
   // A rename only ever changes the last segment, so the parent stays put.
   const parentPath = path.includes("/") ? path.slice(0, path.lastIndexOf("/")) : "";
@@ -933,7 +977,13 @@ export function FilesPage() {
             </div>
           </section>
         ) : file ? (
-          <FileDetail file={file} />
+          <div
+            key={file.path}
+            inert={navigating}
+            className={`${enterClass} ${navigating ? styles.dim : ""}`}
+          >
+            <FileDetail file={file} />
+          </div>
         ) : notFound ? (
           <>
             <section className={styles.panel}>
@@ -952,6 +1002,9 @@ export function FilesPage() {
         ) : (
           <>
             <section className={styles.panel} aria-busy={pending}>
+              {/* A switch has no skeleton to show, so a hairline at the card's edge carries the wait. */}
+              {pending && !firstLoad && <span className={styles.loadLine} aria-hidden="true" />}
+
               {creating && (
                 <div className={styles.newRow}>
                   <input
@@ -974,7 +1027,7 @@ export function FilesPage() {
                 </div>
               )}
 
-              {pending && (
+              {showSkeleton ? (
                 <>
                   {visibleUploads.map((task) => (
                     <UploadRow
@@ -996,36 +1049,43 @@ export function FilesPage() {
                     </div>
                   ))}
                 </>
-              )}
+              ) : (
+                // The key is the directory (or query), so a new listing mounts once and slides in;
+                // an in-place refresh of the same listing keeps the rows it already has.
+                <div
+                  key={listKey}
+                  inert={navigating}
+                  className={`${styles.list} ${enterClass} ${navigating ? styles.dim : ""}`}
+                >
+                  {entries.map((entry) =>
+                    entry.kind === "upload" ? (
+                      <UploadRow
+                        key={entry.key}
+                        task={entry.task}
+                        onCancel={cancelUpload}
+                        onRetry={retryUpload}
+                      />
+                    ) : (
+                      <ItemRow
+                        key={entry.key}
+                        item={entry.item}
+                        activeQuery={Boolean(activeQuery)}
+                      />
+                    ),
+                  )}
 
-              {!pending &&
-                entries.map((entry) =>
-                  entry.kind === "upload" ? (
-                    <UploadRow
-                      key={entry.key}
-                      task={entry.task}
-                      onCancel={cancelUpload}
-                      onRetry={retryUpload}
-                    />
-                  ) : (
-                    <ItemRow
-                      key={entry.key}
-                      item={entry.item}
-                      activeQuery={Boolean(activeQuery)}
-                    />
-                  ),
-                )}
-
-              {!pending && entries.length === 0 && (
-                <div className={styles.empty}>
-                  <span className={styles.emptyIcon}>
-                    {activeQuery ? <SearchIcon size={20} /> : <FolderIcon size={20} />}
-                  </span>
-                  <span className={styles.emptyTitle}>
-                    {activeQuery ? t("drive.emptySearchTitle") : t("drive.emptyFolderTitle")}
-                  </span>
-                  {activeQuery && (
-                    <span className={styles.emptyText}>{t("drive.emptySearchHint")}</span>
+                  {!pending && entries.length === 0 && (
+                    <div className={styles.empty}>
+                      <span className={styles.emptyIcon}>
+                        {activeQuery ? <SearchIcon size={20} /> : <FolderIcon size={20} />}
+                      </span>
+                      <span className={styles.emptyTitle}>
+                        {activeQuery ? t("drive.emptySearchTitle") : t("drive.emptyFolderTitle")}
+                      </span>
+                      {activeQuery && (
+                        <span className={styles.emptyText}>{t("drive.emptySearchHint")}</span>
+                      )}
+                    </div>
                   )}
                 </div>
               )}
