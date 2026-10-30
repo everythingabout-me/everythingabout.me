@@ -1,16 +1,16 @@
 # Are WebDAV / S3 actually enough? A walkthrough of real scenarios
 
-> Status: analysis draft | the final API is in [api.md](api.md)
+> Status: historical analysis draft | the current API reference is [api.md](api.md)
 >
-> **Final decision: an API of our own. No WebDAV, and no S3 facade.**
-> Copy the semantics of S3 / Drive / Dropbox (the same path-tree operations), define the shape ourselves, keep
-> the version out of the URL. WebDAV was rejected because bytes would have to pass through our server; S3 was
-> rejected because controlling third-party apps means building a facade, and a facade puts all the complexity on
-> us while the client has to remember five more settings.
+> **Updated decision, 2026-10-30:** [storage and the unified file API](../design/storage.md) defines two layers,
+> pluggable storage, and one public origin for both control requests and file bytes. The earlier argument
+> against proxying bytes and the inference that presigned direct upload is mandatory are superseded.
 >
-> This document is kept as a record of the reasoning: the walkthrough, the gap table, and the Drive/Dropbox
-> comparison all still hold. The inferences in §5 (nodeId, kind, change feed) and the plans in §6–§9 were
-> **not adopted**.
+> We retain our own public API rather than a WebDAV or S3 facade. WebDAV and S3 remain planned storage
+> integration targets; this is separate from exposing either protocol to downstream applications.
+>
+> This document is a historical record of scenario analysis. Its conclusions and examples are not the current
+> architecture specification; the inferences in §5 (nodeId, kind, change feed) and plans in §6–§9 were not adopted.
 
 ## 0. The conclusion up front
 

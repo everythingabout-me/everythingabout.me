@@ -2,13 +2,21 @@
 
 > An API of our own. **The semantics are the same as S3 / Drive / Dropbox** — it is still "CRUD over a path
 > tree", only the shape is ours to define. No version number in the URL, and no `/v1`.
+>
+> **Storage decision, 2026-10-30:** the accepted [storage/API architecture](../design/storage.md) has two layers
+> and one public origin for control requests and file bytes. Provider redirects, presigned part URLs, and
+> browser COS credentials below describe the **current legacy implementation**, pending migration; they are
+> superseded as design requirements. The target uses same-origin streaming reads/writes and durable upload
+> sessions, with CDN/gateway acceleration behind that origin. New session routes in the design are illustrative
+> and are not yet implemented. Public Bearer routes remain separate from cookie-only web routes.
 
 ---
 
 ## 0. In one sentence
 
-One Bearer token, CRUD over a path tree, plus search and upload. **File bytes never pass through the server**:
-both reads and writes trade an address directly with COS.
+One Bearer token, CRUD over a path tree, plus search and upload. The current implementation exchanges
+provider addresses for downloads and session uploads; the small-file PUT streams through the server.
+The accepted target keeps all control and byte requests on the configured API origin (see the storage design).
 
 ```
 POST /upload          → get an upload address (a small file has exactly one part)
@@ -153,9 +161,9 @@ Authorization: Bearer eam_live_xxx
 → 302 Location: https://<data domain>/drive/<uid>/Photos/2024/a.jpg?q-signature=…
 ```
 
-> **The current implementation** points at the COS domain (`<bucket>.cos.<region>.myqcloud.com`), which differs
-> from the API domain, so the "cross-origin strips Authorization" requirement below is already satisfied. Once a
-> CDN is in front, swap the data domain for `data.example.com`; the signature has to be re-signed for that host.
+> **Current legacy behavior:** the implementation redirects to the COS domain
+> (`<bucket>.cos.<region>.myqcloud.com`). The accepted target returns bytes through the configured API origin;
+> simply replacing COS with a separate public CDN/data domain would not satisfy that decision.
 
 Clients do not handle this 302 — every HTTP client follows it automatically:
 
@@ -170,9 +178,10 @@ The real path is:
 client ──GET /api/files/a.jpg──▶ API (auth, accounting) ──302──▶ client ──▶ CDN ──▶ COS
 ```
 
-- **Location must point at a separate data domain** (such as `data.example.com`). A same-origin redirect does
-  not strip `Authorization`, so the token ends up in the CDN/COS logs; cross-origin, mainstream clients
-  (requests, fetch, Go, curl) all strip it automatically. This one is a hard requirement.
+- In the **legacy redirect flow**, do not forward the application Bearer token to COS. The existing
+  cross-origin redirect allows mainstream clients to strip it. This is no longer a requirement for a
+  separate public data domain: the target authenticates at our origin and strips application credentials
+  before making any internal provider request.
 - `Range` is supported (resumable downloads, video scrubbing).
 - For clients that cannot follow redirects: `GET /api/files/<path>?json=1` → `{"url":…,"name":…,"size":…,"mime":…}`,
   then issue the GET yourself and **do not send `Authorization`**. This is the only query parameter in the whole
@@ -260,10 +269,10 @@ POST /upload/complete
 → 201 <file object>
 ```
 
-- The part count is decided by `size`: ≤ 64 MiB is a single part, anything larger gets sliced automatically.
-  **The shape of the API never changes**, so adding concurrency or resumability later needs no client change.
-- Parts PUT to `data.example.com` (the data domain) without `Authorization`; the signature in the URL is the
-  credential.
+- The current implementation chooses single/multipart using `UPLOAD_MULTIPART_THRESHOLD` (5 GiB by default),
+  with 64 MiB default multipart parts enlarged as necessary to stay within 1000 parts.
+- In this legacy flow, parts PUT to the returned provider address without application `Authorization`;
+  the signature in the URL is the credential. The target replaces these with authenticated same-origin requests.
 - `complete` runs a `HeadObject` to verify the size, then writes the index. Skipping it still works, the index
   just lags.
 - For single-part uploads you may omit `parts`; the server HEADs the object itself.

@@ -2,8 +2,9 @@
 
 Working notes for AI agents and new teammates in this repo. The full story is in
 [README.md](README.md); the API design is in [docs/api/api.md](docs/api/api.md) and the event model in
-[docs/design/events.md](docs/design/events.md). This file only covers what you must know before touching
-anything, and does not repeat the README.
+[docs/design/events.md](docs/design/events.md). The accepted storage/API architecture is in
+[docs/design/storage.md](docs/design/storage.md); read it before changing file transfers or storage drivers.
+This file only covers what you must know before touching anything, and does not repeat the README.
 
 ## One paragraph
 
@@ -105,8 +106,9 @@ Common commands:
 - Pure SPA, no SSR. Routing is a React Router data router (`router.tsx`); page data comes from `loader`, and
   logged-out requests `throw redirect("/login")`.
 - Every request goes through `src/api/client.ts` (the single exit), which unwraps the envelope and raises
-  `ApiError`; do not call `fetch` directly in a page. The exception is browser-to-COS uploads after STS
-  (`cos-js-sdk-v5`, loaded on demand).
+  `ApiError`; do not call `fetch` directly in a page. Existing browser-to-COS uploads after STS
+  (`cos-js-sdk-v5`, loaded on demand) are a legacy exception pending the same-origin migration; new
+  integrations keep storage SDKs/credentials server-side and use the configured API origin.
 - Styling: global tokens live in `src/styles/globals.css` (warm paper feel + blue accent + automatic
   light/dark via `prefers-color-scheme`); page layouts use `*.module.css`. **No Tailwind, no CSS-in-JS.**
 - i18n: the locale is chosen once at module load from the browser language (zh / en), with no switcher. New
@@ -253,8 +255,10 @@ Variants: `Committed locally main@abc1234, not pushed` / `Not committed (tests f
 ## Do not
 
 - Commit `.env`, secrets, `bin/`, `.gocache/`, or `web/dist/` (all gitignored).
-- Proxy file bytes through the server: downloads use a 302 to a presigned URL; uploads use STS direct upload /
-  multipart.
+- Introduce new client-to-provider transfers, provider credential responses, or provider download redirects.
+  The accepted target is one configured API origin for control and file bytes, with streaming/CDN/gateways
+  behind it (see `docs/design/storage.md`). Existing STS/presigned routes are legacy pending migration;
+  the former prohibition on proxying bytes is superseded.
 - Delete or rewrite an existing migration; only append.
 - Change the 5173 port or the `/api` proxy in `web/vite.config.ts` — COS CORS and the development flow depend
   on it.

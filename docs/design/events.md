@@ -3,6 +3,10 @@
 > Status: v1.0 · 2026-10 · **P0 shipped** (implementation status in §12)
 > The UI is in [`timeline.md` §17](timeline.md); this file answers only: **what an event looks like, who can write one, and who owns it once written.**
 > There are no events yet. The site will write some, third-party apps will write some; let's fix the contract first.
+>
+> **Storage decision, 2026-10-30:** [storage.md](storage.md) governs file/media delivery. Presigned thumbnails
+> below describe the current COS implementation; the accepted target serves thumbnails and previews through
+> the configured API origin, with provider processing and CDN acceleration internal.
 
 ---
 

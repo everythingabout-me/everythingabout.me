@@ -7,6 +7,10 @@
 >
 > **2026-10 update**: what actually ships is governed by §17 and [events.md](events.md).
 > The `moments` / snapshot model in §3, the monthly budget in §4, and user editing in §8 were never implemented, and there is no plan to implement them (see §17.4).
+>
+> **Storage decision, 2026-10-30:** [storage.md](storage.md) governs media delivery. The accepted target keeps
+> previews and thumbnails on the configured API origin. Presigned provider URLs described here are legacy
+> implementation details to migrate, not a requirement for downstream clients.
 
 ---
 

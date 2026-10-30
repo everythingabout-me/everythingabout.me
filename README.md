@@ -7,12 +7,30 @@ Tencent Cloud COS.
 Frontend and backend are split: **a Go backend (net/http) + a React frontend (Vite + React Router)**, with no
 Next.js.
 
+Current implementation (COS transfers; migration pending):
+
 ```
 browser ──session cookie──▶ Go API ──▶ Postgres (users / sessions / nodes)
    │                          │
    │                          └──▶ COS (drive/<userID>/…)
    └──STS temporary credentials, direct upload──▶ COS
 ```
+
+## Accepted storage architecture
+
+The [storage/API design](docs/design/storage.md) defines two layers: a unified API consumed by every app,
+and storage drivers for local filesystems, S3/COS, cloud drives, WebDAV, and NAS. Control requests and file
+bytes use one configured origin: `https://everythingabout.me` when hosted, or the operator's domain/LAN
+endpoint when self-hosted. Clients do not receive provider URLs, credentials, or SDK requirements.
+
+CDN, regional byte gateways, and NAS connectors are internal deployment choices. Downloads can use
+private, authorized CDN caching; uploads need suitable streaming ingress and backend-aware chunk handling.
+Self-hosting can run as one process without a CDN. This trades service bandwidth and gateway costs for
+backend-independent clients and deployment compatibility. See the design for rationale, performance policy,
+and the [implementation review](docs/design/storage.md#9-current-implementation-review).
+
+**Implementation is pending.** The setup instructions and endpoint tables below describe today's COS/STS
+and presigned-URL behavior, not the accepted target. This documentation change adds no runtime endpoints.
 
 ## Stack and layout
 
