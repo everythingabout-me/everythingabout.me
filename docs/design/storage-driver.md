@@ -13,7 +13,9 @@ to the same relative native folder/name structure. S3 uses ordinary prefix keys 
 cloud-drive adapters resolve paths to native IDs internally while preserving actual folders/names. A known
 native ID can accelerate lookup but cannot replace the visible destination tree.
 
-The API owns access control, index/search, IDs, quota and durable operation journals. Drivers implement real
+The API owns access control, index/search, private database keys, quota and durable operation journals.
+All clients address files/folders by path at the same API; neither database keys nor native IDs are public
+file handles. Drivers implement real
 file operations, native authentication, naming constraints, version evidence and backend recovery. Drivers
 must enumerate their content root, including existing files, so indexing and direct migration need no data
 rewrite. They do not own a separate application database or expose provider URLs to clients.

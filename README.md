@@ -32,9 +32,10 @@ may still require per-file copy/delete. Durable journals reconcile backend chang
 
 | Target contract (not implemented) | Interface |
 |---|---|
-| Public files | `/api/files`: Bearer; file/folder metadata, resolve/list/search, content, copies |
-| First-party files | `/api/web/files`: cookie/CSRF; same resource and transfer semantics |
-| Simple byte operations | `GET/HEAD/PUT .../content?path=/...` or `.../{id}/content` |
+| All file clients | `/api/files`: one path-based API for Web, iOS, Android, CLI and third parties |
+| Authentication | Explicit Bearer, or session cookie with CSRF protection on mutations; identical file endpoints |
+| Metadata and listing | `GET /api/files?path=/...`; `GET /api/files/list?path=/...` |
+| File content | `GET/HEAD/PUT /api/files/content?path=/...`; no public file IDs |
 | Resumable uploads | `.../uploads`: one numbered-part protocol, durable receipts, commit/abort |
 | Long operations | `.../operations/{id}`: one durable status/result shape |
 | Storage tree | `Stat / List / Open / Mkdir / Remove`, native move/copy where supported; staged writes and outcome recovery |

@@ -14,8 +14,11 @@ The API layer owns user authentication, authorization, search/indexing, quota, t
 coordination. The storage layer exposes real files and folders through local disk, S3/COS, cloud drives,
 WebDAV or NAS. Clients use one API origin and no provider SDK, credential or transfer URL.
 
-Public files use `/api/files` (Bearer); the browser uses `/api/web/files` (cookie/CSRF) with the same service
-semantics. There is no version path segment. Hosted origin is `https://everythingabout.me`; self-hosted origin
+All clients use `/api/files`: Web, iOS, Android, CLI and third parties. There is no browser-only file API.
+Explicit Bearer authentication takes precedence; invalid Authorization never falls back to cookies. Without
+Authorization, the session cookie may authenticate, with CSRF validation on mutations. Authorization/file
+services are shared. Files/folders are addressed only by paths; database/provider IDs remain private.
+There is no version path segment. Hosted origin is `https://everythingabout.me`; self-hosted origin
 is the user's domain or LAN endpoint. CDN, regional byte gateways and NAS connectors are internal deployment
 choices. Self-hosting must work in one process without a CDN.
 
@@ -57,8 +60,9 @@ collision reporting/conversion by the chosen transfer tool, never silent applica
 ## 3. Storage facts and database responsibilities
 
 Storage is the authority for actual paths, names, existence and bytes. Postgres holds a searchable index,
-application IDs, permissions, annotations, sessions, operation journals and audit/events. An application ID may
-remain stable across moves performed by Everything, but does not replace the native path or provider file.
+private database keys, permissions, annotations, sessions, operation journals and audit/events. File/folder
+identity in the public API is the native path. Rename/move changes that path; clients update references.
+Internal keys may help index maintenance, but are never exposed as file IDs or required to access files.
 
 If the database is lost, files remain directly readable. A scan can rebuild paths and basic metadata. It does
 not magically recover account credentials, ACLs, annotations, events, prior app IDs, or ambiguous outside

@@ -85,9 +85,10 @@ Common commands:
   `timeline.Analyzer`) and never construct clients inside a handler.
 - **Deletion is permanent** (there is no trash); deleting a directory requires an explicit `?recursive=1`, and
   code must never recurse "helpfully" on the user's behalf.
-- Do not mix the two auth systems: the public API (`/list`, `/api/files/...`, `/move`, `/upload`, ...) uses a
-  Bearer token; the web API (`/api/fs/*`, `/api/auth/*`, ...) is web-only and uses the httpOnly cookie
-  `eam_session`. `/api/files/*` is the one public path under `/api`, because `/files` belongs to the SPA.
+- Existing runtime routes separate cookie `/api/fs/*` from Bearer public routes; preserve that behavior until
+  implementation is migrated. The replacement file API is one `/api/files` path-based contract for every
+  client, with no public file IDs or `/api/web/files` mount. Explicit Authorization selects Bearer without
+  fallback; absent Authorization may use the session cookie with CSRF protection on every mutation.
 - Long operations (move / copy) always use `Prefer: respond-async` and return `202 + Location`; do not invent a
   second "task" concept.
 - Rate limiting is in-process memory (`internal/ratelimit`), so multiple instances each keep their own count;
@@ -269,8 +270,9 @@ Variants: `Committed locally main@abc1234, not pushed` / `Not committed (tests f
 - Delete or rewrite an existing migration; only append.
 - Change the 5173 port or the `/api` proxy in `web/vite.config.ts` — COS CORS and the development flow depend
   on it.
-- Mix the two auth systems on one route: the web API (`/api/fs/*`, `/api/auth/*`, ...) uses the cookie, and
-  the public API (including `/api/files/*`) uses Bearer tokens. Keep `/api/files/*` Bearer-only.
+- Change current runtime auth routing accidentally before its migration. For the replacement path-based
+  `/api/files` contract, use the explicit Bearer-or-cookie selection and CSRF rules in `docs/api/api.md`;
+  do not add a browser-specific file API or public file-ID routes.
 
 ## Known traps (already hit)
 

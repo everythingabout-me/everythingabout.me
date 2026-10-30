@@ -17,36 +17,36 @@ Every metadata request and file byte uses the configured origin: hosted `https:/
 self-hosted the operator's domain or LAN endpoint. No provider URLs, redirects, credentials, native upload IDs,
 or SDKs reach clients. One origin may route internally to multiple services or CDN nodes.
 
-The public base is **`/api/files`**, authenticated with Bearer tokens. The first-party browser mounts
-exactly the same resource/service contract at **`/api/web/files`**, authenticated only with its session
-cookie and CSRF protection on mutations. These are two authentication adapters, not two file protocols.
-Each authenticates only its designated mechanism: the public mount ignores ambient cookies and requires
-Authorization; the web mount does not authenticate Bearer credentials and rejects an Authorization header.
-There is no fallback. URLs returned by an adapter
-are origin-relative and stay in that adapter's mount. In examples, `B` means the chosen base.
-The path-based content shortcut is `B/content?path=/Notes/a.md`, not a nested `/files/files/...` route.
-ID-based metadata/content routes are `B/{id}` and `B/{id}/content`; callers never need a `/nodes` collection.
+**One base, `/api/files`, serves Web, iOS, Android, CLIs and third-party clients.** There is no separate
+browser route and no file-ID resource. All returned transfer/operation locations are origin-relative below
+this same base. In examples, `B` means `/api/files`.
+
+Authentication is selected explicitly at the same endpoint:
+
+- If Authorization is present, require a valid supported Bearer token and use only that principal/scope.
+  Invalid/expired/unsupported Authorization returns 401; never fall back to an ambient session cookie.
+- Otherwise authenticate the httpOnly session cookie. All cookie-authenticated mutations, including raw PUT,
+  upload parts and cancellation, require CSRF validation and approved Origin handling. Cookies use Secure
+  in production and suitable SameSite policy. Browser media GET can use the same content endpoint.
+- Both paths invoke identical authorization/file services. Cookie authentication is not a reason to create
+  another API. Native/third-party clients can use Bearer; Web may use cookie or explicit Bearer.
 
 API paths have no version segment. Optional fields may be added; required behavior cannot silently change.
 Any future incompatible change needs an explicit contract decision and rollout plan, not an assumed `/v1` path.
 
 ### Identity and paths
 
-Every file or folder has an opaque application ID, stable across rename, move, and content replacement. Copy creates new
-IDs; delete/recreate does not reuse IDs. IDs reveal no backend references and grant no access by themselves.
-The indexed folder tree uses `(owner_id, parent_id, name)` and mirrors actual native folders/filenames below
-the owner content root. IDs are application conveniences; they never replace native paths. Folders have no
-file body. API-managed moves preserve IDs; an external move may require reconciliation and cannot always
-be matched unambiguously after database loss.
-Public vocabulary is files and folders (`kind: "file" | "folder"`). The shared `/files/{id}` resource can
-represent either; `node` is an internal implementation term, not another public resource. Static routes such
-as `/resolve`, `/content`, `/uploads`, and `/operations` take precedence over the opaque `/{id}` route.
+**The path identifies a file or folder.** `/Photos/2026/trip.jpg` is the same relative tree stored below
+the owner's native content root. Public metadata, targets, folder listing, search, rename, move, copy, delete,
+content and thumbnails all use paths. There is no fileId, parentId, sourceId or /{fileId} route. Database keys
+and provider IDs stay internal and confer no public identity.
 
-Use IDs for durable application references and paths for human-facing lookup or a simple script. Both resolve
-to the same file or folder and invoke the same authorization/conditional-write code. The path shortcut is intentional;
-clients do not need an extra metadata request before downloading a known path.
+Rename/move changes the public path. An old path may stop existing or later refer to another file; applications
+must update their references. ETags/revisions are change preconditions, not alternative identity handles.
+Upload and operation IDs still identify temporary workflows; they never become file identities.
 
-Paths are absolute within the credential's visible root: `/` is its root, `/Notes/a.md` is a descendant.
+Paths are absolute within the account file root: `/` is the root, `/Notes/a.md` is a descendant.
+A scoped credential is authorized for a declared path subtree; its paths are not silently rebased.
 Preserve accepted name spelling. Native case sensitivity, normalization and filename limits are declared by
 the connection; reject ambiguous case/Unicode collisions and unsupported names. NFC may be used for lookup
 comparison, but must not silently rewrite existing native names. Preserve spaces. Reject empty segments,
@@ -58,10 +58,12 @@ paths. A literal percent-encoded-looking filename is not decoded a second time. 
 depth and path limits constrain admission; unsupported original names cannot secretly become encoded or
 anonymous native files. Existing ambiguous native entries are reported as conflicts, not silently hidden.
 
-Scopes are rooted in file/folder IDs, not mutable textual prefixes. `/` and its `parentId: null` represent the
-visible root; ancestors outside that scope are not returned. Recheck current ancestry and permissions on
-every file, folder, operation and session access. A file or folder moved outside scope becomes inaccessible even with a known ID.
-Nonexistent and inaccessible file/folder/session/operation IDs return the same `404`. Root cannot be moved/deleted.
+Authorize normalized native paths by segment boundaries and backend case/normalization semantics, never
+raw string prefix (`/Photos` must not authorize `/Photos-old`). A scope follows its configured path, not an
+invisible file ID: moving content outside scope removes access; new content at the authorized path falls
+under that scope. Moving/renaming a scope root does not automatically retarget that token. Check both source
+and destination for move/copy and recheck session/operation rights before effects. Do not follow symlinks
+outside the bound root. Missing and concealed out-of-scope resources return 404. Root cannot be moved/deleted.
 
 ## 2. HTTP and representations
 
@@ -87,8 +89,8 @@ File metadata JSON:
 
 ```json
 {
-  "id": "n_...",
-  "parentId": "n_parent...",
+  "path": "/Photos/2026/a.jpg",
+  "parentPath": "/Photos/2026",
   "name": "a.jpg",
   "kind": "file",
   "revision": "nr_...",
@@ -103,8 +105,8 @@ File metadata JSON:
 ```
 
 `revision` changes for direct file/folder metadata/content changes; folder revision also changes for direct child
-membership changes. It is not a recursive subtree version. Full paths are resolved views, not identity fields
-that must be repeated in every metadata response. `contentRevision` identifies the observed file content
+membership changes. It is not a recursive subtree version. A move changes returned path/parentPath, so
+metadata revisions must account for that representation change, including ancestor moves when applicable. `contentRevision` identifies the observed file content
 generation, not an anonymous object, and is null on
 folders; `size/mediaType/checksum` are null on folders. A verified checksum carries algorithm and
 value; null means unknown. Content replacement changes both revisions; rename changes only metadata revision.
@@ -123,40 +125,37 @@ All suffixes are below `B`:
 
 | Method | Resource | Behavior |
 |---|---|---|
-| GET | `/capabilities?path=/` | Authorized effective limits/features for the selected destination |
-| GET | `/me` | Visible root, permissions, usage and reserved bytes |
-| GET | `/resolve?path=/Notes/a.md` | Resolve a path to file/folder metadata; no mutation |
-| GET | `/{id}` | File/folder metadata |
-| GET | `/{id}/children?limit=&cursor=` | Immediate children of a folder |
-| GET | `/search?q=&under={id}&kind=&mediaType=&limit=&cursor=` | Indexed search within scope |
-| GET, HEAD | `/{id}/content` | Raw file bytes/headers |
-| GET, HEAD, PUT | `/content?path=/Notes/a.md` | Path shortcut for content; PUT can create |
-| PUT | `/{id}/content` | Replace an existing file conditionally |
-| POST | (base) | Create a folder (`kind: "folder"`), with explicit optional parent creation |
-| PATCH | `/{id}` | Rename or move a file or folder conditionally |
-| POST | `/copies` | Copy a file/subtree to a destination |
-| DELETE | `/{id}?recursive=true` | Delete; recursive flag required for a nonempty folder |
-| GET | `/{id}/thumbnail?width=&format=` | Supported safe image representation on our origin |
-| POST, GET | `/uploads` | Create a session / list this principal's resumable sessions |
-| GET | `/uploads/{id}` | Session state and compact progress |
-| PUT | `/uploads/{id}/parts/{number}` | Write an immutable numbered part |
-| GET | `/uploads/{id}/parts?limit=&cursor=` | Paginated durable part receipts |
-| POST | `/uploads/{id}/commit` | Freeze the upload and publish through an operation |
-| DELETE | `/uploads/{id}` | Abort; never deletes an already published file |
-| GET | `/operations/{id}` | Durable operation state/result |
-| POST | `/operations/{id}/cancel` | Request cancellation before the publication point |
+| GET | `/me` | Current principal, authorized path scope, usage and reservations |
+| GET | `/capabilities?path=/Photos` | Effective limits/features at an authorized path |
+| GET | `?path=/Photos/a.jpg` | File/folder metadata by path |
+| GET | `/list?path=/Photos&limit=&cursor=` | Immediate folder children |
+| GET | `/search?q=&path=/Photos&kind=&mediaType=&limit=&cursor=` | Indexed search below a path |
+| GET, HEAD, PUT | `/content?path=/Photos/a.jpg` | File download/headers/create/conditional replace |
+| POST | (base) | Create a folder using `{kind:"folder",path,parents?}` |
+| POST | `/move` | Rename/move using `{from,to,ifRevision}` |
+| POST | `/copy` | Copy using `{from,to,ifSourceRevision}` |
+| DELETE | `?path=/Photos/a.jpg&recursive=true` | Native deletion; explicit recursion for nonempty folders |
+| GET | `/thumbnail?path=/Photos/a.jpg&width=&format=` | Authorized image representation |
+| POST, GET | `/uploads` | Create/list this principal's resumable sessions |
+| GET | `/uploads/{uploadId}` | Compact state/progress and target path |
+| PUT | `/uploads/{uploadId}/parts/{number}` | Immutable numbered part |
+| GET | `/uploads/{uploadId}/parts?limit=&cursor=` | Durable part receipts |
+| POST | `/uploads/{uploadId}/commit` | Complete at the bound target path |
+| DELETE | `/uploads/{uploadId}` | Abort temporary upload |
+| GET | `/operations/{operationId}` | Durable workflow state/result |
+| POST | `/operations/{operationId}/cancel` | Request stopping further safe steps |
 
 All capabilities are service-level behavior. There is no driver selection, presigning, or backend capability
 negotiation for clients. Storage connection administration is an operator/account API, outside this contract.
 
 ## 4. Lookup, folders, search, and namespace operations
 
-`GET /resolve?path=/` returns the visible root. List and search use opaque keyset cursors, stable sort by
-kind (folders first), NFC name bytes, and internal tie-breaker ID. Search is case-insensitive substring
-matching on name and resolved visible path; `under` defaults to the visible root and includes descendants.
+`GET B?path=/` returns root metadata when authorized; scoped callers use their authorized root path. List and search use opaque keyset cursors, stable sort by
+kind (folders first), NFC name bytes, and normalized full-path tie-breaker. Search is case-insensitive substring
+matching on name and resolved visible path; `path` defaults to the authorized root and includes descendants.
 A cursor binds principal/scope, query and sort. Ordinary concurrent writes do not globally invalidate it.
 Interactive keyset listing/search is not a snapshot: concurrent rename/move can cause omissions or repeated
-IDs; clients may deduplicate/refresh. Backup/import validation uses a coordinated scan, not this pagination.
+paths; clients may deduplicate/refresh. Backup/import validation uses a coordinated scan, not this pagination.
 Default page size is 200; maximum 1000. Authorization filters apply before pagination and never leak totals.
 
 Create a folder:
@@ -169,9 +168,8 @@ Content-Type: application/json
 {"kind":"folder","path":"/Notes/2026","parents":true}
 ```
 
-Creation requires `kind: "folder"`; files are created by content PUT or an upload session. Alternatively
-specify `parentId` and `name`, exclusive with `path`. `parents` defaults false and is only valid
-with path input. Missing parents return `409 parent_missing`; a parent file returns `409 not_a_folder`.
+Creation requires `kind: "folder"` and `path`; files are created by content PUT or an upload session.
+`parents` defaults false. Missing parents return `409 parent_missing`; a parent file returns `409 not_a_folder`.
 Existing folder returns `200` without changing its revision; new folder returns `201`; existing file
 returns `409 name_conflict`. `parents:true` creates native parents explicitly and journals progress; multiple
 backend mkdir calls are not universally atomic. Failure may leave created empty parents. Return structured
@@ -180,20 +178,21 @@ partial-effect details or an Operation when work cannot finish inline.
 Rename/move:
 
 ```http
-PATCH B/n_file
+POST B/move
 Content-Type: application/json
 
-{"name":"renamed.jpg","parentId":"n_album","ifRevision":"nr_observed"}
+{"from":"/Photos/a.jpg","to":"/Archive/renamed.jpg","ifRevision":"nr_observed"}
 ```
 
-Either name or parent may be omitted. `ifRevision` is required (`428` if absent). No target replacement or
+Both `from` and `to` are full paths; rename is a move within the same parent. `ifRevision` is required
+(`428` if absent). No target replacement or
 implicit folder merging: a collision returns `409`. Same owner only; moving into oneself/descendants is
 invalid. The actual native file/folder must move before success is reported. Prefer native rename; S3
 folder moves require per-entry copy/verify/delete. Journal source versions, destination identities and
 per-entry outcomes, coordinate conflicting mutations, then reconcile the index. There is no transaction
 spanning Postgres and the backend, and no universal atomic whole-folder move.
 
-Copies accept `{sourceId, destination:{parentId,name}, ifSourceRevision}`. Source revision is required.
+Copies accept `{from,to,ifSourceRevision}` with full paths. Source revision is required.
 Copy is recursive by definition for folders and never merges/replaces an existing target. The service
 records a finite source manifest and available native versions after verifying authorization. A consistent
 manifest needs coordinated writers or backend snapshots; a folder revision alone is not a subtree snapshot.
@@ -214,7 +213,7 @@ Cancellation/failure of multi-file work can leave native partial effects; the Op
 
 ## 5. Downloads and safe media
 
-GET by ID or path returns `200` bytes, HEAD returns matching representation headers without a body. Root or
+GET by path returns `200` bytes, HEAD returns matching representation headers without a body. Root or
 folder content returns `409 not_a_file`. All content responses include ETag, Content-Type, correct length,
 `X-Content-Type-Options: nosniff`, and suitable Content-Disposition. Default is attachment; `?disposition=inline`
 is honored only for a safe media allowlist. HTML/SVG and other active content are not served as executable
@@ -256,7 +255,7 @@ hello world
 
 The path shortcut creates by default. Existing file returns `409 name_conflict`. `If-None-Match: *` explicitly
 asserts creation and returns `412` on conflict. Replacement requires `If-Match: "cr_observed"`; no wildcard or
-unconditional replacement is provided. ID-based PUT requires an exact If-Match (`428` otherwise).
+unconditional replacement is provided.
 Conditions are checked at the actual native publication effect, not just before receiving the body.
 Native conditional support or a declared coordinated-exclusive writer model is required; unsupported
 strong conditions are rejected rather than emulated by Stat then an unconditional write. Path writes bind
@@ -294,7 +293,7 @@ Content-Type: application/json
 Idempotency-Key: mobile-upload-001
 
 {
-  "target":{"path":"/Videos/a.mp4"},
+  "path":"/Videos/a.mp4",
   "size":18234122311,
   "mediaType":"video/mp4",
   "condition":{"mode":"create"},
@@ -302,14 +301,12 @@ Idempotency-Key: mobile-upload-001
 }
 ```
 
-`target` is exactly one of path, fileId, or `{parentId,name}`. A fileId targets an existing file and requires
-`condition:{mode:"replace",contentRevision:"cr_..."}`. Path/parent-name can also replace with that condition;
-otherwise mode defaults create. Bind owner, native target path, current target/parent identity and ancestry, connection
-configuration generation, declared size/metadata, and write condition. Re-resolve/revalidate path-based targets
-before the final native effect; a moved ancestor or target is `412 target_changed`. This session remains
-bound to its admitted native path, including ID-based replacements; a new target needs a new session. New sessions never cancel old ones;
-publication conditions decide which succeeds. Record a never-reused destination slot generation as well as
-file/parent IDs; create/delete returning a path to absence does not make an old upload valid again.
+Creation accepts `path`, the complete target filename, and condition mode create (default) or replace
+with contentRevision. Bind owner, normalized native path, internal target/parent evidence, connection generation,
+size, metadata and native condition. Recheck the path and parent before the final native effect; moving or
+recreating a parent/target invalidates the admission (`412 target_changed`). A session does not follow a
+renamed file. Internal target generations/tombstones prevent absent/create/delete/absent races; those values
+are not public file IDs. New sessions never silently cancel earlier sessions.
 
 Example response (numbers are illustrative, not universal defaults):
 
@@ -443,7 +440,7 @@ Recovery follows the saved manifest and native validators, never blindly rescan-
 A replacement worker cannot issue conflicting final effects merely because its predecessor lease expired.
 An unresolved operation retains its path/subtree guard until native quiescence/fencing is established.
 
-Reserve quota transactionally before accepting bytes, consistently across Web and Bearer adapters. Charge
+Reserve quota transactionally before accepting bytes, consistently for every client and authentication method. Charge
 logical file sizes (including copies), track reservations independently from staging/physical usage, recheck
 replacement conditions at commit. On failure/abort/expiry, release only unused reservations after indexing
 and charging all proven native partial results; retain liability for unresolved effects. Concurrent sessions
@@ -488,8 +485,8 @@ session/operation/idempotency identity rather than assuming a timeout means noth
 
 ## 10. Design choices and acceptance
 
-- Stable file/folder IDs support rename-safe references; path shortcuts preserve simple curl/scripts. Provider IDs
-  stay private. Files and folders retain the same actual native paths/names; S3 moves may copy bytes.
+- One path-based API serves every client. Native/provider IDs and database keys stay private. Rename/move
+  changes the public path, and S3 moves may copy bytes. Authentication does not change endpoint shape.
 - One service part protocol supports both independent and ordered storage; native protocols stay internal.
   Plain streaming PUT avoids multipart overhead for small files. tus is not the public protocol: its core
   offset stream does not by itself provide the independent part slots/replay receipts chosen here.
@@ -504,7 +501,7 @@ session/operation/idempotency identity rather than assuming a timeout means noth
 
 Before shipping: exercise the same API conformance suite against local disk and COS/S3, then plain WebDAV
 and a sequential-upload drive; cover create/replace races, parent moves, immutable part replay, lost responses,
-commit/abort/restart/revocation, quota reservations, stable ID authorization after moves, range/HEAD correctness,
+commit/abort/restart/revocation, quota reservations, path-scope authorization after moves, range/HEAD correctness,
 media safety, stale native effect blocking, partial tree recovery, readable no-database exit and scan/index repair. Measure tiny/large/mixed transfers,
 LAN/high RTT/throttling/interruptions, memory/staging, request overhead, and egress cost. This document specifies
 behavior; it does not claim the existing implementation or tests already meet it.
