@@ -4,6 +4,7 @@
 //	eam migrate                     run sql/*.sql in filename order
 //	eam doctor [--write]            self-check config / database / COS
 //	eam reconcile [--owner email] [--inventory inventory.csv] [--dry-run]
+//	eam storage-baseline --owner-id UUID --output new-baseline.json
 //	eam claim --email email [--dry-run] [--keep-source]
 package main
 
@@ -41,6 +42,8 @@ func main() {
 		err = runDoctor(args)
 	case "reconcile":
 		err = runReconcile(args)
+	case "storage-baseline":
+		err = runStorageBaseline(args)
 	case "claim":
 		err = runClaim(args)
 	case "token":
@@ -68,6 +71,8 @@ usage:
   eam migrate                      create tables / run sql/*.sql
   eam doctor [--write]             check config, database, COS
   eam reconcile [--owner email] [--inventory inventory.csv] [--dry-run]
+  eam storage-baseline --owner-id UUID --output new-baseline.json [--writers-quiesced]
+  eam storage-baseline --input baseline.json --output recheck.json [--quota-bytes N]
   eam claim --email email [--dry-run] [--keep-source]
   eam token create --email email --name name [--prefix path] [--write=false]
   eam token list   --email email
@@ -76,5 +81,6 @@ usage:
 Environment variables come from the process; a .env in the current or the two
 parent directories is loaded automatically.
 Common: DATABASE_URL / COS_* / SES_* / APP_ENV / ADDR / WEB_DIR
+storage-baseline --input is offline and does not load application configuration.
 `)
 }

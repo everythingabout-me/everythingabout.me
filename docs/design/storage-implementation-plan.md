@@ -7,6 +7,14 @@
 > Contracts: [file API](../api/api.md), [architecture](storage.md), [driver boundary](storage-driver.md).
 > This plan supersedes the earlier [historical audit's](storage-implementation-review.md) migration framing.
 
+## P0 implementation status
+
+P0 foundations are implemented in the contract fixtures, isolated native probes and read-only
+`eam storage-baseline` command. See [boundary decisions and cutover runbook](storage-p0.md) and
+[capability evidence](storage-p0-capabilities.md). These tests do not activate the replacement API.
+Live COS evidence, production baselines and legacy-writer quiescence remain deployment gates;
+normal unit-test success does not establish them.
+
 ## 1. Fixed implementation constraints
 
 - One `/api/files` contract for Web, iOS, Android, CLI and third parties. No browser-only file routes, version

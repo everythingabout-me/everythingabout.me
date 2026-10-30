@@ -44,10 +44,12 @@ CDN/regional gateways and NAS connectors are internal deployment choices. Privat
 authorization; uploads need suitable streaming ingress. Self-hosting can run in one process without a CDN.
 See the architecture for performance tradeoffs, the [current implementation plan](docs/design/storage-implementation-plan.md),
 and the [predecessor audit](docs/design/storage-implementation-review.md).
+P0 foundations are available: [boundary decisions, read-only baseline capture and write-admission runbook](docs/design/storage-p0.md)
+and [isolated native capability evidence](docs/design/storage-p0-capabilities.md). They do not activate the replacement file API.
 
-**Implementation is pending.** All setup instructions and endpoint tables below describe today's COS/STS
-runtime, preserved in the [legacy reference](docs/api/legacy-api.md). This documentation change adds no endpoints,
-changes no client types/schema, and does not authorize deleting existing data.
+**The replacement file API is not active.** Setup instructions and endpoint tables below describe today's
+COS/STS runtime, preserved in the [legacy reference](docs/api/legacy-api.md). P0 adds contract/probe tests and a
+read-only baseline command; it adds no file endpoints, changes no client types/schema, and deletes no existing data.
 
 ## Stack and layout
 
