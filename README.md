@@ -18,19 +18,34 @@ browser ──session cookie──▶ Go API ──▶ Postgres (users / session
 
 ## Accepted storage architecture
 
-The [storage/API design](docs/design/storage.md) defines two layers: a unified API consumed by every app,
+The [architecture](docs/design/storage.md) defines two layers: a unified API consumed by every app,
 and storage drivers for local filesystems, S3/COS, cloud drives, WebDAV, and NAS. Control requests and file
 bytes use one configured origin: `https://everythingabout.me` when hosted, or the operator's domain/LAN
 endpoint when self-hosted. Clients do not receive provider URLs, credentials, or SDK requirements.
 
-CDN, regional byte gateways, and NAS connectors are internal deployment choices. Downloads can use
-private, authorized CDN caching; uploads need suitable streaming ingress and backend-aware chunk handling.
-Self-hosting can run as one process without a CDN. This trades service bandwidth and gateway costs for
-backend-independent clients and deployment compatibility. See the design for rationale, performance policy,
-and the [implementation review](docs/design/storage.md#9-current-implementation-review).
+The [new file API](docs/api/api.md) and [driver contract](docs/design/storage-driver.md) are clean-slate
+specifications with no legacy-client compatibility requirement. The actual storage retains complete native
+folders, original accepted filenames and raw file contents below the user root. Users can leave through
+ordinary filesystem tools, rclone or provider tools without the database or an Everything export. Postgres
+indexes that tree and adds application metadata. Native directory operations are preferred; S3 folder moves
+may still require per-file copy/delete. Durable journals reconcile backend changes and index updates.
 
-**Implementation is pending.** The setup instructions and endpoint tables below describe today's COS/STS
-and presigned-URL behavior, not the accepted target. This documentation change adds no runtime endpoints.
+| Target contract (not implemented) | Interface |
+|---|---|
+| Public files | `/api/files`: Bearer; file/folder metadata, resolve/list/search, content, copies |
+| First-party files | `/api/web/files`: cookie/CSRF; same resource and transfer semantics |
+| Simple byte operations | `GET/HEAD/PUT .../content?path=/...` or `.../{id}/content` |
+| Resumable uploads | `.../uploads`: one numbered-part protocol, durable receipts, commit/abort |
+| Long operations | `.../operations/{id}`: one durable status/result shape |
+| Storage tree | `Stat / List / Open / Mkdir / Remove`, native move/copy where supported; staged writes and outcome recovery |
+
+CDN/regional gateways and NAS connectors are internal deployment choices. Private cache hits require
+authorization; uploads need suitable streaming ingress. Self-hosting can run in one process without a CDN.
+See the architecture for performance tradeoffs and the [predecessor audit](docs/design/storage-implementation-review.md).
+
+**Implementation is pending.** All setup instructions and endpoint tables below describe today's COS/STS
+runtime, preserved in the [legacy reference](docs/api/legacy-api.md). This documentation change adds no endpoints,
+changes no client types/schema, and does not authorize deleting existing data.
 
 ## Stack and layout
 
@@ -237,8 +252,9 @@ first; in the API, deleting a directory requires an explicit `?recursive=1`, whi
 
 ### The public API (for third-party apps / scripts / AI agents)
 
-An API of our own: one Bearer token, CRUD over a path tree. The design and tradeoffs are in
-[docs/api/api.md](docs/api/api.md) and [docs/api/flows.md](docs/api/flows.md).
+The running API uses one Bearer token and CRUD over a path tree. Its routes are recorded in the
+[legacy/runtime reference](docs/api/legacy-api.md); the replacement contract is [the new file API](docs/api/api.md).
+The [historical scenario analysis](docs/api/flows.md) is retained for context.
 
 ```bash
 # first issue a token for an app that can only touch Apps/badminton

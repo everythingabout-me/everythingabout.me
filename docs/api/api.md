@@ -1,788 +1,510 @@
-# Everything About Me API
+# Unified file API
 
-> An API of our own. **The semantics are the same as S3 / Drive / Dropbox** — it is still "CRUD over a path
-> tree", only the shape is ours to define. No version number in the URL, and no `/v1`.
+> Clean-slate specification, 2026-10-30. Implementation pending.
 >
-> **Storage decision, 2026-10-30:** the accepted [storage/API architecture](../design/storage.md) has two layers
-> and one public origin for control requests and file bytes. Provider redirects, presigned part URLs, and
-> browser COS credentials below describe the **current legacy implementation**, pending migration; they are
-> superseded as design requirements. The target uses same-origin streaming reads/writes and durable upload
-> sessions, with CDN/gateway acceleration behind that origin. New session routes in the design are illustrative
-> and are not yet implemented. Public Bearer routes remain separate from cookie-only web routes.
+> This is the target file API, replacing earlier route, envelope, identity, and upload decisions.
+> There is no requirement to preserve old clients or provide compatibility adapters. The running COS
+> implementation is documented separately in [legacy-api.md](legacy-api.md). Account login, Connect,
+> and event authoring are separate APIs; this specification defines the files they consume.
+> Architecture: [storage.md](../design/storage.md). Driver contract: [storage-driver.md](../design/storage-driver.md).
+> **Mandatory:** native storage must retain complete readable folders, original names and raw files. Users
+> must be able to leave through ordinary native tools without the database or an Everything export.
+> The database is an index/application store; anonymous authoritative content is rejected.
 
----
+## 1. Contract and addressing
 
-## 0. In one sentence
+Every metadata request and file byte uses the configured origin: hosted `https://everythingabout.me`,
+self-hosted the operator's domain or LAN endpoint. No provider URLs, redirects, credentials, native upload IDs,
+or SDKs reach clients. One origin may route internally to multiple services or CDN nodes.
 
-One Bearer token, CRUD over a path tree, plus search and upload. The current implementation exchanges
-provider addresses for downloads and session uploads; the small-file PUT streams through the server.
-The accepted target keeps all control and byte requests on the configured API origin (see the storage design).
+The public base is **`/api/files`**, authenticated with Bearer tokens. The first-party browser mounts
+exactly the same resource/service contract at **`/api/web/files`**, authenticated only with its session
+cookie and CSRF protection on mutations. These are two authentication adapters, not two file protocols.
+Each authenticates only its designated mechanism: the public mount ignores ambient cookies and requires
+Authorization; the web mount does not authenticate Bearer credentials and rejects an Authorization header.
+There is no fallback. URLs returned by an adapter
+are origin-relative and stay in that adapter's mount. In examples, `B` means the chosen base.
+The path-based content shortcut is `B/content?path=/Notes/a.md`, not a nested `/files/files/...` route.
+ID-based metadata/content routes are `B/{id}` and `B/{id}/content`; callers never need a `/nodes` collection.
 
-```
-POST /upload          → get an upload address (a small file has exactly one part)
-PUT  <that address>   → bytes go straight to COS
-GET  /api/files/<path>    → 302 to a download address
+API paths have no version segment. Optional fields may be added; required behavior cannot silently change.
+Any future incompatible change needs an explicit contract decision and rollout plan, not an assumed `/v1` path.
 
-everything else goes through us: /list /search /mkdir /move /copy /delete /me /capabilities
-```
+### Identity and paths
 
-No concept here needs the docs to be guessed right. `mkdir` creates a directory, `copy` copies, and
-`Prefer: respond-async` means "you may do this in the background".
+Every file or folder has an opaque application ID, stable across rename, move, and content replacement. Copy creates new
+IDs; delete/recreate does not reuse IDs. IDs reveal no backend references and grant no access by themselves.
+The indexed folder tree uses `(owner_id, parent_id, name)` and mirrors actual native folders/filenames below
+the owner content root. IDs are application conveniences; they never replace native paths. Folders have no
+file body. API-managed moves preserve IDs; an external move may require reconciliation and cannot always
+be matched unambiguously after database loss.
+Public vocabulary is files and folders (`kind: "file" | "folder"`). The shared `/files/{id}` resource can
+represent either; `node` is an internal implementation term, not another public resource. Static routes such
+as `/resolve`, `/content`, `/uploads`, and `/operations` take precedence over the opaque `/{id}` route.
 
----
+Use IDs for durable application references and paths for human-facing lookup or a simple script. Both resolve
+to the same file or folder and invoke the same authorization/conditional-write code. The path shortcut is intentional;
+clients do not need an extra metadata request before downloading a known path.
 
-## 1. Why not just use S3
+Paths are absolute within the credential's visible root: `/` is its root, `/Notes/a.md` is a descendant.
+Preserve accepted name spelling. Native case sensitivity, normalization and filename limits are declared by
+the connection; reject ambiguous case/Unicode collisions and unsupported names. NFC may be used for lookup
+comparison, but must not silently rewrite existing native names. Preserve spaces. Reject empty segments,
+`.`, `..`, backslashes, control characters, trailing slashes except `/`, and invalid UTF-8. Never trim or silently rename.
+Paths are passed as query values or JSON strings, not mixed with ID route segments. URL-encode query values
+with a standard URL builder, including `+` as `%2B`, `#` as `%23`, and `?` as `%3F` when part of a filename.
+Decode query encoding exactly once, then validate the resulting logical path; JSON strings are already literal
+paths. A literal percent-encoded-looking filename is not decoded a second time. Backend name, segment,
+depth and path limits constrain admission; unsupported original names cannot secretly become encoded or
+anonymous native files. Existing ambiguous native entries are reported as conflicts, not silently hidden.
 
-Semantically we do the same thing S3 does. But S3 lacks three things we need:
+Scopes are rooted in file/folder IDs, not mutable textual prefixes. `/` and its `parentId: null` represent the
+visible root; ancestors outside that scope are not returned. Recheck current ancestry and permissions on
+every file, folder, operation and session access. A file or folder moved outside scope becomes inaccessible even with a known ID.
+Nonexistent and inaccessible file/folder/session/operation IDs return the same `404`. Root cannot be moved/deleted.
 
-1. **No "user".** It does not know who this app belongs to or which directory it may touch — that is our user
-   system.
-2. **No search**, and no "who wrote what".
-3. Fine-grained control over third-party apps means building an S3 facade (SigV4, XML, multipart, 307):
-   ~2500 lines on the server, and the client picks up five more settings — region/bucket/endpoint.
+## 2. HTTP and representations
 
-So: **copy the semantics, define the interface ourselves.** A client needs just two values, `endpoint` and
-`token`.
-
----
-
-## 2. Semantic comparison with familiar APIs
-
-The same job under different names; the work is identical:
-
-| Job | S3 | Google Drive | Dropbox | Ours |
-|---|---|---|---|---|
-| List a directory | `ListObjectsV2` | `files.list` | `files/list_folder` | `GET /list?path=` |
-| Read a file | `GetObject` | `files.get` | `files/download` | `GET /api/files/<path>` |
-| Write a file | `PutObject` | `files.create` | `files/upload` | `PUT /api/files/<path>` |
-| Large file | `MultipartUpload` | resumable upload | `upload_session` | `POST /upload` |
-| Metadata | `HeadObject` | `files.get` | `files/get_metadata` | `HEAD /api/files/<path>` |
-| Create a directory | — (no directories) | `files.create` | `files/create_folder` | `POST /mkdir` |
-| Delete | `DeleteObject` | `files.delete` | `files/delete_v2` | `DELETE /api/files/<path>` |
-| Move/rename | `CopyObject`+`Delete` | `files.update` | `files/move_v2` | `POST /move` |
-| Copy | `CopyObject` | `files.copy` | `files/copy_v2` | `POST /copy` |
-| Search | — | `files.list(q=)` | `files/search_v2` | `GET /search?q=` |
-
-Request parameters and return values stay close to theirs too: paths, `cursor` pagination, `etag`, `size`,
-`mime`, `modifiedAt`. **None of them is a new concept.**
-
----
-
-## 3. Conventions
-
-| Item | Convention |
-|---|---|
-| Base URL | `https://your-host` |
-| Auth | `Authorization: Bearer eam_live_xxx` (the web cookie session works too) |
-| Path | a logical path with no leading `/`, percent-encoded per segment (`/` is not encoded) |
-| Time | ISO-8601 UTC, `2026-10-24T02:11:07Z` |
-| Pagination | `cursor` is an opaque string; `limit` defaults to 1000, max 5000 |
-| Errors | `{"error":"not_found","message":"..."}` plus a correct HTTP status code; `message` is a short English sentence you can show or log directly |
-| Characters | UTF-8; the server normalizes to NFC |
-| Size | a single `PUT` is ≤ 32 MiB; anything larger goes through `/upload` |
-| Async | any request that changes state may carry `Prefer: respond-async[, wait=N]`, see §4.12 |
-| Capabilities | `GET /capabilities` needs no auth; clients read their limits from it, **do not hard-code** |
-| Parent path | when the parent is a file, writes and mkdir return `409` (nothing grows a subtree under a file) |
-
-The one public route under `/api` is file content: `/api/files/<path>`. `/files` belongs to the web app
-(the file browser and its file detail pages), so the by-path file API moved one level deeper. Every other
-endpoint below stays at the root.
-
-**There is no `id`.** The path is the identity (the same as an S3 key). The server does have a row primary key
-internally, but it never enters JSON — see §8.4 for why.
-
----
-
-## 4. Endpoints
-
-```
-GET    /capabilities                      limits and capabilities (no auth)
-GET    /me                                who am I
-PATCH  /me        {name}                  name this connection
-GET    /list?path=                        list a directory
-GET    /api/files/<path>                  read a file
-HEAD   /api/files/<path>                  look at metadata
-PUT    /api/files/<path>                  write a small file
-DELETE /api/files/<path>                  permanent delete
-POST   /mkdir     {path}                  create a directory
-POST   /move      {from,to,overwrite}     move / rename
-POST   /copy      {from,to,overwrite}     copy
-POST   /upload → GET /upload/{id} → POST /upload/complete
-GET    /search?q=                         search
-GET    /move/{id}  POST /move/{id}/cancel  POST /move/{id}/retry
-GET    /copy/{id}  POST /copy/{id}/cancel  POST /copy/{id}/retry
-```
-
-### 4.1 List a directory
-
-```http
-GET /list?path=Photos/2024&limit=200&cursor=
-```
+JSON successes are the resource directly, without an `ok/data` envelope. Collections use
+`{"items":[],"nextCursor":null}`. Errors use `application/problem+json`:
 
 ```json
 {
-  "path": "Photos/2024",
-  "writable": true,
-  "items": [
-    {
-      "name": "a.jpg",
-      "path": "Photos/2024/a.jpg",
-      "parent": "Photos/2024",
-      "type": "file",
-      "size": 248123,
-      "mime": "image/jpeg",
-      "etag": "9f2b…",
-      "sha256": "…",
-      "createdAt": "2026-10-24T02:11:07Z",
-      "modifiedAt": "2026-10-24T02:11:07Z"
-    },
-    {"name": "raw", "path": "Photos/2024/raw", "parent": "Photos/2024", "type": "dir", "size": 0}
-  ],
-  "cursor": null
+  "type": "urn:eam:error:precondition_failed",
+  "title": "Precondition failed",
+  "status": 412,
+  "code": "precondition_failed",
+  "detail": "The file changed before publication.",
+  "requestId": "req_..."
 }
 ```
 
-- Directories come first, then it sorts by `lower(name)`.
-- A `cursor` of `null` means there is no next page.
-- Empty directories still come back as `type: "dir"` (creating a directory writes a placeholder object plus an
-  index record).
-- `writable` says whether **this directory** is writable (a read-only token, or a directory outside the token's
-  prefix, both make it `false`).
-  Agents use it to decide whether to bother writing — never discover it by collecting 403s.
-- `sha256` is a content fingerprint, not an identity: unchanged content keeps the same value. It is a more
-  stable cache key than the path.
+`code` is stable; `detail` is an English explanation. Raw content, HEAD, `204`, and `304` are not wrapped in
+JSON. Dates are RFC 3339 UTC. Byte counts are integers in `0..9007199254740991`; service/backend limits may
+be smaller and are discoverable. No provider error body, secret, or internal native reference is returned.
 
-### 4.2 Read a file
-
-```http
-GET /api/files/Photos/2024/a.jpg
-Authorization: Bearer eam_live_xxx
-
-→ 302 Location: https://<data domain>/drive/<uid>/Photos/2024/a.jpg?q-signature=…
-```
-
-> **Current legacy behavior:** the implementation redirects to the COS domain
-> (`<bucket>.cos.<region>.myqcloud.com`). The accepted target returns bytes through the configured API origin;
-> simply replacing COS with a separate public CDN/data domain would not satisfy that decision.
-
-Clients do not handle this 302 — every HTTP client follows it automatically:
-
-```python
-r = requests.get(f"{API}/api/files/Photos/2024/a.jpg", headers=auth)
-open("a.jpg", "wb").write(r.content)      # bytes come from the CDN → COS
-```
-
-The real path is:
-
-```
-client ──GET /api/files/a.jpg──▶ API (auth, accounting) ──302──▶ client ──▶ CDN ──▶ COS
-```
-
-- In the **legacy redirect flow**, do not forward the application Bearer token to COS. The existing
-  cross-origin redirect allows mainstream clients to strip it. This is no longer a requirement for a
-  separate public data domain: the target authenticates at our origin and strips application credentials
-  before making any internal provider request.
-- `Range` is supported (resumable downloads, video scrubbing).
-- For clients that cannot follow redirects: `GET /api/files/<path>?json=1` → `{"url":…,"name":…,"size":…,"mime":…}`,
-  then issue the GET yourself and **do not send `Authorization`**. This is the only query parameter in the whole
-  API that changes the response type.
-- If the path is a directory you get `400 is_directory`; use `/list`.
-
-### 4.3 Metadata
-
-```http
-HEAD /api/files/Photos/2024/a.jpg
-→ 200
-   Content-Length: 248123
-   Content-Type: image/jpeg
-   ETag: "9f2b…"
-   Last-Modified: Fri, 24 Oct 2026 02:11:07 GMT
-```
-
-**HEAD only.** The earlier `GET /api/files/<path>?meta=1` is gone (two entrances to one thing is the easiest fat to
-grow on an API); passing `meta=1` now returns `400` with a message pointing at HEAD.
-
-### 4.4 Write a small file (one-step shortcut)
-
-```http
-PUT /api/files/Apps/badminton/analyses/a.json
-Authorization: Bearer eam_live_xxx
-Content-Type: application/json
-
-{"score": 21}
-```
-
-```
-201 Created
-Content-Type: application/json
-
-{"name":"a.json","path":"Apps/badminton/analyses/a.json","type":"file","size":12,
- "mime":"application/json","etag":"…","createdAt":"…","modifiedAt":"…"}
-```
-
-- **No overwrite by default**: an existing path returns `409`. To overwrite, add `?overwrite=1` explicitly, or
-  send a matching `If-Match` (safer, it prevents concurrent overwrites).
-- Overwriting replaces directly and **keeps no version history**.
-- `Content-Type` lands in `mime`, defaulting to `application/octet-stream`.
-- `If-None-Match: *` is still supported (create only if absent); failure returns `412`.
-- Above 32 MiB returns `413` and points you at `/upload`.
-- **A client that does not want to reason about size can always use `/upload` — it holds for any size.**
-
-### 4.5 Upload (any size, always three steps)
-
-Bytes go straight to COS the whole way, never through the server. A small file is simply "a single part", so the
-client code needs no branches.
-
-```http
-POST /upload
-{"path":"Videos/a.mp4","size":18234122311,"mime":"video/mp4"}
-```
+File metadata JSON:
 
 ```json
 {
-  "uploadId": "u_7f3a…",
-  "mode": "multipart",
-  "size": 18234122311,
-  "partSize": 67108864,
-  "parts": [
-    {"partNumber": 1, "url": "https://data.example.com/…?signA", "headers": {"Content-Type": "video/mp4"}},
-    {"partNumber": 2, "url": "https://data.example.com/…?signB", "headers": {"Content-Type": "video/mp4"}}
-  ],
-  "expiresAt": "2026-10-24T03:00:00Z"
+  "id": "n_...",
+  "parentId": "n_parent...",
+  "name": "a.jpg",
+  "kind": "file",
+  "revision": "nr_...",
+  "contentRevision": "cr_...",
+  "size": 248123,
+  "mediaType": "image/jpeg",
+  "sourceModifiedAt": "2026-10-29T08:00:00Z",
+  "createdAt": "2026-10-30T04:00:00Z",
+  "updatedAt": "2026-10-30T04:00:00Z",
+  "checksum": null
 }
 ```
 
-```python
-# client: one code path whether it is one part or many
-for p in resp["parts"]:
-    requests.put(p["url"], data=chunk(p["partNumber"]), headers=p["headers"])
+`revision` changes for direct file/folder metadata/content changes; folder revision also changes for direct child
+membership changes. It is not a recursive subtree version. Full paths are resolved views, not identity fields
+that must be repeated in every metadata response. `contentRevision` identifies the observed file content
+generation, not an anonymous object, and is null on
+folders; `size/mediaType/checksum` are null on folders. A verified checksum carries algorithm and
+value; null means unknown. Content replacement changes both revisions; rename changes only metadata revision.
+Copy creates an independent ordinary native file/tree at the destination. A provider-side copy or safe
+filesystem reflink is allowed; an application-only reference or mutable hardlink is not a copy.
 
-requests.post(f"{API}/upload/complete", headers=auth, json={
-    "uploadId": resp["uploadId"],
-    "parts": [{"partNumber": p["partNumber"], "etag": p["etag"]} for p in done],
-})
-```
+Metadata and lifecycle responses use `Cache-Control: no-store`. They do not use content ETags as metadata revision
+validators. Mutations carry explicit metadata revisions as described below. When a trustworthy native
+version/snapshot or coordinated writer model supports it, content GET/HEAD uses a strong HTTP ETag equal
+to the quoted contentRevision. Otherwise omit the strong validator, disable validator-dependent guarantees,
+and reject unsupported conditional writes; an index counter alone is not proof of unchanged native bytes.
 
-```http
-POST /upload/complete
-{"uploadId":"u_7f3a…","parts":[{"partNumber":1,"etag":"\"9f2b…\""}]}
-→ 201 <file object>
-```
+## 3. Resource table
 
-- The current implementation chooses single/multipart using `UPLOAD_MULTIPART_THRESHOLD` (5 GiB by default),
-  with 64 MiB default multipart parts enlarged as necessary to stay within 1000 parts.
-- In this legacy flow, parts PUT to the returned provider address without application `Authorization`;
-  the signature in the URL is the credential. The target replaces these with authenticated same-origin requests.
-- `complete` runs a `HeadObject` to verify the size, then writes the index. Skipping it still works, the index
-  just lags.
-- For single-part uploads you may omit `parts`; the server HEADs the object itself.
-- Re-issuing `POST /upload` while an upload is in flight invalidates the old one.
+All suffixes are below `B`:
 
-#### After a disconnect, ask first — do not start over
-
-```http
-GET /upload/u_7f3a…
-→ 200
-{
-  "uploadId": "u_7f3a…",
-  "path": "Videos/a.mp4",
-  "mode": "multipart",
-  "size": 18234122311,
-  "partSize": 67108864,
-  "expiresAt": "2026-10-24T03:00:00Z",
-  "status": "pending",
-  "received": [
-    {"partNumber": 1, "size": 67108864, "etag": "\"9f2b…\""},
-    {"partNumber": 2, "size": 12345678, "etag": "\"1a2c…\""}
-  ]
-}
-```
-
-`received` is the parts COS has already taken (the server turns it into `ListParts`); the client only uploads
-what is missing.
-`status` is `pending` / `completed` / `cancelled` / `expired`.
-Single-part mode returns an empty `received` — just retransmit the whole part, PUT is idempotent on its own.
-
-> **The current implementation** hands out a single part when `size` ≤ 5 GiB (or `UPLOAD_MULTIPART_THRESHOLD`);
-> above that it slices into multiple parts automatically (64 MiB per part by default, at most 1000 parts,
-> growing the part size when that would be exceeded).
-
-### 4.6 Delete
-
-```http
-DELETE /api/files/Documents/old.pdf
-→ 204
-```
-
-- **Permanent delete**: the object and the index go together, with no trash.
-- `DELETE /api/files/<dir>` requires `?recursive=1`, otherwise `409` — the parameter is there as a guardrail against
-  slips.
-- The client should confirm once before deleting (that dialog on the web).
-
-### 4.7 Move / rename
-
-```http
-POST /move
-{"from":"Notes/a.md","to":"Notes/b.md","overwrite":false}
-→ 200 {"name":"b.md","path":"Notes/b.md", …}
-```
-
-- **Files**: done synchronously, returning the moved object directly.
-- **Directories**: N objects means N server-side copies. The server tries synchronously for at most 30 seconds:
-  finished returns `200`, unfinished returns `202` + `Location`.
-
-```http
-POST /move
-Prefer: respond-async, wait=2
-{"from":"Videos/src","to":"Videos/dst"}
-
-→ 202
-   Location: /move/m_5f90…
-   Retry-After: 2
-   {"id":"m_5f90…","op":"move","from":"Videos/src","to":"Videos/dst",
-    "status":"running","total":412,"done":180}
-```
-
-```http
-GET /move/m_5f90…
-→ 200 {"id":"m_5f90…","status":"running","total":412,"done":180,"cancelRequested":false}
-→ 200 {"id":"m_5f90…","status":"done","total":412,"done":412}
-```
-
-- Status: `pending → running → done`; a failure is `failed` and carries `error`; while `cancelRequested` is true
-  it stops after the current item finishes, then becomes `cancelled`.
-- `POST /move/{id}/cancel` asks it to stop; `POST /move/{id}/retry` rescans the source and continues where it
-  left off.
-- A move is "copy first, then delete the source, then rewrite the index", so **the source is still there** until
-  the move finishes and can be read repeatedly.
-- Directories have no "rename in one shot" primitive, so by nature this can be a long operation; but there is no
-  "task" concept on the outside — only "this move has not finished yet".
-
-### 4.8 Copy
-
-```http
-POST /copy
-{"from":"Photos/2024/a.jpg","to":"Backup/a.jpg","overwrite":false}
-→ 201 <new file object>
-```
-
-- Both files and directories are supported. Directories copy recursively and follow the same `Prefer` rules as
-  §4.12; progress is at `GET /copy/{id}`, cancel/retry at `POST /copy/{id}/cancel|retry`.
-- An existing target with `overwrite=false` → `409`; directory copies **do not merge**, an existing target is
-  `409`.
-- The copy is a **new object**: a new creation time, and its first index write is a new row. The source is
-  untouched.
-- A target inside the source (`copy a → a/b`) returns `400`.
-
-### 4.9 Create a directory
-
-```http
-POST /mkdir
-{"path":"Photos/2024/东京"}
-```
-
-```json
-201 {"name":"东京","path":"Photos/2024/东京","parent":"Photos/2024","type":"dir","size":0,
-     "createdAt":"2026-10-24T02:11:07Z","modifiedAt":"2026-10-24T02:11:07Z"}
-```
-
-| Case | Response |
-|---|---|
-| Created | `201` + the directory object |
-| Already exists as a directory | `200` + the directory object (**idempotent**, an agent retrying does not blow up) |
-| Already exists as a file | `409` |
-| Parent missing | created automatically (`mkdir -p`), no extra parameter |
-| Parent is a file | `409` |
-
-Why `POST /mkdir` instead of `PUT /api/files/<dir>/`: a directory is "a resource without bytes", and sharing
-`/api/files/<path>` with files would force a **trailing slash** to tell them apart — the biggest trap in WebDAV.
-With a verb plus a body, a path is always a path and there is no ambiguity.
-
-### 4.10 Search
-
-```http
-GET /search?q=羽毛球&path=Videos&mime=video/&type=file&limit=50
-```
-
-The result shape is the same as `/list` (including `writable`), and the cursor rules match. It matches filenames
-and full paths. `type` is `file` or `dir`.
-
-### 4.11 Who am I / how big is this service
-
-```http
-GET /me
-```
-
-```json
-{
-  "user": {"email": "you@example.com"},
-  "token": {"name":"badminton","prefix": "Apps/badminton", "read": true, "write": true, "events": false},
-  "usage": {"bytes": 1823412231, "files": 20481}
-}
-```
-
-For agents to self-check: confirm your own prefix and permissions.
-
-A connection may name itself. This is the only field a Bearer token can write about itself, and it is
-what the Connect page shows in its list; the rest of the token stays server-owned:
-
-```http
-PATCH /me
-Authorization: Bearer eam_...
-Content-Type: application/json
-
-{"name": "Obsidian"}
-```
-
-```json
-{"name": "Obsidian", "prefix": "", "read": true, "write": true, "events": false, "expiresAt": null}
-```
-
-The name is trimmed and capped at 80 characters; empty is a `400`. A cookie session or a save link gets a
-`400` too: this endpoint is for the credential itself, not for managing connections (that is the web page's
-`/api/connect/tokens`).
-
-```http
-GET /capabilities        # no auth, you do not even need to bring a token
-```
-
-```json
-{
-  "maxPutBytes": 33554432,
-  "maxUploadBytes": 5497558138880,
-  "multipartThreshold": 5368709120,
-  "partSize": 67108864,
-  "maxParts": 1000,
-  "list": {"defaultLimit": 1000, "maxLimit": 5000},
-  "rateLimit": {"perMinute": 600},
-  "quotaBytes": 0,
-  "async": {"header": "Prefer", "value": "respond-async", "defaultWaitSeconds": 30, "maxWaitSeconds": 60},
-  "features": ["range", "if-match", "overwrite", "recursive-delete", "copy", "search"]
-}
-```
-
-Let clients read this once at startup and never hard-code 32 MiB / 64 MiB in their sources.
-
-### 4.12 Long operations: `Prefer: respond-async`
-
-**Every request that changes state accepts it**, including `PUT` and `DELETE`, not only move/copy:
-
-```http
-Prefer: respond-async            # do not wait, give me a 202 right now
-Prefer: respond-async, wait=10   # wait at most 10 seconds, 202 if unfinished
-(omitted)                        # the server waits at most 30 seconds, 202 if unfinished
-```
-
-- A `202` carries `Location: /<action>/{id}` and `Retry-After`; just poll that address.
-- A `200`/`201` means **it is already done**; the client handles both cases — one branch:
-
-```python
-resp = post("/move", json={"from": a, "to": b}, headers={"Prefer": "respond-async, wait=10"})
-if resp.status_code == 202:
-    while (job := get(resp.headers["Location"])).json()["status"] in ("pending", "running"):
-        time.sleep(2)
-```
-
-- The server **may ignore** this header (RFC 7240 allows it). Today only directory `move` / `copy` actually
-  return 202; `mkdir`, single-file operations, and `DELETE` finish in milliseconds and always return
-  200/201/204. If some operation gets slow one day, it starts returning 202 on its own, and **that line of
-  client code does not change**.
-- The 202 body and the `GET /<action>/{id}` body have the **same shape**, so one parser.
-- The progress address is always "the action's own path + id": no `/tasks`, no queue name, no `type` field.
-
-### 4.13 Events (the stream)
-
-The second kind of thing besides the file API. **One event = a span of time + one card + an optional detail
-link**; the design is in [`docs/design/events.md`](../design/events.md).
-
-Events are not files: files use the path as identity, events have an `id`; the stable handle on the outside is
-your own `external_id`.
-
-The token needs the `can_events` capability bit:
-
-```bash
-eam token create --email you@example.com --name Strava --prefix Apps/strava --events
-```
-
-#### Create / update (idempotent)
-
-```http
-POST /events
-
-{
-  "external_id": "run-8921",
-  "starts_at": "2025-08-03T07:12:00Z",
-  "ends_at":   "2025-08-03T08:02:00Z",
-  "tz": "Asia/Shanghai",
-  "precision": "minute",
-  "title": "晨跑 · 北岸",
-  "detail_url": "https://www.strava.com/activities/8921",
-  "type": "metric",
-  "payload": {
-    "metrics": [
-      {"label": "距离", "value": "12.4", "unit": "km"},
-      {"label": "配速", "value": "5'02\"", "unit": "/km"}
-    ],
-    "body": "出门时 24 度。"
-  }
-}
-```
-
-```json
-201 { "id": "0f1c…", "state": "published", "created": true }
-```
-
-- Posting the same `(token, external_id)` again is a **whole-object replacement**, returning `200` +
-  `created:false`;
-- Pushing an event the user deleted → `410 gone`; stop retrying;
-- Media are paths (`payload.media: ["Apps/strava/2025/0803/a.jpg"]`), must sit inside the token's prefix, and are
-  uploaded through the file API first; `photo` allows at most 4, and there are no external image URLs;
-- `tz` defaults to the server's `TIMELINE_TZ` (`Asia/Shanghai`).
-
-The four `type` values and their payloads:
-
-| type | payload | Limits |
+| Method | Resource | Behavior |
 |---|---|---|
-| `photo` | `media[1–4]` + optional `body` / `meta` | title 80 characters, body 500 characters |
-| `note` | `body` + optional `meta` | same as above |
-| `metric` | `metrics[1–3]` + optional `body` | label / value required |
-| `html` | `html` + `height` | html ≤ 32 KB, height 40–640 |
+| GET | `/capabilities?path=/` | Authorized effective limits/features for the selected destination |
+| GET | `/me` | Visible root, permissions, usage and reserved bytes |
+| GET | `/resolve?path=/Notes/a.md` | Resolve a path to file/folder metadata; no mutation |
+| GET | `/{id}` | File/folder metadata |
+| GET | `/{id}/children?limit=&cursor=` | Immediate children of a folder |
+| GET | `/search?q=&under={id}&kind=&mediaType=&limit=&cursor=` | Indexed search within scope |
+| GET, HEAD | `/{id}/content` | Raw file bytes/headers |
+| GET, HEAD, PUT | `/content?path=/Notes/a.md` | Path shortcut for content; PUT can create |
+| PUT | `/{id}/content` | Replace an existing file conditionally |
+| POST | (base) | Create a folder (`kind: "folder"`), with explicit optional parent creation |
+| PATCH | `/{id}` | Rename or move a file or folder conditionally |
+| POST | `/copies` | Copy a file/subtree to a destination |
+| DELETE | `/{id}?recursive=true` | Delete; recursive flag required for a nonempty folder |
+| GET | `/{id}/thumbnail?width=&format=` | Supported safe image representation on our origin |
+| POST, GET | `/uploads` | Create a session / list this principal's resumable sessions |
+| GET | `/uploads/{id}` | Session state and compact progress |
+| PUT | `/uploads/{id}/parts/{number}` | Write an immutable numbered part |
+| GET | `/uploads/{id}/parts?limit=&cursor=` | Paginated durable part receipts |
+| POST | `/uploads/{id}/commit` | Freeze the upload and publish through an operation |
+| DELETE | `/uploads/{id}` | Abort; never deletes an already published file |
+| GET | `/operations/{id}` | Durable operation state/result |
+| POST | `/operations/{id}/cancel` | Request cancellation before the publication point |
 
-We render `html` cards inside a `sandbox` iframe (scripts disabled, CSP restricted) and inject the design tokens
-`--eam-bg` / `--eam-surface` / `--eam-text` / `--eam-text2` / `--eam-text3` / `--eam-line` / `--eam-accent`.
+All capabilities are service-level behavior. There is no driver selection, presigning, or backend capability
+negotiation for clients. Storage connection administration is an operator/account API, outside this contract.
 
-#### Delete / read
+## 4. Lookup, folders, search, and namespace operations
 
-```http
-DELETE /events/{id}          → {"state":"detached"}   content kept, external link cleared
-GET    /events?from=&to=     → reconcile: the events you wrote yourself (including external_id)
-GET    /events/{id}          → one event as full JSON
-```
+`GET /resolve?path=/` returns the visible root. List and search use opaque keyset cursors, stable sort by
+kind (folders first), NFC name bytes, and internal tie-breaker ID. Search is case-insensitive substring
+matching on name and resolved visible path; `under` defaults to the visible root and includes descendants.
+A cursor binds principal/scope, query and sort. Ordinary concurrent writes do not globally invalidate it.
+Interactive keyset listing/search is not a snapshot: concurrent rename/move can cause omissions or repeated
+IDs; clients may deduplicate/refresh. Backup/import validation uses a coordinated scan, not this pagination.
+Default page size is 200; maximum 1000. Authorization filters apply before pagination and never leak totals.
 
-There is no `PATCH`: re-posting is updating.
-
-### 4.14 Save links (for agents)
-
-The link only hands out a token and the instructions; saving goes through the existing file API, and `/s/<code>`
-itself accepts no content.
-
-```http
-GET /s/abcd2345efgh2345
-```
-
-- `Accept: text/markdown` (or `curl`'s default) returns the prompt meant for the agent.
-- Opening it in a browser returns an instruction page.
-- `?format=json` returns `{token, url, api, files, upload, prompt, ...}`.
-- `POST` to `/s/<code>` returns `405`.
-
-The same route also accepts a **Connect token** (`eam_...`) as the code. It then returns the connection's
-instructions instead of the save-link prompt — same Markdown / HTML / JSON shapes, built from the live
-`api_tokens` row, so the scope, permissions and expiry are current. The one-line prompt in the Connect handoff
-is exactly this URL; see §4.15. The code in the URL is a credential, like the save-link code.
-
-```http
-GET /s/eam_ab12cd34ef56_...
-```
-
-```markdown
-# everythingabout.me
-
-Connected to this drive.
-
-Token: abcd2345efgh2345
-API: https://everythingabout.me
-Authorization: Bearer abcd2345efgh2345
-
-Save a short text (one request):
-  PUT https://everythingabout.me/api/files/Inbox/2026/10/28/note.md
-  Content-Type: text/markdown
-
-  <content>
-
-Save a file (image, video, PDF, any size):
-  POST https://everythingabout.me/upload
-  {"path": "Inbox/2026/10/28/photo.jpg", "size": 12345, "mime": "image/jpeg"}
-
-  PUT the bytes to each returned part URL, then:
-  POST https://everythingabout.me/upload/complete
-
-Use a unique path; PUT does not overwrite by default.
-```
-
-Short text goes straight through [`PUT /api/files/<path>`](#44-write-a-small-file-one-step-shortcut):
+Create a folder:
 
 ```http
-PUT /api/files/Inbox/2026/10/28/note.md
-Authorization: Bearer abcd2345efgh2345
+POST B
+Idempotency-Key: create-notes-001
+Content-Type: application/json
+
+{"kind":"folder","path":"/Notes/2026","parents":true}
+```
+
+Creation requires `kind: "folder"`; files are created by content PUT or an upload session. Alternatively
+specify `parentId` and `name`, exclusive with `path`. `parents` defaults false and is only valid
+with path input. Missing parents return `409 parent_missing`; a parent file returns `409 not_a_folder`.
+Existing folder returns `200` without changing its revision; new folder returns `201`; existing file
+returns `409 name_conflict`. `parents:true` creates native parents explicitly and journals progress; multiple
+backend mkdir calls are not universally atomic. Failure may leave created empty parents. Return structured
+partial-effect details or an Operation when work cannot finish inline.
+
+Rename/move:
+
+```http
+PATCH B/n_file
+Content-Type: application/json
+
+{"name":"renamed.jpg","parentId":"n_album","ifRevision":"nr_observed"}
+```
+
+Either name or parent may be omitted. `ifRevision` is required (`428` if absent). No target replacement or
+implicit folder merging: a collision returns `409`. Same owner only; moving into oneself/descendants is
+invalid. The actual native file/folder must move before success is reported. Prefer native rename; S3
+folder moves require per-entry copy/verify/delete. Journal source versions, destination identities and
+per-entry outcomes, coordinate conflicting mutations, then reconcile the index. There is no transaction
+spanning Postgres and the backend, and no universal atomic whole-folder move.
+
+Copies accept `{sourceId, destination:{parentId,name}, ifSourceRevision}`. Source revision is required.
+Copy is recursive by definition for folders and never merges/replaces an existing target. The service
+records a finite source manifest and available native versions after verifying authorization. A consistent
+manifest needs coordinated writers or backend snapshots; a folder revision alone is not a subtree snapshot.
+Every successful destination is a normal readable file. Prefer provider-side copy/reflink, otherwise stream
+bytes. Whole-tree copy can be partially visible and can fail partially; report progress and conflicts. Logical
+quota charges the new sizes. No application-only content sharing replaces the destination files.
+
+DELETE optionally accepts `If-Revision: nr_...` to guard the selected file or folder; recursive deletion additionally
+serializes against subtree mutations. Without it deletion explicitly applies to the current accessible subtree.
+No trash or restore API. Success requires actual native deletion plus index settlement; removing only index
+rows is not deletion. Recursive deletion can partially succeed and must journal each captured entry; never
+rescan and remove new external additions. Provider backup/version retention is separate and secure erasure is
+not promised. Temporary transfer cleanup is background work, not deletion of authoritative user content.
+
+Completed rename/move returns `200` file/folder metadata; copy returns `201`; deletion returns `204`. Slow
+work returns `202 + Operation + Location`. The public action is the same even when backend work differs.
+Cancellation/failure of multi-file work can leave native partial effects; the Operation records them.
+
+## 5. Downloads and safe media
+
+GET by ID or path returns `200` bytes, HEAD returns matching representation headers without a body. Root or
+folder content returns `409 not_a_file`. All content responses include ETag, Content-Type, correct length,
+`X-Content-Type-Options: nosniff`, and suitable Content-Disposition. Default is attachment; `?disposition=inline`
+is honored only for a safe media allowlist. HTML/SVG and other active content are not served as executable
+same-origin documents; preview conversion/sandboxing must preserve this boundary.
+
+Support single HTTP byte ranges (including open-ended and suffix ranges), `If-Match`, `If-None-Match`, and
+`If-Range` with strong content ETags. Evaluate conditions before ranges. A satisfiable range returns `206`
+and Content-Range; an unsatisfiable range returns `416` with `Content-Range: bytes */N`. Unsupported multi-range
+requests are ignored and return a full `200`, as HTTP permits. HEAD ignores Range. `If-Range` mismatch returns
+the full representation; a resuming client must detect that and restart. Never mix revisions.
+
+Select a proven native content version/snapshot for the response, or coordinate all application writes
+against the read. External in-place changes cannot be frozen by an application lock or an open FD alone.
+Do not claim strong ETags/pinning from size and mtime alone; use trustworthy native evidence or verification.
+Only advertise the read guarantees the effective route can enforce. `Accept-Ranges: bytes` is sent only when the effective
+route supports correct ranges. Backends without native ranges may use bounded managed cache/staging; otherwise
+ignore Range, return `200`, and advertise range support false. A backend failure after response headers closes
+the stream; do not append a JSON error to file bytes. Avoid compression that changes byte-range offsets.
+
+Default client cache policy is `private, no-cache`; disable shared private caching unless current
+authorization and a proven native content generation can be enforced on every cache hit and `304`. Native
+paths can change externally, so an old index revision is not by itself proof of unchanged bytes. Cache keys
+include owner/connection/content generation/representation. Never forward app credentials to storage.
+
+Thumbnails use a bounded width/format allowlist from capabilities, contentRevision-based cache keys, and the
+same authorization as the source. They may use native provider processing internally or application workers.
+A pending conversion returns `202` with a same-origin operation Location; invalid types return `415` and
+unsupported representation options return `422`. Raw file content GET never responds with a JSON job body.
+
+## 6. Simple streaming writes
+
+```http
+PUT B/content?path=/Notes/a.md
 Content-Type: text/markdown
+Content-Length: 12
 
-今天聊出来的那段……
+hello world
 ```
 
-Images, videos, and PDFs go through [`POST /upload`](#45-upload-any-size-always-three-steps):
+The path shortcut creates by default. Existing file returns `409 name_conflict`. `If-None-Match: *` explicitly
+asserts creation and returns `412` on conflict. Replacement requires `If-Match: "cr_observed"`; no wildcard or
+unconditional replacement is provided. ID-based PUT requires an exact If-Match (`428` otherwise).
+Conditions are checked at the actual native publication effect, not just before receiving the body.
+Native conditional support or a declared coordinated-exclusive writer model is required; unsupported
+strong conditions are rejected rather than emulated by Stat then an unconditional write. Path writes bind
+the observed parent and target file identity; a concurrent replacement file or moved ancestor cannot silently
+receive the upload. Changed bindings return `412 target_changed`. Parent folders must already exist.
+
+Content-Length is required (`411`); zero is valid. Unknown-length streams use an application-specific future
+extension, not silent unlimited buffering. Above `maxSinglePutBytes` returns `413` and points to uploads.
+The limit is deployment policy, not a hard-coded COS limit. Optional `Content-Digest: sha-256=:base64:` verifies
+the request while streaming. MIME defaults to application/octet-stream; source modification time may be set
+with `X-Source-Modified-At` (RFC 3339).
+
+Return `201` file metadata for creation or `200` for replacement only after the normal native destination
+contains complete bytes and the journal/index/result are settled. The content ETag is separate. Failed body
+reception leaves the old file intact when the admitted staged-write strategy supplies that guarantee. Final
+native publication can succeed before database settlement; recover it rather than claiming rollback.
+A timeout after final publication starts is outcome_unknown until proven otherwise. Block conflicting
+mutations while old requests can still apply; database leases alone cannot fence final-path writes.
+Before issuing final-path I/O, store a durable recovery identity. An unresolved request returns a Problem with
+same-origin operation Location/operationId (or uses its saved Idempotency-Key to recover that identity), not a
+false rollback/success. Replays wait for/retrieve the recorded outcome rather than start another publication.
+
+An optional Idempotency-Key plus Content-Digest makes an ambiguous small PUT retry safe without a preliminary
+metadata request; absent a digest, use GET/HEAD to resolve uncertain success rather than blindly overwriting.
+A retry body is still consumed/validated before claiming it matches a stored result. Large writes use sessions.
+
+## 7. One resumable upload protocol
+
+Clients always write numbered service parts. No S3 mode, provider offset protocol, or native receipt parsing.
+Create with an Idempotency-Key:
 
 ```http
-POST /upload
-Authorization: Bearer abcd2345efgh2345
+POST B/uploads
+Content-Type: application/json
+Idempotency-Key: mobile-upload-001
 
-{"path":"Inbox/2026/10/28/photo.jpg","size":248123,"mime":"image/jpeg"}
-→ presigned part URL
-PUT <part URL>                       # bytes go straight to COS
-POST /upload/complete                # verify the size and write the index
-```
-
-- The short code is 16 lowercase base32 characters, **without the `eam_` prefix**; sending it as
-  `Authorization: Bearer <short code>` is a credential for the full file API.
-- A save link has the same rights as the user: no prefix, no capability bits, no expiry by default.
-- The path is the agent's choice; `Inbox/YYYY/MM/DD/` is a good spot. `PUT /api/files` creates parent directories
-  automatically and does not overwrite by default (`?overwrite=1` or `If-Match` overwrites).
-- `PUT /api/files` caps at 32 MiB; larger files go through `/upload`, with bytes never passing through the server.
-- Saving is audited as the existing file API's `put` / `upload` / `upload_complete`, visible in the account
-  page's "recent activity".
-- `/api/save-links` (cookie session) on the account page creates, lists, and revokes them; after revocation
-  `/s/<code>` 404s immediately.
-- The MAC in the short code is derived from a server secret; replacing `COS_SECRET_KEY` invalidates existing save
-  links.
-
-### 4.15 Connect: the QR payload
-
-The web app's `/connect` page mints the same Bearer tokens as the CLI. It mints **apps** only, and hands one
-over as a QR code plus a one-line prompt. The token kind remains available through the API/CLI as a raw token.
-The prompt points at `/s/<token>`, which returns the full instructions from the live row (see §4.14). The QR
-and the link are only transports — the API calls are the ones documented above.
-
-```json
 {
-  "v": 1,
-  "type": "eam.connect",
-  "api": "https://everythingabout.me",
-  "id": "ab12cd34ef56",
-  "token": "eam_..."
+  "target":{"path":"/Videos/a.mp4"},
+  "size":18234122311,
+  "mediaType":"video/mp4",
+  "condition":{"mode":"create"},
+  "sourceModifiedAt":"2026-10-29T08:00:00Z"
 }
 ```
 
-- The handoff prompt is one sentence, in the page language: `Use my drive as described at
-  <base>/s/<token>` / `按照 <base>/s/<token> 使用我的盘。`. Following it returns the markdown prompt with the
-  current access, scope and expiry; revoking the token makes the URL 404. Treat the URL as a credential.
+`target` is exactly one of path, fileId, or `{parentId,name}`. A fileId targets an existing file and requires
+`condition:{mode:"replace",contentRevision:"cr_..."}`. Path/parent-name can also replace with that condition;
+otherwise mode defaults create. Bind owner, native target path, current target/parent identity and ancestry, connection
+configuration generation, declared size/metadata, and write condition. Re-resolve/revalidate path-based targets
+before the final native effect; a moved ancestor or target is `412 target_changed`. This session remains
+bound to its admitted native path, including ID-based replacements; a new target needs a new session. New sessions never cancel old ones;
+publication conditions decide which succeeds. Record a never-reused destination slot generation as well as
+file/parent IDs; create/delete returning a path to absence does not make an old upload valid again.
 
-- `api` is the base URL; `token` is the Bearer secret. Those two are all an app needs to store.
-- `v` is the payload version and `type` is always `eam.connect`; if either is not understood, say "update the
-  app" / "not an Everything About Me code" and stop.
-- The payload is **only the credential**. The page can change a connection's scope, permissions and lifetime
-  after the QR is drawn, and the server cannot redraw the code (it does not keep the secret), so policy is not
-  in the QR. Read the current values from `GET /me`; a `401` means the connection was revoked or expired.
-- `name` is not in the QR either: the page mints an app nameless, and the app may call `PATCH /me` with its own
-  name. Until then `GET /me` returns an empty name.
-- The QR contains the actual token. It is shown once and can be revoked from the same page; treat a screenshot
-  as a credential.
-- `/api/connect/tokens` (the page's own create/list/edit/revoke endpoint) is **cookie-session only**;
-  third-party apps never need it and cannot call it with a Bearer token.
+Example response (numbers are illustrative, not universal defaults):
 
----
+```json
+{
+  "id":"u_...",
+  "state":"open",
+  "size":18234122311,
+  "partSize":33554432,
+  "partCount":544,
+  "maxParallelism":4,
+  "ordering":"any",
+  "nextPart":null,
+  "receivedParts":0,
+  "receivedBytes":0,
+  "expiresAt":"2026-10-31T04:00:00Z",
+  "partsUrl":"/api/files/uploads/u_.../parts",
+  "commitUrl":"/api/files/uploads/u_.../commit"
+}
+```
 
-## 5. Things the server does behind your back
+The service selects a fixed partSize for the session. Part numbers start at 1; offset is `(number-1)*partSize`;
+all but the final part have exactly partSize bytes. `partCount=ceil(size/partSize)`; a zero-byte session has
+zero parts and can commit immediately. GET session returns compact authoritative counters, not an unbounded
+part array. GET uploads lists accessible sessions for reconnect/reload recovery with normal pagination.
 
-Callers do not need to know, but the user does:
+`ordering` is `any` or `ascending`. In ascending mode `maxParallelism=1`, `nextPart` identifies the next new
+part; replay of earlier acknowledged parts remains allowed. An out-of-order new part returns
+`409 part_out_of_order`, with nextPart. This is a service scheduling rule; clients implement one part protocol
+and scheduling rule, not separate provider protocols. The service may use durable staging to support more
+parallelism when its quotas and benchmarks justify the cost. `maxParallelism` is an upper bound, not a target.
 
-| Behavior | How callers see it |
+### Part acknowledgement and retries
+
+```http
+PUT B/uploads/u_.../parts/1
+Content-Length: 33554432
+Content-Digest: sha-256=:base64-value:
+
+<bytes>
+```
+
+Content-Length must match the assigned part length. Content-Digest is optional; the service always computes
+SHA-256 while receiving and returns `{number,size,sha256}` in a durable receipt (`201`, or `200` for identical
+replay). Client hashing is per-part and optional, never a mandatory full-file pass before upload. Reject a
+provided digest mismatch with `422 checksum_mismatch`; there is no receipt for a failed part.
+
+A part slot is immutable once acknowledged. An identical replay returns its existing receipt; different bytes
+return `409 part_conflict` and cannot replace it. Without a supplied digest, consume/hash the replay to compare;
+never assume a duplicate number means identical content. Concurrent attempts for one slot use isolated native
+attempts or serialized provider writes; ambiguous in-flight attempts must be reconciled before reuse. The
+service must also fence late native effects: a reused native slot cannot receive different content while an
+older request is uncertain. Bind/verify chunk identity before irreversible native writes or isolate attempts,
+using bounded spool where necessary. Acknowledgment
+requires durable provider/staging bytes plus a durable receipt, not bytes in memory or an SDK progress callback.
+
+Status counters count unique acknowledged parts only. GET parts returns receipts in acknowledgement order,
+with a cursor binding session and a captured acknowledgement watermark. Later receipts do not shift those
+pages. Re-list from the first page to see new receipts; pagination returns the watermark explicitly. Complete
+coverage checking happens server-side and does not rely on the client's receipt list. A full-file checksum may
+be supplied at creation, but must be verified if accepted; part hashes alone do not equal a whole-file hash.
+Capabilities disclose supported checksum algorithms and any additional verification work.
+
+### Commit, abort, and expiry
+
+```text
+open ──commit──> committing ──confirmed native effect + index settlement──> committed
+  │                 ├──unresolved native effect──> outcome_unknown ──reconcile──> committed/failed/aborted
+  │                 ├──definite failure──> failed
+  │                 └──cancel before final effect──> aborted
+  ├──abort──> aborted
+  └──timeout──> expired
+```
+
+Commit atomically verifies exact part coverage, freezes the manifest, and transitions to committing; incomplete
+coverage returns `409 upload_incomplete` and stays open. From then on reject new part writes. It returns
+file metadata with `200` if settled, or `202 + Operation + Location + Retry-After` otherwise. Repeated commit
+returns the same settled result or operation identity. Retry only safe native steps; ambiguous final effects
+enter outcome_unknown and block
+conflicting mutations until resolved. Neither an application revision nor a final-path HEAD alone proves
+that older remote requests cannot still arrive.
+
+DELETE upload aborts open sessions atomically (`204`, repeat `204`). It returns `409 commit_in_progress` for
+committing sessions and `409 already_committed` after publication; use operation cancellation for a committing
+upload. Before final native publication starts, cancellation can fence temporary writes. Once a final-path
+effect is in flight, cancellation is best effort: the result may be committed or outcome_unknown. Never
+report a definite abort while the native write could still succeed. Temporary bytes finishing after an open
+abort acquire no receipt and cannot begin publication; clean them by their recorded temporary identity. Failed/aborted/expired session IDs remain tombstones
+for a retention window and are never reused. Their content writes/commit return `410`.
+
+Default idle expiry is 24 hours, extended only by accepted durable progress, with a hard seven-day maximum;
+capabilities may advertise different policy. Native upload-session retention additionally caps the advertised
+expiry/extensions unless durable staging can recreate the acknowledged bytes. Credential renewal does not
+extend a provider session's lifetime. Expiry applies only to open sessions. Committing work has worker
+leases/recovery rather than expiring because a request/token timed out. An expired provider credential is
+renewed internally; an unrecoverably lost native session fails explicitly rather than pretending bytes survived.
+Keep terminal results/idempotency records at least 24 hours after termination, and advertise exact retention.
+Revocation prevents new client actions; queued work rechecks authorization before publishing. First-party owner
+management can recover sessions, but another app token does not gain access merely by sharing the owner.
+
+## 8. Operations, concurrency, and quota
+
+Operation JSON has `{id,kind,state,progress,result,error,cancelRequested,createdAt,finishedAt}`. States are
+`queued/running/outcome_unknown/succeeded/failed/cancelled`; progress is `{completed,total,unit}` with nullable
+total. Also record per-entry effects, conflicts and remaining work for partial tree operations.
+Kinds are bounded file actions (`mkdir/move/copy/delete/upload_commit/thumbnail`), not user-submitted arbitrary tasks.
+Result is the file/folder metadata for mkdir/move/copy/upload_commit, `{deleted:true}` for delete, or
+`{contentUrl,mediaType,size,contentRevision}` for thumbnail; contentUrl is a same-origin representation endpoint.
+The committed upload also stores its file metadata result in session status. Errors use the same Problem structure.
+
+Operation/session visibility uses owner, creator principal and captured authorization anchors. Before creation,
+the anchor is the destination parent, not the nonexistent output file or folder. While source/destination files or folders still exist,
+recheck current ancestry. After successful delete, retained tombstone provenance anchors the terminal operation
+result, so authorized polling/idempotency replay can still confirm deletion. It grants no file-content access.
+Token validity and action/scope rights still apply; another app cannot read results solely because it shares
+the owner. Never require a deleted source to have live ancestry to retrieve its own deletion result.
+Polling returns `200` with the state. Synchronously completed actions return their ordinary resource/status;
+accepted unfinished actions return `202 + Operation + Location` with Retry-After. `Prefer: respond-async` requests immediate
+acceptance; no header promises completion before timeout. Streaming PUT only returns after commit and does
+not detach the caller's unfinished request body into a background operation.
+
+Cancel stops further safe steps, not already completed native effects. Before final publication starts,
+a winning upload cancellation sets session aborted and operation cancelled. After the native effect starts,
+resolve its real outcome; committed returns `409 already_committed`, unresolved remains outcome_unknown.
+Repeat commit on a definitely aborted session returns `410 upload_aborted`.
+A running commit must seal/migrate its native data before its provider retention deadline, retain a replayable
+spool, or fail explicitly if the provider expires it; removing the public idle timer does not extend native
+retention. Advertised resume durability covers the admitted open-session interval, not unlimited native life.
+Failed/cancelled tree operations may have partial native results; report captured per-entry progress.
+Recovery follows the saved manifest and native validators, never blindly rescan-and-delete a changed tree.
+A replacement worker cannot issue conflicting final effects merely because its predecessor lease expired.
+An unresolved operation retains its path/subtree guard until native quiescence/fencing is established.
+
+Reserve quota transactionally before accepting bytes, consistently across Web and Bearer adapters. Charge
+logical file sizes (including copies), track reservations independently from staging/physical usage, recheck
+replacement conditions at commit. On failure/abort/expiry, release only unused reservations after indexing
+and charging all proven native partial results; retain liability for unresolved effects. Concurrent sessions
+must not overbook the account. Replacements reserve worst-case additional liability without allowing multiple
+writers to spend the same old file's size credit. Temporary upload data and retained provider versions use
+a separate physical budget. Missing index entries alone never make ordinary native files garbage.
+
+Idempotency keys are scoped by owner, principal, route/action and canonical request fingerprint. Same key with
+different intent returns `409 idempotency_conflict`. Store the durable operation/session/result with the key;
+retry after a lost response returns that identity. A replay never bypasses current authorization. Keys cannot
+provide exactly-once effects at arbitrary third parties; journals, native conditions and explicit uncertain
+outcome handling define the actual guarantee. Retention is explicit; retrying a key after expiry is a new request.
+
+## 9. Capabilities and failures
+
+Capabilities is authenticated and path-scoped (default visible root), returning effective `read/write`,
+`range`, `thumbnails`, supported checksums, maximum file/single-PUT/part sizes, pagination limits, session
+expiry/retention policy, and quota/reservation information appropriate to the caller. Numbers are authoritative
+for admission but may change before a later request; new sessions bind their accepted limits. Upload responses
+provide their exact chunk layout. Never expose provider names or assume every backend has the same limits.
+
+| Status | Representative code |
 |---|---|
-| The object key is the real path | Any S3 tool can see it directly |
-| Maintaining the directory index | It is just listed |
-| Computing sha256, recording audit | Visible in the account page's "recent activity" |
-| Repair on read (in the bucket but not the index) | Fixed automatically on the first HEAD/GET |
+| 400 | invalid_request, invalid_path |
+| 401 | unauthenticated |
+| 403 | forbidden (known visible resource, insufficient action permission) |
+| 404 | not_found (also outside visible scope) |
+| 409 | name_conflict, cursor_stale, upload_incomplete, part_conflict, part_out_of_order |
+| 410 | upload_expired, upload_aborted, result_expired |
+| 411 | length_required |
+| 412 | precondition_failed, target_changed |
+| 413 | request_too_large, file_too_large |
+| 415 / 422 | unsupported_media_type / checksum_mismatch, unsupported_option |
+| 416 | range_not_satisfiable |
+| 428 | precondition_required |
+| 429 | rate_limited (Retry-After) |
+| 502 / 503 / 504 | storage_failure / temporarily_unavailable / storage_timeout |
+| 507 | quota_exceeded, staging_full |
 
-Sharing, quotas, and account management live on the **website** and stay out of this API.
+Retry transient requests with backoff/jitter and Retry-After. Resolve ambiguous mutations through their
+session/operation/idempotency identity rather than assuming a timeout means nothing happened.
 
----
+## 10. Design choices and acceptance
 
-## 6. Status codes
+- Stable file/folder IDs support rename-safe references; path shortcuts preserve simple curl/scripts. Provider IDs
+  stay private. Files and folders retain the same actual native paths/names; S3 moves may copy bytes.
+- One service part protocol supports both independent and ordered storage; native protocols stay internal.
+  Plain streaming PUT avoids multipart overhead for small files. tus is not the public protocol: its core
+  offset stream does not by itself provide the independent part slots/replay receipts chosen here.
+- Native readable folders/names/raw bytes are mandatory. Leaving Everything requires ordinary native tools,
+  not its database or export. Temporary staging is allowed; permanent anonymous content is not.
+- Native mutations plus a durable journal/index repair replace the old database-only publication model.
+  There is no universal atomic folder operation or transaction spanning provider and Postgres.
+- Plain JSON/Problem responses and one operation resource remove legacy envelope and per-action polling
+  exceptions. Paths have no version segment.
+- No compatibility adapter or old client behavior constrains this specification. Existing data needs a
+  deliberate backup/import decision at implementation time; freedom to redesign does not authorize deleting it.
 
-| Code | Meaning |
-|---|---|
-| 200 / 201 / 204 | Success (201 = created, 204 = deleted, no body) |
-| 202 | Accepted; check `Location` for progress |
-| 206 | Range |
-| 302 | Download redirect |
-| 304 | Not modified |
-| 400 | `invalid_path`, malformed request body, `meta=1` removed |
-| 401 | Missing or invalid token |
-| 403 | Outside the prefix, or a read-only token trying to write |
-| 404 | Not found |
-| 409 | Name conflict, non-empty directory, too many objects to move/copy |
-| 412 | Conditional write failed |
-| 413 | Over 32 MiB, use `/upload` |
-| 429 | Rate limited, with `Retry-After` |
-| 500 | Server error; `job_failed` carries an `id`, so you can `POST /{action}/{id}/retry` |
-| 507 | Quota exhausted |
-
----
-
-## 7. Implementation plan (Go)
-
-| Phase | What | Status |
-|---|---|---|
-| P1 | `api_tokens` table, Bearer auth, `/list` `/api/files` `/move` `/me`, presigned downloads, CORS | ✅ |
-| P2 | `/upload` + `/upload/complete` (single part) | ✅ |
-| P3 | `/search`, directory moves (async), quota and rate limiting, audit | ✅ |
-| P4 | Real multipart (> 5 GiB) | ✅ |
-| P5 | `mkdir`, `copy`, `Prefer: respond-async` + cancel, `/upload/{id}` resume, `/capabilities` | ✅ |
-| P6 | — (explicitly not doing version history, trash, `id`, `/tasks`) | — |
-| P7 | Save links `/s/<code>`, account page links and recent activity | ✅ |
-
-Implementation details:
-
-- Tokens are `eam_<12-char id>_<secret>`; the database stores only `sha256(secret)` and verification uses a constant-time comparison.
-- Permissions: `prefix` (empty = the whole drive) + read-only/read-write; going outside returns `403` rather than trusting the caller to behave.
-- Directory listing uses keyset pagination (`is_dir desc, lower(name), id`) with an opaque base64 cursor.
-- `PUT` supports `If-Match` / `If-None-Match: *`; over 32 MiB returns `413` and points you at `/upload`.
-- Move/copy is "copy, then delete the source, then rewrite the index": if the copy fails the source is still there, so no data is lost.
-- Large files go through upload sessions: `POST /upload` creates one (5 TiB cap) and hands out presigned PUT addresses;
-  a new upload to the same path invalidates the old session; `complete` verifies the real size with `HeadObject`.
-- Long operations do not build a "task center": each action carries its own progress address (`/move/{id}`, `/copy/{id}`),
-  and there is only one job table (`fs_jobs`, with an `op` column), purely an internal detail.
-- Search filters on `q` (filename/path), `path`, `mime`, and `type`, with cursor grouping identical to `/list`.
-- Quota: `USER_QUOTA_BYTES` (0 = unlimited); before a write it checks "used − old file + new file" and returns `507` when exceeded.
-- Rate limiting: 600 per minute per token (per IP when there is no token); over the limit returns `429` + `Retry-After`, `X-RateLimit-Limit`.
-- Audit: writes are recorded in `audit_log` (action / path / status / ip / token / detail); a failed audit write only logs.
-- Multipart upload: sliced automatically above the threshold, one presigned URL per part; at `complete` the `{partNumber, etag}` pairs go to COS to be combined.
-- Error body: `{"error":"not_found","message":"..."}` with a matching HTTP status; `message` is always English (lowercase, no period) and `error` is a stable machine-readable code.
-- Save links: a 16-character base32 short code; GET yields the token + prompt, and saving reuses `PUT /api/files` and `/upload` rather than adding a new write entrance.
-
-The web-facing `/api/fs/*` stays as it is, untouched. The public API lives in `backend/internal/api/api_*.go`,
-auth in `backend/internal/auth/token.go`, and jobs in `backend/internal/jobs`.
-
----
-
-## 8. Four deliberate tradeoffs
-
-### 8.1 No version history, no trash
-
-Overwriting takes an explicit `?overwrite=1`, and deleting is permanent. A folder should be a folder: one less
-layer of "hidden state", and one less concept for both the user and the agent to understand.
-
-### 8.2 No version number in the URL
-
-This is a stable interface for programs: adding fields breaks nothing, removing fields gets announced ahead of
-time. If we really must break, use the `Sunset` response header plus an announcement, not a different path.
-
-### 8.3 No SDK needed
-
-About a dozen endpoints in total, all HTTP verbs and JSON; twenty lines of `requests` wrap the whole thing. A CLI
-or an MCP server later goes on top of this layer, without changing the protocol.
-
-### 8.4 No ids exposed, no "tasks" exposed
-
-Both come down to "keep implementation details in the implementation":
-
-- **id**: S3 has no object id, WebDAV has no id, and the ones that do (Drive's `fileId`, Dropbox's `id:`) mint it
-  themselves. Internally we have a row primary key (unchanged by rename/move), but it **never enters JSON**. The
-  external identity is the path, the content identity is `sha256`. There is exactly one cost: an app that keeps
-  its index locally can no longer recognize "the same batch of files" after the user reorganizes directories — so
-  let it keep the index alongside the data (stored inside the directory being analyzed) rather than referencing
-  across the tree. That also removes a class of 404 semantics where "the path exists but the id does not".
-- **Tasks**: what users want is "is this directory done moving", not "what is an async task". So there is no
-  `/tasks`, no queue name, no `type` field, only each action's own `{id}`.
-
-When looking at OpenList (the AList fork) we **copied capabilities, never shape**: we took the semantics of its
-`fs/mkdir`, `fs/copy`, `fs/multipart/*`, `fs/task/*`; its `POST everything`, its `{code,message,data}` envelope,
-its `page/per_page` offset pagination, and its 84 task sub-routes were copied not at all.
+Before shipping: exercise the same API conformance suite against local disk and COS/S3, then plain WebDAV
+and a sequential-upload drive; cover create/replace races, parent moves, immutable part replay, lost responses,
+commit/abort/restart/revocation, quota reservations, stable ID authorization after moves, range/HEAD correctness,
+media safety, stale native effect blocking, partial tree recovery, readable no-database exit and scan/index repair. Measure tiny/large/mixed transfers,
+LAN/high RTT/throttling/interruptions, memory/staging, request overhead, and egress cost. This document specifies
+behavior; it does not claim the existing implementation or tests already meet it.

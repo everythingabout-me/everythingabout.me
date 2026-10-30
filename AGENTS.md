@@ -3,7 +3,11 @@
 Working notes for AI agents and new teammates in this repo. The full story is in
 [README.md](README.md); the API design is in [docs/api/api.md](docs/api/api.md) and the event model in
 [docs/design/events.md](docs/design/events.md). The accepted storage/API architecture is in
-[docs/design/storage.md](docs/design/storage.md); read it before changing file transfers or storage drivers.
+[docs/design/storage.md](docs/design/storage.md); read it and [the driver contract](docs/design/storage-driver.md)
+before changing file transfers or storage drivers. The clean-slate [file API](docs/api/api.md) supersedes old
+route/envelope/path-identity assumptions for replacement work; the running COS API is documented in
+[docs/api/legacy-api.md](docs/api/legacy-api.md). New contracts have no legacy-client compatibility requirement.
+The runtime conventions below describe existing code unless the new specifications explicitly replace them.
 This file only covers what you must know before touching anything, and does not repeat the README.
 
 ## One paragraph
@@ -65,13 +69,16 @@ Common commands:
 - Handlers all use `func(http.ResponseWriter, *http.Request) error` and are wrapped with `s.wrap` (web) or
   `s.api` (public API). Business errors use `httpx.Error` (`httpx.BadRequest(...)` etc.), which maps to a
   status code plus `{ok:false,error}`.
-- The response envelope is fixed: `{ok:true,data}` / `{ok:false,error}` (`internal/httpx`).
+- The current runtime uses `{ok:true,data}` / `{ok:false,error}` (`internal/httpx`). The replacement file API
+  uses plain JSON resources and Problem Details as specified in `docs/api/api.md`.
 - **Everything in this repo is written in English** — comments, docs, SQL comments, Makefile and scripts,
   commit messages, logs, CLI output, API error text, and test failure messages. Chinese exists only as
   product copy: the `zh` entries in `web/src/i18n/messages.ts`, the `zh` email templates, CJK test fixtures
   that exercise non-ASCII paths, and keyword data that recognizes Chinese file/folder names.
-- Path is identity: changes only ever touch the logical path (NFC-normalized), and the public API never
-  exposes node ids; a COS key is `drive/<userID>/<path>`. Never build keys yourself outside `internal/paths`.
+- Preserve complete native folder structure, original accepted filenames, and raw contents below each user
+  content root. The database indexes files and holds application metadata; it must not be required to interpret
+  the stored tree. Replacement work follows `docs/design/storage-driver.md`; anonymous authoritative blobs
+  and database-only moves/copies/deletes are rejected. Keep current COS key construction in `internal/paths`.
 - Multi-user isolation rests on `owner_id` (`users.id`, a UUID) — new tables and queries must always carry the
   user dimension.
 - Dependencies are wired in `api.New`; define an interface first for a new service (see `storage.Storage`,

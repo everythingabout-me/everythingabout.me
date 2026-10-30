@@ -1,6 +1,6 @@
 # Are WebDAV / S3 actually enough? A walkthrough of real scenarios
 
-> Status: historical analysis draft | the current API reference is [api.md](api.md)
+> Status: historical analysis draft | target contract: [api.md](api.md); running COS API: [legacy-api.md](legacy-api.md)
 >
 > **Updated decision, 2026-10-30:** [storage and the unified file API](../design/storage.md) defines two layers,
 > pluggable storage, and one public origin for both control requests and file bytes. The earlier argument

@@ -225,8 +225,11 @@ Same table, same read path. **No second-class "app event" citizen**: the only di
 
 ## 6. Write API
 
-Follows [`docs/api/api.md`](../api/api.md): Bearer, UTC, `{"error","message"}`, path is identity.
-**Exception**: events have an `id`. Files use the path as identity, but events have no natural path; the stable handle for an app is always its own `external_id`.
+The current event routes below follow the [legacy/runtime API](../api/legacy-api.md): Bearer, UTC, and the
+existing response conventions. They are not part of the replacement [file API](../api/api.md), which uses
+stable node IDs, plain JSON/Problem Details, and same-origin content. During implementation, event media
+references and generated instructions must be aligned with that contract; existing path payload examples
+here describe today's event API. An app's event dedupe handle remains its own `external_id`.
 
 ### 6.1 Create / update (idempotent)
 
