@@ -42,7 +42,8 @@ may still require per-file copy/delete. Durable journals reconcile backend chang
 
 CDN/regional gateways and NAS connectors are internal deployment choices. Private cache hits require
 authorization; uploads need suitable streaming ingress. Self-hosting can run in one process without a CDN.
-See the architecture for performance tradeoffs and the [predecessor audit](docs/design/storage-implementation-review.md).
+See the architecture for performance tradeoffs, the [current implementation plan](docs/design/storage-implementation-plan.md),
+and the [predecessor audit](docs/design/storage-implementation-review.md).
 
 **Implementation is pending.** All setup instructions and endpoint tables below describe today's COS/STS
 runtime, preserved in the [legacy reference](docs/api/legacy-api.md). This documentation change adds no endpoints,

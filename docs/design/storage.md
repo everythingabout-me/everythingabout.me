@@ -156,6 +156,9 @@ the configured origin. Active same-origin content still needs safe MIME/disposit
 
 ## 7. Acceptance and implementation
 
+The [implementation plan](storage-implementation-plan.md) maps this contract to verified source gaps,
+dependency-ordered phases and release gates. It does not change runtime behavior.
+
 Before replacing the current implementation:
 
 - Prove direct exit using local tools and rclone/provider CLI with the database unavailable; no special export.
