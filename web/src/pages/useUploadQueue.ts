@@ -10,8 +10,9 @@
  * tasks exists only for rendering.
  */
 import { useCallback, useRef, useState } from "react";
-import { api, type Item } from "../api/client";
+import { ApiError, api, type Item } from "../api/client";
 import { t } from "../i18n";
+import type { UploadEntry } from "./uploadSelection";
 
 /**
  * How many uploads run at once.
@@ -123,7 +124,7 @@ export type UploadStatus = "queued" | "uploading" | "finalizing" | "failed";
 
 export interface UploadTask {
   id: string;
-  file: File;
+  file: File | null;
   name: string;
   /** Directory the upload started in; decides which directory shows this placeholder row. */
   dir: string;
@@ -193,7 +194,7 @@ function errorMessage(error: unknown): string {
 export interface UploadQueue {
   tasks: UploadTask[];
   enqueue: (
-    files: FileList | File[] | null,
+    entries: UploadEntry[],
     dir: string,
     exists: (path: string) => boolean,
   ) => void;
@@ -230,6 +231,23 @@ export function useUploadQueue(
         const task = tasksRef.current.find((entry) => entry.id === id);
         if (!task || task.status !== "uploading") return;
 
+        if (!task.file) {
+          // Merge an existing directory, but never turn a file into a directory.
+          try {
+            await api.mkdir(task.path);
+          } catch (error) {
+            if (!(error instanceof ApiError) || error.status !== 409) throw error;
+          }
+          if (runtime.canceled) return;
+          const { node } = await api.list(task.path);
+          if (!node?.is_dir) throw new Error("a file with the same name already exists");
+          if (runtime.canceled) return;
+          update((current) => current.filter((entry) => entry.id !== id));
+          onUploadedRef.current(task, node);
+          return;
+        }
+
+        const file = task.file;
         if (task.uploaded) {
           // The previous round uploaded every byte and only confirm failed; do not send it again.
           update((current) =>
@@ -243,7 +261,23 @@ export function useUploadQueue(
           const { default: COS } = await import("cos-js-sdk-v5");
           if (runtime.canceled) return;
 
-          const sign = await api.signUpload(task.path, task.size, task.overwrite);
+          let sign;
+          try {
+            sign = await api.signUpload(task.path, task.size, task.overwrite);
+          } catch (error) {
+            if (!(error instanceof ApiError) || error.status !== 409 || task.overwrite) throw error;
+            const { node } = await api.list(task.path);
+            if (runtime.canceled) return;
+            if (!node || node.is_dir) throw error;
+            if (!window.confirm(t("drive.overwriteConfirm", { name: task.name }))) {
+              update((current) => current.filter((entry) => entry.id !== id));
+              return;
+            }
+            update((current) => current.map((entry) =>
+              entry.id === id ? { ...entry, overwrite: true } : entry,
+            ));
+            sign = await api.signUpload(task.path, task.size, true);
+          }
           if (runtime.canceled) return;
 
           runtime.target = { bucket: sign.bucket, region: sign.region, key: sign.key };
@@ -267,7 +301,7 @@ export function useUploadQueue(
                 Bucket: sign.bucket,
                 Region: sign.region,
                 Key: sign.key,
-                Body: task.file,
+                Body: file,
                 SliceSize: sliceSizeFor(task.size),
                 AsyncLimit: CHUNK_PARALLEL_LIMIT,
                 onTaskReady: (taskId) => {
@@ -355,7 +389,11 @@ export function useUploadQueue(
     pumpingRef.current = true;
     try {
       while (runningRef.current < MAX_PARALLEL_UPLOADS) {
-        const next = tasksRef.current.find((task) => task.status === "queued");
+        const next = tasksRef.current.find((task) =>
+          task.status === "queued" && !tasksRef.current.some((parent) =>
+            !parent.file && parent.id !== task.id && task.path.startsWith(`${parent.path}/`),
+          ),
+        );
         if (!next) break;
         runningRef.current += 1;
         // A retry restarts from 0 or from the bytes already sent, so drop the speed window too.
@@ -383,8 +421,13 @@ export function useUploadQueue(
 
   const cancel = useCallback(
     (id: string) => {
-      const runtime = runtimesRef.current.get(id);
-      if (runtime) {
+      const target = tasksRef.current.find((task) => task.id === id);
+      const canceled = new Set(tasksRef.current.filter((task) =>
+        task.id === id || (target && !target.file && task.path.startsWith(`${target.path}/`)),
+      ).map((task) => task.id));
+      for (const canceledId of canceled) {
+        const runtime = runtimesRef.current.get(canceledId);
+        if (!runtime) continue;
         runtime.canceled = true;
         try {
           runtime.abortTransfer?.();
@@ -407,7 +450,8 @@ export function useUploadQueue(
           // Cancellation is best effort: an SDK error must not leave the placeholder row on screen.
         }
       }
-      update((current) => current.filter((task) => task.id !== id));
+      update((current) => current.filter((task) => !canceled.has(task.id)));
+      pumpRef.current();
     },
     [update],
   );
@@ -433,22 +477,21 @@ export function useUploadQueue(
   );
 
   const enqueue = useCallback(
-    (files: FileList | File[] | null, dir: string, exists: (path: string) => boolean) => {
-      const list = files ? Array.from(files) : [];
-      if (!list.length) return;
+    (entries: UploadEntry[], dir: string, exists: (path: string) => boolean) => {
+      if (!entries.length) return;
 
       const added: UploadTask[] = [];
-      for (const file of list) {
-        const name = file.name.normalize("NFC");
+      for (const { file, path: name } of entries) {
         const path = dir ? `${dir}/${name}` : name;
         const duplicate = tasksRef.current.find((task) => task.path === path);
 
         let overwrite = false;
+        if (duplicate && !file && !duplicate.file) continue;
         if (duplicate) {
           if (!window.confirm(t("drive.overwriteConfirm", { name }))) continue;
           cancel(duplicate.id);
           overwrite = true;
-        } else if (exists(path)) {
+        } else if (file && exists(path)) {
           if (!window.confirm(t("drive.overwriteConfirm", { name }))) continue;
           overwrite = true;
         }
@@ -459,7 +502,7 @@ export function useUploadQueue(
           name,
           dir,
           path,
-          size: file.size,
+          size: file?.size ?? 0,
           overwrite,
           status: "queued",
           loaded: 0,

@@ -140,7 +140,7 @@ func (s *Server) handleUploadSign(w http.ResponseWriter, r *http.Request) error 
 	if path == "" {
 		return httpx.BadRequest("path cannot be empty")
 	}
-	if math.IsNaN(body.Size) || math.IsInf(body.Size, 0) || body.Size <= 0 {
+	if math.IsNaN(body.Size) || math.IsInf(body.Size, 0) || body.Size < 0 {
 		return httpx.BadRequest("invalid file size")
 	}
 	if body.Size > float64(maxFileSize) {

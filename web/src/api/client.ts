@@ -367,6 +367,7 @@ export const api = {
     return request<SearchResult>(`/api/fs/search?q=${encodeURIComponent(keyword)}`);
   },
 
+  /** Size is in bytes; zero is valid for an empty file. */
   signUpload(path: string, size: number, overwrite = false): Promise<UploadSignResult> {
     return post<UploadSignResult>("/api/fs/upload/sign", { path, size, overwrite });
   },

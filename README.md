@@ -117,6 +117,7 @@ The key sits directly on the path (`drive/<userID>/Photos/2024/a.jpg`), which me
   the viewer ([open-file-viewer](https://github.com/xushanpei/open-file-viewer)) plus pdfjs go through `React.lazy`,
   so nothing downloads on first paint and a single chunk (~191KB gzip) is fetched when you open one, with the per-format renderer loading on top of that; formats without a preview still offer a download
 - Drag / multi-select upload: placeholder rows appear immediately, with a queue, progress, and speed, cancelable, retryable on failure; `/` focuses search
+- Folder uploads: drag folders or choose **Upload → Upload folder** to retain the selected root and nested paths. Dragged folders also preserve empty directories; the browser folder picker only exposes directories containing files. Existing directories merge, while replacing files requires confirmation.
 - Search matches both the filename and the full path, and each result shows its directory on the right
 - New directories use an inline input, and deletion has a confirmation dialog (it is permanent)
 - One shared top bar on every signed-in page: brand, `Home` / `Files` navigation with the current page highlighted, the account chip, and the file page's search and upload actions
@@ -222,7 +223,7 @@ directory with coscli first, then run `reconcile --owner you@example.com`.
 
 1. **CORS** (to allow browser direct uploads and to let previews read directly)
    - Origins: `http://localhost:5173`, `http://127.0.0.1:5173`, your production domain
-   - Methods: `PUT, GET, POST, HEAD`
+   - Methods: `PUT, GET, POST, HEAD, DELETE` (DELETE allows multipart cancellation)
    - Headers: `*`; exposed headers: `ETag, x-cos-request-id`
    - `GET` is not only for downloads: file previews use `fetch` and follow the 302 from `/api/fs/download` to COS,
      so without a GET CORS rule on the bucket previews get no bytes (the browser console reports CORS and the overlay shows a load failure)
@@ -360,7 +361,7 @@ the rewrite.
 | POST | `/api/timeline/rebuild` | Force a full re-organize of the current account (drops the analysis results and backfills from scratch) |
 | GET | `/api/fs/list?path=` | List the current level (Postgres only, not the bucket; also returns the path's own `node`, so the UI can tell a folder from a file) |
 | GET | `/api/fs/search?q=` | Fuzzy search by name/path |
-| POST | `/api/fs/upload/sign` | Get STS temporary credentials for a browser direct upload |
+| POST | `/api/fs/upload/sign` | Get STS temporary credentials for a browser direct upload (`size` may be zero for an empty file) |
 | POST | `/api/fs/upload/confirm` | Writes the index after a HeadObject check |
 | GET | `/api/fs/download?path=` | 302 to a presigned URL (`&json=1` returns JSON) |
 | POST | `/api/fs/mkdir` | Create a directory (writes a zero-byte placeholder object) |

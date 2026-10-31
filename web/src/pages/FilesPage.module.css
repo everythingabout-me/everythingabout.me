@@ -271,6 +271,11 @@ a.crumb:hover {
 
 /* ---------- Upload ---------- */
 
+.uploadMenu {
+  left: auto;
+  right: 0;
+}
+
 .uploadBtn {
   display: inline-flex;
   align-items: center;

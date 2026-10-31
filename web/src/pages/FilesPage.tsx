@@ -27,9 +27,10 @@ import {
 } from "../components/icons";
 import { canPreviewFile } from "../components/preview/supported";
 import { filesHref } from "../filesPath";
-import { filesText, resultsText, t } from "../i18n";
+import { resultsText, t } from "../i18n";
 import { formatRelativeTime } from "../i18n/format";
 import { useUploadQueue, type UploadStatus, type UploadTask } from "./useUploadQueue";
+import { droppedUploadEntries, filesToUploadEntries } from "./uploadSelection";
 import styles from "./FilesPage.module.css";
 
 /**
@@ -186,12 +187,12 @@ const UploadRow = memo(function UploadRow({
       : task.size > 0
         ? Math.min(100, Math.round((task.loaded / task.size) * 100))
         : 0;
-  const showProgress = task.status === "uploading" || task.status === "finalizing";
+  const showProgress = !!task.file && (task.status === "uploading" || task.status === "finalizing");
 
   return (
     <div className={`${styles.row} ${styles.uploadRow}`}>
       <span className={styles.glyph}>
-        <GlyphFor name={task.name} mime={task.file.type || null} isDir={false} />
+        <GlyphFor name={task.name} mime={task.file?.type || null} isDir={!task.file} />
       </span>
 
       <div className={styles.uploadInfo}>
@@ -204,7 +205,7 @@ const UploadRow = memo(function UploadRow({
             {uploadStatusText(task.status)}
           </span>
 
-          {task.status === "uploading" ? (
+          {task.status === "uploading" && task.file ? (
             <span className={styles.uploadMeta}>
               <span>{percent}%</span>
               <span className={styles.uploadSep}>·</span>
@@ -222,7 +223,7 @@ const UploadRow = memo(function UploadRow({
                   <span className={styles.uploadSep}>·</span>
                 </>
               )}
-              <span>{formatSize(task.size)}</span>
+              <span>{task.file ? formatBytes(task.size) : t("drive.folder")}</span>
               {task.status === "failed" && (
                 <>
                   <span className={styles.uploadSep}>·</span>
@@ -370,11 +371,13 @@ export function FilesPage() {
   const [dragging, setDragging] = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
+  const [uploadMenuOpen, setUploadMenuOpen] = useState(false);
   const [renaming, setRenaming] = useState(false);
   const [renameName, setRenameName] = useState("");
   const [renameJob, setRenameJob] = useState<Job | null>(null);
 
   const fileInput = useRef<HTMLInputElement>(null);
+  const folderInput = useRef<HTMLInputElement>(null);
   const searchInput = useRef<HTMLInputElement>(null);
   const renameInput = useRef<HTMLInputElement>(null);
   const renameTimer = useRef<number | null>(null);
@@ -448,9 +451,9 @@ export function FilesPage() {
   }, [path]);
 
   /** Once a file's confirm succeeds, swap its placeholder row for the returned node. */
-  const handleUploaded = useCallback((task: UploadTask, item: Item) => {
+  const handleUploaded = useCallback((_task: UploadTask, item: Item) => {
     completedUploads.current += 1;
-    if (listingRef.current.path !== task.dir || listingRef.current.searching) return;
+    if (listingRef.current.searching || listingRef.current.path !== item.parent) return;
     setItems((currentItems) => {
       const next = currentItems.filter((existing) => existing.path !== item.path);
       next.push(item);
@@ -469,13 +472,8 @@ export function FilesPage() {
   // Summarize once the whole batch is done; the placeholder rows may sit far down the list.
   useEffect(() => {
     if (uploads.length > 0 || completedUploads.current === 0) return;
-    const count = completedUploads.current;
     completedUploads.current = 0;
-    showToast(
-      count === 1
-        ? t("drive.uploadCompleted")
-        : t("drive.uploadCompletedMany", { files: filesText(count) }),
-    );
+    showToast(t("drive.uploadCompleted"));
   }, [uploads.length, showToast]);
 
   useEffect(() => {
@@ -483,6 +481,7 @@ export function FilesPage() {
       if (event.key === "Escape") {
         setCreating(false);
         setMenuOpen(false);
+        setUploadMenuOpen(false);
         setRenaming(false);
         setToast(null);
       }
@@ -757,7 +756,22 @@ export function FilesPage() {
     event.preventDefault();
     dragDepth.current = 0;
     setDragging(false);
-    enqueue(event.dataTransfer.files, path, itemExists);
+    // Capture entries while the drop data store is still readable, before awaiting traversal.
+    void droppedUploadEntries(event.dataTransfer)
+      .then((entries) => enqueue(entries, path, itemExists))
+      .catch((error) => showToast(
+        error instanceof Error ? error.message : t("drive.readUploadFailed"), "error",
+      ));
+  };
+
+  const onFilesSelected = (event: React.ChangeEvent<HTMLInputElement>) => {
+    const files = Array.from(event.target.files ?? []);
+    event.target.value = "";
+    try {
+      enqueue(filesToUploadEntries(files), path, itemExists);
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : t("drive.readUploadFailed"), "error");
+    }
   };
 
   return (
@@ -792,11 +806,15 @@ export function FilesPage() {
         type="file"
         multiple
         hidden
-        onChange={(event) => {
-          const files = Array.from(event.target.files ?? []);
-          event.target.value = "";
-          enqueue(files, path, itemExists);
-        }}
+        onChange={onFilesSelected}
+      />
+      <input
+        ref={folderInput}
+        type="file"
+        multiple
+        hidden
+        {...{ webkitdirectory: "" }}
+        onChange={onFilesSelected}
       />
 
       <main className={styles.main}>
@@ -954,17 +972,51 @@ export function FilesPage() {
             )}
 
             {canUpload && (
-              <button
-                className={styles.uploadBtn}
-                onClick={() => fileInput.current?.click()}
-                title={t("drive.upload")}
-              >
-                <UploadIcon size={14} />
-                {t("drive.upload")}
-                {activeUploadCount > 0 && (
-                  <span className={styles.uploadBadge}>{activeUploadCount}</span>
+              <div className={styles.menuWrap}>
+                <button
+                  className={styles.uploadBtn}
+                  onClick={() => setUploadMenuOpen((open) => !open)}
+                  aria-expanded={uploadMenuOpen}
+                >
+                  <UploadIcon size={14} />
+                  {t("drive.upload")}
+                  {activeUploadCount > 0 && (
+                    <span className={styles.uploadBadge}>{activeUploadCount}</span>
+                  )}
+                  <ChevronDownIcon size={12} />
+                </button>
+                {uploadMenuOpen && (
+                  <>
+                    <button
+                      className={styles.menuScrim}
+                      aria-label={t("common.close")}
+                      onClick={() => setUploadMenuOpen(false)}
+                    />
+                    <div className={`${styles.menu} ${styles.uploadMenu}`}>
+                      <button
+                        className={styles.menuItem}
+                        onClick={() => {
+                          setUploadMenuOpen(false);
+                          fileInput.current?.click();
+                        }}
+                      >
+                        <FileIcon size={14} />
+                        {t("drive.uploadFiles")}
+                      </button>
+                      <button
+                        className={styles.menuItem}
+                        onClick={() => {
+                          setUploadMenuOpen(false);
+                          folderInput.current?.click();
+                        }}
+                      >
+                        <FolderIcon size={14} />
+                        {t("drive.uploadFolder")}
+                      </button>
+                    </div>
+                  </>
                 )}
-              </button>
+              </div>
             )}
           </div>
         </div>

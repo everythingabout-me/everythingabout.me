@@ -41,7 +41,7 @@ check-write:
 
 test:
 	cd backend && $(GO) test ./...
-	cd web && npm run typecheck
+	cd web && npm run typecheck && npm test
 
 fmt:
 	cd backend && gofmt -w .
