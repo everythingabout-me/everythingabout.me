@@ -1,4 +1,4 @@
-/** The only entry point to the Go backend. Responses use the {ok, data|error} envelope. */
+/** The only backend entry point. Legacy account/event calls use envelopes; files use resources/Problems. */
 
 export class ApiError extends Error {
   constructor(
@@ -8,6 +8,74 @@ export class ApiError extends Error {
     super(message);
     this.name = "ApiError";
   }
+}
+
+export interface FileProblem {
+  type: string;
+  title: string;
+  status: number;
+  code: string;
+  detail: string;
+  requestId: string;
+}
+
+export class FileApiError extends ApiError {
+  constructor(readonly problem: FileProblem) {
+    super(problem.detail, problem.status);
+    this.name = "FileApiError";
+  }
+}
+
+export interface FileResource {
+  path: string;
+  parentPath: string;
+  name: string;
+  kind: "file" | "folder";
+  revision: string;
+  contentRevision: string | null;
+  size: number | null;
+  mediaType: string | null;
+  sourceModifiedAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+  checksum: { algorithm: string; value: string } | null;
+}
+
+export interface FileCollection {
+  items: FileResource[];
+  nextCursor: string | null;
+}
+
+export interface FilePrincipal {
+  principal: { kind: "session" | "token" };
+  scope: { path: string };
+  read: boolean;
+  write: boolean;
+  usage: { bytes: number; files: number; indexed: boolean };
+  quota: null;
+  reservations: null;
+  csrfToken?: string;
+}
+
+export interface FileCapabilities {
+  path: string;
+  read: boolean;
+  write: boolean;
+  range: boolean;
+  pinnedRead: boolean;
+  strongContentValidators: boolean;
+  thumbnails: boolean;
+  uploads: boolean;
+  checksums: string[];
+  maxFileBytes: number | null;
+  maxSinglePutBytes: number;
+  maxPartBytes: number | null;
+  pagination: { defaultLimit: number; maxLimit: number };
+  names: { caseSensitive: boolean; maxSegmentBytes: number; maxPathBytes: number; maxDepth: number };
+  sessionExpirySeconds: number | null;
+  terminalRetentionSeconds: number | null;
+  quota: null;
+  reservations: null;
 }
 
 export interface AuthUser {
@@ -260,6 +328,50 @@ function post<T>(path: string, body?: unknown): Promise<T> {
     ...(body === undefined ? {} : { body: JSON.stringify(body) }),
   });
 }
+
+function fileURL(resource: string, values: Record<string, string | number | undefined> = {}): string {
+  const query = new URLSearchParams();
+  for (const [key, value] of Object.entries(values)) {
+    if (value !== undefined) query.set(key, String(value));
+  }
+  const encoded = query.toString();
+  return `/api/files${resource}${encoded ? `?${encoded}` : ""}`;
+}
+
+async function fileRequest<T>(url: string): Promise<T> {
+  const response = await fetch(url, { credentials: "same-origin" });
+  const payload: unknown = await response.json().catch(() => { throw httpError(response.status); });
+  if (!response.ok) {
+    const p = payload as Partial<FileProblem> | null;
+    if (!p || typeof p.code !== "string" || typeof p.detail !== "string" || p.status !== response.status) {
+      throw httpError(response.status);
+    }
+    throw new FileApiError(p as FileProblem);
+  }
+  return payload as T;
+}
+
+/** Shared file reads. Existing pages migrate to this contract in P6. */
+export const files = {
+  metadata(path: string): Promise<FileResource> {
+    return fileRequest(fileURL("", { path }));
+  },
+  list(path: string, options: { limit?: number; cursor?: string } = {}): Promise<FileCollection> {
+    return fileRequest(fileURL("/list", { path, ...options }));
+  },
+  search(options: { q: string; path?: string; kind?: "file" | "folder"; mediaType?: string; limit?: number; cursor?: string }): Promise<FileCollection> {
+    return fileRequest(fileURL("/search", options));
+  },
+  me(): Promise<FilePrincipal> {
+    return fileRequest(fileURL("/me"));
+  },
+  capabilities(path?: string): Promise<FileCapabilities> {
+    return fileRequest(fileURL("/capabilities", { path }));
+  },
+  contentURL(path: string, disposition?: "inline" | "attachment"): string {
+    return fileURL("/content", { path, disposition });
+  },
+};
 
 export const api = {
   async me(): Promise<AuthUser | null> {

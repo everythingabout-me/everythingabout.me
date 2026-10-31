@@ -5,6 +5,8 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+
+	"everythingabout.me/backend/internal/filecontract"
 )
 
 // Storage configures one connection with deterministic per-owner roots. Connection
@@ -104,6 +106,11 @@ func (c *Config) ValidateStorage() error {
 // ValidateServer refuses an accidental identity reset: migrating deployments must
 // explicitly set APP_SECRET to the old save-link derivation seed before switching.
 func (c *Config) ValidateServer() error {
+	for _, origin := range c.FileCookieOrigins {
+		if _, err := filecontract.NewCookieMutationPolicy(origin); err != nil {
+			return fmt.Errorf("FILE_COOKIE_ORIGINS requires explicit HTTP(S) origins without paths")
+		}
+	}
 	if c.AppSecret == "" {
 		return fmt.Errorf("APP_SECRET is required: preserve existing save links by setting it to the previous signing seed before changing storage or database credentials")
 	}

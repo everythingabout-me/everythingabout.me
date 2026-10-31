@@ -23,6 +23,15 @@ Local startup without COS, actual Postgres import/repeat/rollback, native filesy
 COS/S3 read conformance are tested. Public file read/byte routes remain P2; new backend writes remain
 P3–P5. Live provider capability and production migration evidence are still deployment gates.
 
+## P2 implementation status
+
+P2 adds the shared authenticated metadata/list/search/me/capabilities routes and same-origin GET/HEAD
+content, with explicit auth selection, cookie CSRF/origin handling, Problem responses and bounded scoped
+cursors. See [active resources, limits and validation](storage-p2.md). The old file-path wildcard is retired.
+Local/Postgres runtime and actual S3 SDK HTTP conformance are exercised; live COS and production cutover
+remain unverified deployment gates. P3–P7 remain: durable writes, native actions, resumable ingress,
+Web/media migration and release/performance acceptance. No new production write capability is activated.
+
 ## 1. Fixed implementation constraints
 
 - One `/api/files` contract for Web, iOS, Android, CLI and third parties. No browser-only file routes, version

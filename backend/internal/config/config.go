@@ -22,11 +22,12 @@ type Config struct {
 	WebDir      string
 	DatabaseURL string
 	// AppSecret is a stable deployment secret, independent of database/storage credentials.
-	AppSecret        string
-	Storage          Storage
-	SessionTTLDays   int
-	CookieSecure     bool
-	RegistrationOpen bool
+	AppSecret         string
+	FileCookieOrigins []string
+	Storage           Storage
+	SessionTTLDays    int
+	CookieSecure      bool
+	RegistrationOpen  bool
 	// QuotaBytes is the storage cap per account; 0 means unlimited.
 	QuotaBytes int64
 	// MultipartThreshold is the size above which uploads go multipart; defaults to 5 GiB.
@@ -141,6 +142,14 @@ func Load() (*Config, error) {
 			MonthBudget: positiveInt("TIMELINE_MONTH_BUDGET", 24),
 			Timezone:    envOr("TIMELINE_TZ", "Asia/Shanghai"),
 		},
+	}
+
+	if raw := os.Getenv("FILE_COOKIE_ORIGINS"); raw != "" {
+		for _, origin := range strings.Split(raw, ",") {
+			c.FileCookieOrigins = append(c.FileCookieOrigins, strings.TrimSpace(origin))
+		}
+	} else if !c.IsProduction() {
+		c.FileCookieOrigins = []string{"http://localhost:5173", "http://127.0.0.1:5173"}
 	}
 
 	// An explicit COOKIE_SECURE wins; otherwise production defaults to Secure.

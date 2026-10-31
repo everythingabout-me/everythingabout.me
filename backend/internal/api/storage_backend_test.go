@@ -3,6 +3,7 @@ package api
 import (
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"everythingabout.me/backend/internal/config"
@@ -18,7 +19,11 @@ func TestReadOnlyBackendRejectsLegacyEffectsBeforeServices(t *testing.T) {
 			for _, tc := range []struct{ method, path string }{{"GET", "/capabilities"}, {"GET", "/api/fs/rename/m_1"}, {"HEAD", "/api/fs/rename/m_1"}, {"POST", "/api/fs/mkdir"}, {"POST", "/api/fs/upload/sign"}, {"POST", "/api/fs/upload/confirm"}, {"POST", "/api/fs/rename"}, {"POST", "/api/fs/delete"}, {"GET", "/api/fs/download?path=a"}, {"PUT", "/api/files/a"}, {"DELETE", "/api/files/a"}, {"GET", "/api/files/a"}, {"POST", "/upload"}, {"POST", "/upload/complete"}, {"POST", "/move"}, {"GET", "/move/m_1"}, {"POST", "/copy"}, {"POST", "/mkdir"}, {"POST", "/api/timeline/rebuild"}} {
 				recorder := httptest.NewRecorder()
 				handler.ServeHTTP(recorder, httptest.NewRequest(tc.method, tc.path, nil))
-				if recorder.Code != http.StatusNotImplemented {
+				want := http.StatusNotImplemented
+				if strings.HasPrefix(tc.path, "/api/files/") {
+					want = http.StatusNotFound
+				}
+				if recorder.Code != want {
 					t.Fatalf("%s %s: status %d body=%s", tc.method, tc.path, recorder.Code, recorder.Body.String())
 				}
 			}

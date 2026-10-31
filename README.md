@@ -30,15 +30,16 @@ ordinary filesystem tools, rclone or provider tools without the database or an E
 indexes that tree and adds application metadata. Native directory operations are preferred; S3 folder moves
 may still require per-file copy/delete. Durable journals reconcile backend changes and index updates.
 
-| Target contract (not implemented) | Interface |
+| Unified file contract | Interface / status |
 |---|---|
 | All file clients | `/api/files`: one path-based API for Web, iOS, Android, CLI and third parties |
-| Authentication | Explicit Bearer, or session cookie with CSRF protection on mutations; identical file endpoints |
-| Metadata and listing | `GET /api/files?path=/...`; `GET /api/files/list?path=/...` |
-| File content | `GET/HEAD/PUT /api/files/content?path=/...`; no public file IDs |
-| Resumable uploads | `.../uploads`: one numbered-part protocol, durable receipts, commit/abort |
-| Long operations | `.../operations/{id}`: one durable status/result shape |
-| Storage tree | `Stat / List / Open / Mkdir / Remove`, native move/copy where supported; staged writes and outcome recovery |
+| Authentication (P2 active) | Explicit Bearer, or session cookie; Origin + session-bound CSRF required for mutations |
+| Metadata and listing (P2 active) | `GET /api/files?path=/...`; `GET /api/files/list?path=/...` |
+| Search and principal (P2 active) | `GET /api/files/search`; `/api/files/me`; `/api/files/capabilities` |
+| File content (P2 active) | `GET/HEAD /api/files/content?path=/...`: same-origin streaming, safe single ranges |
+| Mutations/uploads (pending) | PUT/actions/`.../uploads`: authenticated 501 until P3–P5 |
+| Long operations (pending) | `.../operations/{id}`: reserved durable status/result family |
+| Storage tree (P1 active) | Native `Stat / List / Open`; mutation/publication remains pending |
 
 CDN/regional gateways and NAS connectors are internal deployment choices. Private cache hits require
 authorization; uploads need suitable streaming ingress. Self-hosting can run in one process without a CDN.
@@ -49,12 +50,15 @@ and [isolated native capability evidence](docs/design/storage-p0-capabilities.md
 
 P1 adds [read-only Local/COS/S3 native trees, backend configuration and safe index import](docs/design/storage-p1.md).
 `STORAGE_BACKEND=local` or `s3` starts without COS configuration; native reads/import are available internally and
-through maintenance commands. Their browser byte/mutation routes remain unavailable until the unified API lands.
+through maintenance commands. P2 now adds [authenticated metadata/search and same-origin file bytes](docs/design/storage-p2.md)
+on all three backends. Existing browser pages/media migrate in P6; new writes remain unavailable.
 
-**The replacement file API is not active.** Endpoint tables below describe the default COS/STS runtime,
-preserved in the [legacy reference](docs/api/legacy-api.md). Server startup now requires a stable `APP_SECRET`;
-production also requires explicit SES credentials. See the [P1 upgrade steps](docs/design/storage-p1.md#configuration-and-identity-upgrade)
-before changing storage/database credentials. No file endpoints or database schema change in P1.
+The old `/api/files/{path...}` wildcard has been removed. Use `/api/files/content?path=/...` for downloads.
+Other legacy COS routes remain documented in the [legacy reference](docs/api/legacy-api.md) until cutover.
+Server startup requires a stable `APP_SECRET`; production also requires explicit SES credentials.
+See the [P1 upgrade steps](docs/design/storage-p1.md#configuration-and-identity-upgrade) before changing
+storage/database credentials. Configure `FILE_COOKIE_ORIGINS` for cookie mutations and credentialed CORS;
+GET `/api/files/me` bootstraps its session-bound CSRF token. P2 adds no database schema changes.
 
 ## Stack and layout
 
@@ -264,8 +268,9 @@ first; in the API, deleting a directory requires an explicit `?recursive=1`, whi
 
 ### The public API (for third-party apps / scripts / AI agents)
 
-The running API uses one Bearer token and CRUD over a path tree. Its routes are recorded in the
-[legacy/runtime reference](docs/api/legacy-api.md); the replacement contract is [the new file API](docs/api/api.md).
+The unified authenticated read API is active at `/api/files`; see [its contract](docs/api/api.md)
+and [P2 rollout limits](docs/design/storage-p2.md). Remaining root-level COS actions below are legacy
+until P3–P6; their contracts are in the [legacy reference](docs/api/legacy-api.md).
 The [historical scenario analysis](docs/api/flows.md) is retained for context.
 
 ```bash
@@ -274,20 +279,23 @@ cd backend && go run ./cmd/eam token create \
   --email you@example.com --name badminton --prefix Apps/badminton
 
 # after that it is just plain HTTP
-curl -H "Authorization: Bearer eam_..." https://your-host/list?path=Apps/badminton
+curl -G -H "Authorization: Bearer eam_..." --data-urlencode 'path=/Apps/badminton' \
+  https://your-host/api/files/list
 ```
 
-File content lives under `/api/files/<path>` because `/files` is the web app's own route; every other public
-endpoint stays at the root.
+Content uses `GET/HEAD /api/files/content?path=/...`; the old `/api/files/<path>` family is retired.
+The table separates active shared reads from remaining legacy COS routes.
 
 | Method | Path | Description |
 |---|---|---|
-| GET | `/capabilities` | No auth: limits, capabilities, rate limits (clients read them here, do not hard-code) |
-| GET | `/list?path=&limit=&cursor=` | List a directory (keyset pagination, includes `writable`) |
-| GET | `/api/files/<path>` | 302 to a presigned download URL; `?json=1` returns the URL |
-| HEAD | `/api/files/<path>` | Metadata (length / type / ETag / modification time) |
-| PUT | `/api/files/<path>` | Write a file (≤ 32 MiB; never overwrites by default, add `?overwrite=1` to overwrite) |
-| DELETE | `/api/files/<path>` | Permanent delete (directories need `?recursive=1`) |
+| GET | `/api/files?path=` | Path-only native file/folder metadata |
+| GET | `/api/files/list?path=&limit=&cursor=` | Shared immediate-child listing |
+| GET | `/api/files/search?q=&path=&kind=&mediaType=` | Authorized indexed search with scoped opaque cursors |
+| GET | `/api/files/me` · `/api/files/capabilities` | Authenticated scope/usage/read limits and cookie CSRF bootstrap |
+| GET, HEAD | `/api/files/content?path=` | Same-origin bytes and representation headers; single Range support |
+| GET | `/capabilities` | Legacy COS limits; unavailable for Local/S3 |
+| GET | `/list?path=&limit=&cursor=` | Legacy indexed listing |
+| PUT/actions | `/api/files/content` · `/api/files/move` · `/api/files/copy` | Reserved; authenticated 501 until durable writes land |
 | POST | `/mkdir` | `{"path"}` creates a directory (parents created automatically; an existing directory returns 200, idempotent) |
 | POST | `/move` | `{"from","to","overwrite"}` move / rename |
 | POST | `/copy` | `{"from","to","overwrite"}` copy (files and directories) |
@@ -300,7 +308,8 @@ endpoint stays at the root.
 | PATCH | `/me` | `{"name"}` names the connection this token belongs to (an app names itself after scanning) |
 | GET | `/s/<code>` | Agent instructions: a save-link code returns the save prompt; a Connect token (`eam_...`) returns that connection's prompt, live |
 
-Large file flow: `POST /upload` for URLs → PUT straight to COS (never through this server) → `POST /upload/complete`.
+The remaining legacy COS large-file flow is `POST /upload` for URLs → PUT straight to COS → `POST /upload/complete`.
+The new file read API always streams bytes through the application origin.
 Writes are recorded in `audit_log`; the rate limit is 600 requests per minute per token.
 Uploads above the threshold automatically go multipart (one presigned URL per part, merged at `complete`).
 
@@ -314,10 +323,11 @@ Save links (for agents):
 https://your-host/s/abcd2345efgh2345
 ```
 
-The URL itself is the token plus the instructions: `GET` only returns a prompt and accepts no content. An agent
-opens it, gets the token, and saves through the existing file API: short text with `PUT /api/files/Inbox/...`; images,
-videos, and PDFs with `POST /upload` for a URL that uploads straight to COS, bytes never passing through the
-server. The account page can mint as many as you like, show recent use, and revoke them at any time; a revoked
+The URL itself is the token plus the instructions: `GET` only returns a prompt and accepts no content.
+Generated save prompts still belong to the legacy client release and are migrated in P6. Their old
+`PUT /api/files/<path>` shortcut is retired in P2; remaining COS upload sessions use `POST /upload`
+and `/upload/complete`. Unified writes are unavailable until P3–P5. The account page can mint as many
+save links as needed, show recent use, and revoke them at any time; a revoked
 link stops working immediately. The short code has no `eam_` prefix and also works directly as a Bearer token for
 the full file API. The account page's "recent activity" lists who changed which path and when; save links and
 event submissions both land in `audit_log`.

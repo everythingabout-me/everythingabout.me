@@ -1,5 +1,6 @@
-// Package filecontract defines pure boundary helpers and wire types for the future
-// unified /api/files API. It is not connected to the current router or services.
+// Package filecontract defines pure boundary helpers and wire types for the
+// unified /api/files API. P2 runtime handlers reuse the path/auth/resource helpers;
+// this package alone supplies no storage or database guarantees.
 //
 // Paths preserve accepted bytes, including decomposed Unicode and spaces. Parsing
 // validates account-absolute paths; Relative removes only the boundary slash. Name
@@ -22,7 +23,7 @@
 // durable service; the DTO is not an implementation of that recovery protocol.
 // RootBinding captures immutable root identity independently of credential rotation.
 //
-// Tests exercise these helpers and test-only HTTP adapters, not nonexistent runtime
-// endpoints. Native safety probes, database workflows, CORS, streaming/ranges and
-// production route cutover are deliberately outside this package's P0 scope.
+// Tests here exercise pure helpers and test-only HTTP adapters. Real P2 endpoint,
+// CORS, streaming/range and database integration tests live in the api package;
+// native safety and durable-write recovery remain separate conformance gates.
 package filecontract

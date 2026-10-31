@@ -1,6 +1,9 @@
 # Unified file API
 
-> Clean-slate specification, 2026-10-30. Implementation pending.
+> Clean-slate specification, 2026-10-30. P2 read resources and same-origin GET/HEAD content are implemented.
+> Mutation/upload/operation resources remain pending and return authenticated 501 placeholders.
+> See [P2 rollout, active endpoints and validation](../design/storage-p2.md) for current limits;
+> the sections below remain the complete target contract.
 >
 > This is the target file API, replacing earlier route, envelope, identity, and upload decisions.
 > There is no requirement to preserve old clients or provide compatibility adapters. The running COS
@@ -30,6 +33,8 @@ Authentication is selected explicitly at the same endpoint:
 - Otherwise authenticate the httpOnly session cookie. All cookie-authenticated mutations, including raw PUT,
   upload parts and cancellation, require CSRF validation and approved Origin handling. Cookies use Secure
   in production and suitable SameSite policy. Browser media GET can use the same content endpoint.
+  A mutation is denied unless the session-bound `X-CSRF-Token` from `GET /api/files/me` validates and its
+  Origin matches an explicitly configured `FILE_COOKIE_ORIGINS` entry. Host/forwarding headers do not establish trust.
 - Both paths invoke identical authorization/file services. Cookie authentication is not a reason to create
   another API. Native/third-party clients can use Bearer; Web may use cookie or explicit Bearer.
 
@@ -105,6 +110,10 @@ File metadata JSON:
   "checksum": null
 }
 ```
+
+P2 can expose an existing native entry before it has an index row. Its unknown `createdAt` is
+`0001-01-01T00:00:00Z`; `updatedAt` falls back to native modification time or the same unknown value.
+`sourceModifiedAt` and checksum remain null when unavailable. This does not invent application history.
 
 `revision` changes for direct file/folder metadata/content changes; folder revision also changes for direct child
 membership changes. It is not a recursive subtree version. A move changes returned path/parentPath, so
@@ -216,8 +225,9 @@ Cancellation/failure of multi-file work can leave native partial effects; the Op
 ## 5. Downloads and safe media
 
 GET by path returns `200` bytes, HEAD returns matching representation headers without a body. Root or
-folder content returns `409 not_a_file`. All content responses include ETag, Content-Type, correct length,
-`X-Content-Type-Options: nosniff`, and suitable Content-Disposition. Default is attachment; `?disposition=inline`
+folder content returns `409 not_a_file`. Content responses include Content-Type, correct length,
+`X-Content-Type-Options: nosniff`, suitable Content-Disposition and a strong ETag only when §2's native
+version guarantees are proven. Default is attachment; `?disposition=inline`
 is honored only for a safe media allowlist. HTML/SVG and other active content are not served as executable
 same-origin documents; preview conversion/sandboxing must preserve this boundary.
 

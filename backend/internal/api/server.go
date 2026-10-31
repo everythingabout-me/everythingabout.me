@@ -30,19 +30,21 @@ type OwnerStorageFactory interface {
 }
 
 type Server struct {
-	trees     OwnerStorageFactory
-	cfg       *config.Config
-	db        *store.DB
-	auth      *auth.Service
-	codes     *emailcode.Service
-	mail      *mail.Sender
-	storage   storage.Storage
-	nodes     *nodes.Service
-	jobs      *jobs.Service
-	eventsSvc *events.Service
-	timeline  *timeline.Service
-	limiter   *ratelimit.Limiter
-	web       http.Handler
+	trees      OwnerStorageFactory
+	filesAuth  FilesAuthenticator
+	filesIndex FileReadIndex
+	cfg        *config.Config
+	db         *store.DB
+	auth       *auth.Service
+	codes      *emailcode.Service
+	mail       *mail.Sender
+	storage    storage.Storage
+	nodes      *nodes.Service
+	jobs       *jobs.Service
+	eventsSvc  *events.Service
+	timeline   *timeline.Service
+	limiter    *ratelimit.Limiter
+	web        http.Handler
 }
 
 // New wires dependencies. web is the handler for the frontend build (SPA) and may be nil.
@@ -54,18 +56,19 @@ func New(cfg *config.Config, db *store.DB, objectStorage storage.Storage, web ht
 		jobService = jobs.New(db, objectStorage, nodeService)
 	}
 	return &Server{
-		cfg:       cfg,
-		db:        db,
-		auth:      auth.New(db, cfg),
-		codes:     emailcode.New(db),
-		mail:      mail.New(cfg),
-		storage:   objectStorage,
-		nodes:     nodeService,
-		jobs:      jobService,
-		eventsSvc: eventService,
-		timeline:  timeline.New(db, objectStorage, cfg.Timeline, eventService),
-		limiter:   ratelimit.New(),
-		web:       web,
+		cfg:        cfg,
+		db:         db,
+		auth:       auth.New(db, cfg),
+		codes:      emailcode.New(db),
+		mail:       mail.New(cfg),
+		storage:    objectStorage,
+		nodes:      nodeService,
+		filesIndex: nodeService,
+		jobs:       jobService,
+		eventsSvc:  eventService,
+		timeline:   timeline.New(db, objectStorage, cfg.Timeline, eventService),
+		limiter:    ratelimit.New(),
+		web:        web,
 	}
 }
 
@@ -126,9 +129,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/fs/rename/{id}", s.wrap(s.handleRenameStatus))
 	mux.HandleFunc("POST /api/fs/delete", s.wrap(s.handleDelete))
 
-	// Public API: the path is the feature, with no /v1 prefix. File paths live under /api/files
-	// because /files is the web app's route; every other public endpoint still sits at the root.
-	// Events keep their root-level paths too.
+	// Account/event and remaining legacy COS actions retain their routes during
+	// migration. The shared file resource family below owns /api/files exclusively.
 	mux.HandleFunc("POST /events", s.api(s.handleAPICreateEvent))
 	mux.HandleFunc("GET /events", s.api(s.handleAPIListEvents))
 	mux.HandleFunc("GET /events/{id}", s.api(s.handleAPIGetEvent))
@@ -151,12 +153,10 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /upload", s.api(s.handleAPIUpload))
 	mux.HandleFunc("GET /upload/{id}", s.api(s.handleAPIUploadStatus))
 	mux.HandleFunc("POST /upload/complete", s.api(s.handleAPIComplete))
-	mux.HandleFunc("GET /api/files/{path...}", s.api(s.handleAPIGetFile))
-	mux.HandleFunc("HEAD /api/files/{path...}", s.api(s.handleAPIHeadFile))
-	mux.HandleFunc("PUT /api/files/{path...}", s.api(s.handleAPIPutFile))
-	mux.HandleFunc("DELETE /api/files/{path...}", s.api(s.handleAPIDeleteFile))
+	mux.Handle("/api/files", s.filesHandler())
+	mux.Handle("/api/files/", s.filesHandler())
 
-	// A save link is just a page of instructions; saving uses the existing /api/files and /upload.
+	// A save link is an instruction page. Generated prompts migrate with clients in P6.
 	// The sub-router registers GET only; ServeMux answers 405 for POST, with no business handler.
 	saveMux := http.NewServeMux()
 	saveMux.HandleFunc("GET /{code}", s.wrap(s.handleSaveLinkPage))
@@ -265,6 +265,10 @@ func setCORSHeaders(w http.ResponseWriter) {
 // and preflight is answered right here.
 func (s *Server) cors(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if isFileAPIPath(r.URL.Path) {
+			s.filesCORS(next).ServeHTTP(w, r)
+			return
+		}
 		if isAPIPath(r.URL.Path) {
 			setCORSHeaders(w)
 			if r.Method == http.MethodOptions {
@@ -290,8 +294,24 @@ type statusRecorder struct {
 }
 
 func (r *statusRecorder) WriteHeader(status int) {
+	if r.status != 0 {
+		return
+	}
 	r.status = status
 	r.ResponseWriter.WriteHeader(status)
+}
+func (r *statusRecorder) Write(data []byte) (int, error) {
+	if r.status == 0 {
+		r.WriteHeader(http.StatusOK)
+	}
+	return r.ResponseWriter.Write(data)
+}
+func (r *statusRecorder) Unwrap() http.ResponseWriter { return r.ResponseWriter }
+func (r *statusRecorder) Flush() {
+	if r.status == 0 {
+		r.WriteHeader(http.StatusOK)
+	}
+	_ = http.NewResponseController(r.ResponseWriter).Flush()
 }
 
 func (s *Server) logger(next http.Handler) http.Handler {
@@ -301,7 +321,7 @@ func (s *Server) logger(next http.Handler) http.Handler {
 			return
 		}
 		started := time.Now()
-		recorder := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
+		recorder := &statusRecorder{ResponseWriter: w}
 		next.ServeHTTP(recorder, r)
 		// /s/<code> is a credential in the path: never write it to the log.
 		path := r.URL.Path
@@ -321,7 +341,14 @@ func (s *Server) recoverer(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		defer func() {
 			if recovered := recover(); recovered != nil {
+				if recovered == http.ErrAbortHandler {
+					panic(recovered)
+				}
 				slog.Error("panic", "path", r.URL.Path, "panic", recovered)
+				if isFileAPIPath(r.URL.Path) {
+					writeFilesProblem(w, r, errors.New("file handler panic"))
+					return
+				}
 				httpx.WriteError(w, httpx.Internal("internal server error"))
 			}
 		}()
