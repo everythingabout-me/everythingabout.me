@@ -15,6 +15,7 @@ type ObjectInfo struct {
 	ETag         string
 	LastModified time.Time
 	StorageClass string
+	ContentType  string
 }
 
 type ObjectPage struct {

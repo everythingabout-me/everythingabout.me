@@ -23,6 +23,7 @@ import (
 	"everythingabout.me/backend/internal/storage"
 	"everythingabout.me/backend/internal/store"
 	"everythingabout.me/backend/internal/timeline"
+	"everythingabout.me/backend/internal/uploadindex"
 )
 
 type OwnerStorageFactory interface {
@@ -30,21 +31,22 @@ type OwnerStorageFactory interface {
 }
 
 type Server struct {
-	trees      OwnerStorageFactory
-	filesAuth  FilesAuthenticator
-	filesIndex FileReadIndex
-	cfg        *config.Config
-	db         *store.DB
-	auth       *auth.Service
-	codes      *emailcode.Service
-	mail       *mail.Sender
-	storage    storage.Storage
-	nodes      *nodes.Service
-	jobs       *jobs.Service
-	eventsSvc  *events.Service
-	timeline   *timeline.Service
-	limiter    *ratelimit.Limiter
-	web        http.Handler
+	uploadIndex UploadIndex
+	trees       OwnerStorageFactory
+	filesAuth   FilesAuthenticator
+	filesIndex  FileReadIndex
+	cfg         *config.Config
+	db          *store.DB
+	auth        *auth.Service
+	codes       *emailcode.Service
+	mail        *mail.Sender
+	storage     storage.Storage
+	nodes       *nodes.Service
+	jobs        *jobs.Service
+	eventsSvc   *events.Service
+	timeline    *timeline.Service
+	limiter     *ratelimit.Limiter
+	web         http.Handler
 }
 
 // New wires dependencies. web is the handler for the frontend build (SPA) and may be nil.
@@ -55,7 +57,7 @@ func New(cfg *config.Config, db *store.DB, objectStorage storage.Storage, web ht
 	if cfg.BackendName() == "cos" {
 		jobService = jobs.New(db, objectStorage, nodeService)
 	}
-	return &Server{
+	server := &Server{
 		cfg:        cfg,
 		db:         db,
 		auth:       auth.New(db, cfg),
@@ -70,6 +72,10 @@ func New(cfg *config.Config, db *store.DB, objectStorage storage.Storage, web ht
 		limiter:    ratelimit.New(),
 		web:        web,
 	}
+	if cfg.BackendName() == "cos" {
+		server.uploadIndex = uploadindex.New(uploadIndexBinding(cfg), uploadindex.NewJournal(db.Pool()), uploadindex.ObserverFunc(server.observeUploadedObject))
+	}
+	return server
 }
 
 // SetStorageFactory wires the startup-owned factory; handlers never construct providers.

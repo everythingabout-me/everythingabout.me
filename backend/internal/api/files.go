@@ -164,6 +164,10 @@ func (s *Server) handleUploadSign(w http.ResponseWriter, r *http.Request) error 
 		return err
 	}
 
+	if err := s.watchUpload(r.Context(), user.ID, path, false, time.Unix(credentials.ExpiredTime, 0)); err != nil {
+		return err
+	}
+
 	return s.ok(w, map[string]any{
 		"bucket":      s.cfg.COS.Bucket,
 		"region":      s.cfg.COS.Region,
@@ -192,27 +196,6 @@ func (s *Server) handleUploadConfirm(w http.ResponseWriter, r *http.Request) err
 		return httpx.BadRequest("path cannot be empty")
 	}
 
-	existing, err := s.nodes.Live(r.Context(), path, user.ID)
-	if err != nil {
-		return err
-	}
-	if existing != nil && existing.IsDir {
-		return httpx.Conflict("a directory with the same name already exists")
-	}
-
-	// verify with HeadObject before writing the row
-	info, err := s.storage.Head(r.Context(), paths.KeyFor(path, user.ID))
-	if err != nil {
-		return err
-	}
-	if info == nil {
-		return httpx.BadRequest("object not found; the upload may not be complete")
-	}
-
-	if err := s.nodes.EnsureParents(r.Context(), path, user.ID); err != nil {
-		return err
-	}
-
 	meta := map[string]any{}
 	var mime *string
 	if body.Mime != "" {
@@ -223,15 +206,6 @@ func (s *Server) handleUploadConfirm(w http.ResponseWriter, r *http.Request) err
 		meta["sha256"] = body.SHA256
 	}
 
-	var etag *string
-	if info.ETag != "" {
-		etag = &info.ETag
-	}
-	var storageClass *string
-	if info.StorageClass != "" {
-		storageClass = &info.StorageClass
-	}
-
 	var modified *time.Time
 	if body.ModifiedAt > 0 {
 		candidate := time.UnixMilli(body.ModifiedAt)
@@ -239,23 +213,17 @@ func (s *Server) handleUploadConfirm(w http.ResponseWriter, r *http.Request) err
 			modified = &candidate
 		}
 	}
-	if modified == nil && !info.LastModified.IsZero() {
-		modified = &info.LastModified
-	}
-
-	node, err := s.nodes.UpsertFile(r.Context(), nodes.UpsertInput{
+	node, err := s.nodes.ConfirmUpload(r.Context(), nodes.UpsertInput{
 		OwnerID:          user.ID,
 		Path:             path,
-		Size:             info.Size,
 		Mime:             mime,
-		ETag:             etag,
-		StorageClass:     storageClass,
 		SourceModifiedAt: modified,
 		Meta:             meta,
 	})
 	if err != nil {
 		return err
 	}
+	s.settleUpload(r.Context(), user.ID, path, false)
 	s.timeline.Notify(user.ID)
 	return s.ok(w, map[string]any{"node": node})
 }
@@ -334,6 +302,9 @@ func (s *Server) handleMkdir(w http.ResponseWriter, r *http.Request) error {
 	if err := s.nodes.EnsureParents(r.Context(), path, user.ID); err != nil {
 		return err
 	}
+	if err := s.watchUpload(r.Context(), user.ID, path, true, time.Now().Add(time.Hour)); err != nil {
+		return err
+	}
 	if err := s.storage.PutEmpty(r.Context(), paths.DirKeyFor(path, user.ID)); err != nil {
 		return err
 	}
@@ -342,6 +313,7 @@ func (s *Server) handleMkdir(w http.ResponseWriter, r *http.Request) error {
 	if err != nil {
 		return err
 	}
+	s.settleUpload(r.Context(), user.ID, path, true)
 	var payload any
 	if node != nil {
 		payload = node

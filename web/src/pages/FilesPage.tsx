@@ -31,6 +31,7 @@ import { resultsText, t } from "../i18n";
 import { formatRelativeTime } from "../i18n/format";
 import { useUploadQueue, type UploadStatus, type UploadTask } from "./useUploadQueue";
 import { droppedUploadEntries, filesToUploadEntries } from "./uploadSelection";
+import { buildUploadRows, isUploadDirectory, type UploadRowEntry } from "./uploadRows";
 import styles from "./FilesPage.module.css";
 
 /**
@@ -82,20 +83,6 @@ function compareItems(a: Item, b: Item): number {
   return compareNames(a.name, b.name);
 }
 
-type RowEntry =
-  | { kind: "item"; key: string; item: Item }
-  | { kind: "upload"; key: string; task: UploadTask };
-
-function compareEntries(a: RowEntry, b: RowEntry): number {
-  const aDir = a.kind === "item" && a.item.is_dir;
-  const bDir = b.kind === "item" && b.item.is_dir;
-  if (aDir !== bDir) return aDir ? -1 : 1;
-  return compareNames(
-    a.kind === "item" ? a.item.name : a.task.name,
-    b.kind === "item" ? b.item.name : b.task.name,
-  );
-}
-
 function uploadStatusText(status: UploadStatus): string {
   switch (status) {
     case "queued":
@@ -106,6 +93,8 @@ function uploadStatusText(status: UploadStatus): string {
       return t("drive.finishing");
     case "failed":
       return t("drive.failed");
+    case "completed":
+      return t("drive.uploadCompleted");
   }
 }
 
@@ -173,109 +162,128 @@ const ItemRow = memo(function ItemRow({
 });
 
 const UploadRow = memo(function UploadRow({
-  task,
+  entry,
   onCancel,
   onRetry,
 }: {
-  task: UploadTask;
+  entry: UploadRowEntry;
   onCancel: (id: string) => void;
   onRetry: (id: string) => void;
 }) {
-  const percent =
-    task.status === "finalizing"
-      ? 100
-      : task.size > 0
-        ? Math.min(100, Math.round((task.loaded / task.size) * 100))
-        : 0;
-  const showProgress = !!task.file && (task.status === "uploading" || task.status === "finalizing");
-
-  return (
-    <div className={`${styles.row} ${styles.uploadRow}`}>
+  const { upload, task, item, name, path, isDir } = entry;
+  if (!upload) return null;
+  const completed = upload.status === "completed";
+  const navigable = isDir || completed;
+  const showProgress = !completed && (!isDir || upload.files > 0);
+  const content = (
+    <>
       <span className={styles.glyph}>
-        <GlyphFor name={task.name} mime={task.file?.type || null} isDir={!task.file} />
+        <GlyphFor name={name} mime={item?.mime || task?.file?.type || null} isDir={isDir} />
       </span>
-
       <div className={styles.uploadInfo}>
-        {/* Progress, speed and sent/total sit after the status; the row stays two lines tall. */}
         <div className={styles.uploadTitle}>
-          <span className={styles.name} title={task.name}>
-            {task.name}
+          <span className={`${styles.name} ${isDir ? styles.nameDir : ""}`} title={name}>
+            {name}
           </span>
-          <span className={`${styles.statusBadge} ${uploadStatusClass(task.status)}`}>
-            {uploadStatusText(task.status)}
-          </span>
-
-          {task.status === "uploading" && task.file ? (
-            <span className={styles.uploadMeta}>
-              <span>{percent}%</span>
-              <span className={styles.uploadSep}>·</span>
-              <span>{formatSpeed(task.speed)}</span>
-              <span className={styles.uploadSep}>·</span>
-              <span>
-                {formatBytes(Math.min(task.loaded, task.size))} / {formatSize(task.size)}
-              </span>
-            </span>
-          ) : (
-            <span className={styles.uploadMeta}>
-              {task.status === "finalizing" && (
-                <>
-                  <span>100%</span>
-                  <span className={styles.uploadSep}>·</span>
-                </>
-              )}
-              <span>{task.file ? formatBytes(task.size) : t("drive.folder")}</span>
-              {task.status === "failed" && (
-                <>
-                  <span className={styles.uploadSep}>·</span>
-                  <span className={styles.uploadError} title={task.error}>
-                    {task.error}
-                  </span>
-                </>
-              )}
+          {!completed && (
+            <span className={`${styles.statusBadge} ${uploadStatusClass(upload.status)}`}>
+              {upload.failed > 0
+                ? t("drive.uploadFailedCount", { count: upload.failed.toLocaleString() })
+                : uploadStatusText(upload.status)}
             </span>
           )}
         </div>
-
-        {showProgress && (
+        <div className={styles.uploadMeta}>
+          {isDir ? (
+            <>
+              <span>{t("drive.uploadFileCount", { count: upload.files.toLocaleString() })}</span>
+              <span className={styles.uploadSep}>·</span>
+              <span>{t("drive.uploadedFileCount", { count: upload.completedFiles.toLocaleString() })}</span>
+            </>
+          ) : (
+            <>
+              <span>{formatBytes(upload.size)}</span>
+              {upload.status === "uploading" && (
+                <>
+                  <span className={styles.uploadSep}>·</span>
+                  <span>{formatSpeed(upload.speed)}</span>
+                </>
+              )}
+              {task?.error && (
+                <>
+                  <span className={styles.uploadSep}>·</span>
+                  <span className={styles.uploadError} title={task.error}>{task.error}</span>
+                </>
+              )}
+            </>
+          )}
+        </div>
+      </div>
+      {showProgress ? (
+        <div className={styles.uploadProgress}>
+          <div className={styles.uploadProgressLabel}>
+            <span>{formatBytes(upload.loaded)} / {formatBytes(upload.size)}</span>
+            <span className={styles.uploadPercent}>{upload.percent}%</span>
+          </div>
           <div
             className={styles.progressTrack}
             role="progressbar"
-            aria-label={task.name}
+            aria-label={t("drive.uploadProgressLabel", { name })}
             aria-valuemin={0}
             aria-valuemax={100}
-            aria-valuenow={percent}
+            aria-valuenow={upload.percent}
+            aria-valuetext={t("drive.uploadProgressValue", {
+              percent: upload.percent,
+              sent: formatBytes(upload.loaded),
+              total: formatBytes(upload.size),
+            })}
           >
             <div
-              className={`${styles.progressFill} ${
-                task.status === "finalizing" ? styles.progressFillFinishing : ""
-              }`}
-              style={{ width: `${percent}%` }}
+              className={`${styles.progressFill} ${upload.status === "finalizing" ? styles.progressFillFinishing : ""}`}
+              style={{ width: `${upload.percent}%` }}
             />
           </div>
-        )}
-      </div>
+        </div>
+      ) : (
+        <span className={styles.uploadFinishedMeta}>
+          {isDir ? (upload.size > 0 ? formatBytes(upload.size) : "")
+            : item ? formatRelativeTime(item.updated_at) : t("drive.uploadCompleted")}
+        </span>
+      )}
+      {isDir && <span className={styles.folderChevron}><ChevronRightIcon size={14} /></span>}
+    </>
+  );
 
-      <div className={styles.uploadActions}>
-        {task.status === "failed" && (
-          <button
-            className={styles.textBtn}
-            onClick={() => onRetry(task.id)}
-            title={t("drive.retryUpload")}
-          >
-            {t("common.retry")}
-          </button>
-        )}
-        {task.status !== "finalizing" && (
-          <button
-            className={`${styles.ghostBtn} ${styles.cancelUpload}`}
-            onClick={() => onCancel(task.id)}
-            title={t("drive.cancelUpload")}
-            aria-label={t("drive.cancelUpload")}
-          >
-            <CloseIcon size={13} />
-          </button>
-        )}
-      </div>
+  return (
+    <div className={`${styles.row} ${styles.uploadRow}`}>
+      {navigable ? (
+        <Link className={styles.uploadLink} to={filesHref(path)}>{content}</Link>
+      ) : (
+        <div className={styles.uploadLink}>{content}</div>
+      )}
+      {!completed && (
+        <div className={styles.uploadActions}>
+          {upload.retryIds.length > 0 && (
+            <button
+              className={styles.textBtn}
+              onClick={() => upload.retryIds.forEach(onRetry)}
+              title={t("drive.retryUpload")}
+            >
+              {t("common.retry")}
+            </button>
+          )}
+          {upload.cancelIds.length > 0 && (
+            <button
+              className={`${styles.ghostBtn} ${styles.cancelUpload}`}
+              onClick={() => upload.cancelIds.forEach(onCancel)}
+              title={t("drive.cancelUpload")}
+              aria-label={t("drive.cancelUploadNamed", { name })}
+            >
+              <CloseIcon size={13} />
+            </button>
+          )}
+        </div>
+      )}
     </div>
   );
 });
@@ -469,12 +477,14 @@ export function FilesPage() {
     retry: retryUpload,
   } = useUploadQueue(handleUploaded);
 
-  // Summarize once the whole batch is done; the placeholder rows may sit far down the list.
+  const unfinishedUploadCount = uploads.filter((task) => task.status !== "completed").length;
+
+  // Completed metadata stays available for folder counts after the final confirmation.
   useEffect(() => {
-    if (uploads.length > 0 || completedUploads.current === 0) return;
+    if (unfinishedUploadCount > 0 || completedUploads.current === 0) return;
     completedUploads.current = 0;
     showToast(t("drive.uploadCompleted"));
-  }, [uploads.length, showToast]);
+  }, [unfinishedUploadCount, showToast]);
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
@@ -587,29 +597,18 @@ export function FilesPage() {
   const navigating = loadedPath !== null && loadedPath !== path;
   const listPath = navigating ? (loadedPath ?? path) : path;
 
-  // In-flight placeholder rows share one list with real files and follow the same ordering:
-  // when an upload finishes, the real file lands where its placeholder was and nothing jumps.
-  const { entries, visibleUploads } = useMemo(() => {
-    const uploading = uploads.filter((task) => task.dir === listPath);
-    const pendingPaths = new Set(uploading.map((task) => task.path));
-    // When overwriting a same-named file, hide the old one and keep only the placeholder row;
-    // directories are unaffected.
-    const baseItems = items.filter((item) => item.is_dir || !pendingPaths.has(item.path));
-    const list: RowEntry[] = [
-      ...baseItems.map<RowEntry>((item) => ({
-        kind: "item",
-        key: `item:${item.id}`,
-        item,
-      })),
-      ...uploading.map<RowEntry>((task) => ({
-        kind: "upload",
-        key: `upload:${task.id}`,
-        task,
-      })),
-    ];
-    if (!activeQuery) list.sort(compareEntries);
-    return { entries: list, visibleUploads: uploading };
+  const entries = useMemo<UploadRowEntry[]>(() => {
+    // Search results preserve their API ordering and do not mix in a folder's placeholders.
+    if (activeQuery) return items.map((item) => ({
+      path: item.path,
+      name: item.name,
+      isDir: item.is_dir,
+      item,
+    }));
+    return buildUploadRows(items, uploads, listPath);
   }, [activeQuery, items, listPath, uploads]);
+  const visibleUploads = entries.filter((entry) => entry.upload);
+  const uploadDirectory = isUploadDirectory(uploads, path);
 
   const listKey = `${loadedPath ?? ""}|${activeQuery}`;
 
@@ -656,9 +655,11 @@ export function FilesPage() {
   const currentCrumb = trail[trail.length - 1];
   const currentName = currentCrumb ? crumbName(currentCrumb) : t("drive.root");
 
-  const activeUploadCount = visibleUploads.filter((task) => task.status !== "failed").length;
+  const activeUploadCount = uploads.filter((task) => task.status !== "failed"
+    && task.status !== "completed" && !task.isDir).length;
   const file = !activeQuery && current && !current.is_dir ? current : null;
-  const notFound = !pending && !loadError && !activeQuery && !file && current === null && path !== "";
+  const notFound = !pending && !loadError && !activeQuery && !file && current === null
+    && path !== "" && !uploadDirectory;
   // The current path may be a file even while search results are on screen; never upload to it.
   const canUpload =
     !pending && !loadError && !file && !notFound && !(current !== null && !current.is_dir);
@@ -1107,10 +1108,10 @@ export function FilesPage() {
 
               {showSkeleton ? (
                 <>
-                  {visibleUploads.map((task) => (
+                  {visibleUploads.map((entry) => (
                     <UploadRow
-                      key={task.id}
-                      task={task}
+                      key={entry.path}
+                      entry={entry}
                       onCancel={cancelUpload}
                       onRetry={retryUpload}
                     />
@@ -1136,20 +1137,20 @@ export function FilesPage() {
                   className={`${styles.list} ${styles.enter} ${navigating ? styles.dim : ""}`}
                 >
                   {entries.map((entry) =>
-                    entry.kind === "upload" ? (
+                    entry.upload && (entry.isDir || entry.upload.status !== "completed" || !entry.item) ? (
                       <UploadRow
-                        key={entry.key}
-                        task={entry.task}
+                        key={entry.path}
+                        entry={entry}
                         onCancel={cancelUpload}
                         onRetry={retryUpload}
                       />
-                    ) : (
+                    ) : entry.item ? (
                       <ItemRow
-                        key={entry.key}
+                        key={entry.path}
                         item={entry.item}
                         activeQuery={Boolean(activeQuery)}
                       />
-                    ),
+                    ) : null,
                   )}
 
                   {!pending && entries.length === 0 && (

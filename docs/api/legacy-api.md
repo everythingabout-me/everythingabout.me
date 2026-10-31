@@ -1,6 +1,12 @@
 > Historical reference for the running COS implementation before the clean-slate redesign.
 > New file API work follows [api.md](api.md); compatibility with these routes is not a design requirement.
 > This file also preserves the existing event/Connect descriptions until their implementation is updated.
+>
+> Browser transfer recovery: `/api/fs/upload/sign` durably watches the owner/path before returning STS;
+> `/api/fs/mkdir` watches before writing its marker. A backend worker indexes complete native objects
+> after a lost browser confirmation and resumes after restart. Normal confirm retains a cold watch.
+> Request/response shapes are unchanged; public `/upload` is not covered by these browser hooks.
+> See [index recovery and limits](../design/upload-index-recovery.md).
 
 # Everything About Me API
 

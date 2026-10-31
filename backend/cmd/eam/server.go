@@ -58,6 +58,7 @@ func runServer(args []string) error {
 	defer stop()
 
 	apiServer.StartTimeline(shutdownSignal)
+	apiServer.StartUploadIndex(shutdownSignal)
 
 	go func() {
 		<-shutdownSignal.Done()

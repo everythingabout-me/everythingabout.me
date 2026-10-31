@@ -83,6 +83,7 @@ func (c *Client) Head(ctx context.Context, key string) (*storage.ObjectInfo, err
 		Key:          key,
 		ETag:         strings.Trim(resp.Header.Get("ETag"), `"`),
 		StorageClass: resp.Header.Get("x-cos-storage-class"),
+		ContentType:  resp.Header.Get("Content-Type"),
 	}
 	info.Size, _ = strconv.ParseInt(resp.Header.Get("Content-Length"), 10, 64)
 	if modified := resp.Header.Get("Last-Modified"); modified != "" {

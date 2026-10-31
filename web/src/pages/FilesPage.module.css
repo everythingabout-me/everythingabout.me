@@ -828,13 +828,24 @@ a.crumb:hover {
   }
 }
 
-/* ---------- Upload placeholder rows ---------- */
+/* ---------- Hierarchical upload rows ---------- */
 
 .uploadRow {
-  grid-template-columns: 28px minmax(0, 1fr) 104px;
+  display: flex;
+  gap: 0;
+  min-height: 76px;
+  padding: 0;
+}
+
+.uploadLink {
+  display: grid;
+  grid-template-columns: 28px minmax(0, 1fr) 190px 14px;
+  align-items: center;
   gap: 14px;
-  min-height: 58px;
-  padding: 9px 20px;
+  flex: 1;
+  min-width: 0;
+  min-height: 76px;
+  padding: 12px 12px 12px 20px;
 }
 
 .uploadInfo {
@@ -849,14 +860,11 @@ a.crumb:hover {
   align-items: center;
   gap: 8px;
   min-width: 0;
-  overflow: hidden;
-  white-space: nowrap;
 }
 
 .uploadTitle .name {
   flex: 0 1 auto;
-  /* The name may shrink but must keep a sliver; the width goes to the progress numbers. */
-  min-width: 90px;
+  min-width: 0;
 }
 
 .statusBadge {
@@ -865,7 +873,7 @@ a.crumb:hover {
   flex: none;
   height: 18px;
   padding: 0 7px;
-  border-radius: 999px;
+  border-radius: 6px;
   background: var(--hover);
   color: var(--text-3);
   font-size: 11px;
@@ -885,15 +893,14 @@ a.crumb:hover {
 }
 
 .statusFailed {
-  background: var(--danger-soft);
-  color: var(--danger);
+  background: color-mix(in srgb, var(--border-strong) 35%, var(--surface));
+  color: var(--text-2);
 }
 
 .uploadMeta {
   display: flex;
   align-items: baseline;
   gap: 6px;
-  flex: 0 1 auto;
   min-width: 0;
   overflow: hidden;
   color: var(--text-3);
@@ -908,17 +915,50 @@ a.crumb:hover {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
-  color: var(--danger);
+  color: var(--text-2);
 }
 
 .uploadSep {
   opacity: 0.45;
 }
 
+.uploadProgress {
+  min-width: 0;
+}
+
+.uploadProgressLabel {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  color: var(--text-3);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.uploadPercent {
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.uploadFinishedMeta {
+  color: var(--text-3);
+  font-size: 13px;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.folderChevron {
+  color: var(--text-3);
+  opacity: 0.7;
+}
+
 .progressTrack {
   width: 100%;
   height: 4px;
-  margin-top: 1px;
+  margin-top: 6px;
   border-radius: 999px;
   background: color-mix(in srgb, var(--border) 80%, transparent);
   overflow: hidden;
@@ -949,8 +989,9 @@ a.crumb:hover {
   display: flex;
   align-items: center;
   justify-content: flex-end;
-  gap: 6px;
+  gap: 4px;
   flex: none;
+  margin-right: 12px;
 }
 
 .cancelUpload {
@@ -1065,21 +1106,44 @@ a.crumb:hover {
   }
 
   .uploadRow {
-    grid-template-columns: 26px minmax(0, 1fr) auto;
-    gap: 10px;
-    padding: 8px 15px;
+    gap: 0;
+    padding: 0;
   }
 
-  /* Narrow screens cannot fit one row: name and status on line one, progress wraps below. */
+  .uploadLink {
+    grid-template-columns: 28px minmax(0, 1fr) 14px;
+    gap: 10px;
+    padding: 12px 8px 12px 16px;
+  }
+
   .uploadTitle {
     flex-wrap: wrap;
-    gap: 6px;
-    row-gap: 3px;
+    gap: 5px 7px;
   }
 
   .uploadMeta {
-    flex: 1 0 100%;
-    gap: 5px;
+    flex-wrap: wrap;
+    gap: 4px;
+    font-size: 11px;
+    white-space: normal;
+  }
+
+  .uploadProgress,
+  .uploadFinishedMeta {
+    grid-column: 2;
+    grid-row: 2;
+    text-align: left;
+  }
+
+  .folderChevron {
+    grid-column: 3;
+    grid-row: 1;
+  }
+
+  .uploadActions {
+    align-self: flex-start;
+    margin-top: 12px;
+    margin-right: 8px;
   }
 
   .detailRow {

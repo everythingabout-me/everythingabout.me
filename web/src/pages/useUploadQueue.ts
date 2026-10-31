@@ -120,11 +120,12 @@ class SpeedMeter {
   }
 }
 
-export type UploadStatus = "queued" | "uploading" | "finalizing" | "failed";
+export type UploadStatus = "queued" | "uploading" | "finalizing" | "failed" | "completed";
 
 export interface UploadTask {
   id: string;
   file: File | null;
+  isDir: boolean;
   name: string;
   /** Directory the upload started in; decides which directory shows this placeholder row. */
   dir: string;
@@ -242,7 +243,9 @@ export function useUploadQueue(
           const { node } = await api.list(task.path);
           if (!node?.is_dir) throw new Error("a file with the same name already exists");
           if (runtime.canceled) return;
-          update((current) => current.filter((entry) => entry.id !== id));
+          update((current) => current.map((entry) => entry.id === id
+            ? { ...entry, status: "completed", file: null, loaded: entry.size, speed: 0 }
+            : entry));
           onUploadedRef.current(task, node);
           return;
         }
@@ -363,7 +366,9 @@ export function useUploadQueue(
         );
         if (runtime.canceled) return;
 
-        update((current) => current.filter((entry) => entry.id !== id));
+        update((current) => current.map((entry) => entry.id === id
+          ? { ...entry, status: "completed", file: null, loaded: entry.size, speed: 0 }
+          : entry));
         onUploadedRef.current(task, item);
       } catch (error) {
         if (runtime.canceled || error instanceof UploadCanceledError) return;
@@ -391,7 +396,7 @@ export function useUploadQueue(
       while (runningRef.current < MAX_PARALLEL_UPLOADS) {
         const next = tasksRef.current.find((task) =>
           task.status === "queued" && !tasksRef.current.some((parent) =>
-            !parent.file && parent.id !== task.id && task.path.startsWith(`${parent.path}/`),
+            parent.isDir && parent.status !== "completed" && parent.id !== task.id && task.path.startsWith(`${parent.path}/`),
           ),
         );
         if (!next) break;
@@ -423,7 +428,7 @@ export function useUploadQueue(
     (id: string) => {
       const target = tasksRef.current.find((task) => task.id === id);
       const canceled = new Set(tasksRef.current.filter((task) =>
-        task.id === id || (target && !target.file && task.path.startsWith(`${target.path}/`)),
+        task.id === id || (target?.isDir && task.path.startsWith(`${target.path}/`)),
       ).map((task) => task.id));
       for (const canceledId of canceled) {
         const runtime = runtimesRef.current.get(canceledId);
@@ -479,11 +484,12 @@ export function useUploadQueue(
   const enqueue = useCallback(
     (entries: UploadEntry[], dir: string, exists: (path: string) => boolean) => {
       if (!entries.length) return;
+      if (tasksRef.current.every((task) => task.status === "completed")) update(() => []);
 
       const added: UploadTask[] = [];
       for (const { file, path: name } of entries) {
         const path = dir ? `${dir}/${name}` : name;
-        const duplicate = tasksRef.current.find((task) => task.path === path);
+        const duplicate = tasksRef.current.find((task) => task.path === path && task.status !== "completed");
 
         let overwrite = false;
         if (duplicate && !file && !duplicate.file) continue;
@@ -499,6 +505,7 @@ export function useUploadQueue(
         added.push({
           id: newTaskId(),
           file,
+          isDir: file === null,
           name,
           dir,
           path,
@@ -512,7 +519,8 @@ export function useUploadQueue(
       }
 
       if (!added.length) return;
-      update((current) => [...current, ...added]);
+      const addedPaths = new Set(added.map((task) => task.path));
+      update((current) => [...current.filter((task) => task.status !== "completed" || !addedPaths.has(task.path)), ...added]);
       pump();
     },
     [cancel, pump, update],

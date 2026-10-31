@@ -10,7 +10,10 @@
 > implementation is documented separately in [legacy-api.md](legacy-api.md). Account login, Connect,
 > and event authoring are separate APIs; this specification defines the files they consume.
 > The legacy browser folder-upload fix uses existing directory/sign/confirm routes; sign now accepts
-> zero-byte files. It does not activate or change the unified API specified here.
+> zero-byte files. Legacy browser uploads also persist root-bound index observation watches before
+> returning credentials or creating folder markers, so complete native objects are indexed after lost
+> confirmation; see [recovery guarantees](../design/upload-index-recovery.md). This does not activate
+> or change the unified API specified here.
 > Architecture: [storage.md](../design/storage.md). Driver contract: [storage-driver.md](../design/storage-driver.md).
 > **Mandatory:** native storage must retain complete readable folders, original names and raw files. Users
 > must be able to leave through ordinary native tools without the database or an Everything export.

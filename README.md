@@ -121,7 +121,8 @@ The key sits directly on the path (`drive/<userID>/Photos/2024/a.jpg`), which me
   the viewer ([open-file-viewer](https://github.com/xushanpei/open-file-viewer)) plus pdfjs go through `React.lazy`,
   so nothing downloads on first paint and a single chunk (~191KB gzip) is fetched when you open one, with the per-format renderer loading on top of that; formats without a preview still offer a download
 - Drag / multi-select upload: placeholder rows appear immediately, with a queue, progress, and speed, cancelable, retryable on failure; `/` focuses search
-- Folder uploads: drag folders or choose **Upload → Upload folder** to retain the selected root and nested paths. Dragged folders also preserve empty directories; the browser folder picker only exposes directories containing files. Existing directories merge, while replacing files requires confirmation.
+- Folder uploads: drag folders or choose **Upload → Upload folder** to retain the selected root and nested paths. The list shows only immediate children throughout upload; each folder summarizes selected descendant file counts, confirmed files, bytes and percentage. Pending folders are navigable, completed rows lose their progress bars, and folder actions cancel/retry the remaining descendants. Dragged folders also preserve empty directories; the browser folder picker only exposes directories containing files. Existing directories merge, while replacing files requires confirmation.
+- Refreshing discards the browser queue. Before credentials or folder markers are returned/written, the backend persists owner/root-bound index observations. A separate startup worker repairs complete COS objects even when browser confirmation is lost; it never uploads missing files or deletes native bytes. Apply migrations (including `018_upload_index_watches.sql`) and restart the backend when upgrading. Recovery is eventual, not an atomic COS/Postgres transaction; see [upload recovery](docs/design/upload-index-recovery.md).
 - Search matches both the filename and the full path, and each result shows its directory on the right
 - New directories use an inline input, and deletion has a confirmation dialog (it is permanent)
 - One shared top bar on every signed-in page: brand, `Home` / `Files` navigation with the current page highlighted, the account chip, and the file page's search and upload actions
@@ -371,8 +372,8 @@ the rewrite.
 | POST | `/api/timeline/rebuild` | Force a full re-organize of the current account (drops the analysis results and backfills from scratch) |
 | GET | `/api/fs/list?path=` | List the current level (Postgres only, not the bucket; also returns the path's own `node`, so the UI can tell a folder from a file) |
 | GET | `/api/fs/search?q=` | Fuzzy search by name/path |
-| POST | `/api/fs/upload/sign` | Get STS temporary credentials for a browser direct upload (`size` may be zero for an empty file) |
-| POST | `/api/fs/upload/confirm` | Writes the index after a HeadObject check |
+| POST | `/api/fs/upload/sign` | Persist an index watch before returning existing STS credentials (`size` may be zero) |
+| POST | `/api/fs/upload/confirm` | Verify HeadObject, write the index, and retain a cold recovery watch |
 | GET | `/api/fs/download?path=` | 302 to a presigned URL (`&json=1` returns JSON) |
 | POST | `/api/fs/mkdir` | Create a directory (writes a zero-byte placeholder object) |
 | POST | `/api/fs/rename` | Rename a file in one request; a directory answers `202` + `Location` because every object inside has to move |
