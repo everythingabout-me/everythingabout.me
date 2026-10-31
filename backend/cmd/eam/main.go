@@ -2,8 +2,8 @@
 //
 //	eam server                      start the HTTP server (default)
 //	eam migrate                     run sql/*.sql in filename order
-//	eam doctor [--write]            self-check config / database / COS
-//	eam reconcile [--owner email] [--inventory inventory.csv] [--dry-run]
+//	eam doctor [--owner-id UUID] [--write]  self-check configuration / database / selected storage
+//	eam reconcile --owner email-or-UUID [--inventory inventory.csv] [--dry-run]
 //	eam storage-baseline --owner-id UUID --output new-baseline.json
 //	eam claim --email email [--dry-run] [--keep-source]
 package main
@@ -69,8 +69,8 @@ func usage() {
 usage:
   eam [server]                     start the HTTP server
   eam migrate                      create tables / run sql/*.sql
-  eam doctor [--write]             check config, database, COS
-  eam reconcile [--owner email] [--inventory inventory.csv] [--dry-run]
+  eam doctor [--owner-id UUID] [--write]  check config, database, selected storage
+  eam reconcile --owner email-or-UUID [--inventory inventory.csv] [--dry-run]
   eam storage-baseline --owner-id UUID --output new-baseline.json [--writers-quiesced]
   eam storage-baseline --input baseline.json --output recheck.json [--quota-bytes N]
   eam claim --email email [--dry-run] [--keep-source]
@@ -80,7 +80,7 @@ usage:
 
 Environment variables come from the process; a .env in the current or the two
 parent directories is loaded automatically.
-Common: DATABASE_URL / COS_* / SES_* / APP_ENV / ADDR / WEB_DIR
+Common: DATABASE_URL / APP_SECRET / STORAGE_BACKEND / COS_* / S3_* / LOCAL_* / SES_* / APP_ENV / ADDR / WEB_DIR
 storage-baseline --input is offline and does not load application configuration.
 `)
 }

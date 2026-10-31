@@ -1,5 +1,6 @@
-// Package storage defines the object storage interface. Business code depends only on it;
-// the concrete implementation (Tencent Cloud COS for now) lives in internal/cos.
+// Package storage defines the native tree contract and typed backend semantics.
+// This file retains the legacy COS object interface until the file API cutover;
+// new drivers implement Tree/Driver without client credentials or presigning.
 package storage
 
 import (
@@ -16,7 +17,7 @@ type ObjectInfo struct {
 	StorageClass string
 }
 
-type Page struct {
+type ObjectPage struct {
 	Objects    []ObjectInfo
 	NextMarker string
 }
@@ -69,7 +70,7 @@ type Storage interface {
 	// Content-Length); an empty contentType is treated as application/octet-stream.
 	Put(ctx context.Context, key string, r io.Reader, size int64, contentType string) (*ObjectInfo, error)
 	// List enumerates page by page; return false from the callback to stop early.
-	List(ctx context.Context, prefix string, onPage func(Page) (bool, error)) error
+	List(ctx context.Context, prefix string, onObjectPage func(ObjectPage) (bool, error)) error
 	// GetURL builds a presigned URL for downloads, inline by default.
 	GetURL(ctx context.Context, key string, opts URLOptions) (string, error)
 	// PutURL builds a presigned PUT URL for uploads. The client sends bytes straight to object

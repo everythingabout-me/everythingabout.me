@@ -24,13 +24,9 @@ type Service struct {
 }
 
 func New(db *store.DB, cfg *config.Config) *Service {
-	// Derive from a secret the deployment already has; database-only commands with no COS
-	// key fall back to the database URL.
-	seed := cfg.COS.SecretKey
-	if seed == "" {
-		seed = cfg.DatabaseURL
-	}
-	sum := sha256.Sum256([]byte("eam/save-link/v1:" + seed))
+	// Keep the derivation stable so an explicitly preserved legacy seed retains
+	// existing links. Server startup validates APP_SECRET before creating services.
+	sum := sha256.Sum256([]byte("eam/save-link/v1:" + cfg.AppSecret))
 	return &Service{db: db, cfg: cfg, linkKey: sum[:]}
 }
 

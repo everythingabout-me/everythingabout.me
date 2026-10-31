@@ -17,10 +17,13 @@ import (
 
 // Config is all the configuration one process start needs.
 type Config struct {
-	Addr             string
-	AppEnv           string
-	WebDir           string
-	DatabaseURL      string
+	Addr        string
+	AppEnv      string
+	WebDir      string
+	DatabaseURL string
+	// AppSecret is a stable deployment secret, independent of database/storage credentials.
+	AppSecret        string
+	Storage          Storage
 	SessionTTLDays   int
 	CookieSecure     bool
 	RegistrationOpen bool
@@ -97,8 +100,9 @@ func COSAppID(bucket string) string {
 func Load() (*Config, error) {
 	loadDotEnv()
 
-	if bucket := os.Getenv("COS_BUCKET"); bucket != "" && COSAppID(bucket) == "" {
-		return nil, fmt.Errorf("COS_BUCKET must include the APPID, e.g. mydata-1250000000")
+	storageConfig, err := loadStorage(os.Getenv)
+	if err != nil {
+		return nil, err
 	}
 
 	c := &Config{
@@ -106,6 +110,8 @@ func Load() (*Config, error) {
 		AppEnv:             envOr("APP_ENV", "development"),
 		WebDir:             webDir(),
 		DatabaseURL:        os.Getenv("DATABASE_URL"),
+		AppSecret:          os.Getenv("APP_SECRET"),
+		Storage:            storageConfig,
 		SessionTTLDays:     positiveInt("SESSION_TTL_DAYS", 30),
 		RegistrationOpen:   os.Getenv("ALLOW_REGISTRATION") != "false",
 		QuotaBytes:         int64(positiveInt("USER_QUOTA_BYTES", 0)),
@@ -118,8 +124,8 @@ func Load() (*Config, error) {
 			Region:    os.Getenv("COS_REGION"),
 		},
 		SES: SES{
-			SecretID:         firstNonEmpty(os.Getenv("SES_SECRET_ID"), os.Getenv("COS_SECRET_ID")),
-			SecretKey:        firstNonEmpty(os.Getenv("SES_SECRET_KEY"), os.Getenv("COS_SECRET_KEY")),
+			SecretID:         os.Getenv("SES_SECRET_ID"),
+			SecretKey:        os.Getenv("SES_SECRET_KEY"),
 			Region:           envOr("SES_REGION", "ap-guangzhou"),
 			FromEmailAddress: os.Getenv("SES_FROM_EMAIL_ADDRESS"),
 			TemplateID:       int64(positiveInt("SES_TEMPLATE_ID", 0)),
@@ -157,6 +163,9 @@ func Load() (*Config, error) {
 // ValidateCOS is only for commands that really touch the bucket (server / doctor /
 // reconcile / claim); pure database work such as migrations needs no COS config.
 func (c *Config) ValidateCOS() error {
+	if c.COS.Bucket != "" && COSAppID(c.COS.Bucket) == "" {
+		return fmt.Errorf("COS_BUCKET must include the APPID, e.g. mydata-1250000000")
+	}
 	for name, value := range map[string]string{
 		"COS_SECRET_ID":  c.COS.SecretID,
 		"COS_SECRET_KEY": c.COS.SecretKey,

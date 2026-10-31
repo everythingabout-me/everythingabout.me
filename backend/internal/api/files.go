@@ -261,6 +261,10 @@ func (s *Server) handleUploadConfirm(w http.ResponseWriter, r *http.Request) err
 }
 
 func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
+	if err := s.assertBackendRoute(r); err != nil {
+		httpx.WriteError(w, err)
+		return
+	}
 	asJSON := r.URL.Query().Get("json") == "1"
 
 	err := func() error {

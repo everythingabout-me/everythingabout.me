@@ -14,7 +14,7 @@ import (
 
 	"everythingabout.me/backend/internal/api"
 	"everythingabout.me/backend/internal/config"
-	"everythingabout.me/backend/internal/cos"
+	"everythingabout.me/backend/internal/storagebackend"
 	"everythingabout.me/backend/internal/store"
 	"everythingabout.me/backend/internal/webui"
 )
@@ -28,7 +28,7 @@ func runServer(args []string) error {
 	if err != nil {
 		return err
 	}
-	if err := cfg.ValidateCOS(); err != nil {
+	if err := cfg.ValidateServer(); err != nil {
 		return err
 	}
 
@@ -39,12 +39,14 @@ func runServer(args []string) error {
 	}
 	defer db.Close()
 
-	objectStorage, err := cos.New(cfg.COS)
+	backend, err := storagebackend.New(cfg)
 	if err != nil {
-		return fmt.Errorf("failed to initialize COS: %w", err)
+		return fmt.Errorf("failed to initialize storage backend: %w", err)
 	}
+	defer backend.Close()
 
-	apiServer := api.New(cfg, db, objectStorage, webui.New(cfg.WebDir))
+	apiServer := api.New(cfg, db, backend.Legacy(), webui.New(cfg.WebDir))
+	apiServer.SetStorageFactory(backend)
 	server := &http.Server{
 		Addr:              cfg.Addr,
 		Handler:           apiServer.Handler(),

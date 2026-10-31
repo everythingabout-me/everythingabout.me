@@ -2,443 +2,123 @@ package main
 
 import (
 	"context"
-	"encoding/csv"
 	"flag"
 	"fmt"
-	"io"
 	"os"
-	"sort"
-	"strconv"
 	"strings"
 	"time"
 
-	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgtype"
 
 	"everythingabout.me/backend/internal/config"
-	"everythingabout.me/backend/internal/cos"
+	"everythingabout.me/backend/internal/nodes"
 	"everythingabout.me/backend/internal/paths"
-	"everythingabout.me/backend/internal/storage"
+	"everythingabout.me/backend/internal/storagebackend"
 	"everythingabout.me/backend/internal/store"
+	"everythingabout.me/backend/internal/treescan"
 )
 
-const reconcileBatch = 500
-
-type scanned struct {
-	key          string
-	path         string
-	isDir        bool
-	size         int64
-	etag         string
-	storageClass string
-	modified     time.Time
-}
-
-// reconcile syncs the objects in a COS bucket into the database index.
-//
-//  1. run this to build the index after coscli / rclone fills drive/<userID>/ for a user;
-//  2. it can also read a COS Inventory CSV, avoiding a full List over millions of objects.
+// runReconcile imports existing native names and metadata without changing native
+// content. P1 deliberately never prunes: complete enumeration and CSV claims do
+// not establish writer quiescence or safe deletion of index/application metadata.
 func runReconcile(args []string) error {
 	flags := flag.NewFlagSet("reconcile", flag.ContinueOnError)
-	owner := flags.String("owner", "", "only sync the prefix for this user")
-	inventory := flags.String("inventory", "", "COS inventory CSV; lists live when empty")
-	dryRun := flags.Bool("dry-run", false, "print results without committing")
+	owner := flags.String("owner", "", "required owner email or UUID")
+	inventory := flags.String("inventory", "", "scoped CSV with key,size headers and exact unescaped native-root keys (local: drive/<owner>/ keys)")
+	dryRun := flags.Bool("dry-run", false, "validate and report index changes without database writes")
+	maxEntries := flags.Int("max-entries", 1000000, "maximum scanned entries including implicit folders (up to 5000000)")
+	maxPages := flags.Int("max-pages", 100000, "maximum native listing pages (up to 1000000)")
+	maxDepth := flags.Int("max-depth", 128, "maximum path depth (up to 1024)")
+	pageSize := flags.Int("page-size", 1000, "requested immediate-child listing page size (up to 10000)")
+	maxInventoryBytes := flags.Int64("max-inventory-bytes", 256<<20, "maximum CSV input bytes (up to 8 GiB)")
+	timeout := flags.Duration("timeout", 30*time.Minute, "total scan/import timeout (positive and at most 24h)")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
-
+	if flags.NArg() != 0 {
+		return fmt.Errorf("reconcile does not accept positional arguments")
+	}
+	if strings.TrimSpace(*owner) == "" {
+		return fmt.Errorf("reconcile requires --owner email-or-UUID; legacy data is handled separately by claim")
+	}
+	if *timeout <= 0 || *timeout > 24*time.Hour {
+		return fmt.Errorf("reconcile timeout must be positive and at most 24h")
+	}
+	if *maxEntries <= 0 || *maxEntries > 5000000 || *maxPages <= 0 || *maxPages > 1000000 || *maxDepth <= 0 || *maxDepth > 1024 || *pageSize <= 0 || *pageSize > 10000 || *maxInventoryBytes <= 0 || *maxInventoryBytes > 8<<30 {
+		return fmt.Errorf("reconcile limits must be positive and within the documented bounds")
+	}
 	cfg, err := config.Load()
 	if err != nil {
 		return err
 	}
-	if err := cfg.ValidateCOS(); err != nil {
-		return err
-	}
-
-	ctx := context.Background()
+	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
+	defer cancel()
 	db, err := store.Open(ctx, cfg.DatabaseURL)
 	if err != nil {
-		return fmt.Errorf("failed to connect to database: %w", err)
+		return fmt.Errorf("connect to index database: %w", err)
 	}
 	defer db.Close()
-
-	ownerID := ""
-	if strings.TrimSpace(*owner) != "" {
-		if err := db.Pool().QueryRow(ctx,
-			`select id::text from users where lower(email) = lower($1) limit 1`,
-			strings.TrimSpace(*owner)).Scan(&ownerID); err != nil {
-			return fmt.Errorf("user %s not found; sign up on the website first", *owner)
-		}
+	selector := strings.TrimSpace(*owner)
+	var id pgtype.UUID
+	query := `select id::text from users where lower(email)=lower($1)`
+	if err := id.Scan(selector); err == nil && id.Valid {
+		query = `select id::text from users where id=$1::uuid`
 	}
-
-	prefix := paths.DrivePrefix
-	if ownerID != "" {
-		prefix = paths.OwnerPrefix(ownerID)
+	var ownerID string
+	if err := db.Pool().QueryRow(ctx, query, selector).Scan(&ownerID); err != nil {
+		return fmt.Errorf("resolve reconcile owner %q: %w", selector, err)
 	}
-
-	objectStorage, err := cos.New(cfg.COS)
+	backend, err := storagebackend.New(cfg)
 	if err != nil {
 		return err
 	}
-
-	tx, err := db.Pool().Begin(ctx)
+	defer backend.Close()
+	driver, err := backend.Open(ctx, ownerID)
 	if err != nil {
 		return err
 	}
-	defer func() { _ = tx.Rollback(ctx) }()
-
-	if _, err := tx.Exec(ctx, `create temp table scan_keys (key text primary key) on commit drop`); err != nil {
-		return err
-	}
-
-	startedAt := time.Now()
-	var seen, inserted int
-	var buffer []scanned
-
-	flush := func() error {
-		if len(buffer) == 0 {
-			return nil
-		}
-		owners := make([]string, len(buffer))
-		keys := make([]string, len(buffer))
-		itemPaths := make([]string, len(buffer))
-		parents := make([]string, len(buffer))
-		names := make([]string, len(buffer))
-		dirs := make([]string, len(buffer))
-		sizes := make([]string, len(buffer))
-		etags := make([]string, len(buffer))
-		classes := make([]string, len(buffer))
-		modifieds := make([]*time.Time, len(buffer))
-		for i, item := range buffer {
-			owners[i] = ownerID
-			keys[i] = item.key
-			itemPaths[i] = item.path
-			parents[i] = paths.ParentOf(item.path)
-			names[i] = paths.NameOf(item.path)
-			dirs[i] = strconv.FormatBool(item.isDir)
-			sizes[i] = strconv.FormatInt(item.size, 10)
-			etags[i] = item.etag
-			classes[i] = item.storageClass
-			if !item.modified.IsZero() {
-				modifieds[i] = &buffer[i].modified
+	defer driver.Close()
+	opts := treescan.Options{Names: driver.Describe().Names, MaxEntries: *maxEntries, MaxPages: *maxPages, MaxDepth: *maxDepth, PageSize: *pageSize, MaxInventoryBytes: *maxInventoryBytes}
+	fmt.Printf("scan owner: %s; index pruning: disabled; dry-run: %t\n", ownerID, *dryRun)
+	var result *treescan.Result
+	if *inventory != "" {
+		fmt.Println("inventory: validating supplied records; current native tree completeness is unverified")
+		// Object-store inventories use the configured native prefix. Local CSVs
+		// use logical drive keys; neither becomes a raw private database key.
+		prefix := paths.OwnerPrefix(ownerID)
+		if cfg.BackendName() != "local" {
+			binding, err := backend.Binding(ownerID)
+			if err != nil {
+				return err
 			}
+			prefix = binding.ContentRoot
 		}
-
-		tag, err := tx.Exec(ctx,
-			`insert into nodes (owner_id, key, path, parent, name, is_dir, size, etag,
-			                    storage_class, source_modified_at)
-			 select nullif(owner, '')::uuid, key, path, parent, name,
-			        is_dir::boolean, size::bigint, nullif(etag, ''), nullif(storage_class, ''),
-			        modified
-			   from unnest($1::text[], $2::text[], $3::text[], $4::text[], $5::text[],
-			               $6::text[], $7::text[], $8::text[], $9::text[], $10::timestamptz[])
-			     as t(owner, key, path, parent, name, is_dir, size, etag, storage_class, modified)
-			 on conflict do nothing`,
-			owners, keys, itemPaths, parents, names, dirs, sizes, etags, classes, modifieds)
+		input, err := os.Open(*inventory)
 		if err != nil {
 			return err
 		}
-		inserted += int(tag.RowsAffected())
-		seen += len(buffer)
-
-		if _, err := tx.Exec(ctx,
-			`insert into scan_keys (key) select unnest($1::text[]) on conflict do nothing`, keys); err != nil {
+		result, err = treescan.Inventory(ctx, input, prefix, opts)
+		closeErr := input.Close()
+		if err != nil {
 			return err
 		}
-
-		if _, err := tx.Exec(ctx,
-			`update nodes n
-			    set size = s.size,
-			        etag = s.etag,
-			        storage_class = s.storage_class,
-			        source_modified_at = coalesce(s.modified, n.source_modified_at),
-			        updated_at = now()
-			   from (
-			     select key,
-			            size::bigint as size,
-			            nullif(etag, '') as etag,
-			            nullif(storage_class, '') as storage_class,
-			            modified
-			       from unnest($1::text[], $2::text[], $3::text[], $4::text[], $5::timestamptz[])
-			         as t(key, size, etag, storage_class, modified)
-			   ) s
-			  where n.key = s.key
-				    and (n.size is distinct from s.size
-				         or n.etag is distinct from s.etag
-				         or (s.modified is not null and n.source_modified_at is distinct from s.modified))`,
-			keys, sizes, etags, classes, modifieds); err != nil {
-			return err
-		}
-
-		buffer = buffer[:0]
-		return nil
-	}
-
-	accept := func(item scanned) error {
-		buffer = append(buffer, item)
-		if len(buffer) >= reconcileBatch {
-			return flush()
-		}
-		return nil
-	}
-
-	acceptKey := func(key string, size int64, etag, storageClass string, modified time.Time) error {
-		if !strings.HasPrefix(key, prefix) {
-			return nil
-		}
-		// without --owner only legacy unowned rows are touched; keys already under
-		// drive/<userID>/ are skipped
-		if ownerID == "" && paths.OwnerSegmentOf(key) != "" {
-			return nil
-		}
-		itemPath, ok := paths.PathFromKey(key, ownerID)
-		if !ok {
-			return nil
-		}
-		isDir := strings.HasSuffix(key, "/")
-		if isDir && itemPath == "" {
-			return nil
-		}
-		if isDir {
-			size = 0
-		}
-		return accept(scanned{
-			key:          key,
-			path:         itemPath,
-			isDir:        isDir,
-			size:         size,
-			etag:         etag,
-			storageClass: storageClass,
-			modified:     modified,
-		})
-	}
-
-	scope := prefix
-	if ownerID == "" {
-		scope += " (legacy unowned data)"
-	}
-	if *dryRun {
-		scope += " [dry-run]"
-	}
-	fmt.Printf("scan scope: %s\n", scope)
-
-	if *inventory != "" {
-		if err := readInventory(*inventory, acceptKey); err != nil {
-			return err
+		if closeErr != nil {
+			return closeErr
 		}
 	} else {
-		err := objectStorage.List(ctx, prefix, func(page storage.Page) (bool, error) {
-			for _, object := range page.Objects {
-				if err := acceptKey(object.Key, object.Size, object.ETag,
-					object.StorageClass, object.LastModified); err != nil {
-					return false, err
-				}
-			}
-			return true, nil
-		})
+		result, err = treescan.Scan(ctx, driver, opts)
 		if err != nil {
 			return err
 		}
 	}
-	if err := flush(); err != nil {
-		return err
-	}
-
-	// backfill parent directories
-	if err := backfillParents(ctx, tx, ownerID); err != nil {
-		return err
-	}
-
-	// objects not seen during the scan were deleted outside (only the scope scanned here)
-	var gone int64
-	err = tx.QueryRow(ctx,
-		`with changed as (
-		   delete from nodes
-		    where updated_at < $1
-		      and owner_id is not distinct from nullif($2, '')::uuid
-		      and key not in (select key from scan_keys)
-		    returning 1
-		 )
-		 select count(*) from changed`, startedAt, ownerID).Scan(&gone)
+	report, err := nodes.ApplyScan(ctx, db.Pool(), ownerID, result, nodes.ScanApplyOptions{DryRun: *dryRun})
 	if err != nil {
 		return err
 	}
-
+	label := ""
 	if *dryRun {
-		if err := tx.Rollback(ctx); err != nil {
-			return err
-		}
-	} else if err := tx.Commit(ctx); err != nil {
-		return err
+		label = "[dry-run] "
 	}
-
-	prefixText := ""
-	if *dryRun {
-		prefixText = "[dry-run] "
-	}
-	fmt.Printf("%sscanned %d objects, inserted %d, marked deleted %d\n", prefixText, seen, inserted, gone)
+	fmt.Printf("%sscanned %d paths, inserted %d, updated %d, unchanged %d; pruned 0\n", label, report.Scanned, report.Inserted, report.Updated, report.Unchanged)
 	return nil
-}
-
-// backfillParents makes sure every level of the tree has a directory row.
-func backfillParents(ctx context.Context, tx pgx.Tx, ownerID string) error {
-	rows, err := tx.Query(ctx,
-		`select distinct parent
-		   from nodes
-		  where parent <> ''
-		    and owner_id is not distinct from nullif($1, '')::uuid`, ownerID)
-	if err != nil {
-		return err
-	}
-	allDirs := make(map[string]struct{})
-	for rows.Next() {
-		var parent string
-		if err := rows.Scan(&parent); err != nil {
-			rows.Close()
-			return err
-		}
-		allDirs[parent] = struct{}{}
-		for _, ancestor := range paths.AncestorsOf(parent) {
-			allDirs[ancestor] = struct{}{}
-		}
-	}
-	rows.Close()
-	if err := rows.Err(); err != nil {
-		return err
-	}
-	if len(allDirs) == 0 {
-		return nil
-	}
-
-	dirs := make([]string, 0, len(allDirs))
-	for dir := range allDirs {
-		dirs = append(dirs, dir)
-	}
-	sort.Slice(dirs, func(i, j int) bool { return len(dirs[i]) < len(dirs[j]) })
-
-	owners := make([]string, len(dirs))
-	keys := make([]string, len(dirs))
-	parents := make([]string, len(dirs))
-	names := make([]string, len(dirs))
-	for i, dir := range dirs {
-		owners[i] = ownerID
-		if ownerID != "" {
-			keys[i] = paths.DirKeyFor(dir, ownerID)
-		} else {
-			keys[i] = paths.DrivePrefix + dir + "/"
-		}
-		parents[i] = paths.ParentOf(dir)
-		names[i] = paths.NameOf(dir)
-	}
-
-	_, err = tx.Exec(ctx,
-		`insert into nodes (owner_id, key, path, parent, name, is_dir)
-		 select nullif(owner, '')::uuid, key, path, parent, name, true
-		   from unnest($1::text[], $2::text[], $3::text[], $4::text[], $5::text[])
-		     as t(owner, key, path, parent, name)
-		 on conflict do nothing`,
-		owners, keys, dirs, parents, names)
-	return err
-}
-
-// readInventory reads a COS inventory CSV, taking key / size / etag / modified time
-// from the header names (or the default column order).
-func readInventory(
-	file string,
-	accept func(key string, size int64, etag, storageClass string, modified time.Time) error,
-) error {
-	handle, err := os.Open(file)
-	if err != nil {
-		return err
-	}
-	defer handle.Close()
-
-	reader := csv.NewReader(handle)
-	reader.FieldsPerRecord = -1
-	reader.LazyQuotes = true
-
-	var header []string
-	first := true
-	for {
-		record, err := reader.Read()
-		if err == io.EOF {
-			return nil
-		}
-		if err != nil {
-			return err
-		}
-		if len(record) == 0 {
-			continue
-		}
-		for i := range record {
-			record[i] = strings.TrimSpace(record[i])
-		}
-
-		if first {
-			first = false
-			isHeader := false
-			for _, cell := range record {
-				if strings.Contains(strings.ToLower(cell), "key") {
-					isHeader = true
-					break
-				}
-			}
-			if isHeader {
-				header = make([]string, len(record))
-				for i, cell := range record {
-					header[i] = strings.ToLower(cell)
-				}
-				continue
-			}
-			// no header: fall back to the COS inventory's default column order
-			header = []string{"bucket", "key", "size", "lastmodifieddate", "etag", "storageclass"}
-		}
-
-		row := make(map[string]string, len(header))
-		for i, name := range header {
-			if i < len(record) {
-				row[name] = record[i]
-			}
-		}
-		key := pick(row, "key", "objectkey", "object_key")
-		if key == "" || strings.HasPrefix(key, "_inventory/") {
-			continue
-		}
-		size, _ := strconv.ParseInt(pick(row, "size"), 10, 64)
-		if err := accept(key, size,
-			strings.Trim(pick(row, "etag"), `"`),
-			pick(row, "storageclass", "storage_class"),
-			parseInventoryTime(pick(row, "lastmodifieddate", "last_modified", "lastmodified"))); err != nil {
-			return err
-		}
-	}
-}
-
-func pick(row map[string]string, names ...string) string {
-	for _, name := range names {
-		if value := row[name]; value != "" {
-			return value
-		}
-	}
-	return ""
-}
-
-// parseInventoryTime accepts the timestamp formats common in COS inventories.
-func parseInventoryTime(value string) time.Time {
-	value = strings.TrimSpace(value)
-	if value == "" {
-		return time.Time{}
-	}
-	for _, layout := range []string{
-		time.RFC3339Nano,
-		time.RFC3339,
-		"2006-01-02T15:04:05.000Z",
-		"2006-01-02T15:04:05Z",
-		"2006-01-02 15:04:05",
-		"2006-01-02",
-	} {
-		if parsed, err := time.Parse(layout, value); err == nil {
-			return parsed
-		}
-	}
-	return time.Time{}
 }

@@ -47,9 +47,14 @@ and the [predecessor audit](docs/design/storage-implementation-review.md).
 P0 foundations are available: [boundary decisions, read-only baseline capture and write-admission runbook](docs/design/storage-p0.md)
 and [isolated native capability evidence](docs/design/storage-p0-capabilities.md). They do not activate the replacement file API.
 
-**The replacement file API is not active.** Setup instructions and endpoint tables below describe today's
-COS/STS runtime, preserved in the [legacy reference](docs/api/legacy-api.md). P0 adds contract/probe tests and a
-read-only baseline command; it adds no file endpoints, changes no client types/schema, and deletes no existing data.
+P1 adds [read-only Local/COS/S3 native trees, backend configuration and safe index import](docs/design/storage-p1.md).
+`STORAGE_BACKEND=local` or `s3` starts without COS configuration; native reads/import are available internally and
+through maintenance commands. Their browser byte/mutation routes remain unavailable until the unified API lands.
+
+**The replacement file API is not active.** Endpoint tables below describe the default COS/STS runtime,
+preserved in the [legacy reference](docs/api/legacy-api.md). Server startup now requires a stable `APP_SECRET`;
+production also requires explicit SES credentials. See the [P1 upgrade steps](docs/design/storage-p1.md#configuration-and-identity-upgrade)
+before changing storage/database credentials. No file endpoints or database schema change in P1.
 
 ## Stack and layout
 
@@ -123,7 +128,7 @@ The key sits directly on the path (`drive/<userID>/Photos/2024/a.jpg`), which me
 Prerequisites: **Go 1.26+**, **Node 20.19+** (only for building the frontend), and a Postgres.
 
 ```bash
-cp .env.example .env      # fill in DATABASE_URL / COS_*
+cp .env.example .env      # fill in DATABASE_URL / APP_SECRET / selected storage backend
 make install              # go mod download + frontend npm install
 make migrate              # create tables: nodes / users / sessions / email_codes
 make check                # self-check: database / COS auth / STS issuing / SES
@@ -159,6 +164,8 @@ Sign-in, sign-up, and email changes all share the same 6-digit email verificatio
 3. Fill in `.env`:
 
    ```bash
+   SES_SECRET_ID=<mail-subaccount-id>
+   SES_SECRET_KEY=<mail-subaccount-secret>
    SES_REGION=ap-guangzhou
    SES_FROM_EMAIL_ADDRESS="Everything About Me <noreply@yourdomain.com>"
    SES_TEMPLATE_ID=123456          # default (English) template
@@ -166,13 +173,13 @@ Sign-in, sign-up, and email changes all share the same 6-digit email verificatio
    SES_TEMPLATE_VAR=code
    SES_SUBJECT=Everything About Me verification code
    SES_SUBJECT_ZH=Everything About Me 验证码
-   # when SES_SECRET_ID / SES_SECRET_KEY are empty, the COS keys are reused
+   # Explicit SES credentials do not inherit COS keys.
    ```
 
    Keep the template body generic (see `email-templates/sign-in-code.en.txt`) and do not hard-code "sign-up" into it; otherwise sign-in and email changes would also receive sign-up wording.
    The verification email also **does not distinguish sign-in from sign-up**: the backend can tell whether an address is already registered when it sends a code, but baking that into the email would leak whether an account exists for that address, so one template serves all cases.
 
-4. When reusing the COS sub-account key, attach a policy that grants **only send permission** to that sub-user (CAM → Users → Attach policy; or create a custom policy → create by policy syntax):
+4. For the dedicated SES sub-account key, attach a policy that grants **only send permission** to that sub-user (CAM → Users → Attach policy; or create a custom policy → create by policy syntax):
 
    ```json
    {

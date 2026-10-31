@@ -15,6 +15,14 @@ P0 foundations are implemented in the contract fixtures, isolated native probes 
 Live COS evidence, production baselines and legacy-writer quiescence remain deployment gates;
 normal unit-test success does not establish them.
 
+## P1 implementation status
+
+P1 adds read-only native Local/COS/S3 trees, startup backend selection, explicit application/mail
+secrets and bounded no-prune index import. See [configuration, migration and validation](storage-p1.md).
+Local startup without COS, actual Postgres import/repeat/rollback, native filesystem exit and SDK-backed
+COS/S3 read conformance are tested. Public file read/byte routes remain P2; new backend writes remain
+P3–P5. Live provider capability and production migration evidence are still deployment gates.
+
 ## 1. Fixed implementation constraints
 
 - One `/api/files` contract for Web, iOS, Android, CLI and third parties. No browser-only file routes, version

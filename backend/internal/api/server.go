@@ -25,7 +25,12 @@ import (
 	"everythingabout.me/backend/internal/timeline"
 )
 
+type OwnerStorageFactory interface {
+	Open(context.Context, string) (storage.Driver, error)
+}
+
 type Server struct {
+	trees     OwnerStorageFactory
 	cfg       *config.Config
 	db        *store.DB
 	auth      *auth.Service
@@ -44,6 +49,10 @@ type Server struct {
 func New(cfg *config.Config, db *store.DB, objectStorage storage.Storage, web http.Handler) *Server {
 	nodeService := nodes.New(db, objectStorage)
 	eventService := events.New(db, objectStorage, nodeService)
+	var jobService *jobs.Service
+	if cfg.BackendName() == "cos" {
+		jobService = jobs.New(db, objectStorage, nodeService)
+	}
 	return &Server{
 		cfg:       cfg,
 		db:        db,
@@ -52,7 +61,7 @@ func New(cfg *config.Config, db *store.DB, objectStorage storage.Storage, web ht
 		mail:      mail.New(cfg),
 		storage:   objectStorage,
 		nodes:     nodeService,
-		jobs:      jobs.New(db, objectStorage, nodeService),
+		jobs:      jobService,
 		eventsSvc: eventService,
 		timeline:  timeline.New(db, objectStorage, cfg.Timeline, eventService),
 		limiter:   ratelimit.New(),
@@ -60,8 +69,14 @@ func New(cfg *config.Config, db *store.DB, objectStorage storage.Storage, web ht
 	}
 }
 
+// SetStorageFactory wires the startup-owned factory; handlers never construct providers.
+func (s *Server) SetStorageFactory(factory OwnerStorageFactory) { s.trees = factory }
+
 // StartTimeline starts the background organizer. Run it after listen, so startup is not delayed.
 func (s *Server) StartTimeline(ctx context.Context) {
+	if s.cfg.BackendName() != "cos" {
+		return
+	}
 	s.timeline.Start(ctx)
 }
 
@@ -170,6 +185,10 @@ func (s *Server) ok(w http.ResponseWriter, data any) error {
 // wrap turns an error-returning handler into a standard http.HandlerFunc.
 func (s *Server) wrap(fn handlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		if err := s.assertBackendRoute(r); err != nil {
+			httpx.WriteError(w, err)
+			return
+		}
 		if err := fn(w, r); err != nil {
 			var apiErr *httpx.Error
 			var pathErr *paths.Error
@@ -184,6 +203,10 @@ func (s *Server) wrap(fn handlerFunc) http.HandlerFunc {
 // api wraps the public API: rate limit + {"error","message"} bodies (not the web {ok,...} shape).
 func (s *Server) api(fn handlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		if err := s.assertBackendRoute(r); err != nil {
+			writeAPIError(w, err)
+			return
+		}
 		if err := s.limitAPI(w, r); err != nil {
 			writeAPIError(w, err)
 			return

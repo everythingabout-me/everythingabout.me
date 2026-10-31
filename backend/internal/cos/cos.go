@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -22,17 +23,32 @@ import (
 )
 
 type Client struct {
-	bucket string
-	region string
-	appID  string
-	client *cos.Client
-	cred   tencent.Credentials
+	bucket    string
+	region    string
+	appID     string
+	client    *cos.Client
+	cred      tencent.Credentials
+	transport *http.Transport
+}
+
+func (c *Client) Close() error {
+	if c.transport != nil {
+		c.transport.CloseIdleConnections()
+	}
+	return nil
 }
 
 func New(cfg config.COS) (*Client, error) {
 	bucketURL, err := url.Parse(fmt.Sprintf("https://%s.cos.%s.myqcloud.com", cfg.Bucket, cfg.Region))
 	if err != nil {
 		return nil, err
+	}
+	transport := &http.Transport{
+		Proxy:             http.ProxyFromEnvironment,
+		DialContext:       (&net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
+		ForceAttemptHTTP2: true, MaxIdleConns: 128, MaxIdleConnsPerHost: 32, MaxConnsPerHost: 64,
+		IdleConnTimeout: 90 * time.Second, TLSHandshakeTimeout: 10 * time.Second,
+		ResponseHeaderTimeout: 30 * time.Second, ExpectContinueTimeout: time.Second,
 	}
 	client := cos.NewClient(
 		&cos.BaseURL{BucketURL: bucketURL},
@@ -41,15 +57,17 @@ func New(cfg config.COS) (*Client, error) {
 			Transport: &cos.AuthorizationTransport{
 				SecretID:  cfg.SecretID,
 				SecretKey: cfg.SecretKey,
+				Transport: transport,
 			},
 		},
 	)
 	return &Client{
-		bucket: cfg.Bucket,
-		region: cfg.Region,
-		appID:  config.COSAppID(cfg.Bucket),
-		client: client,
-		cred:   tencent.Credentials{SecretID: cfg.SecretID, SecretKey: cfg.SecretKey},
+		bucket:    cfg.Bucket,
+		region:    cfg.Region,
+		appID:     config.COSAppID(cfg.Bucket),
+		client:    client,
+		transport: transport,
+		cred:      tencent.Credentials{SecretID: cfg.SecretID, SecretKey: cfg.SecretKey},
 	}, nil
 }
 
@@ -136,7 +154,7 @@ func (c *Client) Put(
 	}, nil
 }
 
-func (c *Client) List(ctx context.Context, prefix string, onPage func(storage.Page) (bool, error)) error {
+func (c *Client) List(ctx context.Context, prefix string, onPage func(storage.ObjectPage) (bool, error)) error {
 	marker := ""
 	for {
 		result, _, err := c.client.Bucket.Get(ctx, &cos.BucketGetOptions{
@@ -148,7 +166,7 @@ func (c *Client) List(ctx context.Context, prefix string, onPage func(storage.Pa
 			return err
 		}
 
-		page := storage.Page{NextMarker: result.NextMarker, Objects: make([]storage.ObjectInfo, 0, len(result.Contents))}
+		page := storage.ObjectPage{NextMarker: result.NextMarker, Objects: make([]storage.ObjectInfo, 0, len(result.Contents))}
 		for _, object := range result.Contents {
 			info := storage.ObjectInfo{
 				Key:          object.Key,

@@ -9,6 +9,8 @@ import (
 
 	"everythingabout.me/backend/internal/config"
 	"everythingabout.me/backend/internal/cos"
+	"everythingabout.me/backend/internal/storage"
+	"everythingabout.me/backend/internal/storagebackend"
 	"everythingabout.me/backend/internal/store"
 )
 
@@ -36,7 +38,8 @@ func (d *doctor) warn(label string) {
 
 func runDoctor(args []string) error {
 	flags := flag.NewFlagSet("doctor", flag.ContinueOnError)
-	writeTest := flags.Bool("write", false, "also test write + delete")
+	writeTest := flags.Bool("write", false, "also test legacy COS write + delete")
+	ownerID := flags.String("owner-id", "", "owner UUID for native tree checks on local/S3 backends")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
@@ -48,8 +51,14 @@ func runDoctor(args []string) error {
 	checks := &doctor{}
 
 	fmt.Println("\nconfig")
-	fmt.Printf("  bucket   %s\n", cfg.COS.Bucket)
-	fmt.Printf("  region   %s\n", cfg.COS.Region)
+	fmt.Printf("  storage  %s\n", cfg.BackendName())
+	if cfg.BackendName() == "cos" {
+		fmt.Printf("  bucket   %s\n", cfg.COS.Bucket)
+		fmt.Printf("  region   %s\n", cfg.COS.Region)
+	}
+	if cfg.AppSecret == "" {
+		checks.bad("application secret missing", fmt.Errorf("APP_SECRET is required for server startup"), "preserve the previous signing seed explicitly before changing backend")
+	}
 	fmt.Printf("  database %s\n", credentialRe.ReplaceAllString(cfg.DatabaseURL, "//***@"))
 
 	ctx := context.Background()
@@ -74,11 +83,15 @@ func runDoctor(args []string) error {
 		checks.warn("Tencent SES not configured: in development the code goes to the server log and is autofilled on the login page")
 	}
 
-	fmt.Println("\nCOS")
-	if err := cfg.ValidateCOS(); err != nil {
-		checks.bad("incomplete COS config", err, "set COS_SECRET_ID / COS_SECRET_KEY / COS_BUCKET / COS_REGION")
+	fmt.Println("\nstorage")
+	if cfg.BackendName() == "cos" {
+		if err := cfg.ValidateCOS(); err != nil {
+			checks.bad("incomplete COS config", err, "set COS_SECRET_ID / COS_SECRET_KEY / COS_BUCKET / COS_REGION")
+		} else {
+			checkCOS(ctx, cfg, checks, *writeTest)
+		}
 	} else {
-		checkCOS(ctx, cfg, checks, *writeTest)
+		checkNativeStorage(ctx, cfg, checks, *ownerID, *writeTest)
 	}
 
 	if checks.failed == 0 {
@@ -87,6 +100,40 @@ func runDoctor(args []string) error {
 	}
 	fmt.Printf("\n%d check(s) failed.\n", checks.failed)
 	return fmt.Errorf("%d check(s) failed", checks.failed)
+}
+
+func checkNativeStorage(ctx context.Context, cfg *config.Config, checks *doctor, ownerID string, writeTest bool) {
+	if writeTest {
+		checks.bad("write probe unavailable", fmt.Errorf("P1 native backends are read-only"), "use isolated P0 capability probes; native publication ships after durable mutation coordination")
+		return
+	}
+	backend, err := storagebackend.New(cfg)
+	if err != nil {
+		checks.bad("storage configuration", err, "check the selected backend configuration and existing root directories")
+		return
+	}
+	defer backend.Close()
+	if ownerID == "" {
+		checks.warn("backend configuration valid; pass --owner-id UUID to verify a native owner root")
+		return
+	}
+	driver, err := backend.Open(ctx, ownerID)
+	if err != nil {
+		checks.bad("owner root binding", err, "create and verify the separate content/system owner directories")
+		return
+	}
+	defer driver.Close()
+	entry, err := driver.Stat(ctx, "")
+	if err != nil || entry.Kind != storage.Folder {
+		checks.bad("native root", fmt.Errorf("root check failed: %v", err), "")
+		return
+	}
+	page, err := driver.List(ctx, "", storage.PageRequest{Limit: 1})
+	if err != nil {
+		checks.bad("native child listing", err, "resolve ambiguous or unsupported native names before import")
+		return
+	}
+	checks.ok("native root and child listing", fmt.Sprintf(" %d sampled children; read-only", len(page.Entries)))
 }
 
 func checkDatabase(ctx context.Context, db *store.DB, checks *doctor) {
