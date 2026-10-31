@@ -32,6 +32,16 @@ Local/Postgres runtime and actual S3 SDK HTTP conformance are exercised; live CO
 remain unverified deployment gates. P3–P7 remain: durable writes, native actions, resumable ingress,
 Web/media migration and release/performance acceptance. No new production write capability is activated.
 
+## P3 implementation status
+
+P3 implements the internal owner/root/principal-bound journal, persistent guards, leases, idempotent results,
+logical/physical reservations, proven partial charging and native-success/index-repair coordination. Local
+create-only staging/publication/recovery is opt-in for explicitly coordinated writers on admitted local
+filesystems. See [native strategy, accounting and validation](storage-p3.md). Public writes remain disabled;
+COS/S3 publication, full native namespace actions, resumable ingress and client cutover remain P4–P6.
+Actual Postgres/local fault tests and repeatable migrations are exercised; production baselines and provider
+quiescence/capability proof are still deployment gates. P4–P7 remain pending.
+
 ## 1. Fixed implementation constraints
 
 - One `/api/files` contract for Web, iOS, Android, CLI and third parties. No browser-only file routes, version

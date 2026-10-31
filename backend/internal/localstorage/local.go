@@ -74,6 +74,7 @@ type driver struct {
 	content   *os.Root
 	system    *os.Root
 	binding   string
+	config    storage.Config
 	lifetime  context.Context
 	cancel    context.CancelFunc
 	closeOnce sync.Once
@@ -195,7 +196,8 @@ func (f *Factory) bindHandles(cfg storage.Config, content, system *os.Root, cont
 	}{cfg.OwnerID, cfg.ConnectionID, cfg.Generation, contentName, systemName, rootIdentity(ci), rootIdentity(si), f.options.CaseSensitive})
 	hash := sha256.Sum256(identity)
 	lifetime, cancel := context.WithCancel(context.Background())
-	return &driver{factory: f, content: content, system: system, binding: hex.EncodeToString(hash[:]), lifetime: lifetime, cancel: cancel}
+	cfg.Credentials = nil
+	return &driver{factory: f, content: content, system: system, binding: hex.EncodeToString(hash[:]), config: cfg, lifetime: lifetime, cancel: cancel}
 }
 
 func (d *driver) Describe() storage.Descriptor {

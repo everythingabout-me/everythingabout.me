@@ -1,8 +1,9 @@
 # Storage driver contract
 
 > Native-tree contract, 2026-10-30. P1 read-only Local/COS/S3 trees are implemented;
-> mutation/publication interfaces remain pending. Preserving the readable tree is mandatory.
-> Implementation/configuration limits: [P1](storage-p1.md).
+> mutation/publication interfaces and an opt-in Local create-only writer are implemented in P3.
+> Public native mutations and COS/S3 staged publication remain pending. Preserving the readable tree is mandatory.
+> Implementation/configuration limits: [P1](storage-p1.md), [P3](storage-p3.md).
 >
 > [Architecture](storage.md) requires original names, complete native folder structure and directly usable
 > file bytes. [The file API](../api/api.md) remains same-origin and backend-neutral. This replaces the
@@ -301,7 +302,11 @@ acknowledgement is missing. After any final effect starts, cancellation is best 
 Discard removes temporary resources only, using known checkpoint IDs; it never blindly deletes the Target path.
 
 A writable connection must supply EffectRecovery (even when its only safe answer is OutcomeUnknown) and a
-bounded operational plan for discovering/expiring temporary allocations. List/scan content and staging areas
+bounded operational plan for discovering/expiring temporary allocations. P3 coordinators additionally require
+`BoundStagedWriter`/`BoundEffectRecovery` construction identity (`StorageBinding`, `StorageNameRules`) and
+reject a mismatched owner/connection/generation/root before native I/O; the identity must come from the
+actual admitted driver, with credentials excluded. Trusted action callbacks must use that same bound executor.
+List/scan content and staging areas
 is an operational requirement, with inventory extensions where useful. Inventory does not itself prove garbage
 is safe to delete: a restored database may be behind real storage, and old native requests may still be active.
 

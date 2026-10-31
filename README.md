@@ -39,7 +39,7 @@ may still require per-file copy/delete. Durable journals reconcile backend chang
 | File content (P2 active) | `GET/HEAD /api/files/content?path=/...`: same-origin streaming, safe single ranges |
 | Mutations/uploads (pending) | PUT/actions/`.../uploads`: authenticated 501 until P3–P5 |
 | Long operations (pending) | `.../operations/{id}`: reserved durable status/result family |
-| Storage tree (P1 active) | Native `Stat / List / Open`; mutation/publication remains pending |
+| Storage tree (P1/P3) | Native `Stat / List / Open`; internal Local create-only staging/recovery, public actions pending |
 
 CDN/regional gateways and NAS connectors are internal deployment choices. Private cache hits require
 authorization; uploads need suitable streaming ingress. Self-hosting can run in one process without a CDN.
@@ -51,7 +51,10 @@ and [isolated native capability evidence](docs/design/storage-p0-capabilities.md
 P1 adds [read-only Local/COS/S3 native trees, backend configuration and safe index import](docs/design/storage-p1.md).
 `STORAGE_BACKEND=local` or `s3` starts without COS configuration; native reads/import are available internally and
 through maintenance commands. P2 now adds [authenticated metadata/search and same-origin file bytes](docs/design/storage-p2.md)
-on all three backends. Existing browser pages/media migrate in P6; new writes remain unavailable.
+on all three backends. P3 adds [durable journals, guards, quota reservations and native recovery](docs/design/storage-p3.md),
+with additive migrations 016/017 and an explicitly admitted Local create-only publication helper. HTTP writes
+remain disabled until P4/P5; existing browser pages/media migrate in P6. No production baseline or writer
+revocation is performed automatically by these migrations.
 
 The old `/api/files/{path...}` wildcard has been removed. Use `/api/files/content?path=/...` for downloads.
 Other legacy COS routes remain documented in the [legacy reference](docs/api/legacy-api.md) until cutover.
