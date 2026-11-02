@@ -249,8 +249,8 @@ func (s *Server) filesHandler() http.Handler {
 		switch r.URL.Path {
 		case fc.Base:
 			routes["GET"] = s.handleFilesMetadata
-			routes["POST"] = pending
-			routes["DELETE"] = pending
+			routes["POST"] = s.handleFilesMkdir
+			routes["DELETE"] = s.handleFilesDelete
 		case fc.Base + "/list":
 			routes["GET"] = s.handleFilesList
 		case fc.Base + "/search":
@@ -262,9 +262,11 @@ func (s *Server) filesHandler() http.Handler {
 		case fc.Base + "/content":
 			routes["GET"] = s.handleFilesContent
 			routes["HEAD"] = s.handleFilesContent
-			routes["PUT"] = pending
-		case fc.Base + "/move", fc.Base + "/copy":
-			routes["POST"] = pending
+			routes["PUT"] = s.handleFilesPut
+		case fc.Base + "/move":
+			routes["POST"] = s.handleFilesMove
+		case fc.Base + "/copy":
+			routes["POST"] = s.handleFilesCopy
 		case fc.Base + "/thumbnail":
 			routes["GET"] = pending
 		case fc.Base + "/uploads":
@@ -273,6 +275,12 @@ func (s *Server) filesHandler() http.Handler {
 		default:
 			if pendingFileWorkflow.MatchString(r.URL.Path) {
 				switch {
+				case strings.HasPrefix(r.URL.Path, fc.Base+"/operations/"):
+					if strings.HasSuffix(r.URL.Path, "/cancel") {
+						routes["POST"] = s.handleFilesCancelOperation
+					} else {
+						routes["GET"] = s.handleFilesGetOperation
+					}
 				case strings.HasSuffix(r.URL.Path, "/commit"), strings.HasSuffix(r.URL.Path, "/cancel"):
 					routes["POST"] = pending
 				case strings.Contains(r.URL.Path, "/parts/"):

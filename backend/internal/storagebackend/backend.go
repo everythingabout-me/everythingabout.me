@@ -163,7 +163,14 @@ func (b *Backend) Open(ctx context.Context, ownerID string) (storage.Driver, err
 		return nil, err
 	}
 	if factory, ok := b.factory.(*localstorage.Factory); ok {
-		return factory.OpenOwner(ctx, cfg, b.cfg.Storage.Local.ContentRoot, b.cfg.Storage.Local.SystemRoot)
+		driver, err := factory.OpenOwner(ctx, cfg, b.cfg.Storage.Local.ContentRoot, b.cfg.Storage.Local.SystemRoot)
+		if err != nil { return nil, err }
+		if b.cfg.Storage.CoordinatedWrites {
+			mutation, err := localstorage.NewMutationDriver(driver, localstorage.WriteOptions{CoordinatedExclusiveWriter:true})
+			if err != nil { driver.Close(); return nil, err }
+			return mutation,nil
+		}
+		return driver,nil
 	}
 	return b.factory.Open(ctx, cfg)
 }

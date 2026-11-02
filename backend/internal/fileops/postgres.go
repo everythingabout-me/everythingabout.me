@@ -329,7 +329,7 @@ func (p *Postgres) Claim(ctx context.Context, root Root, a Actor, id string, ttl
 			return E("operation_in_progress", nil)
 		}
 		op.Lease = Lease{OperationID: op.ID, Token: newID(), Epoch: op.Lease.Epoch + 1, ExpiresAt: now.Add(ttl)}
-		if op.Phase == EffectStarted {
+		if op.Phase == EffectStarted && (len(op.Entries) == 0 || uncertainEntries(&op)) {
 			op.State = Unknown
 		} else if op.State != Unknown {
 			op.State = Running

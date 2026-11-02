@@ -17,6 +17,7 @@ export interface FileProblem {
   code: string;
   detail: string;
   requestId: string;
+  operationId?: string;
 }
 
 export class FileApiError extends ApiError {
@@ -46,14 +47,46 @@ export interface FileCollection {
   nextCursor: string | null;
 }
 
+export interface FileQuota {
+  logicalBytes: number;
+  logicalLimitBytes: number;
+  physicalBytes: number;
+  physicalLimitBytes: number;
+}
+
+export interface FileReservations {
+  logicalBytes: number;
+  physicalBytes: number;
+}
+
+export interface FileEffect {
+  number: number;
+  action: "mkdir" | "copy" | "move" | "delete";
+  state: string;
+  source?: string;
+  target?: string;
+}
+
+export interface FileOperation {
+  id: string;
+  kind: "mkdir" | "move" | "copy" | "delete" | "upload_commit" | "thumbnail";
+  state: "queued" | "running" | "outcome_unknown" | "succeeded" | "failed" | "cancelled";
+  progress: { completed: number; total: number | null; unit: string };
+  result: FileResource | { deleted: boolean } | { effects: FileEffect[]; remaining: FileEffect[] } | null;
+  error: FileProblem | null;
+  cancelRequested: boolean;
+  createdAt: string;
+  finishedAt: string | null;
+}
+
 export interface FilePrincipal {
   principal: { kind: "session" | "token" };
   scope: { path: string };
   read: boolean;
   write: boolean;
   usage: { bytes: number; files: number; indexed: boolean };
-  quota: null;
-  reservations: null;
+  quota: FileQuota | null;
+  reservations: FileReservations | null;
   csrfToken?: string;
 }
 
@@ -74,8 +107,8 @@ export interface FileCapabilities {
   names: { caseSensitive: boolean; maxSegmentBytes: number; maxPathBytes: number; maxDepth: number };
   sessionExpirySeconds: number | null;
   terminalRetentionSeconds: number | null;
-  quota: null;
-  reservations: null;
+  quota: FileQuota | null;
+  reservations: FileReservations | null;
 }
 
 export interface AuthUser {
@@ -334,8 +367,9 @@ function fileURL(resource: string, values: Record<string, string | number | unde
   return `/api/files${resource}${encoded ? `?${encoded}` : ""}`;
 }
 
-async function fileRequest<T>(url: string): Promise<T> {
-  const response = await fetch(url, { credentials: "same-origin" });
+async function fileRequest<T>(url: string, init?: RequestInit): Promise<T> {
+  const response = await fetch(url, { ...init, credentials: "same-origin" });
+  if (response.status === 204) return undefined as T;
   const payload: unknown = await response.json().catch(() => { throw httpError(response.status); });
   if (!response.ok) {
     const p = payload as Partial<FileProblem> | null;
@@ -363,6 +397,15 @@ export const files = {
   },
   capabilities(path?: string): Promise<FileCapabilities> {
     return fileRequest(fileURL("/capabilities", { path }));
+  },
+  operation(id: string): Promise<FileOperation> {
+    return fileRequest(fileURL(`/operations/${encodeURIComponent(id)}`));
+  },
+  cancelOperation(id: string, csrfToken: string): Promise<FileOperation> {
+    return fileRequest(fileURL(`/operations/${encodeURIComponent(id)}/cancel`), {
+      method: "POST",
+      headers: { "X-CSRF-Token": csrfToken },
+    });
   },
   contentURL(path: string, disposition?: "inline" | "attachment"): string {
     return fileURL("/content", { path, disposition });

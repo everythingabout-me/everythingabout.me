@@ -130,7 +130,7 @@ func (s *Service) Write(ctx context.Context, root Root, actor Actor, id string, 
 		if e != nil {
 			// Stage cannot publish authoritative bytes. Discard must also fence late
 			// temporary attempts; failed cleanup retains the operation and reservation.
-			return s.finishBeforeEffect(work, root, actor, op, writer, checkpoint, Failed, problem("body_reception_failed", e))
+			return s.finishBeforeEffect(work, root, actor, op, writer, checkpoint, Failed, problem(writeFailureCode(e), e))
 		}
 		if err = validateStage(intent, received); err != nil {
 			return s.finishBeforeEffect(work, root, actor, op, writer, checkpoint, Failed, problem("invalid_stage", err))
@@ -226,6 +226,22 @@ func (r *contextReader) Read(p []byte) (int, error) {
 	}
 	return r.reader.Read(p)
 }
+func writeFailureCode(err error) string {
+	switch {
+	case storage.IsCode(err, "digest_mismatch"), storage.IsCode(err, "checksum_mismatch"):
+		return "checksum_mismatch"
+	case storage.IsCode(err, "size_mismatch"), storage.IsCode(err, "length_mismatch"):
+		return "length_mismatch"
+	case storage.IsCode(err, "parent_missing"):
+		return "parent_missing"
+	case storage.IsCode(err, "changed"):
+		return "target_changed"
+	case storage.IsCode(err, "precondition_failed"):
+		return "precondition_failed"
+	}
+	return "body_reception_failed"
+}
+
 func problem(code string, _ error) json.RawMessage {
 	value, _ := json.Marshal(map[string]any{"code": code, "detail": "The file operation did not complete."})
 	return value
@@ -384,6 +400,9 @@ func (s *Service) recoverClaimed(ctx context.Context, root Root, actor Actor, op
 		}
 		if inspection.Stage == nil || validateStage(intent, *inspection.Stage) != nil {
 			return s.markUnknown(ctx, root, actor, op, op.Checkpoint, E("invalid_stage", nil))
+		}
+		if op.CancelRequested {
+			return s.finishBeforeEffect(ctx, root, actor, op, writer, op.Checkpoint, Cancelled, nil)
 		}
 		if err = s.journal.SaveStage(ctx, op.Lease, *inspection.Stage); err != nil {
 			return op, err

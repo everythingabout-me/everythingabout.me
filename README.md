@@ -39,9 +39,10 @@ may still require per-file copy/delete. Durable journals reconcile backend chang
 | Metadata and listing (P2 active) | `GET /api/files?path=/...`; `GET /api/files/list?path=/...` |
 | Search and principal (P2 active) | `GET /api/files/search`; `/api/files/me`; `/api/files/capabilities` |
 | File content (P2 active) | `GET/HEAD /api/files/content?path=/...`: same-origin streaming, safe single ranges |
-| Mutations/uploads (pending) | PUT/actions/`.../uploads`: authenticated 501 until P3–P5 |
-| Long operations (pending) | `.../operations/{id}`: reserved durable status/result family |
-| Storage tree (P1/P3) | Native `Stat / List / Open`; internal Local create-only staging/recovery, public actions pending |
+| Mutations (P4 admitted Local) | PUT content, POST folder/move/copy, DELETE path; write flag + verified owner baseline required |
+| Long operations (P4) | `.../operations/{id}` and `/cancel`: durable progress, partial effects, recovery |
+| Resumable uploads (P5 pending) | `.../uploads` remains authenticated 501 |
+| Storage tree (P1/P4) | Native reads and admitted Local stage/publish/mkdir/move/copy/empty-only remove |
 
 CDN/regional gateways and NAS connectors are internal deployment choices. Private cache hits require
 authorization; uploads need suitable streaming ingress. Self-hosting can run in one process without a CDN.
@@ -54,9 +55,11 @@ P1 adds [read-only Local/COS/S3 native trees, backend configuration and safe ind
 `STORAGE_BACKEND=local` or `s3` starts without COS configuration; native reads/import are available internally and
 through maintenance commands. P2 now adds [authenticated metadata/search and same-origin file bytes](docs/design/storage-p2.md)
 on all three backends. P3 adds [durable journals, guards, quota reservations and native recovery](docs/design/storage-p3.md),
-with additive migrations 016/017 and an explicitly admitted Local create-only publication helper. HTTP writes
-remain disabled until P4/P5; existing browser pages/media migrate in P6. No production baseline or writer
-revocation is performed automatically by these migrations.
+with additive migrations 016/017. P4 adds [admitted Local native writes and Operations](docs/design/storage-p4.md)
+with migrations 019/020. Writes default off: configure `FILE_COORDINATED_WRITES=true` only for coordinated
+Local writers, validate/import the native index, then run the explicit `eam storage-admit` command with
+`--owner-id UUID --writers-quiesced --evidence /secure/proof.json` before serving mutations. No production baseline or writer revocation is automatic.
+COS/S3 new writes remain restricted; P5 resumable ingress and P6 browser/media migration remain pending.
 
 The old `/api/files/{path...}` wildcard has been removed. Use `/api/files/content?path=/...` for downloads.
 Other legacy COS routes remain documented in the [legacy reference](docs/api/legacy-api.md) until cutover.
@@ -301,7 +304,10 @@ The table separates active shared reads from remaining legacy COS routes.
 | GET, HEAD | `/api/files/content?path=` | Same-origin bytes and representation headers; single Range support |
 | GET | `/capabilities` | Legacy COS limits; unavailable for Local/S3 |
 | GET | `/list?path=&limit=&cursor=` | Legacy indexed listing |
-| PUT/actions | `/api/files/content` · `/api/files/move` · `/api/files/copy` | Reserved; authenticated 501 until durable writes land |
+| PUT | `/api/files/content?path=` | Admitted Local create/conditional replacement after staged bytes and durable settlement |
+| POST | `/api/files` · `/api/files/move` · `/api/files/copy` | Admitted Local folder creation and finite native move/copy, no target merge |
+| DELETE | `/api/files?path=&recursive=true` | Captured native deletion; explicit recursion for nonempty folders |
+| GET, POST | `/api/files/operations/{id}` · `.../cancel` | Durable state/result and safe cancellation |
 | POST | `/mkdir` | `{"path"}` creates a directory (parents created automatically; an existing directory returns 200, idempotent) |
 | POST | `/move` | `{"from","to","overwrite"}` move / rename |
 | POST | `/copy` | `{"from","to","overwrite"}` copy (files and directories) |

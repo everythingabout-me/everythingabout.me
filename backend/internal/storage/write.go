@@ -3,6 +3,7 @@ package storage
 import (
 	"context"
 	"io"
+	"time"
 )
 
 // Conditions must be enforced at the native effect. Stat followed by an
@@ -23,12 +24,16 @@ type MutationResult struct {
 type Checkpoint func(context.Context, []byte) error
 
 type WriteIntent struct {
-	ID         string
-	Target     Path
-	Conditions Conditions
-	Size       int64
-	MediaType  string
-	Digest     *Digest
+	ID               string
+	Target           Path
+	Conditions       Conditions
+	Size             int64
+	MediaType        string
+	SourceModifiedAt *time.Time
+	ClientCondition  string
+	ParentPath       Path
+	ParentVersion    []byte
+	Digest           *Digest
 }
 type Staged struct {
 	Intent WriteIntent

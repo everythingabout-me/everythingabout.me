@@ -68,7 +68,9 @@ func runReconcile(args []string) error {
 	if err := db.Pool().QueryRow(ctx, query, selector).Scan(&ownerID); err != nil {
 		return fmt.Errorf("resolve reconcile owner %q: %w", selector, err)
 	}
-	backend, err := storagebackend.New(cfg)
+	readConfig := *cfg
+	readConfig.Storage.CoordinatedWrites = false
+	backend, err := storagebackend.New(&readConfig)
 	if err != nil {
 		return err
 	}

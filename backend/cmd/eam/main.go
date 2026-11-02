@@ -4,6 +4,7 @@
 //	eam migrate                     run sql/*.sql in filename order
 //	eam doctor [--owner-id UUID] [--write]  self-check configuration / database / selected storage
 //	eam reconcile --owner email-or-UUID [--inventory inventory.csv] [--dry-run]
+//	eam storage-admit --owner-id UUID --writers-quiesced --evidence proof.json [--dry-run]
 //	eam storage-baseline --owner-id UUID --output new-baseline.json
 //	eam claim --email email [--dry-run] [--keep-source]
 package main
@@ -42,6 +43,8 @@ func main() {
 		err = runDoctor(args)
 	case "reconcile":
 		err = runReconcile(args)
+	case "storage-admit":
+		err = runStorageAdmit(args)
 	case "storage-baseline":
 		err = runStorageBaseline(args)
 	case "claim":
@@ -71,6 +74,7 @@ usage:
   eam migrate                      create tables / run sql/*.sql
   eam doctor [--owner-id UUID] [--write]  check config, database, selected storage
   eam reconcile --owner email-or-UUID [--inventory inventory.csv] [--dry-run]
+  eam storage-admit --owner-id UUID --writers-quiesced --evidence proof.json [--physical-limit N] [--dry-run]
   eam storage-baseline --owner-id UUID --output new-baseline.json [--writers-quiesced]
   eam storage-baseline --input baseline.json --output recheck.json [--quota-bytes N]
   eam claim --email email [--dry-run] [--keep-source]

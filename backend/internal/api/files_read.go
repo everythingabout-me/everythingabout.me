@@ -8,7 +8,6 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
-	"encoding/hex"
 	"encoding/json"
 	"net/http"
 	"net/url"
@@ -20,6 +19,7 @@ import (
 	"unicode/utf8"
 
 	fc "everythingabout.me/backend/internal/filecontract"
+	"everythingabout.me/backend/internal/filerevision"
 	"everythingabout.me/backend/internal/nodes"
 	"everythingabout.me/backend/internal/storage"
 	"golang.org/x/text/cases"
@@ -332,21 +332,15 @@ func (s *Server) filesMetadataObserved(ctx context.Context, f *fileRequest, entr
 			media = "application/octet-stream"
 		}
 		m.MediaType = &media
-		m.ContentRevision = filesContentRevision(f.ContentNamespace, entry)
+		m.ContentRevision, err = s.filesObservedContentRevision(ctx, f, entry)
+		if err != nil {
+			return fc.Metadata{}, err
+		}
 		if entry.Digest != nil {
 			m.Checksum = &fc.Checksum{Algorithm: entry.Digest.Algorithm, Value: base64.StdEncoding.EncodeToString(entry.Digest.Value)}
 		}
 	}
-	// Hash the public representation plus trustworthy observed native evidence.
-	// This is an observation revision, never a native conditional-write fence.
-	h := sha256.New()
-	representation, _ := json.Marshal(m)
-	h.Write(representation)
-	evidence, _ := json.Marshal(struct {
-		Namespace string
-		Version   []byte
-	}{f.ContentNamespace, entry.Version})
-	h.Write(evidence)
+	var membership []string
 	if entry.Kind == storage.Folder {
 		var children []storage.Entry
 		if observations != nil {
@@ -357,15 +351,12 @@ func (s *Server) filesMetadataObserved(ctx context.Context, f *fileRequest, entr
 		if err != nil {
 			return fc.Metadata{}, err
 		}
-		membership := make([]string, 0, len(children))
+		membership = make([]string, 0, len(children))
 		for _, child := range children {
 			membership = append(membership, string(child.Kind)+":"+string(child.Path))
 		}
-		sort.Strings(membership)
-		encoded, _ := json.Marshal(membership)
-		h.Write(encoded)
 	}
-	m.Revision = "nr_" + hex.EncodeToString(h.Sum(nil))
+	m.Revision = filerevision.Metadata(f.ContentNamespace, m, entry.Version, membership)
 	return m, nil
 }
 
@@ -614,7 +605,12 @@ func (s *Server) handleFilesMe(w http.ResponseWriter, r *http.Request, f *fileRe
 	if f.Principal.Token != nil {
 		kind = "token"
 	}
-	result := map[string]any{"principal": map[string]any{"kind": kind}, "scope": map[string]any{"path": f.Scope}, "read": true, "write": false, "usage": map[string]any{"bytes": bytes, "files": files, "indexed": true}, "quota": nil, "reservations": nil}
+	ready, accounting, err := s.filesWriteReadiness(r.Context(), f)
+	if err != nil {
+		return err
+	}
+	quota, reservations := filesUsageFields(accounting, f.Scope == "/")
+	result := map[string]any{"principal": map[string]any{"kind": kind}, "scope": map[string]any{"path": f.Scope}, "read": true, "write": ready, "usage": map[string]any{"bytes": bytes, "files": files, "indexed": true}, "quota": quota, "reservations": reservations}
 	if f.CSRFToken != "" {
 		result["csrfToken"] = f.CSRFToken
 	}
@@ -643,13 +639,31 @@ func (s *Server) handleFilesCapabilities(w http.ResponseWriter, r *http.Request,
 		}
 		maxFile = &n
 	}
+	ready, usage, err := s.filesWriteReadiness(r.Context(), f)
+	if err != nil {
+		return err
+	}
+	var singlePut int64
+	checksums := []string{}
+	if ready {
+		singlePut = s.cfg.Storage.MaxSinglePutBytes
+		if singlePut == 0 {
+			singlePut = 32 << 20
+		}
+		checksums = []string{"sha-256"}
+	}
+	var retention any
+	if ready {
+		retention = 86400
+	}
+	quota, reservations := filesUsageFields(usage, f.Scope == "/" && actual == "/")
 	return writeFilesJSON(w, 200, map[string]any{
-		"path": actual, "read": true, "write": false, "range": d.RangeRead, "pinnedRead": d.PinnedRead, "strongContentValidators": d.PinnedRead,
-		"thumbnails": false, "uploads": false, "checksums": []string{},
-		"maxFileBytes": maxFile, "maxSinglePutBytes": 0, "maxPartBytes": nil,
+		"path": actual, "read": true, "write": ready, "range": d.RangeRead, "pinnedRead": d.PinnedRead, "strongContentValidators": d.PinnedRead,
+		"thumbnails": false, "uploads": false, "checksums": checksums,
+		"maxFileBytes": maxFile, "maxSinglePutBytes": singlePut, "maxPartBytes": nil,
 		"pagination":           map[string]any{"defaultLimit": filesDefaultLimit, "maxLimit": filesMaxLimit},
 		"names":                map[string]any{"caseSensitive": d.Names.CaseSensitive, "maxSegmentBytes": d.Names.MaxSegmentBytes, "maxPathBytes": d.Names.MaxPathBytes, "maxDepth": d.Names.MaxDepth},
-		"sessionExpirySeconds": nil, "terminalRetentionSeconds": nil, "quota": nil, "reservations": nil,
+		"sessionExpirySeconds": nil, "terminalRetentionSeconds": retention, "quota": quota, "reservations": reservations,
 	})
 }
 

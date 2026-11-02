@@ -116,6 +116,7 @@ func (r *Result) NameRules() storage.NameRules {
 func clone(r Record) Record {
 	r.Entry.NativeRef = bytes.Clone(r.Entry.NativeRef)
 	r.Entry.Version = bytes.Clone(r.Entry.Version)
+	r.Entry.ContentIdentity = bytes.Clone(r.Entry.ContentIdentity)
 	if r.Entry.Digest != nil {
 		d := *r.Entry.Digest
 		d.Value = bytes.Clone(d.Value)

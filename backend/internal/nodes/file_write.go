@@ -2,15 +2,14 @@ package nodes
 
 import (
 	"context"
-	"crypto/sha256"
 	"encoding/base64"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"time"
 
 	fc "everythingabout.me/backend/internal/filecontract"
 	"everythingabout.me/backend/internal/fileops"
+	"everythingabout.me/backend/internal/filerevision"
 	"everythingabout.me/backend/internal/paths"
 	"everythingabout.me/backend/internal/storage"
 	"github.com/jackc/pgx/v5"
@@ -67,18 +66,14 @@ func CommitStagedFile(ctx context.Context, tx pgx.Tx, op fileops.Operation, resu
 		media = "application/octet-stream"
 	}
 	size := entry.Size
-	metadata := fc.Metadata{Path: apiPath, ParentPath: apiParent, Name: paths.NameOf(p), Kind: "file", Size: &size, MediaType: &media, SourceModifiedAt: modified, CreatedAt: created.UTC(), UpdatedAt: updated.UTC()}
+	metadata := fc.Metadata{Path: apiPath, ParentPath: apiParent, Name: paths.NameOf(p), Kind: "file", Size: &size, MediaType: &media, SourceModifiedAt: modified, CreatedAt: created.UTC().Truncate(time.Millisecond), UpdatedAt: updated.UTC().Truncate(time.Millisecond), ContentRevision: filerevision.Content(fileRootNamespace(op.Root), *entry)}
 	if entry.Digest != nil {
 		metadata.Checksum = &fc.Checksum{Algorithm: entry.Digest.Algorithm, Value: base64.StdEncoding.EncodeToString(entry.Digest.Value)}
 	}
-	// This settled response is durable even if the path later moves or disappears.
-	// P4's HTTP representation/revision integration will bind mutation preconditions;
-	// a private index result is not itself a native conditional or strong ETag.
-	encoded, err := json.Marshal(metadata)
-	if err != nil {
+	if err := saveContentRevision(ctx, tx, op.Root, *entry, filerevision.Content(fileRootNamespace(op.Root), *entry)); err != nil {
 		return nil, err
 	}
-	hash := sha256.Sum256(encoded)
-	metadata.Revision = "nr_" + hex.EncodeToString(hash[:])
+	// This settled response remains durable if the native path later changes.
+	metadata.Revision = filerevision.Metadata(fileRootNamespace(op.Root), metadata, entry.Version, nil)
 	return json.Marshal(metadata)
 }

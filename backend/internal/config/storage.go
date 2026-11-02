@@ -12,11 +12,13 @@ import (
 // Storage configures one connection with deterministic per-owner roots. Connection
 // identity and generation must be backed up independently from credential rotation.
 type Storage struct {
-	Backend      string
-	ConnectionID string
-	Generation   int64
-	Local        Local
-	S3           S3
+	Backend           string
+	ConnectionID      string
+	Generation        int64
+	CoordinatedWrites bool
+	MaxSinglePutBytes int64
+	Local             Local
+	S3                S3
 }
 type Local struct {
 	ContentRoot   string
@@ -45,6 +47,24 @@ func loadStorage(getenv func(string) string) (Storage, error) {
 	s := Storage{Backend: value("STORAGE_BACKEND", "cos"), ConnectionID: value("STORAGE_CONNECTION_ID", "default"), Generation: 1,
 		Local: Local{ContentRoot: getenv("LOCAL_CONTENT_ROOT"), SystemRoot: getenv("LOCAL_SYSTEM_ROOT")},
 		S3:    S3{Endpoint: getenv("S3_ENDPOINT"), Region: getenv("S3_REGION"), Bucket: getenv("S3_BUCKET"), AccessKeyID: getenv("S3_ACCESS_KEY_ID"), SecretAccessKey: getenv("S3_SECRET_ACCESS_KEY"), SessionToken: getenv("S3_SESSION_TOKEN"), ContentPrefix: value("S3_CONTENT_PREFIX", "drive/"), SystemPrefix: value("S3_SYSTEM_PREFIX", "__eam_system__/")}}
+	s.MaxSinglePutBytes = 32 << 20
+	if raw := getenv("FILE_MAX_SINGLE_PUT_BYTES"); raw != "" {
+		n, err := strconv.ParseInt(raw, 10, 64)
+		if err != nil || n < 1 || n > 9007199254740991 {
+			return s, fmt.Errorf("FILE_MAX_SINGLE_PUT_BYTES must be a positive safe integer")
+		}
+		s.MaxSinglePutBytes = n
+	}
+	if raw := getenv("FILE_COORDINATED_WRITES"); raw != "" {
+		v, err := strconv.ParseBool(raw)
+		if err != nil {
+			return s, fmt.Errorf("FILE_COORDINATED_WRITES must be a boolean")
+		}
+		s.CoordinatedWrites = v
+	}
+	if s.CoordinatedWrites && s.Backend != "local" {
+		return s, fmt.Errorf("coordinated native writes currently require STORAGE_BACKEND=local")
+	}
 	if raw := getenv("STORAGE_GENERATION"); raw != "" {
 		var err error
 		s.Generation, err = strconv.ParseInt(raw, 10, 64)
@@ -81,6 +101,9 @@ func (c *Config) BackendName() string {
 }
 
 func (c *Config) ValidateStorage() error {
+	if c.Storage.CoordinatedWrites && c.BackendName() != "local" {
+		return fmt.Errorf("coordinated native writes currently require STORAGE_BACKEND=local")
+	}
 	switch c.BackendName() {
 	case "cos":
 		return c.ValidateCOS()

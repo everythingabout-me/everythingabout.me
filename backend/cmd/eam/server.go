@@ -59,6 +59,7 @@ func runServer(args []string) error {
 
 	apiServer.StartTimeline(shutdownSignal)
 	apiServer.StartUploadIndex(shutdownSignal)
+	apiServer.StartFileOperations(shutdownSignal)
 
 	go func() {
 		<-shutdownSignal.Done()

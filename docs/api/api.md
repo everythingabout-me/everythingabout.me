@@ -1,8 +1,10 @@
 # Unified file API
 
 > Clean-slate specification, 2026-10-30. P2 read resources and same-origin GET/HEAD content are implemented.
-> Mutation/upload/operation resources remain pending and return authenticated 501 placeholders.
-> See [P2 rollout, active endpoints and validation](../design/storage-p2.md) for current limits;
+> P4 implements PUT, native namespace actions and Operations for explicitly admitted coordinated Local roots.
+> Writes default off and require a verified root baseline; COS/S3 writes remain restricted. Resumable uploads
+> and thumbnails are still authenticated 501 placeholders. See [P2 reads](../design/storage-p2.md) and
+> [P4 admission, active endpoints and validation](../design/storage-p4.md) for current limits;
 > the sections below remain the complete target contract.
 >
 > This is the target file API, replacing earlier route, envelope, identity, and upload decisions.

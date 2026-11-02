@@ -2,8 +2,9 @@
 
 > Native-tree contract, 2026-10-30. P1 read-only Local/COS/S3 trees are implemented;
 > mutation/publication interfaces and an opt-in Local create-only writer are implemented in P3.
-> Public native mutations and COS/S3 staged publication remain pending. Preserving the readable tree is mandatory.
-> Implementation/configuration limits: [P1](storage-p1.md), [P3](storage-p3.md).
+> P4 adds an admitted Local mutation wrapper and public native actions; COS/S3 staged publication remains pending.
+> Preserving the readable tree is mandatory. Implementation/configuration limits: [P1](storage-p1.md),
+> [P3](storage-p3.md), [P4](storage-p4.md).
 >
 > [Architecture](storage.md) requires original names, complete native folder structure and directly usable
 > file bytes. [The file API](../api/api.md) remains same-origin and backend-neutral. This replaces the
@@ -178,6 +179,12 @@ type NameRules struct {
     ReservedNames []string
 }
 ```
+
+P4 may add a private `ContentIdentity` to Entry when the admitted driver proves a stable native identity
+independent of pathname. It does not expose a public file ID. Evidence-bound application content-generation
+mappings may retain contentRevision across a proven copy/delete move, but must reject a changed native
+fingerprint. WriteIntent additionally captures optional source modification time, original client condition,
+and parent path/version so recovery cannot retarget a replaced ancestor.
 
 Missing entries return a typed not_found error; not nil success. List is mandatory even on read-only drivers.
 The service recurses paginated child listings or uses an optional inventory optimization. Native IDs/versions

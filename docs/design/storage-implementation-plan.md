@@ -42,6 +42,16 @@ COS/S3 publication, full native namespace actions, resumable ingress and client 
 Actual Postgres/local fault tests and repeatable migrations are exercised; production baselines and provider
 quiescence/capability proof are still deployment gates. P4–P7 remain pending.
 
+## P4 implementation status
+
+P4 implements admitted coordinated Local PUT/create/conditional replace, native mkdir and finite-manifest
+copy/move/delete, durable Operations and bounded restart/cancellation workers. An explicit `storage-admit`
+command validates native/index baselines before budgets can enable write admission; configuration defaults off.
+See [P4 admission, semantics and validation](storage-p4.md). Migrations 019/020 persist frozen action bindings
+and evidence-bound content generations so proven moves retain contentRevision without database-only file moves.
+Local/Postgres HTTP and fault-recovery tests are exercised; COS/S3 new writes remain restricted until native
+capability/quiescence proof. P5–P7 and live production migration/provider acceptance remain pending.
+
 ## 1. Fixed implementation constraints
 
 - One `/api/files` contract for Web, iOS, Android, CLI and third parties. No browser-only file routes, version

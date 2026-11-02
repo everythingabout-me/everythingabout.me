@@ -331,8 +331,17 @@ func (p *Postgres) Settle(ctx context.Context, l Lease, s Settlement, commit Ind
 			out = *op
 			return nil
 		}
-		if op.Terminal() || op.Phase != NativeApplied || op.NativeResult == nil || uncertainEntries(op) {
+		binding, action, err := readActionBinding(ctx, tx, *op)
+		if err != nil {
+			return err
+		}
+		if op.Terminal() || uncertainEntries(op) || (!action && (op.Phase != NativeApplied || op.NativeResult == nil)) || (action && anyApplied(op) && (op.Phase != NativeApplied || op.NativeResult == nil)) {
 			return E("recovery_required", nil)
+		}
+		if action {
+			if err = validateActionSettlement(ctx, tx, *op, binding, s); err != nil {
+				return err
+			}
 		}
 		pending := false
 		for _, e := range op.Entries {
@@ -350,10 +359,14 @@ func (p *Postgres) Settle(ctx context.Context, l Lease, s Settlement, commit Ind
 		if err = json.Unmarshal(request, &req); err != nil {
 			return err
 		}
-		if s.LogicalDelta < -req.OldBytes || s.LogicalDelta > max(req.NewBytes-req.OldBytes, 0) || s.KeepLogical > logical || s.KeepPhysical > physical {
+		upper := max(req.NewBytes-req.OldBytes, 0)
+		if action {
+			upper = req.NewBytes
+		}
+		if s.LogicalDelta < -req.OldBytes || s.LogicalDelta > upper || s.KeepLogical > logical || s.KeepPhysical > physical {
 			return E("reservation_exceeded", nil)
 		}
-		if op.ChargedLogical > 0 && s.LogicalDelta < op.ChargedLogical || op.ChargedPhysical > 0 && s.PhysicalDelta < op.ChargedPhysical {
+		if !action && (op.ChargedLogical > 0 && s.LogicalDelta < op.ChargedLogical || op.ChargedPhysical > 0 && s.PhysicalDelta < op.ChargedPhysical) {
 			return E("reservation_exceeded", nil)
 		}
 		logicalDelta := s.LogicalDelta - op.ChargedLogical
@@ -378,6 +391,10 @@ func (p *Postgres) Settle(ctx context.Context, l Lease, s Settlement, commit Ind
 			return E("reservation_exceeded", nil)
 		}
 		op.Result = s.Result
+		if action {
+			op.State = s.State
+			op.Problem = s.Problem
+		}
 		if commit != nil {
 			result, err := commit(ctx, tx, *op, op.NativeResult)
 			if err != nil {

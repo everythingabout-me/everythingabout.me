@@ -3,9 +3,6 @@ package api
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
-	"encoding/binary"
-	"encoding/hex"
 	"fmt"
 	"io"
 	"mime"
@@ -16,6 +13,7 @@ import (
 	"sync"
 
 	fc "everythingabout.me/backend/internal/filecontract"
+	"everythingabout.me/backend/internal/filerevision"
 	"everythingabout.me/backend/internal/storage"
 )
 
@@ -28,19 +26,7 @@ import (
 // moves requires a future durable content-generation anchor.
 // The caller must prove native version selection before using it as a strong ETag.
 func filesContentRevision(namespace string, e storage.Entry) *string {
-	if e.Kind != storage.File || len(e.Version) == 0 {
-		return nil
-	}
-	h := sha256.New()
-	h.Write([]byte("eam/files/content/v1\x00"))
-	for _, value := range [][]byte{[]byte(namespace), []byte(e.Path), e.NativeRef, e.Version} {
-		var length [8]byte
-		binary.BigEndian.PutUint64(length[:], uint64(len(value)))
-		h.Write(length[:])
-		h.Write(value)
-	}
-	revision := "cr_" + hex.EncodeToString(h.Sum(nil))
-	return &revision
+	return filerevision.Content(namespace, e)
 }
 
 func (s *Server) handleFilesContent(w http.ResponseWriter, r *http.Request, f *fileRequest) error {
@@ -103,7 +89,12 @@ func (s *Server) handleFilesContent(w http.ResponseWriter, r *http.Request, f *f
 			}
 		}
 		tag := ""
-		if revision := filesContentRevision(f.ContentNamespace, read.Entry); revision != nil {
+		revision, revisionErr := s.filesObservedContentRevision(r.Context(), f, read.Entry)
+		if revisionErr != nil {
+			read.Body.Close()
+			return revisionErr
+		}
+		if revision != nil {
 			tag = strconv.Quote(*revision)
 		}
 		condition := filesContentCondition(r.Header, tag)

@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"everythingabout.me/backend/internal/auth"
@@ -15,6 +16,7 @@ import (
 	"everythingabout.me/backend/internal/config"
 	"everythingabout.me/backend/internal/emailcode"
 	"everythingabout.me/backend/internal/events"
+	"everythingabout.me/backend/internal/fileops"
 	"everythingabout.me/backend/internal/httpx"
 	"everythingabout.me/backend/internal/jobs"
 	"everythingabout.me/backend/internal/mail"
@@ -37,6 +39,9 @@ type Server struct {
 	trees          OwnerStorageFactory
 	filesAuth      FilesAuthenticator
 	filesIndex     FileReadIndex
+	filesJournal   *fileops.Postgres
+	fileWorkerMu   sync.Mutex
+	fileWorkers    *fileWorkers
 	cfg            *config.Config
 	db             *store.DB
 	auth           *auth.Service
@@ -73,6 +78,9 @@ func New(cfg *config.Config, db *store.DB, objectStorage storage.Storage, web ht
 		timeline:   timeline.New(db, objectStorage, cfg.Timeline, eventService),
 		limiter:    ratelimit.New(),
 		web:        web,
+	}
+	if db != nil {
+		server.filesJournal = fileops.NewPostgres(db.Pool())
 	}
 	if cfg.BackendName() == "cos" {
 		server.uploadIndex = uploadindex.New(uploadIndexBinding(cfg), uploadindex.NewJournal(db.Pool()), uploadindex.ObserverFunc(server.observeUploadedObject))

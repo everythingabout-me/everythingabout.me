@@ -15,8 +15,8 @@ import (
 	"everythingabout.me/backend/internal/storage"
 )
 
-// WriteOptions requires all application writers to participate in durable path
-// guards. Replacement is unsupported because P1 exposes no trustworthy version.
+// WriteOptions requires all application and external writers to participate in
+// coordinated exclusion. The standalone staged helper remains create-only.
 type WriteOptions struct{ CoordinatedExclusiveWriter bool }
 
 // StagedWriter preserves ordinary files and exact native names. The private
@@ -24,9 +24,11 @@ type WriteOptions struct{ CoordinatedExclusiveWriter bool }
 // Temporary discovery is bounded to known per-intent ledger and data names;
 // there is no content-root garbage collection. The caller owns driver lifetime.
 type StagedWriter struct {
-	driver    *driver
-	namespace string
-	link      func(*os.Root, string, *os.Root, string) error
+	driver      *driver
+	namespace   string
+	link        func(*os.Root, string, *os.Root, string) error
+	replacement bool
+	replace     func(*os.Root, string, *os.Root, string, bool) error
 }
 
 var _ storage.StagedWriter = (*StagedWriter)(nil)
@@ -138,6 +140,10 @@ func cloneDigest(d *storage.Digest) *storage.Digest {
 func cloneIntent(in storage.WriteIntent) storage.WriteIntent {
 	in.Conditions.ExpectedVersion = bytes.Clone(in.Conditions.ExpectedVersion)
 	in.Digest = cloneDigest(in.Digest)
+	if in.SourceModifiedAt != nil {
+		captured := *in.SourceModifiedAt
+		in.SourceModifiedAt = &captured
+	}
 	return in
 }
 func sameIntent(a, b storage.WriteIntent) bool {
@@ -152,7 +158,7 @@ func (w *StagedWriter) validateIntent(in storage.WriteIntent) error {
 	if err := validatePath(in.Target); err != nil {
 		return err
 	}
-	if !in.Conditions.Absent || len(in.Conditions.ExpectedVersion) != 0 {
+	if !(in.Conditions.Absent && len(in.Conditions.ExpectedVersion) == 0) && !(w.replacement && !in.Conditions.Absent && len(in.Conditions.ExpectedVersion) == sha256.Size) {
 		return storage.NewError("unsupported", in.Target, nil)
 	}
 	if in.Digest != nil && (in.Digest.Algorithm != "sha-256" || len(in.Digest.Value) != sha256.Size) {
@@ -275,6 +281,9 @@ func (w *StagedWriter) destination(ctx context.Context, in storage.WriteIntent) 
 	parent, name := splitPath(in.Target)
 	root, err := w.driver.directory(ctx, parent)
 	if err != nil {
+		if w.replacement && storage.IsCode(err, "not_found") {
+			err = storage.NewError("parent_missing", in.Target, err)
+		}
 		return nil, "", err
 	}
 	pi, err := root.Stat(".")
@@ -301,6 +310,26 @@ func (w *StagedWriter) destination(ctx context.Context, in storage.WriteIntent) 
 		return nil, "", storage.NewError("unsupported", in.Target, nil)
 	}
 	_, err = w.driver.find(ctx, root, parent, name)
+	if !in.Conditions.Absent {
+		if err != nil {
+			root.Close()
+			if storage.IsCode(err, "not_found") {
+				err = storage.NewError("changed", in.Target, err)
+			}
+			return nil, "", err
+		}
+		mw := &MutationDriver{StagedWriter: w}
+		e, err := mw.nativeAt(ctx, root, parent, name)
+		if err != nil {
+			root.Close()
+			return nil, "", err
+		}
+		if e.Kind != storage.File || !bytes.Equal(e.Version, in.Conditions.ExpectedVersion) {
+			root.Close()
+			return nil, "", storage.NewError("changed", in.Target, nil)
+		}
+		return root, name, nil
+	}
 	if err == nil {
 		root.Close()
 		return nil, "", storage.NewError("precondition_failed", in.Target, nil)
@@ -428,6 +457,11 @@ func (w *StagedWriter) Stage(ctx context.Context, in storage.WriteIntent, body i
 		r.Phase = "failed"
 		return storage.Staged{}, errors.Join(err, w.save(root, r))
 	}
+	if in.SourceModifiedAt != nil {
+		if err := root.Chtimes(dataName(r), *in.SourceModifiedAt, *in.SourceModifiedAt); err != nil {
+			return storage.Staged{}, err
+		}
+	}
 	if err := f.Sync(); err != nil {
 		return storage.Staged{}, err
 	}
@@ -549,7 +583,19 @@ func (w *StagedWriter) Publish(ctx context.Context, s storage.Staged, cp storage
 		return storage.MutationResult{}, noEffect(err)
 	}
 	verified.Close()
-	if err := w.link(root, dataName(r), dest, name); err != nil {
+	// Recheck target conditions after the potentially delayed fence callback.
+	checked, _, err := w.destination(ctx, in)
+	if err != nil {
+		return storage.MutationResult{}, noEffect(err)
+	}
+	checked.Close()
+	var finalErr error
+	if in.Conditions.Absent {
+		finalErr = w.link(root, dataName(r), dest, name)
+	} else {
+		finalErr = w.replace(root, dataName(r), dest, name, true)
+	}
+	if err := finalErr; err != nil {
 		if errors.Is(err, os.ErrExist) {
 			// Native no-replace rejected this effect. All other errors retain the
 			// publishing ledger until quiescent identity-based inspection.
@@ -573,6 +619,9 @@ func (w *StagedWriter) Publish(ctx context.Context, s storage.Staged, cp storage
 	}
 	e.MediaType = in.MediaType
 	e.Digest = cloneDigest(r.Digest)
+	if w.replacement {
+		e = nativeVersion(e, info)
+	}
 	r.Phase = "applied"
 	result := storage.MutationResult{Entry: &e, Evidence: w.receipt(r)}
 	r.Result = &result
@@ -659,6 +708,17 @@ func (w *StagedWriter) inspectFinal(ctx context.Context, root *os.Root, r *stage
 		}
 		return storage.Inspection{State: storage.NotApplied, Evidence: w.receipt(r)}, nil
 	}
+	if r.Phase == "publishing" && !r.Intent.Conditions.Absent && err == nil {
+		mw := &MutationDriver{StagedWriter: w}
+		current, verifyErr := mw.nativeAt(ctx, dest, parent, name)
+		if verifyErr == nil && bytes.Equal(current.Version, r.Intent.Conditions.ExpectedVersion) {
+			r.Phase = "not_applied"
+			if err := w.save(root, r); err != nil {
+				return unknown, err
+			}
+			return storage.Inspection{State: storage.NotApplied, Evidence: w.receipt(r)}, nil
+		}
+	}
 	if err != nil || found.entry.Kind != storage.File || rootIdentity(found.info) != r.Identity {
 		return unknown, nil
 	}
@@ -691,6 +751,9 @@ func (w *StagedWriter) inspectFinal(ctx context.Context, root *os.Root, r *stage
 	}
 	e.MediaType = r.Intent.MediaType
 	e.Digest = cloneDigest(r.Digest)
+	if w.replacement {
+		e = nativeVersion(e, info)
+	}
 	r.Phase = "applied"
 	result := storage.MutationResult{Entry: &e, Evidence: w.receipt(r)}
 	r.Result = &result

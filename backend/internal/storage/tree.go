@@ -24,14 +24,17 @@ type Digest struct {
 	Value     []byte
 }
 type Entry struct {
-	Path       Path
-	Kind       Kind
-	NativeRef  []byte
-	Version    []byte
-	Size       int64
-	ModifiedAt time.Time
-	MediaType  string
-	Digest     *Digest
+	Path      Path
+	Kind      Kind
+	NativeRef []byte
+	Version   []byte
+	// ContentIdentity is private driver-proven identity independent of pathname.
+	// Only admitted coordinated/versioned drivers may supply it; it is not an app file ID.
+	ContentIdentity []byte
+	Size            int64
+	ModifiedAt      time.Time
+	MediaType       string
+	Digest          *Digest
 }
 type PageRequest struct {
 	Cursor string
