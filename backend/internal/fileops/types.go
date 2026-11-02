@@ -194,6 +194,8 @@ type CleanupJournal interface {
 type Error struct {
 	Code  string
 	Cause error
+	// OperationID identifies the existing owner-scoped guard, never a bypass of its read authorization.
+	OperationID string
 }
 
 func (e *Error) Error() string           { return "file operation " + e.Code }

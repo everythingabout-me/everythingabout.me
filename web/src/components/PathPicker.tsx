@@ -6,7 +6,7 @@ import styles from "./PathPicker.module.css";
 
 /**
  * Pick the folder a connection may reach. The whole drive (empty path) is the default; the
- * control browses with the same /api/fs/list the file page uses, so no extra endpoint exists
+ * control browses with the same unified file listing the file page uses, so no extra endpoint exists
  * only for this picker.
  */
 export function PathPicker({
@@ -51,7 +51,7 @@ export function PathPicker({
       .then((result) => {
         if (cancelled) return;
         setItems(
-          result.items.filter((item) => item.is_dir).sort((left, right) => left.name.localeCompare(right.name)),
+          result.items.filter((item) => item.kind === "folder").sort((left, right) => left.name.localeCompare(right.name)),
         );
       })
       .catch((caught) => {
@@ -125,11 +125,11 @@ export function PathPicker({
             ) : (
               items.map((item) => (
                 <button
-                  key={item.id}
+                  key={item.path}
                   className={styles.folder}
                   type="button"
                   title={item.name}
-                  onClick={() => setDir(item.path)}
+                  onClick={() => setDir(item.path.slice(1))}
                 >
                   <FolderIcon size={14} className={styles.folderIcon} />
                   <span className={styles.folderName}>{item.name}</span>

@@ -32,9 +32,10 @@ const plugins = [
   audioPlugin(),
 ];
 
-export default function FilePreview({ path, name }: { path: string; name: string }) {
-  // The presigned URL only handles the 302; the browser talks to COS directly, never through us.
-  const url = api.downloadHref(path);
+export default function FilePreview({ path, name, mediaType }: { path: string; name: string; mediaType: string | null }) {
+  // Render fetched bytes through plugins; only safe media receives inline disposition.
+  const safeInline = /^(image\/(jpeg|png|gif|webp|avif)|audio\/|video\/)/.test(mediaType ?? "");
+  const url = api.contentURL(path, safeInline ? "inline" : "attachment");
 
   return (
     <div className={styles.viewer}>

@@ -13,7 +13,6 @@
   "dependencies": {
     "@open-file-viewer/core": "^1.0.0",
     "@open-file-viewer/react": "^1.0.0",
-    "cos-js-sdk-v5": "^1.10.1",
     "pdfjs-dist": "^4.10.38",
     "react": "^19.3.1",
     "react-dom": "^19.3.1",

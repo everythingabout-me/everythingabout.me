@@ -65,6 +65,15 @@ rejects files beyond the admitted existing single-publication limit; native mult
 Real COS/S3 probes, production admission and old authority drain remain separate unverified gates.
 P6 client/media/prompt cutover and P7 release/restore/performance acceptance remain pending.
 
+## P6 implementation status
+
+P6 switches Web resources, namespace actions, persistent P5 upload recovery, all media bytes and generated
+Save/Connect instructions to the shared file API. Legacy file routes return 410; client provider SDKs are
+removed. See [client behavior and browser acceptance](storage-p6.md) and the separate
+[code-cutover versus authority-drain runbook](storage-p6-backend.md). Built-SPA Chromium acceptance uses
+real Cookie/scoped Bearer, disposable Postgres and admitted Local roots. P7 release/restore/performance,
+real COS/S3 probes, production baselines and actual old authority drain remain unverified gates.
+
 ## 1. Fixed implementation constraints
 
 - One `/api/files` contract for Web, iOS, Android, CLI and third parties. No browser-only file routes, version

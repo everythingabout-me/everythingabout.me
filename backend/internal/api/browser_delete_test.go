@@ -10,7 +10,7 @@ import (
 	"everythingabout.me/backend/internal/config"
 )
 
-func TestBrowserDeletionProgressRequiresCookie(t *testing.T) {
+func TestLegacyBrowserDeletionProgressIsRetired(t *testing.T) {
 	cfg := &config.Config{AppSecret: "delete-progress-test"}
 	server := &Server{cfg: cfg, auth: auth.New(nil, cfg)}
 	for _, path := range []string{"/api/fs/deletions", "/api/fs/delete/d_example"} {
@@ -21,8 +21,8 @@ func TestBrowserDeletionProgressRequiresCookie(t *testing.T) {
 			}
 			w := httptest.NewRecorder()
 			server.Handler().ServeHTTP(w, r)
-			if w.Code != http.StatusUnauthorized || !strings.Contains(w.Body.String(), `"ok":false`) {
-				t.Fatalf("GET %s bearer=%v: HTTP=%d body=%s; want cookie authentication error", path, bearer, w.Code, w.Body.String())
+			if w.Code != http.StatusGone || !strings.Contains(w.Body.String(), `"code":"legacy_file_api_retired"`) {
+				t.Fatalf("GET %s bearer=%v: HTTP=%d body=%s; want retired route error", path, bearer, w.Code, w.Body.String())
 			}
 		}
 	}

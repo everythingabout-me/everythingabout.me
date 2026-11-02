@@ -39,7 +39,7 @@ export interface FileProblem {
 
 export class FileApiError extends ApiError {
   constructor(readonly problem: FileProblem) {
-    super(problem.detail, problem.status);
+    super(problem.detail, problem.status, problem);
     this.name = "FileApiError";
   }
 }
@@ -148,6 +148,7 @@ export interface FileCapabilities {
   strongContentValidators: boolean;
   thumbnails: boolean;
   uploads: boolean;
+  sourceModifiedAt: boolean;
   checksums: string[];
   maxFileBytes: number | null;
   maxSinglePutBytes: number;
@@ -171,18 +172,8 @@ export interface AuthUser {
   emailChangedAt: string | null;
 }
 
-export interface Item {
-  id: string;
-  path: string;
-  parent: string;
-  name: string;
-  is_dir: boolean;
-  size: number;
-  mime: string | null;
-  created_at: string;
-  updated_at: string;
-  meta: Record<string, unknown>;
-}
+/** File pages consume the public resource without a compatibility DTO. */
+export type Item = FileResource;
 
 export interface Crumb {
   name: string;
@@ -193,8 +184,7 @@ export interface ListResult {
   path: string;
   parent: string;
   breadcrumb: Crumb[];
-  truncated: boolean;
-  /** The current path itself: a folder, a file (is_dir false), or null at the root / when missing. */
+  /** The current file/folder, or null when the path is missing. */
   node: Item | null;
   items: Item[];
 }
@@ -202,23 +192,6 @@ export interface ListResult {
 export interface SearchResult {
   items: Item[];
 }
-
-/** Durable background move, copy, or permanent deletion progress. */
-export interface Job {
-  id: string;
-  op: "move" | "copy" | "delete";
-  from: string;
-  to: string;
-  status: "pending" | "running" | "done" | "failed" | "cancelled";
-  total: number;
-  done: number;
-  error?: string;
-  cancelRequested: boolean;
-  createdAt: string;
-  startedAt: string | null;
-  finishedAt: string | null;
-}
-
 
 export interface EventMedia {
   path: string;
@@ -337,8 +310,17 @@ export interface AccountSummary {
   activity: ActivityItem[];
 }
 
-export interface UploadSignResult {
-  uploadId: string;
+export interface FileUploadInput {
+  path: string;
+  size: number;
+  mediaType: string;
+  condition: { mode: "create" } | { mode: "replace"; contentRevision: string };
+  sourceModifiedAt?: string;
+}
+
+export interface FileUploadCollection {
+  items: FileUploadSession[];
+  nextCursor: string | null;
 }
 
 export interface UploadProgress {
@@ -418,6 +400,11 @@ function post<T>(path: string, body?: unknown): Promise<T> {
   });
 }
 
+/** API paths are absolute; route and queue paths may omit the leading slash. */
+export function filePath(path: string): string {
+  return path === "" ? "/" : path.startsWith("/") ? path : `/${path}`;
+}
+
 function fileURL(resource: string, values: Record<string, string | number | undefined> = {}): string {
   const query = new URLSearchParams();
   for (const [key, value] of Object.entries(values)) {
@@ -427,50 +414,93 @@ function fileURL(resource: string, values: Record<string, string | number | unde
   return `/api/files${resource}${encoded ? `?${encoded}` : ""}`;
 }
 
-async function fileRequest<T>(url: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(url, { ...init, credentials: "same-origin" });
-  if (response.status === 204) return undefined as T;
-  const payload: unknown = await response.json().catch(() => { throw httpError(response.status); });
-  if (!response.ok) {
-    const p = payload as Partial<FileProblem> | null;
-    if (!p || typeof p.code !== "string" || typeof p.detail !== "string" || p.status !== response.status) {
-      throw httpError(response.status);
+function filePayload<T>(payload: unknown, status: number): T {
+  if (status < 200 || status >= 300) {
+    const problem = payload as Partial<FileProblem> | null;
+    if (!problem || typeof problem.code !== "string" || typeof problem.detail !== "string" || problem.status !== status) {
+      throw httpError(status);
     }
-    throw new FileApiError(p as FileProblem);
+    throw new FileApiError(problem as FileProblem);
   }
   return payload as T;
 }
 
-/** Shared file reads. Existing pages migrate to this contract in P6. */
+let csrfRequest: Promise<string> | undefined;
+async function fileCSRF(): Promise<string> {
+  if (!csrfRequest) {
+    csrfRequest = fileRequest<FilePrincipal>(fileURL("/me")).then((principal) => {
+      if (!principal.csrfToken) throw new ApiError("missing file session CSRF token", 403);
+      return principal.csrfToken;
+    }).catch((error) => { csrfRequest = undefined; throw error; });
+  }
+  return csrfRequest;
+}
+
+async function fileRequest<T>(url: string, init?: RequestInit): Promise<T> {
+  const headers = new Headers(init?.headers);
+  if (init?.method && !["GET", "HEAD"].includes(init.method)) {
+    headers.set("X-CSRF-Token", await fileCSRF());
+  }
+  const response = await fetch(url, { ...init, headers, credentials: "same-origin" });
+  if (response.status === 401 || response.status === 403) csrfRequest = undefined;
+  if (response.status === 204) return undefined as T;
+  const payload: unknown = await response.json().catch(() => { throw httpError(response.status); });
+  return filePayload<T>(payload, response.status);
+}
+
+function filePost<T>(resource: string, body?: unknown, headers?: HeadersInit, signal?: AbortSignal): Promise<T> {
+  return fileRequest(fileURL(resource), {
+    method: "POST", signal,
+    headers: { ...(body === undefined ? {} : { "Content-Type": "application/json" }), ...headers },
+    ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+  });
+}
+
+export function isFileOperation(result: FileResource | FileOperation | void): result is FileOperation {
+  return Boolean(result && "state" in result && "id" in result);
+}
+
+/** Unified resources and same-origin byte URLs. No provider locations are consumed. */
 export const files = {
-  metadata(path: string): Promise<FileResource> {
-    return fileRequest(fileURL("", { path }));
+  metadata(path: string, signal?: AbortSignal): Promise<FileResource> {
+    return fileRequest(fileURL("", { path: filePath(path) }), { signal });
   },
   list(path: string, options: { limit?: number; cursor?: string } = {}): Promise<FileCollection> {
-    return fileRequest(fileURL("/list", { path, ...options }));
+    return fileRequest(fileURL("/list", { ...options, path: filePath(path) }));
   },
   search(options: { q: string; path?: string; kind?: "file" | "folder"; mediaType?: string; limit?: number; cursor?: string }): Promise<FileCollection> {
-    return fileRequest(fileURL("/search", options));
+    return fileRequest(fileURL("/search", { ...options, path: options.path === undefined ? undefined : filePath(options.path) }));
   },
   me(): Promise<FilePrincipal> {
     return fileRequest(fileURL("/me"));
   },
   capabilities(path?: string): Promise<FileCapabilities> {
-    return fileRequest(fileURL("/capabilities", { path }));
+    return fileRequest(fileURL("/capabilities", { path: path === undefined ? undefined : filePath(path) }));
   },
-  operation(id: string): Promise<FileOperation> {
-    return fileRequest(fileURL(`/operations/${encodeURIComponent(id)}`));
+  operation(id: string, signal?: AbortSignal): Promise<FileOperation> {
+    return fileRequest(fileURL(`/operations/${encodeURIComponent(id)}`), { signal });
   },
-  cancelOperation(id: string, csrfToken: string): Promise<FileOperation> {
-    return fileRequest(fileURL(`/operations/${encodeURIComponent(id)}/cancel`), {
-      method: "POST",
-      headers: { "X-CSRF-Token": csrfToken },
-    });
+  cancelOperation(id: string, signal?: AbortSignal): Promise<FileOperation> {
+    return filePost(`/operations/${encodeURIComponent(id)}/cancel`, undefined, undefined, signal);
   },
-  contentURL(path: string, disposition?: "inline" | "attachment"): string {
-    return fileURL("/content", { path, disposition });
+  contentURL(path: string, disposition: "inline" | "attachment" = "attachment"): string {
+    return fileURL("/content", { path: filePath(path), disposition });
+  },
+  thumbnailURL(path: string, width = 320, format = "webp"): string {
+    return fileURL("/thumbnail", { path: filePath(path), width, format });
   },
 };
+
+async function allFiles(load: (cursor?: string) => Promise<FileCollection>): Promise<FileResource[]> {
+  const items = new Map<string, FileResource>();
+  let cursor: string | undefined;
+  do {
+    const page = await load(cursor);
+    for (const item of page.items) items.set(item.path, item);
+    cursor = page.nextCursor ?? undefined;
+  } while (cursor);
+  return [...items.values()];
+}
 
 export const api = {
   async me(): Promise<AuthUser | null> {
@@ -537,6 +567,7 @@ export const api = {
 
   async logout(): Promise<void> {
     await post("/api/auth/logout");
+    csrfRequest = undefined;
   },
 
   async setPassword(input: {
@@ -570,120 +601,113 @@ export const api = {
     return post("/api/auth/email", input);
   },
 
-  list(path: string): Promise<ListResult> {
-    return request<ListResult>(`/api/fs/list?path=${encodeURIComponent(path)}`);
+  metadata: files.metadata,
+  fileMe: files.me,
+  capabilities: files.capabilities,
+  getOperation: files.operation,
+  cancelOperation: files.cancelOperation,
+  contentURL: files.contentURL,
+  thumbnailURL: files.thumbnailURL,
+
+  /** App navigation composed from resources, rather than a legacy server listing DTO. */
+  async list(path: string): Promise<ListResult> {
+    const absolute = filePath(path);
+    let node: FileResource | null;
+    try { node = await files.metadata(absolute); }
+    catch (error) {
+      if (!(error instanceof ApiError) || error.status !== 404) throw error;
+      node = null;
+    }
+    const breadcrumb: Crumb[] = [{ name: "", path: "/" }];
+    let current = "";
+    for (const name of absolute.split("/").filter(Boolean)) {
+      current += `/${name}`;
+      breadcrumb.push({ name, path: current });
+    }
+    return {
+      path: absolute, parent: node?.parentPath ?? (absolute.slice(0, absolute.lastIndexOf("/")) || "/"),
+      breadcrumb, node,
+      items: node?.kind === "folder" ? await allFiles((cursor) => files.list(absolute, { cursor })) : [],
+    };
   },
 
-  search(keyword: string): Promise<SearchResult> {
-    return request<SearchResult>(`/api/fs/search?q=${encodeURIComponent(keyword)}`);
+  async search(keyword: string): Promise<SearchResult> {
+    return { items: await allFiles((cursor) => files.search({ q: keyword, cursor })) };
   },
 
-  /** Allocate a server-owned upload receipt before sending bytes. */
-  signUpload(
-    path: string,
-    size: number,
-    overwrite = false,
-    mime?: string,
-    modifiedAt?: number,
-  ): Promise<UploadSignResult> {
-    return post<UploadSignResult>("/api/fs/upload/sign", { path, size, overwrite, mime, modifiedAt });
+  mkdir(path: string, parents = false): Promise<FileResource | FileOperation> {
+    return filePost("", { kind: "folder", path: filePath(path), parents });
   },
 
-  /** Retry finalization/result retrieval without sending the file body again. */
-  async confirmUpload(uploadId: string): Promise<Item> {
-    const data = await post<{ node: Item }>("/api/fs/upload/confirm", { uploadId });
-    return data.node;
+  move(from: string, to: string, ifRevision: string): Promise<FileResource | FileOperation> {
+    return filePost("/move", { from: filePath(from), to: filePath(to), ifRevision }, { Prefer: "respond-async" });
   },
 
-  /** Stream a File to the configured API origin; the backend publishes and indexes it. */
-  uploadFile(
-    uploadId: string,
-    file: File,
-    onProgress: (progress: UploadProgress) => void,
-    onSent: () => void,
-    signal: AbortSignal,
-  ): Promise<Item> {
+  copy(from: string, to: string, ifSourceRevision: string): Promise<FileResource | FileOperation> {
+    return filePost("/copy", { from: filePath(from), to: filePath(to), ifSourceRevision }, { Prefer: "respond-async" });
+  },
+
+  deletePath(path: string, recursive = false, ifRevision?: string): Promise<FileOperation | void> {
+    return fileRequest(fileURL("", { path: filePath(path), recursive: recursive ? "true" : undefined }), {
+      method: "DELETE", headers: { Prefer: "respond-async", ...(ifRevision ? { "If-Revision": ifRevision } : {}) },
+    });
+  },
+
+  createUpload(input: FileUploadInput, key: string, signal?: AbortSignal): Promise<FileUploadSession> {
+    return filePost("/uploads", { ...input, path: filePath(input.path) }, { "Idempotency-Key": key }, signal);
+  },
+
+  async uploadPart(id: string, number: number, blob: Blob, signal?: AbortSignal, onProgress?: (progress: UploadProgress) => void): Promise<FileUploadReceipt> {
+    const token = await fileCSRF();
+    if (signal?.aborted) throw new DOMException("Upload canceled", "AbortError");
     return new Promise((resolve, reject) => {
       const xhr = new XMLHttpRequest();
       let settled = false;
-      const finish = (error?: unknown, item?: Item) => {
+      const finish = (error?: unknown, receipt?: FileUploadReceipt) => {
         if (settled) return;
         settled = true;
-        signal.removeEventListener("abort", abort);
-        if (error) reject(error);
-        else resolve(item!);
+        signal?.removeEventListener("abort", abort);
+        if (error) reject(error); else resolve(receipt!);
       };
-      const abort = () => {
-        xhr.abort();
-        finish(new DOMException("Upload canceled", "AbortError"));
-      };
-      if (signal.aborted) {
-        finish(new DOMException("Upload canceled", "AbortError"));
-        return;
-      }
-      const query = new URLSearchParams({ uploadId });
-      xhr.open("POST", `/api/fs/upload/confirm?${query}`);
+      const abort = () => { xhr.abort(); finish(new DOMException("Upload canceled", "AbortError")); };
+      xhr.open("PUT", fileURL(`/uploads/${encodeURIComponent(id)}/parts/${number}`));
       xhr.withCredentials = true;
       xhr.setRequestHeader("Content-Type", "application/octet-stream");
+      xhr.setRequestHeader("X-CSRF-Token", token);
       xhr.upload.onprogress = (event) => {
-        if (!settled && !signal.aborted) onProgress({ loaded: event.loaded, total: file.size });
-      };
-      xhr.upload.onload = () => {
-        if (!settled && !signal.aborted) onSent();
+        if (!settled && !signal?.aborted) onProgress?.({ loaded: event.loaded, total: blob.size });
       };
       xhr.onload = () => {
-        try {
-          const data = unpack<{ node: Item }>(JSON.parse(xhr.responseText), xhr.status);
-          if (xhr.status < 200 || xhr.status >= 300) throw httpError(xhr.status);
-          finish(undefined, data.node);
-        } catch (error) {
-          finish(error instanceof ApiError ? error : httpError(xhr.status));
-        }
+        if (xhr.status === 401 || xhr.status === 403) csrfRequest = undefined;
+        try { finish(undefined, filePayload<FileUploadReceipt>(JSON.parse(xhr.responseText), xhr.status)); }
+        catch (error) { finish(error instanceof ApiError ? error : httpError(xhr.status)); }
       };
       xhr.onerror = () => finish(new ApiError("upload connection interrupted", 0));
       xhr.ontimeout = () => finish(new ApiError("upload request timed out", 0));
       xhr.onabort = () => finish(new DOMException("Upload canceled", "AbortError"));
-      signal.addEventListener("abort", abort, { once: true });
-      try {
-        xhr.send(file);
-      } catch (error) {
-        finish(error);
-      }
+      signal?.addEventListener("abort", abort, { once: true });
+      try { xhr.send(blob); } catch (error) { finish(error); }
     });
   },
 
-  async mkdir(path: string): Promise<void> {
-    await post("/api/fs/mkdir", { path });
+  uploadStatus(id: string, signal?: AbortSignal): Promise<FileUploadSession> {
+    return fileRequest(fileURL(`/uploads/${encodeURIComponent(id)}`), { signal });
   },
 
-  /**
-   * A file is renamed in one request; a directory is a subtree, so it answers with a job whose
-   * progress is polled at `renameStatus`. `job` is null when the work already finished.
-   * `respond-async` keeps the request from blocking while a big directory is being copied.
-   */
-  async rename(from: string, to: string): Promise<{ job: Job | null }> {
-    const data = await request<{ job?: Job }>("/api/fs/rename", {
-      method: "POST",
-      body: JSON.stringify({ from, to }),
-      headers: { Prefer: "respond-async" },
-    });
-    return { job: data.job ?? null };
+  uploadParts(id: string, cursor?: string, signal?: AbortSignal): Promise<FileUploadReceipts> {
+    return fileRequest(fileURL(`/uploads/${encodeURIComponent(id)}/parts`, { cursor }), { signal });
   },
 
-  async renameStatus(id: string): Promise<{ job: Job }> {
-    return request<{ job: Job }>(`/api/fs/rename/${encodeURIComponent(id)}`);
+  commitUpload(id: string, signal?: AbortSignal): Promise<FileResource | FileOperation> {
+    return filePost(`/uploads/${encodeURIComponent(id)}/commit`, undefined, undefined, signal);
   },
 
-  deletePath(path: string, recursive = false): Promise<{ job: Job }> {
-    return post(`/api/fs/delete${recursive ? "?recursive=1" : ""}`, { path });
+  abortUpload(id: string, signal?: AbortSignal): Promise<void> {
+    return fileRequest(fileURL(`/uploads/${encodeURIComponent(id)}`), { method: "DELETE", signal });
   },
 
-  deletionStatus(id: string, signal?: AbortSignal): Promise<{ job: Job }> {
-    return request(`/api/fs/delete/${encodeURIComponent(id)}`, { signal });
-  },
-
-  deletions(): Promise<{ jobs: Job[] }> {
-    return request("/api/fs/deletions");
+  listUploads(cursor?: string, signal?: AbortSignal): Promise<FileUploadCollection> {
+    return fileRequest(fileURL("/uploads", { cursor }), { signal });
   },
 
   /** Timeline: one flat event stream with keyset pagination. */
@@ -698,8 +722,8 @@ export const api = {
     return request<StreamStatus>("/api/timeline/status");
   },
 
-  /** 302s to a presigned COS URL; use it directly as an <a href>. */
+  /** Same-origin attachment; provider locations never reach the browser. */
   downloadHref(path: string): string {
-    return `/api/fs/download?path=${encodeURIComponent(path)}`;
+    return files.contentURL(path, "attachment");
   },
 };

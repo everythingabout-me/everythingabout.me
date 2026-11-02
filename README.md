@@ -7,16 +7,16 @@ Tencent Cloud COS.
 Frontend and backend are split: **a Go backend (net/http) + a React frontend (Vite + React Router)**, with no
 Next.js.
 
-Current browser upload implementation (unified resource migration remains pending):
+Current browser and Bearer upload implementation:
 
 ```
-browser ──session cookie + file stream──▶ Go API ──▶ COS (drive/<userID>/…)
-                                           │        complete native file
-                                           └──▶ Postgres (upload receipt + index)
+client ──/api/files/uploads + parts + commit──▶ Go API ──▶ admitted Local/COS/S3 tree
+                                                   └──▶ Postgres (sessions, receipts, Operations, index)
 ```
 
-The backend completes native upload and immediately indexes it. Only unfinished or uncertain records
-need recovery; completed files are not permanently polled. Legacy public `/upload` is separate.
+The API acknowledges durable numbered parts, then commits through staged native publication and index/result
+settlement. Unknown native effects remain guarded. Small clients may use streaming content PUT. Browser
+session identities survive refresh; local File reselection may be required to resume acknowledged chunks.
 
 ## Accepted storage architecture
 
@@ -65,11 +65,13 @@ probes were not configured here. Object admission also requires explicit `--phys
 P5 adds [durable numbered-part ingress](docs/design/storage-p5.md) with migration 024, server SHA-256,
 watermarked receipts, restart recovery and P3/P4 publication. Parts are 8 MiB with four concurrent byte
 requests and at most 10000 parts. COS/S3 still reject files above their admitted single-publication policy
-(default 32 MiB, at most 5 GiB); this release does not claim native multipart publication. P6 browser/media
-migration remains pending; the browser's existing sign/confirm receipt is a separate legacy protocol.
+(default 32 MiB, at most 5 GiB); this release does not claim native multipart publication.
+P6 [switches Web/media/generated instructions](docs/design/storage-p6.md) to the same resources and Problems,
+removes browser storage SDKs, and retires legacy file routes with 410. [Old authority drain](docs/design/storage-p6-backend.md)
+is a separate deployment gate; issued grants and in-flight effects were not revoked by this code change.
 
 The old `/api/files/{path...}` wildcard has been removed. Use `/api/files/content?path=/...` for downloads.
-Other legacy COS routes remain documented in the [legacy reference](docs/api/legacy-api.md) until cutover.
+Legacy COS file routes return 410; historical behavior remains in the [legacy reference](docs/api/legacy-api.md).
 Server startup requires a stable `APP_SECRET`; production also requires explicit SES credentials.
 See the [P1 upgrade steps](docs/design/storage-p1.md#configuration-and-identity-upgrade) before changing
 storage/database credentials. Configure `FILE_COOKIE_ORIGINS` for cookie mutations and credentialed CORS;
@@ -137,7 +139,7 @@ The key sits directly on the path (`drive/<userID>/Photos/2024/a.jpg`), which me
   so nothing downloads on first paint and a single chunk (~191KB gzip) is fetched when you open one, with the per-format renderer loading on top of that; formats without a preview still offer a download
 - Drag / multi-select upload: placeholder rows appear immediately, with a queue, progress, and speed, cancelable, retryable on failure; `/` focuses search
 - Folder uploads: drag folders or choose **Upload → Upload folder** to retain the selected root and nested paths. The list shows only immediate children throughout upload; each folder summarizes selected descendant file counts, confirmed files, bytes and percentage. Pending folders are navigable, completed rows lose their progress bars, and folder actions cancel/retry the remaining descendants. Dragged folders also preserve empty directories; the browser folder picker only exposes directories containing files. Existing directories merge, while replacing files requires confirmation.
-- Refreshing discards unfinished browser tasks. A started file receives a temporary upload ID, then streams through the backend to unpublished COS multipart state. The backend publishes complete bytes and immediately writes the index; only unfinished/uncertain records enter recovery. Successful files leave the recovery query and retain a 24-hour result receipt without COS polling. Apply forward migrations (including `021_upload_watch_retirement.sql` and `022_browser_uploads.sql`) and restart the backend when upgrading; see [upload recovery and cutover](docs/design/upload-index-recovery.md).
+- Refreshing preserves owner-scoped P5 session IDs, idempotency keys, target intent and Operation waits. Select the original File again when the browser cannot retain its handle; acknowledged parts are hash-verified and skipped. Cancellation reconciles the same session/Operation before a newer mutation can receive bytes. Apply all forward migrations, including `024_file_uploads.sql`, before starting the new binary. See [P6 client acceptance](docs/design/storage-p6.md) and the separate [authority drain](docs/design/storage-p6-backend.md).
 - Search matches both the filename and the full path, and each result shows its directory on the right
 - New directories use an inline input, and deletion has a confirmation dialog (it is permanent)
 - One shared top bar on every signed-in page: brand, `Home` / `Files` navigation with the current page highlighted, the account chip, and the file page's search and upload actions
@@ -152,7 +154,7 @@ Prerequisites: **Go 1.26+**, **Node 20.19+** (only for building the frontend), a
 cp .env.example .env      # fill in DATABASE_URL / APP_SECRET / selected storage backend
 make install              # go mod download + frontend npm install
 make migrate              # create tables: nodes / users / sessions / email_codes
-make check                # self-check: database / COS auth / STS issuing / SES
+make check                # self-check: database / selected storage / mail configuration
 make dev                  # backend :8080 + frontend :5173 (/api is proxied)
 ```
 
@@ -239,16 +241,13 @@ directory with coscli first, then run `reconcile --owner you@example.com`.
 
 **Migrating from the Next.js version touches no data**: the schema, COS keys, password hashes, and session tokens are all unchanged, so just start the new `eam` binary and users do not have to sign in again.
 
-### Three things to configure on the COS side
+### COS connection admission
 
-1. **CORS** (to allow browser direct uploads and to let previews read directly)
-   - Origins: `http://localhost:5173`, `http://127.0.0.1:5173`, your production domain
-   - Methods: `PUT, GET, POST, HEAD, DELETE` (DELETE allows multipart cancellation)
-   - Headers: `*`; exposed headers: `ETag, x-cos-request-id`
-   - `GET` is not only for downloads: file previews use `fetch` and follow the 302 from `/api/fs/download` to COS,
-     so without a GET CORS rule on the bucket previews get no bytes (the browser console reports CORS and the overlay shows a load failure)
-2. **Sub-account + STS permission**: keep root account keys on the server only; `eam` issues temporary credentials scoped to a single object key (30–60 minutes).
-3. **(Optional) Cloud Infinite**: once enabled, images can produce thumbnails through `?imageMogr2/thumbnail/300x` without running Sharp yourself.
+Clients use the application origin for all file requests and bytes. Browser bucket CORS and STS issuance
+are no longer part of the file protocol. Keep provider credentials server-side, then establish the exact
+connection's retained-version, single-attempt and coordinated-writer evidence described in
+[object admission](docs/design/storage-p4-objects.md). Follow the separate [legacy-authority drain](docs/design/storage-p6-backend.md)
+before enabling replacement writes. Unsupported image conversions use authorized raw content or placeholders.
 
 ## Loading terabytes of data the first time
 
@@ -274,7 +273,7 @@ it also never deletes any object — the power to delete stays with you.
 ## Deletion
 
 Deletion is permanent: the object and the index go together, with no trash. The web UI asks for confirmation
-first; in the API, deleting a directory requires an explicit `?recursive=1`, which is a guardrail against slips.
+first; in the unified API, recursive directory deletion requires explicit `?recursive=true`.
 
 > Upgrading from an older version: if the database still has rows with a non-null `deleted_at`, run
 > `eam purge --days 0` once with the old binary to delete the objects too, then run `migrate`. The migration
@@ -284,10 +283,9 @@ first; in the API, deleting a directory requires an explicit `?recursive=1`, whi
 
 ### The public API (for third-party apps / scripts / AI agents)
 
-The unified authenticated read API is active at `/api/files`; see [its contract](docs/api/api.md)
-and [P2 rollout limits](docs/design/storage-p2.md). Remaining root-level COS actions below are legacy
-until P3–P6; their contracts are in the [legacy reference](docs/api/legacy-api.md).
-The [historical scenario analysis](docs/api/flows.md) is retained for context.
+The unified authenticated file API serves browser and Bearer clients at `/api/files`; see
+[its contract](docs/api/api.md), [P5 limits](docs/design/storage-p5.md), and [P6 cutover](docs/design/storage-p6.md).
+Historical protocols are retained in the [legacy reference](docs/api/legacy-api.md) and return 410.
 
 ```bash
 # first issue a token for an app that can only touch Apps/badminton
@@ -300,7 +298,7 @@ curl -G -H "Authorization: Bearer eam_..." --data-urlencode 'path=/Apps/badminto
 ```
 
 Content uses `GET/HEAD /api/files/content?path=/...`; the old `/api/files/<path>` family is retired.
-The table separates active shared reads from remaining legacy COS routes.
+The table lists the active shared file resources and retained account/Connect entry points.
 
 | Method | Path | Description |
 |---|---|---|
@@ -309,32 +307,22 @@ The table separates active shared reads from remaining legacy COS routes.
 | GET | `/api/files/search?q=&path=&kind=&mediaType=` | Authorized indexed search with scoped opaque cursors |
 | GET | `/api/files/me` · `/api/files/capabilities` | Authenticated scope/usage/read limits and cookie CSRF bootstrap |
 | GET, HEAD | `/api/files/content?path=` | Same-origin bytes and representation headers; single Range support |
-| GET | `/capabilities` | Legacy COS limits; unavailable for Local/S3 |
-| GET | `/list?path=&limit=&cursor=` | Legacy indexed listing |
 | PUT | `/api/files/content?path=` | Admitted Local create/conditional replacement after staged bytes and durable settlement |
 | POST | `/api/files` · `/api/files/move` · `/api/files/copy` | Admitted Local folder creation and finite native move/copy, no target merge |
 | DELETE | `/api/files?path=&recursive=true` | Captured native deletion; explicit recursion for nonempty folders |
 | GET, POST | `/api/files/operations/{id}` · `.../cancel` | Durable state/result and safe cancellation |
-| POST | `/mkdir` | `{"path"}` creates a directory (parents created automatically; an existing directory returns 200, idempotent) |
-| POST | `/move` | `{"from","to","overwrite"}` move / rename |
-| POST | `/copy` | `{"from","to","overwrite"}` copy (files and directories) |
-| GET | `/move/{id}` · `/copy/{id}` | Progress of a directory operation (`POST .../cancel` · `.../retry`) |
-| GET | `/search?q=&path=&mime=&type=` | Search filenames and paths |
-| POST | `/upload` | Create an upload session and return presigned PUT URLs (multipart above the threshold; overwriting needs `overwrite: true`) |
-| GET | `/upload/{id}` | See how far it got (the parts already received) and resume after a disconnect |
-| POST | `/upload/complete` | Confirm the upload; verifies the size, then writes the index |
+| POST, GET | `/api/files/uploads` | Create/list persistent principal-bound upload sessions |
+| GET, DELETE | `/api/files/uploads/{id}` | Compact durable status or open-session abort |
+| PUT | `/api/files/uploads/{id}/parts/{number}` | Exact immutable numbered part and SHA-256 receipt |
+| GET | `/api/files/uploads/{id}/parts?limit=&cursor=` | Watermarked durable receipt pages |
+| POST | `/api/files/uploads/{id}/commit` | Frozen-manifest commit; metadata or stable Operation |
 | GET | `/me` | Current account, token permissions, usage |
 | PATCH | `/me` | `{"name"}` names the connection this token belongs to (an app names itself after scanning) |
 | GET | `/s/<code>` | Agent instructions: a save-link code returns the save prompt; a Connect token (`eam_...`) returns that connection's prompt, live |
 
-The remaining legacy COS large-file flow is `POST /upload` for URLs → PUT straight to COS → `POST /upload/complete`.
-The new file read API always streams bytes through the application origin.
-Writes are recorded in `audit_log`; the rate limit is 600 requests per minute per token.
-Uploads above the threshold automatically go multipart (one presigned URL per part, merged at `complete`).
-
-Long operations all use the standard `Prefer: respond-async[, wait=N]`: if the server finished it answers `200`,
-if not it answers `202` + `Location` (pointing at the action's own `/{id}`), and the client needs one branch.
-There is no "task" concept on the outside, and no object `id` — the path is the identity.
+All clients stream same-origin content or use P5 parts followed by explicit commit. Long work returns
+202 + Location below `/api/files/operations/{id}`; polling/cancellation uses that exact identity. Native
+uncertainty never authorizes blind re-upload. File identity is the path, and workflow IDs are temporary.
 
 Save links (for agents):
 
@@ -343,10 +331,9 @@ https://your-host/s/abcd2345efgh2345
 ```
 
 The URL itself is the token plus the instructions: `GET` only returns a prompt and accepts no content.
-Generated save prompts still belong to the legacy client release and are migrated in P6. Their old
-`PUT /api/files/<path>` shortcut is retired in P2; remaining COS upload sessions use `POST /upload`
-and `/upload/complete`. Unified writes are unavailable until P3–P5. The account page can mint as many
-save links as needed, show recent use, and revoke them at any time; a revoked
+Generated save and Connect prompts call `/api/files` content or P5 session/part/commit endpoints and
+follow durable Operations. The account page can mint as many save links as needed, show recent use,
+and revoke them at any time; a revoked
 link stops working immediately. The short code has no `eam_` prefix and also works directly as a Bearer token for
 the full file API. The account page's "recent activity" lists who changed which path and when; save links and
 event submissions both land in `audit_log`.
@@ -367,9 +354,9 @@ scanning. The payload and the page design are in [docs/design/connect.md](docs/d
 
 ### The API the web UI uses
 
-Every `/api/fs/*` endpoint requires a session and only touches the current account's own files (an anonymous
-request gets 401). URLs and the response envelope (`{ok, data}` / `{ok, error}`) are exactly the same as before
-the rewrite.
+File requests use `/api/files` with plain resources and Problem Details. Cookie mutations require the
+session CSRF token and configured Origin. The account/event APIs below retain their envelopes.
+Legacy `/api/fs/*` routes return 410.
 
 | Method | Path | Description |
 |---|---|---|
@@ -384,21 +371,10 @@ the rewrite.
 | POST | `/api/auth/email/current-code` | Send an email-change code to the **current address** (requires a session, used to confirm identity) |
 | POST | `/api/auth/email/code` | Send an email-change code to the **new address** (requires a session) |
 | POST | `/api/auth/email` | Change the email (requires codes for both the current and the new address) |
-| GET | `/api/timeline?cursor=&limit=` | Read the stream: a flat event feed, keyset paginated newest first, with presigned thumbnails |
+| GET | `/api/timeline?cursor=&limit=` | Read the event stream with authorized same-origin media references |
 | DELETE | `/api/events/{id}` | Delete one event (a tombstone, so it cannot come back) |
 | GET | `/api/timeline/status` | Organizing progress (unfinished tasks, files organized, earliest/latest month) |
 | POST | `/api/timeline/rebuild` | Force a full re-organize of the current account (drops the analysis results and backfills from scratch) |
-| GET | `/api/fs/list?path=` | List the current level (Postgres only, not the bucket; also returns the path's own `node`, so the UI can tell a folder from a file) |
-| GET | `/api/fs/search?q=` | Fuzzy search by name/path |
-| POST | `/api/fs/upload/sign` | Create a temporary upload receipt from `{path,size,overwrite,mime?,modifiedAt?}`; returns `{uploadId}` without provider credentials; `409 deletion_in_progress` lets the browser wait for cleanup before uploading |
-| POST | `/api/fs/upload/confirm` | Binary body with `?uploadId=` receives/publishes/indexes; JSON `{uploadId}` retrieves or repairs the recorded result |
-| GET | `/api/fs/download?path=` | 302 to a presigned URL (`&json=1` returns JSON) |
-| POST | `/api/fs/mkdir` | Create a directory (writes a zero-byte placeholder object); pending deletion returns `409 deletion_in_progress` with its operation identity |
-| POST | `/api/fs/rename` | Rename a file in one request; a directory answers `202` + `Location` because every object inside has to move |
-| GET | `/api/fs/rename/{id}` | Progress of a directory rename (`done` / `total`, `status`, `error`) |
-| POST | `/api/fs/delete` | Immediately hide `{path}` and return `202 {job}` with `Location` and `Retry-After: 2`; permanent cleanup runs in background; directories require `?recursive=1` (`409` otherwise) |
-| GET | `/api/fs/delete/{id}` | Owner-scoped permanent deletion progress (`done` / `total`, `status`, `error`) |
-| GET | `/api/fs/deletions` | Unfinished deletion jobs (`{jobs}`), including failures that still reserve their paths |
 | GET | `/api/health` | Liveness probe |
 
 The auth write endpoints validate `Origin`/`Host` and rate limit in in-process memory (code sends: 30 per hour per
@@ -410,6 +386,12 @@ password sign-in: 30 per 15 minutes per IP, 10 per 15 minutes per email).
 | Variable | Description |
 |---|---|
 | `DATABASE_URL` | Postgres connection string |
+| `APP_SECRET` | Stable application secret independent of storage credentials |
+| `STORAGE_BACKEND` | `local`, `cos` or `s3`; configure bound roots per P1 |
+| `FILE_COOKIE_ORIGINS` | Explicit allowed cookie mutation origins including port |
+| `FILE_COORDINATED_WRITES` | Default false; enable only after native evidence, legacy drain and root budget admission |
+| `FILE_MAX_SINGLE_PUT_BYTES` | Simple PUT/object publication policy; default 32 MiB, admitted object maximum 5 GiB |
+| `FILE_OBJECT_ADMISSION_FILE` / `FILE_OBJECT_SPOOL_ROOT` | Exact-connection capability evidence and durable shared object spool |
 | `COS_SECRET_ID` / `COS_SECRET_KEY` | Server-side keys; never give them to the frontend |
 | `COS_BUCKET` / `COS_REGION` | The bucket must include the APPID |
 | `APP_ENV` | `development` (default) or `production`; decides Secure cookies and the behavior when SES is not configured |
@@ -423,8 +405,7 @@ password sign-in: 30 per 15 minutes per IP, 10 per 15 minutes per email).
 | `ADDR` / `PORT` | Listen address; `:8080` by default (`ADDR` wins) |
 | `WEB_DIR` | Frontend build output directory; when empty it finds the repo's `web/dist` |
 | `USER_QUOTA_BYTES` | Storage limit per account in bytes; 0 or empty means unlimited |
-| `UPLOAD_MULTIPART_THRESHOLD` | Above how many bytes uploads go multipart, 5 GiB by default |
-| `UPLOAD_PART_SIZE` | Part size, 64 MiB by default (enlarged automatically if that would exceed 1000 parts) |
+| `UPLOAD_MULTIPART_THRESHOLD` / `UPLOAD_PART_SIZE` | Retired legacy transfer settings; not P5 geometry or publication limits |
 | `SES_REGION` | Tencent Cloud SES region, `ap-guangzhou` by default |
 | `SES_FROM_EMAIL_ADDRESS` | A sender address already verified in SES; may include a display name, as in `Everything About Me <noreply@yourdomain.com>` |
 | `SES_TEMPLATE_ID` | Verification code template ID (default / English) |
@@ -433,7 +414,7 @@ password sign-in: 30 per 15 minutes per IP, 10 per 15 minutes per email).
 | `SES_SUBJECT` | Subject of the default (English) verification email |
 | `SES_SUBJECT_ZH` | Subject of the Chinese verification email |
 | `SES_REPLY_TO_ADDRESS` | Optional reply-to address |
-| `SES_SECRET_ID` / `SES_SECRET_KEY` | Optional; when empty the COS keys are reused |
+| `SES_SECRET_ID` / `SES_SECRET_KEY` | Independent server-side mail credentials |
 
 ## Ops commands
 
@@ -458,7 +439,7 @@ go run ./cmd/eam token revoke --email … --id …
 | `make dev` | Start the Go backend and Vite together |
 | `make build` | Build the frontend + compile `bin/eam` |
 | `make migrate` / `make check` / `make check-write` | Map to `eam migrate` / `eam doctor` |
-| `make test` | Go tests + frontend typecheck |
+| `make test` | Go tests + frontend typecheck and behavior tests |
 
 ## Known tradeoffs
 
@@ -471,7 +452,7 @@ go run ./cmd/eam token revoke --email … --id …
 - **No instant upload (dedup)**: computing a full SHA256 over TBs means reading all the data once. If we ever do it, use `size + hash of the first and last 1MB`.
 - **Legacy data must be claimed by hand**: `eam claim` is O(number of objects) server-side copying; run `--dry-run` first.
 - **Deleting an account** only cascades database records; the objects under `drive/<userID>/` in COS must be cleaned up by prefix yourself.
-- **The frontend is a pure SPA**: first paint waits for the JS to load (~110KB gzip, with the COS SDK loaded on demand); there is no SSR, but there is also no need to render user data on the server.
+- **The frontend is a pure SPA**: first paint waits for application JS; heavy preview dependencies load on demand. Storage SDKs and credentials stay server-side.
 - **Automatic events are heuristic for now**: they only look at path/size/type/time in the index and never read EXIF/GPS or image content; analysis, grouping, scoring, and naming are all interfaces (`Analyzer` / `Grouper` / `Scorer` / `Narrator` in `internal/timeline`), so wiring in multimodal models or an LLM is a matter of swapping the implementation. The health CSV is a built-in `AmbientExtractor`.
 - **The event structure is in [`docs/design/events.md`](docs/design/events.md)**: one event = a time + one card (`photo` / `note` / `metric` / `html`) + an optional detail link; third-party apps submit through `POST /events` with a token that has `can_events`.
 - **Old databases need file times backfilled**: `nodes.source_modified_at` is new in this change, and legacy rows only get it after one `reconcile` run; until then the stream falls back to the index update time.
@@ -479,4 +460,3 @@ go run ./cmd/eam token revoke --email … --id …
 - **Moving or copying a directory does not refresh the stream immediately**: the background sweeper scans recent changes every 20 minutes; if you want it now, use `POST /api/timeline/rebuild`.
 - **Events have no in-site editor yet**: right now the only sources are automatic (photo sessions) and third-party submissions; hand-written events, health-change cards, and merging are all still missing.
 - **Upgrading to the event model takes one migration run**: `sql/013_events.sql` creates `events` / `event_media` and marks the existing monthly snapshots stale; the next sweeper pass (or `POST /api/timeline/rebuild`) recomputes each month's pieces into events. Before the migration the stream is empty.
-- **`cos-js-sdk-v5` has an audit advisory in its XML parser dependency**: the official SDK pins `fast-xml-parser@4.5.0`, which `npm audit` reports as critical. It only parses XML returned by COS (over TLS), and there is currently no lossless upgrade path; follow up once the official SDK upgrades.

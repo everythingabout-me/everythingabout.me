@@ -302,6 +302,10 @@ func TestPostgresJournal(t *testing.T) {
 		op := mustBegin(t, p, req)
 		_, _, err = p.Begin(ctx, genericRequest(r, a, "CAFÉ /file", 0))
 		requireCode(t, err, "operation_in_progress")
+		var conflict *Error
+		if !errors.As(err, &conflict) || conflict.OperationID != op.ID {
+			t.Fatalf("guard conflict lost exact operation: %v", err)
+		}
 		ancestor := genericRequest(r, a, "Café ", 0)
 		ancestor.Guards[0].Subtree = true
 		_, _, err = p.Begin(ctx, ancestor)

@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"path"
 	"strings"
 
 	"everythingabout.me/backend/internal/auth"
@@ -13,7 +14,7 @@ import (
 )
 
 // A /s/<code> link is instructions for an agent: it returns the token plus a prompt and
-// accepts no content itself; saving goes through the file API (PUT /api/files, POST /upload).
+// accepts no content itself; saving uses unified content or durable upload sessions.
 // The code is either a save link or an eam_ token: the Connect handoff links here with the
 // token secret, so one page can explain a scoped connection and a full-access save link.
 
@@ -53,8 +54,8 @@ func (s *Server) serveSaveLink(w http.ResponseWriter, r *http.Request, code stri
 			"token":      code,
 			"url":        linkURL,
 			"api":        base,
-			"files":      base + "/api/files/",
-			"upload":     base + "/upload",
+			"files":      base + "/api/files",
+			"upload":     base + "/api/files/uploads",
 			"prompt":     prompt,
 			"name":       p.Token.Name,
 			"createdAt":  p.Token.CreatedAt,
@@ -147,19 +148,19 @@ func tokenPrompt(base, plain string, token *auth.Token) string {
 	}
 
 	scope := "the whole drive"
-	listPath := "/list"
-	writePath := "Inbox/note.md"
+	root := "/"
+	writePath := "/note.md"
 	if token.Prefix != "" {
-		scope = token.Prefix + "/"
-		listPath = "/list?path=" + url.QueryEscape(token.Prefix)
-		writePath = token.Prefix + "/note.md"
+		scope = "/" + token.Prefix
+		root = scope
+		writePath = scope + "/note.md"
 	}
 	expires := "never"
 	if token.ExpiresAt != nil {
 		expires = *token.ExpiresAt
 	}
 
-	return fmt.Sprintf(`# everythingabout.me
+	prompt := fmt.Sprintf(`# everythingabout.me
 
 You can access my drive through the Everything About Me API.
 
@@ -169,18 +170,26 @@ Access:  %s
 Scope:   %s
 Expires: %s
 
-Use it as a Bearer token:
-  curl -H "Authorization: Bearer %s" \
-       "%s%s"
-
-  curl -X PUT -H "Authorization: Bearer %s" \
-       --data-binary @note.md "%s/api/files/%s"
-
-First call GET /me to confirm the token and its scope.
-`, base, plain, access, scope, expires, plain, base, listPath, plain, base, writePath)
+Use Authorization: Bearer %s on every API request.
+First call GET /me to confirm the connection and its current permissions.
+PATCH /me manages the Connect identity; POST /events authors events.
+Use only the configured API origin for metadata and bytes. Never use provider credentials or URLs.
+`, base, plain, access, scope, expires, plain)
+	if token.CanRead {
+		prompt += fmt.Sprintf(`
+GET /api/files/me confirms file access and scope.
+List the authorized folder:
+  curl -H "Authorization: Bearer %s" "%s/api/files/list?path=%s"
+Read a file with GET /api/files/content?path=<URL-encoded absolute path>.
+`, plain, base, url.QueryEscape(root))
+	}
+	if token.CanWrite {
+		prompt += unifiedWritePrompt(base, plain, writePath)
+	}
+	return prompt
 }
 
-// saveLinkPrompt only explains how to call the API with this token; it defines no new write path.
+// saveLinkPrompt explains only unified API requests; the link itself is read-only.
 func saveLinkPrompt(base, code string) string {
 	return fmt.Sprintf(`# everythingabout.me
 
@@ -190,21 +199,56 @@ Token: %s
 API: %s
 Authorization: Bearer %s
 
-Save a short text (one request):
-  PUT %s/api/files/Inbox/2026/10/28/note.md
-  Content-Type: text/markdown
+First call GET /api/files/me and GET /api/files/capabilities?path=%%2F.
+Use only this API origin for metadata, content, numbered parts and Operations.
+`, code, base, code) + unifiedWritePrompt(base, code, "/note.md")
+}
 
-  <content>
+func unifiedWritePrompt(base, token, target string) string {
+	return fmt.Sprintf(`
+The destination parent must exist. Create folders explicitly when needed:
+  POST /api/files
+  Content-Type: application/json
+  Idempotency-Key: <unique-folder-key>
+  {"kind":"folder","path":"<absolute parent path>","parents":true}
 
-Save a file (image, video, PDF, any size):
-  POST %s/upload
-  {"path": "Inbox/2026/10/28/photo.jpg", "size": 12345, "mime": "image/jpeg"}
+If file reads are permitted, after the parent exists check GET /api/files/capabilities?path=%s for admitted write and size limits.
+For a write-only connection, 403 from file introspection means those limits are unavailable;
+create a session with the exact file size and honor its admission result and returned part geometry.
+A rejected admission grants no upload authority. Do not retry with guessed read permissions.
 
-  PUT the bytes to each returned part URL, then:
-  POST %s/upload/complete
+Save a short text (create only):
+  curl -X PUT -H "Authorization: Bearer %s" \
+       -H "Content-Type: text/markdown" -H "If-None-Match: *" \
+       -H "Idempotency-Key: <unique-write-key>" \
+       --data-binary @note.md "%s/api/files/content?path=%s"
 
-Use a unique path; PUT does not overwrite by default.
-`, code, base, code, base, base, base)
+For resumable files within the advertised limits:
+  POST %s/api/files/uploads
+  Authorization: Bearer %s
+  Content-Type: application/json
+  Idempotency-Key: <unique-session-key>
+  {"path":%q,"size":12345,"mediaType":"image/jpeg","condition":{"mode":"create"}}
+
+Use the returned id, partSize, partCount and maxParallelism. Split exactly at partSize;
+the final part has the exact remainder. PUT each part's bytes with Content-Length to:
+  /api/files/uploads/{id}/parts/{number}
+Numbers start at 1; a zero-byte file has no parts. Persist the id and recover receipts with
+GET /api/files/uploads/{id}/parts. Identical-byte retries are safe; changed bytes conflict.
+After every part is acknowledged:
+  POST /api/files/uploads/{id}/commit
+Commit may return 202 with Location pointing to /api/files/operations/{operationId}.
+Poll that same-origin Operation until state is succeeded; failed, cancelled or
+outcome_unknown is not success. Resume status with GET /api/files/uploads/{id}.
+A 409 operation_in_progress may include operationId: wait for that exact Operation to
+succeed, then retry admission before sending bytes; unavailable status keeps the wait.
+Use Authorization: Bearer on every request, including parts, commit and Operation status.
+Choose a unique path. When file reads are permitted, to replace deliberately read its contentRevision and use
+If-Match: "<contentRevision>" for PUT or condition.mode=replace plus contentRevision
+for a session. A write-only connection must obtain an authorized revision separately or use create-only.
+Never silently overwrite after a conflict. Writes may be disabled until
+the deployment's storage configuration and baseline are explicitly admitted.
+`, url.QueryEscape(path.Dir(target)), token, base, url.QueryEscape(target), base, token, target)
 }
 
 func requestBaseURL(r *http.Request) string {

@@ -271,7 +271,7 @@ func TestLocalStorageServerStartupPostgres(t *testing.T) {
 			t.Fatalf("%s lost authenticated owner: %s", path, body)
 		}
 	}
-	if body := request("GET", "/api/fs/list?path=Notes", "", http.StatusOK); !strings.Contains(body, " original + report.txt") {
+	if body := request("GET", "/api/files/list?path=%2FNotes", "", http.StatusOK); !strings.Contains(body, " original + report.txt") {
 		t.Fatalf("imported file absent from HTTP list: %s", body)
 	}
 	for _, mutation := range []struct{ path, body string }{
@@ -281,7 +281,7 @@ func TestLocalStorageServerStartupPostgres(t *testing.T) {
 		{"/api/fs/upload/sign", `{"path":"blocked.txt","size":1}`},
 		{"/api/fs/upload/confirm", `{"path":"blocked.txt"}`},
 	} {
-		request("POST", mutation.path, mutation.body, http.StatusNotImplemented)
+		request("POST", mutation.path, mutation.body, http.StatusGone)
 	}
 	if !reflect.DeepEqual(before, snapshot()) {
 		t.Fatal("startup, reads or rejected legacy mutation changed the file index")
@@ -297,5 +297,5 @@ func TestLocalStorageServerStartupPostgres(t *testing.T) {
 	if err != nil || len(entries) != 2 {
 		t.Fatalf("native root changed: %v %v", entries, err)
 	}
-	t.Log("real local server: health 200; password session, account and imported listing 200; five legacy mutations 501; index unchanged; original native filename, binary bytes and empty folder preserved")
+	t.Log("real local server: health 200; password session, account and imported listing 200; five retired legacy mutations 410; index unchanged; original native filename, binary bytes and empty folder preserved")
 }

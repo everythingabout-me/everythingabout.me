@@ -29,17 +29,16 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log/slog"
 	"net/url"
 	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
 
+	fc "everythingabout.me/backend/internal/filecontract"
 	"everythingabout.me/backend/internal/httpx"
 	"everythingabout.me/backend/internal/nodes"
 	"everythingabout.me/backend/internal/paths"
-	"everythingabout.me/backend/internal/storage"
 	"everythingabout.me/backend/internal/store"
 )
 
@@ -87,8 +86,8 @@ type Metric struct {
 	Unit  string `json:"unit,omitempty"`
 }
 
-// Media is media on the read path: path is the drive path, url is presigned when the
-// response is built.
+// Media uses an authorized same-origin content URL. A URL confers no authority;
+// every byte request must authenticate through the unified file boundary.
 type Media struct {
 	Path  string `json:"path"`
 	URL   string `json:"url,omitempty"`
@@ -175,13 +174,12 @@ type AppInput struct {
 
 // Service is the read/write entry point for events.
 type Service struct {
-	db      *store.DB
-	storage storage.Storage
-	nodes   *nodes.Service
+	db    *store.DB
+	nodes *nodes.Service
 }
 
-func New(db *store.DB, objectStorage storage.Storage, nodeService *nodes.Service) *Service {
-	return &Service{db: db, storage: objectStorage, nodes: nodeService}
+func New(db *store.DB, nodeService *nodes.Service) *Service {
+	return &Service{db: db, nodes: nodeService}
 }
 
 // ---------- reads ----------
@@ -276,7 +274,7 @@ func (s *Service) ListByToken(ctx context.Context, userID, tokenID string, from,
 		        coalesce(t.name, ''), t.revoked_at is not null
 		   from events e
 		   left join api_tokens t on t.id = e.token_id
-		  where e.user_id = $1::uuid and e.token_id = $2::uuid and e.state <> 'deleted'
+		  where e.user_id = $1::uuid and e.token_id = (select id from api_tokens where user_id=$1::uuid and token_id=$2) and e.state <> 'deleted'
 		    and ($3::timestamptz is null or e.starts_at >= $3::timestamptz)
 		    and ($4::timestamptz is null or e.starts_at < $4::timestamptz)
 		  order by e.starts_at desc
@@ -360,8 +358,8 @@ func (s *Service) attachMedia(ctx context.Context, userID string, list []Event) 
 		`select em.event_id::text, em.idx, n.path, coalesce(n.name, ''), coalesce(n.mime, '')
 		   from event_media em
 		   join nodes n on n.id = em.node_id
-		  where em.event_id = any($1::uuid[])
-		  order by em.event_id, em.idx`, ids)
+		  where em.event_id = any($1::uuid[]) and n.owner_id = $2::uuid
+		  order by em.event_id, em.idx`, ids, userID)
 	if err != nil {
 		return err
 	}
@@ -403,18 +401,7 @@ func (s *Service) attachMedia(ctx context.Context, userID string, list []Event) 
 		out := make([]Media, 0, len(media))
 		for _, row := range media {
 			item := row.item
-			if !item.Video {
-				key := paths.KeyFor(item.Path, userID)
-				signed, err := s.storage.GetURL(ctx, key, storage.URLOptions{
-					ExpiresSeconds: 900,
-					Process:        "imageMogr2/thumbnail/1600x>",
-				})
-				if err != nil {
-					slog.Warn("events: failed to sign media", "path", item.Path, "error", err)
-				} else {
-					item.URL = signed
-				}
-			}
+			item.URL = fc.InlineContentURL(item.Path)
 			out = append(out, item)
 		}
 		event.Payload.Media = out
@@ -539,7 +526,8 @@ func (s *Service) CreateApp(ctx context.Context, userID, tokenID, prefix string,
 	err = tx.QueryRow(ctx,
 		`insert into events (user_id, origin, token_id, external_id, starts_at, ends_at, tz,
 		                     local_date, precision, type, title, detail_url, payload, state)
-		 values ($1::uuid, 'app', $2::uuid, $3, $4, $5, $6, $7::date, $8, $9, $10, $11, $12::jsonb, 'published')
+		 select $1::uuid, 'app', t.id, $3, $4, $5, $6, $7::date, $8, $9, $10, $11, $12::jsonb, 'published'
+		   from api_tokens t where t.user_id=$1::uuid and t.token_id=$2
 		 on conflict (user_id, token_id, external_id) where external_id is not null
 		 do update set starts_at = excluded.starts_at, ends_at = excluded.ends_at, tz = excluded.tz,
 		               local_date = excluded.local_date, precision = excluded.precision,
@@ -577,7 +565,7 @@ func (s *Service) CreateApp(ctx context.Context, userID, tokenID, prefix string,
 func (s *Service) DetachApp(ctx context.Context, userID, tokenID, eventID string) error {
 	tag, err := s.db.Pool().Exec(ctx,
 		`update events set state = 'detached', detail_url = null, updated_at = now()
-		  where user_id = $1::uuid and token_id = $2::uuid and id = $3::uuid
+		  where user_id = $1::uuid and token_id = (select id from api_tokens where user_id=$1::uuid and token_id=$2) and id = $3::uuid
 		    and state in ('published', 'detached')`, userID, tokenID, eventID)
 	if err != nil {
 		return err

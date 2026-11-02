@@ -9,6 +9,7 @@ import {
   type TimelineEvent,
   type StreamStatus,
 } from "../api/client";
+import { htmlCardPolicy } from "../components/preview/htmlCardPolicy";
 import { AppHeader } from "../components/AppHeader";
 import { RefreshIcon } from "../components/icons";
 import { filesText, t } from "../i18n";
@@ -285,7 +286,7 @@ function HtmlCard({ event }: { event: TimelineEvent }) {
   const tokens = useCardTokens();
   const height = Math.min(640, Math.max(40, event.payload.height ?? 240));
   const doc = `<!doctype html><meta charset="utf-8">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src data: https:; style-src 'unsafe-inline'; font-src data:">
+<meta http-equiv="Content-Security-Policy" content="${htmlCardPolicy(window.location.origin)}">
 <style>${tokens}
 html,body{margin:0;height:100%;background:transparent;color:var(--eam-text);font:13px/1.55 -apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei",sans-serif;-webkit-font-smoothing:antialiased}
 *{box-sizing:border-box}
@@ -345,6 +346,21 @@ function Media({ media }: { media: EventMedia[] }) {
 
 function Thumb({ media }: { media: EventMedia }) {
   const [failed, setFailed] = useState(false);
+  const [url, setURL] = useState<string | null>(null);
+  useEffect(() => {
+    setFailed(false);
+    setURL(null);
+    if (!media.path || media.video) return;
+    const controller = new AbortController();
+    void api.metadata(media.path, controller.signal).then((file) => {
+      if (controller.signal.aborted) return;
+      const mime = file.mediaType?.split(";", 1)[0].trim().toLowerCase();
+      if (file.kind === "file" && mime && /^image\/(jpeg|png|gif|webp|avif|bmp|x-icon|vnd\.microsoft\.icon)$/.test(mime)) {
+        setURL(api.contentURL(file.path, "inline"));
+      }
+    }).catch(() => { if (!controller.signal.aborted) setFailed(true); });
+    return () => controller.abort();
+  }, [media.path, media.video]);
 
   if (media.video) {
     return (
@@ -353,11 +369,11 @@ function Thumb({ media }: { media: EventMedia }) {
       </div>
     );
   }
-  if (failed || !media.url) return <div className={`${styles.tile} ${styles.tileFallback}`} aria-hidden="true" />;
+  if (failed || !url) return <div className={`${styles.tile} ${styles.tileFallback}`} aria-hidden="true" />;
   return (
     <img
       className={styles.tile}
-      src={media.url}
+      src={url}
       alt={media.name ?? ""}
       loading="lazy"
       decoding="async"

@@ -109,3 +109,11 @@ func TestFilesMutationProblemsAndPUTUnknownLocation(t *testing.T) {
 		t.Fatal("unknown publication lost recoverable identity", err)
 	}
 }
+
+func TestFilesGuardConflictPreservesOperationID(t *testing.T) {
+	err := filesMutationProblem(&fileops.Error{Code: "operation_in_progress", OperationID: "guard-operation"})
+	var p *fc.Problem
+	if !errors.As(err, &p) || p.Status != 409 || p.OperationID != "guard-operation" {
+		t.Fatalf("guard conflict lost recoverable identity: %v", err)
+	}
+}

@@ -193,8 +193,8 @@ type Item struct {
 	Series    []Series `json:"series,omitempty"`
 }
 
-// Thumb is a displayable cover. Its URL is presigned at read time (10 minutes) and
-// never stored in a snapshot.
+// Thumb is a displayable cover. Its same-origin URL requires file authorization
+// on every content request; no provider grants are returned.
 type Thumb struct {
 	Path       string `json:"path"`
 	URL        string `json:"url,omitempty"`

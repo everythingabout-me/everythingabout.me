@@ -17,7 +17,6 @@ const previewableExtensions: ReadonlySet<string> = new Set([
   "avif",
   "bmp",
   "ico",
-  "svg",
   "tif",
   "tiff",
   "heic",
@@ -76,8 +75,6 @@ const previewableExtensions: ReadonlySet<string> = new Set([
   "csv",
   "tsv",
   "xml",
-  "html",
-  "htm",
   "css",
   "scss",
   "less",
@@ -123,7 +120,6 @@ const previewableExtensions: ReadonlySet<string> = new Set([
   "mpeg",
   "mpe",
   "m2ts",
-  "m3u8",
   "mp3",
   "wav",
   "flac",
@@ -136,7 +132,9 @@ const previewableExtensions: ReadonlySet<string> = new Set([
 ]);
 
 /** Filename -> extension, case-insensitive; a missing extension (e.g. .bashrc) means no preview. */
-export function canPreviewFile(name: string): boolean {
+export function canPreviewFile(name: string, mediaType?: string | null): boolean {
+  const mime = mediaType?.split(";", 1)[0].trim().toLowerCase();
+  if (mime === "text/html" || mime === "image/svg+xml" || mime === "application/xhtml+xml") return false;
   const dot = name.lastIndexOf(".");
   if (dot <= 0 || dot === name.length - 1) return false;
   return previewableExtensions.has(name.slice(dot + 1).toLowerCase());

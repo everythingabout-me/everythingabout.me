@@ -52,9 +52,9 @@ export function buildUploadRows(items: Item[], tasks: UploadTask[], directory: s
   const rows = new Map<string, UploadRowEntry>();
   const groups = new Map<string, UploadTask[]>();
   for (const item of items) {
-    if (normalize(item.parent) !== dir) continue;
+    if (normalize(item.parentPath) !== dir) continue;
     const path = normalize(item.path);
-    rows.set(path, { path, name: item.name, isDir: item.is_dir, item });
+    rows.set(path, { path, name: item.name, isDir: item.kind === "folder", item });
   }
   // Latest metadata wins if the same path is selected again in an active batch.
   const unique = new Map(tasks.map((task) => [normalize(task.path), task]));
@@ -94,7 +94,7 @@ export function buildUploadRows(items: Item[], tasks: UploadTask[], directory: s
         : pending.some((task) => task.status === "finalizing")
           ? row.isDir && pending.some((task) => task.status === "queued") ? "uploading" : "finalizing"
           : waiting.length ? "waiting" : pending.length ? "queued" : "completed";
-    const cancelable = pending.filter((task) => task.status !== "finalizing");
+    const cancelable = pending.filter((task) => !task.cancelRequested);
     row.upload = {
       status,
       files: files.length,

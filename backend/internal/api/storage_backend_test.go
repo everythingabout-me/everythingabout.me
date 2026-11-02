@@ -20,7 +20,10 @@ func TestReadOnlyBackendRejectsLegacyEffectsBeforeServices(t *testing.T) {
 			for _, tc := range []struct{ method, path string }{{"GET", "/capabilities"}, {"GET", "/api/fs/rename/m_1"}, {"HEAD", "/api/fs/rename/m_1"}, {"POST", "/api/fs/mkdir"}, {"POST", "/api/fs/upload/sign"}, {"POST", "/api/fs/upload/confirm"}, {"POST", "/api/fs/rename"}, {"POST", "/api/fs/delete"}, {"GET", "/api/fs/download?path=a"}, {"PUT", "/api/files/a"}, {"DELETE", "/api/files/a"}, {"GET", "/api/files/a"}, {"POST", "/upload"}, {"POST", "/upload/complete"}, {"POST", "/move"}, {"GET", "/move/m_1"}, {"POST", "/copy"}, {"POST", "/mkdir"}, {"POST", "/api/timeline/rebuild"}} {
 				recorder := httptest.NewRecorder()
 				handler.ServeHTTP(recorder, httptest.NewRequest(tc.method, tc.path, nil))
-				want := http.StatusNotImplemented
+				want := http.StatusGone
+				if tc.path == "/api/timeline/rebuild" {
+					want = http.StatusNotImplemented
+				}
 				if strings.HasPrefix(tc.path, "/api/files/") {
 					want = http.StatusNotFound
 				}
@@ -47,7 +50,11 @@ func TestCOSCoordinatedWritesDisableLegacyNativeAuthorities(t *testing.T) {
 	for _, tc := range []struct{ method, path string }{{"POST", "/api/fs/upload/sign"}, {"POST", "/api/fs/upload/confirm"}, {"POST", "/api/fs/mkdir"}, {"POST", "/api/fs/delete"}, {"POST", "/api/fs/rename"}, {"GET", "/api/fs/rename/job"}, {"POST", "/upload"}, {"POST", "/upload/complete"}, {"POST", "/mkdir"}, {"POST", "/move"}, {"POST", "/copy"}, {"POST", "/api/timeline/rebuild"}} {
 		w := httptest.NewRecorder()
 		handler.ServeHTTP(w, httptest.NewRequest(tc.method, tc.path, nil))
-		if w.Code != 501 {
+		want := http.StatusGone
+		if tc.path == "/api/timeline/rebuild" {
+			want = http.StatusNotImplemented
+		}
+		if w.Code != want {
 			t.Fatalf("legacy %s %s bypassed guard: status%d body%s", tc.method, tc.path, w.Code, w.Body.String())
 		}
 	}

@@ -5,6 +5,13 @@
  * so `/` keeps separating segments and spaces or CJK characters stay readable in the address bar.
  */
 export function filesHref(path: string): string {
-  if (!path) return "/files";
-  return `/files/${path.split("/").map(encodeURIComponent).join("/")}`;
+  const relative = path.startsWith("/") ? path.slice(1) : path;
+  if (!relative) return "/files";
+  return `/files/${relative.split("/").map(encodeURIComponent).join("/")}`;
+}
+
+/** Read the raw location: router splat decoding can interpret a literal %2F twice. */
+export function filesRoutePath(pathname: string): string {
+  if (pathname === "/files" || pathname === "/files/") return "";
+  return pathname.slice("/files/".length).split("/").map(decodeURIComponent).join("/");
 }

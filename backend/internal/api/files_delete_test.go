@@ -77,7 +77,7 @@ func TestLegacyDeleteAuthentication(t *testing.T) {
 				r.Header.Set("Authorization", "Bearer "+tc.bearer)
 			}
 			w := httptest.NewRecorder()
-			server.Handler().ServeHTTP(w, r)
+			server.wrap(server.handleDelete).ServeHTTP(w, r)
 			if w.Code != tc.status || !strings.Contains(w.Body.String(), `"ok":false`) {
 				t.Fatalf("HTTP=%d body=%s, want status %d and legacy error envelope", w.Code, w.Body.String(), tc.status)
 			}
@@ -167,7 +167,14 @@ func TestLegacyDeletePostgres(t *testing.T) {
 		seed(owner, "file.txt", false)
 	}
 	seed(owners[1], "private", true)
-	handler := server.Handler()
+	// Exercise retained recovery internals directly. The application router retires
+	// these HTTP routes; P6 tests assert they cannot reach these handlers.
+	legacy := http.NewServeMux()
+	legacy.HandleFunc("POST /api/fs/delete", server.wrap(server.handleDelete))
+	legacy.HandleFunc("POST /api/fs/mkdir", server.wrap(server.handleMkdir))
+	legacy.HandleFunc("POST /api/fs/upload/sign", server.wrap(server.handleUploadSign))
+	legacy.HandleFunc("GET /api/fs/delete/{id}", server.wrap(server.handleDeleteStatus))
+	handler := legacy
 	request := func(path, query string, status, deleted int) {
 		t.Helper()
 		body, err := json.Marshal(pathBody{Path: path})

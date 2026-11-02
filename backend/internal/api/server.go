@@ -16,6 +16,7 @@ import (
 	"everythingabout.me/backend/internal/config"
 	"everythingabout.me/backend/internal/emailcode"
 	"everythingabout.me/backend/internal/events"
+	fc "everythingabout.me/backend/internal/filecontract"
 	"everythingabout.me/backend/internal/fileops"
 	"everythingabout.me/backend/internal/httpx"
 	"everythingabout.me/backend/internal/jobs"
@@ -61,7 +62,7 @@ type Server struct {
 // New wires dependencies. web is the handler for the frontend build (SPA) and may be nil.
 func New(cfg *config.Config, db *store.DB, objectStorage storage.Storage, web http.Handler) *Server {
 	nodeService := nodes.New(db, objectStorage)
-	eventService := events.New(db, objectStorage, nodeService)
+	eventService := events.New(db, nodeService)
 	var jobService *jobs.Service
 	if cfg.BackendName() == "cos" && !cfg.Storage.CoordinatedWrites {
 		jobService = jobs.New(db, objectStorage, nodeService)
@@ -148,46 +149,25 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/timeline/rebuild", s.wrap(s.handleTimelineRebuild))
 	mux.HandleFunc("DELETE /api/events/{id}", s.wrap(s.handleDeleteEvent))
 
-	mux.HandleFunc("GET /api/fs/list", s.wrap(s.handleList))
-	mux.HandleFunc("GET /api/fs/search", s.wrap(s.handleSearch))
-	mux.HandleFunc("POST /api/fs/upload/sign", s.wrap(s.handleUploadSign))
-	mux.HandleFunc("POST /api/fs/upload/confirm", s.wrap(s.handleUploadConfirm))
-	mux.HandleFunc("GET /api/fs/download", s.handleDownload)
-	mux.HandleFunc("POST /api/fs/mkdir", s.wrap(s.handleMkdir))
-	mux.HandleFunc("POST /api/fs/rename", s.wrap(s.handleRename))
-	mux.HandleFunc("GET /api/fs/rename/{id}", s.wrap(s.handleRenameStatus))
-	mux.HandleFunc("POST /api/fs/delete", s.wrap(s.handleDelete))
-	mux.HandleFunc("GET /api/fs/delete/{id}", s.wrap(s.handleDeleteStatus))
-	mux.HandleFunc("GET /api/fs/deletions", s.wrap(s.handleDeletions))
+	// Retired routes are explicit so an SPA fallback cannot disguise a stale client.
+	// No legacy file handler or signer is reachable through this router.
+	for _, route := range []string{"/api/fs", "/api/fs/", "/capabilities", "/list", "/search", "/mkdir", "/move", "/move/", "/copy", "/copy/", "/delete", "/delete/", "/upload", "/upload/"} {
+		mux.HandleFunc(route, retiredFileRoute)
+	}
 
-	// Account/event and remaining legacy COS actions retain their routes during
-	// migration. The shared file resource family below owns /api/files exclusively.
+	// Account/Connect management and event authoring remain separate APIs.
+	// The shared file resource family below owns /api/files exclusively.
 	mux.HandleFunc("POST /events", s.api(s.handleAPICreateEvent))
 	mux.HandleFunc("GET /events", s.api(s.handleAPIListEvents))
 	mux.HandleFunc("GET /events/{id}", s.api(s.handleAPIGetEvent))
 	mux.HandleFunc("DELETE /events/{id}", s.api(s.handleAPIDeleteEvent))
 
-	mux.HandleFunc("GET /capabilities", s.api(s.handleAPICapabilities))
-	mux.HandleFunc("GET /list", s.api(s.handleAPIList))
 	mux.HandleFunc("GET /me", s.api(s.handleAPIMe))
 	mux.HandleFunc("PATCH /me", s.api(s.handleAPIPatchMe))
-	mux.HandleFunc("GET /search", s.api(s.handleAPISearch))
-	mux.HandleFunc("POST /mkdir", s.api(s.handleAPIMkdir))
-	mux.HandleFunc("POST /move", s.api(s.handleAPIMove))
-	mux.HandleFunc("GET /move/{id}", s.api(s.jobGet(jobs.OpMove)))
-	mux.HandleFunc("POST /move/{id}/cancel", s.api(s.jobCancel(jobs.OpMove)))
-	mux.HandleFunc("POST /move/{id}/retry", s.api(s.jobRetry(jobs.OpMove)))
-	mux.HandleFunc("POST /copy", s.api(s.handleAPICopy))
-	mux.HandleFunc("GET /copy/{id}", s.api(s.jobGet(jobs.OpCopy)))
-	mux.HandleFunc("POST /copy/{id}/cancel", s.api(s.jobCancel(jobs.OpCopy)))
-	mux.HandleFunc("POST /copy/{id}/retry", s.api(s.jobRetry(jobs.OpCopy)))
-	mux.HandleFunc("POST /upload", s.api(s.handleAPIUpload))
-	mux.HandleFunc("GET /upload/{id}", s.api(s.handleAPIUploadStatus))
-	mux.HandleFunc("POST /upload/complete", s.api(s.handleAPIComplete))
 	mux.Handle("/api/files", s.filesHandler())
 	mux.Handle("/api/files/", s.filesHandler())
 
-	// A save link is an instruction page. Generated prompts migrate with clients in P6.
+	// A save link is an instruction page using the unified file API.
 	// The sub-router registers GET only; ServeMux answers 405 for POST, with no business handler.
 	saveMux := http.NewServeMux()
 	saveMux.HandleFunc("GET /{code}", s.wrap(s.handleSaveLinkPage))
@@ -206,6 +186,10 @@ func (s *Server) Handler() http.Handler {
 	}
 
 	return s.recoverer(s.logger(s.cors(mux)))
+}
+
+func retiredFileRoute(w http.ResponseWriter, r *http.Request) {
+	writeFilesProblem(w, r, fc.NewProblem(http.StatusGone, "legacy_file_api_retired", "Use the unified /api/files API."))
 }
 
 func (s *Server) ok(w http.ResponseWriter, data any) error {
@@ -270,11 +254,10 @@ func (s *Server) limitAPI(w http.ResponseWriter, r *http.Request) error {
 // isAPIPath reports whether a path belongs to the public API, for CORS and preflight.
 func isAPIPath(path string) bool {
 	switch path {
-	case "/capabilities", "/list", "/me", "/mkdir", "/move", "/copy",
-		"/search", "/api/files", "/upload", "/upload/complete", "/events":
+	case "/me", "/api/files", "/events":
 		return true
 	}
-	for _, prefix := range []string{"/api/files/", "/move/", "/copy/", "/upload/", "/events/", "/s/"} {
+	for _, prefix := range []string{"/api/files/", "/events/", "/s/"} {
 		if strings.HasPrefix(path, prefix) {
 			return true
 		}

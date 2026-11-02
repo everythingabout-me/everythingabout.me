@@ -196,15 +196,15 @@ func (p *Postgres) beginTx(ctx context.Context, tx pgx.Tx, req BeginRequest, fin
 		if err != nil {
 			return err
 		}
-		rows, err := tx.Query(ctx, `select g.native_path,g.subtree,o.action from file_operation_guards g join file_operations o on o.id=g.operation_id and o.owner_id=g.owner_id where g.owner_id=$1`, req.Root.OwnerID)
+		rows, err := tx.Query(ctx, `select g.native_path,g.subtree,o.action,o.id::text from file_operation_guards g join file_operations o on o.id=g.operation_id and o.owner_id=g.owner_id where g.owner_id=$1 order by o.id,g.ordinal`, req.Root.OwnerID)
 		if err != nil {
 			return err
 		}
-		conflict := false
+		conflictID := ""
 		for rows.Next() {
 			var g Guard
-			var kind string
-			if err = rows.Scan(&g.Path, &g.Subtree, &kind); err != nil {
+			var kind, operationID string
+			if err = rows.Scan(&g.Path, &g.Subtree, &kind, &operationID); err != nil {
 				rows.Close()
 				return err
 			}
@@ -215,8 +215,8 @@ func (p *Postgres) beginTx(ctx context.Context, tx pgx.Tx, req BeginRequest, fin
 				if req.Kind == "move" {
 					want.Subtree = true
 				}
-				if guardConflict(req.Root, g, want) {
-					conflict = true
+				if conflictID == "" && guardConflict(req.Root, g, want) {
+					conflictID = operationID
 				}
 			}
 		}
@@ -225,8 +225,8 @@ func (p *Postgres) beginTx(ctx context.Context, tx pgx.Tx, req BeginRequest, fin
 		if err != nil {
 			return err
 		}
-		if conflict {
-			return E("operation_in_progress", nil)
+		if conflictID != "" {
+			return &Error{Code: "operation_in_progress", OperationID: conflictID}
 		}
 		if !budgetFits(u.LogicalBytes, u.LogicalReserved, reserve, u.LogicalLimit) {
 			return E("quota_exceeded", nil)

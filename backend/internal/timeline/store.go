@@ -14,7 +14,7 @@ import (
 
 	"everythingabout.me/backend/internal/config"
 	"everythingabout.me/backend/internal/events"
-	"everythingabout.me/backend/internal/paths"
+	fc "everythingabout.me/backend/internal/filecontract"
 	"everythingabout.me/backend/internal/storage"
 	"everythingabout.me/backend/internal/store"
 )
@@ -628,22 +628,14 @@ func (s *Service) status(ctx context.Context, userID string) (Status, error) {
 	return status, nil
 }
 
-// ---------- signing ----------
+// ---------- same-origin media ----------
 
-func (s *Service) signThumb(ctx context.Context, userID string, thumb *Thumb, process string) {
-	if thumb == nil || thumb.Video || thumb.Path == "" {
+func hydrateThumb(thumb *Thumb) {
+	if thumb == nil {
 		return
 	}
-	key := paths.KeyFor(thumb.Path, userID)
-	url, err := s.storage.GetURL(ctx, key, storage.URLOptions{
-		ExpiresSeconds: 900,
-		Process:        process,
-	})
-	if err != nil {
-		slog.Warn("timeline: failed to sign thumbnail URL", "path", thumb.Path, "error", err)
-		return
-	}
-	thumb.URL = url
+	// Replace persisted historical URLs too; snapshots may contain old grants.
+	thumb.URL = fc.InlineContentURL(thumb.Path)
 }
 
 // ---------- month helpers ----------

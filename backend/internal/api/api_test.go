@@ -3,7 +3,6 @@ package api
 import (
 	"bytes"
 	"encoding/json"
-	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -16,56 +15,9 @@ import (
 	"everythingabout.me/backend/internal/nodes"
 )
 
-// checks a few things about /api/files/{path...}: slashes kept, %20 decoded, HEAD routed before GET.
-func TestFilesRoute(t *testing.T) {
-	mux := http.NewServeMux()
-	mux.HandleFunc("GET /api/files/{path...}", func(w http.ResponseWriter, r *http.Request) {
-		fmt.Fprintf(w, "GET:%s", r.PathValue("path"))
-	})
-	mux.HandleFunc("HEAD /api/files/{path...}", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("X-Handler", "head")
-		w.WriteHeader(http.StatusOK)
-	})
-
-	cases := []struct {
-		name       string
-		method     string
-		target     string
-		wantBody   string
-		wantHeader string
-	}{
-		{"multi-level path", http.MethodGet, "/api/files/Photos/2024/a.jpg", "GET:Photos/2024/a.jpg", ""},
-		{"percent-encoded", http.MethodGet, "/api/files/A%20B.txt", "GET:A B.txt", ""},
-		{"non-ASCII path", http.MethodGet, "/api/files/%E7%BE%BD%E6%AF%9B%E7%90%83/a.mp4", "GET:羽毛球/a.mp4", ""},
-		{"HEAD has its own handler", http.MethodHead, "/api/files/a.jpg", "", "head"},
-	}
-
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			request := httptest.NewRequest(tc.method, tc.target, nil)
-			recorder := httptest.NewRecorder()
-			mux.ServeHTTP(recorder, request)
-
-			if tc.wantHeader != "" {
-				if got := recorder.Header().Get("X-Handler"); got != tc.wantHeader {
-					t.Fatalf("handler = %q, want %q", got, tc.wantHeader)
-				}
-				return
-			}
-			if got := recorder.Body.String(); got != tc.wantBody {
-				t.Fatalf("body = %q, want %q", got, tc.wantBody)
-			}
-		})
-	}
-}
-
 func TestIsAPIPath(t *testing.T) {
-	yes := []string{
-		"/capabilities", "/list", "/me", "/mkdir", "/move", "/copy", "/search",
-		"/api/files", "/api/files/a/b", "/upload", "/upload/complete", "/upload/u_1",
-		"/move/m_1", "/copy/c_1", "/copy/c_1/cancel", "/s/abcd2345efgh2345",
-	}
-	no := []string{"/", "/api/fs/list", "/files", "/filesx", "/api/filesx", "/login", "/capabilitiesx"}
+	yes := []string{"/me", "/api/files", "/api/files/content", "/events", "/events/e_fixture", "/s/abcd2345efgh2345"}
+	no := []string{"/", "/api/fs/list", "/files", "/filesx", "/api/filesx", "/login", "/capabilities", "/list", "/mkdir", "/move", "/copy", "/upload", "/upload/u_fixture", "/search"}
 
 	for _, path := range yes {
 		if !isAPIPath(path) {
@@ -302,9 +254,14 @@ func TestSaveLinkPrompt(t *testing.T) {
 	prompt := saveLinkPrompt("https://everythingabout.me", "abcd2345efgh2345")
 	for _, want := range []string{
 		"Token: abcd2345efgh2345",
-		"PUT https://everythingabout.me/api/files/Inbox/2026/10/28/note.md",
+		"https://everythingabout.me/api/files/content?path=%2Fnote.md",
 		"Content-Type: text/markdown",
-		"POST https://everythingabout.me/upload",
+		"If-None-Match: *",
+		"Idempotency-Key:",
+		"POST https://everythingabout.me/api/files/uploads",
+		"/api/files/uploads/{id}/parts/{number}",
+		"POST /api/files/uploads/{id}/commit",
+		"/api/files/operations/{operationId}",
 		"Authorization: Bearer abcd2345efgh2345",
 	} {
 		if !strings.Contains(prompt, want) {
@@ -316,6 +273,57 @@ func TestSaveLinkPrompt(t *testing.T) {
 	}
 	if strings.Contains(prompt, "confirmation") {
 		t.Errorf("prompt should not tell the agent what to confirm:\n%s", prompt)
+	}
+}
+
+func TestWritePromptCapabilitiesUseExistingParent(t *testing.T) {
+	for _, tc := range []struct{ target, parent string }{
+		{"/note.md", "%2F"},
+		{"/Apps/obsidian/note.md", "%2FApps%2Fobsidian"},
+		{"/Apps/ +%2F?# /note.md", "%2FApps%2F+%2B%252F%3F%23+"},
+	} {
+		t.Run(tc.target, func(t *testing.T) {
+			prompt := unifiedWritePrompt("https://files.example", "test-token", tc.target)
+			check := "If file reads are permitted, after the parent exists check GET /api/files/capabilities?path=" + tc.parent + " for admitted write and size limits."
+			if !strings.Contains(prompt, check) {
+				t.Fatalf("capabilities did not use the exact parent: %s", prompt)
+			}
+			if strings.Index(prompt, check) < strings.Index(prompt, `{"kind":"folder"`) {
+				t.Fatal("capability check precedes parent creation guidance")
+			}
+			if strings.Count(prompt, "/api/files/capabilities?path=") != 1 {
+				t.Fatal("write instructions contain a competing capability target")
+			}
+		})
+	}
+}
+
+func TestTokenPromptWithoutFileReads(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		token auth.Token
+	}{
+		{"write-only", auth.Token{CanWrite: true, Prefix: "Apps/writer"}},
+		{"events-only", auth.Token{CanEvents: true}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			prompt := tokenPrompt("https://files.example", "test-token", &tc.token)
+			if !strings.Contains(prompt, "First call GET /me to confirm the connection and its current permissions.") {
+				t.Fatal("connection bootstrap is missing")
+			}
+			if strings.Contains(prompt, "GET /api/files/me") || strings.Contains(prompt, "List the authorized folder:") {
+				t.Fatal("unreadable file bootstrap is advertised")
+			}
+			if tc.token.CanWrite {
+				for _, required := range []string{"If file reads are permitted", "403 from file introspection means those limits are unavailable", "create a session with the exact file size", "write-only connection must obtain an authorized revision separately or use create-only"} {
+					if !strings.Contains(prompt, required) {
+						t.Fatalf("write-only guidance omits %q", required)
+					}
+				}
+			} else if strings.Contains(prompt, "curl -X PUT") || strings.Contains(prompt, "/api/files/capabilities?") {
+				t.Fatal("events-only connection advertised file requests")
+			}
+		})
 	}
 }
 
@@ -405,11 +413,12 @@ func TestTokenPrompt(t *testing.T) {
 		"API:     https://everythingabout.me",
 		"Token:   eam_ab12cd34ef56_secret",
 		"Access:  read + write + events",
-		"Scope:   Apps/obsidian/",
+		"Scope:   /Apps/obsidian",
 		"Expires: 2026-10-29T13:45:00.000Z",
-		"/list?path=Apps%2Fobsidian",
-		"/api/files/Apps/obsidian/note.md",
+		"/api/files/list?path=%2FApps%2Fobsidian",
+		"/api/files/content?path=%2FApps%2Fobsidian%2Fnote.md",
 		"First call GET /me",
+		"GET /api/files/me confirms file access and scope.",
 	} {
 		if !strings.Contains(prompt, want) {
 			t.Errorf("the prompt is missing %q:\n%s", want, prompt)
@@ -417,7 +426,7 @@ func TestTokenPrompt(t *testing.T) {
 	}
 
 	whole := tokenPrompt("https://everythingabout.me", "eam_plain", &auth.Token{CanRead: true})
-	for _, want := range []string{"Access:  read\n", "Scope:   the whole drive", "Expires: never", `"https://everythingabout.me/list"`} {
+	for _, want := range []string{"Access:  read\n", "Scope:   the whole drive", "Expires: never", `"https://everythingabout.me/api/files/list?path=%2F"`} {
 		if !strings.Contains(whole, want) {
 			t.Errorf("the whole-drive prompt is missing %q:\n%s", want, whole)
 		}

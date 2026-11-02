@@ -62,7 +62,11 @@ func filesMutationProblem(err error) error {
 		case "not_empty":
 			code = "directory_not_empty"
 		}
-		return fc.NewProblem(status, code, "The file operation could not complete: "+code+".")
+		problem := fc.NewProblem(status, code, "The file operation could not complete: "+code+".")
+		if code == "operation_in_progress" {
+			problem.OperationID = e.OperationID
+		}
+		return problem
 	}
 	var n *storage.Error
 	if errors.As(err, &n) {

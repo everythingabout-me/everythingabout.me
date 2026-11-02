@@ -11,30 +11,13 @@
 > the sections below remain the complete target contract.
 >
 > This is the target file API, replacing earlier route, envelope, identity, and upload decisions.
-> There is no requirement to preserve old clients or provide compatibility adapters. The running COS
-> implementation is documented separately in [legacy-api.md](legacy-api.md). Account login, Connect,
-> and event authoring are separate APIs; this specification defines the files they consume.
-> The existing browser directory/sign/confirm routes now stream file bytes through the backend.
-> Sign returns only a temporary application uploadId; binary confirm publishes then indexes, and JSON
-> confirm retrieves the result. Completed files leave recovery, with no permanent per-file COS polls.
-> See [recovery guarantees](../design/upload-index-recovery.md). These legacy browser receipts are separate
-> from the unified P5 upload/session resources; switching the browser is P6.
-> Legacy browser deletion uses cookie-authenticated `POST /api/fs/delete` with `{path}` and requires
-> `?recursive=1` for every directory, including empty ones (`409` otherwise); file deletion needs no flag.
-> Acceptance atomically captures a durable manifest and removes the indexed subtree, returning
-> `202 {ok:true,data:{job}}`, `Location: /api/fs/delete/{id}`, and `Retry-After: 2`. Native cleanup runs
-> in background and resumes after restart. Cookie-only GET status returns `{job}`; `GET /api/fs/deletions`
-> returns `{jobs}` for every unfinished deletion, including failures. Progress counts captured index rows
-> (`done` / `total`). The path remains reserved until `done`; failure needs attention and keeps the
-> reservation. No undo, cancel, or browser retry endpoint is offered. Legacy upload grants and unresolved
-> upload observations must be proven settled before admission. The browser recovers status on mount and
-> polls every three seconds while work is active; failures remain visible after refresh.
-> A conflicting legacy mkdir/upload allocation returns `409` with `code: "deletion_in_progress"`,
-> `operationId`, `path` (the deletion root), and `deletionStatus` in its error envelope. The browser retains
-> the local upload, displays the wait reason, and resumes only after the exact deletion reports `done`.
-> Failed cleanup or unavailable status keeps the upload waiting; cancellation drops the local waiting upload.
-> See [legacy deletion behavior and operator recovery](legacy-api.md#46-delete). This legacy change does not
-> alter the admitted Local mutation contract described above.
+> There is no requirement to preserve old clients or provide compatibility adapters. The retired protocols
+> are documented separately in [legacy-api.md](legacy-api.md). Account login, Connect and event authoring
+> remain separate APIs. P6 switches Web metadata, namespace mutations, resumable uploads and all media bytes
+> to this contract. Session identities and exact Operation waits survive refresh; local File reselection may
+> be required. `/api/fs/*` and root legacy file routes return 410 and issue no new native authority.
+> Read [P6 client acceptance](../design/storage-p6.md) and [authority-drain runbook](../design/storage-p6-backend.md)
+> before deployment. Route removal does not revoke previously issued PUT/STS/multipart authority.
 > Architecture: [storage.md](../design/storage.md). Driver contract: [storage-driver.md](../design/storage-driver.md).
 > **Mandatory:** native storage must retain complete readable folders, original names and raw files. Users
 > must be able to leave through ordinary native tools without the database or an Everything export.
@@ -502,7 +485,7 @@ outcome handling define the actual guarantee. Retention is explicit; retrying a 
 
 Capabilities is authenticated and path-scoped (default visible root), returning effective `read/write`,
 `range`, `thumbnails`, supported checksums, maximum file/single-PUT/part sizes, pagination limits, session
-expiry/retention policy, and quota/reservation information appropriate to the caller. Numbers are authoritative
+expiry/retention policy, `sourceModifiedAt` support, and quota/reservation information appropriate to the caller. Numbers are authoritative
 for admission but may change before a later request; new sessions bind their accepted limits. Upload responses
 provide their exact chunk layout. Never expose provider names or assume every backend has the same limits.
 

@@ -31,19 +31,22 @@ function folder(path, status = "completed") {
   return task(path, { isDir: true, size: 0, status });
 }
 
-function item(path, isDir = false) {
+function item(relative, isDir = false) {
+  const path = `/${relative}`;
   const slash = path.lastIndexOf("/");
   return {
-    id: `item:${path}`,
     path,
-    parent: slash < 0 ? "" : path.slice(0, slash),
+    parentPath: path.slice(0, slash) || "/",
     name: path.slice(slash + 1),
-    is_dir: isDir,
-    size: isDir ? 0 : 100,
-    mime: null,
-    created_at: "2026-10-31T10:00:00Z",
-    updated_at: "2026-10-31T10:00:00Z",
-    meta: {},
+    kind: isDir ? "folder" : "file",
+    revision: "nr_test",
+    contentRevision: isDir ? null : "cr_test",
+    size: isDir ? null : 100,
+    mediaType: null,
+    sourceModifiedAt: null,
+    createdAt: "2026-10-31T10:00:00Z",
+    updatedAt: "2026-10-31T10:00:00Z",
+    checksum: null,
   };
 }
 
@@ -186,7 +189,9 @@ test("clamps sent bytes and handles zero-byte files and finalization without NaN
   assert.equal(row.upload.loaded, 100);
   assert.equal(row.upload.percent, 100);
   assert.equal(row.upload.status, "finalizing");
-  assert.deepEqual(row.upload.cancelIds, []);
+  assert.deepEqual(row.upload.cancelIds, ["task:health/file"]);
+  const cancelling = buildUploadRows([], [task("health/file", { status: "finalizing", cancelRequested: true })], "health")[0];
+  assert.deepEqual(cancelling.upload.cancelIds, []);
   assert.equal(buildUploadRows([], [task("health/file", { loaded: -1 })], "health")[0].upload.loaded, 0);
 });
 

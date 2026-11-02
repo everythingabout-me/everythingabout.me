@@ -145,22 +145,16 @@ func (s *Service) month(ctx context.Context, userID string, month time.Time) (*M
 		return period, nil
 	}
 
-	s.signMonth(ctx, userID, snapshot)
+	s.hydrateMonth(snapshot)
 	return snapshot, nil
 }
 
-func (s *Service) signMonth(ctx context.Context, userID string, month *Month) {
+func (s *Service) hydrateMonth(month *Month) {
 	for i := range month.Items {
 		item := &month.Items[i]
-		process := "imageMogr2/thumbnail/640x>"
-		if item.Layout == "hero" || item.Layout == "single" {
-			process = "imageMogr2/thumbnail/1440x>"
-		}
-		if item.Cover != nil {
-			s.signThumb(ctx, userID, item.Cover, process)
-		}
+		hydrateThumb(item.Cover)
 		for j := range item.Grid {
-			s.signThumb(ctx, userID, &item.Grid[j], process)
+			hydrateThumb(&item.Grid[j])
 		}
 	}
 }
