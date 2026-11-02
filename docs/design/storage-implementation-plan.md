@@ -55,6 +55,16 @@ and permanent unknown-outcome guards. Real COS/S3 isolated probes were not confi
 new object writes remain default-off and require exact-connection capability evidence plus a verified baseline.
 P5–P7 and live production migration/provider acceptance remain pending.
 
+## P5 implementation status
+
+P5 adds owner/principal/root-bound persistent numbered-part sessions and watermarked durable SHA-256 receipts,
+private Local chunks, atomic manifest freeze/abort/expiry, and restart workers that reuse P3/P4 Stage/Publish,
+guards, accounting and saved results. See [P5 lifecycle, physical costs and validation](storage-p5.md).
+Migration 024 is additive and repeatable. Object ingress uses the same durable gateway chunks and explicitly
+rejects files beyond the admitted existing single-publication limit; native multipart is not claimed.
+Real COS/S3 probes, production admission and old authority drain remain separate unverified gates.
+P6 client/media/prompt cutover and P7 release/restore/performance acceptance remain pending.
+
 ## 1. Fixed implementation constraints
 
 - One `/api/files` contract for Web, iOS, Android, CLI and third parties. No browser-only file routes, version

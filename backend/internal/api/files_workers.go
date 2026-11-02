@@ -106,6 +106,12 @@ func (s *Server) runFileOperation(ctx context.Context, op fileops.Operation) err
 		if err != nil {
 			return err
 		}
+		if _, e := s.filesJournal.GetUpload(ctx, op.Root, actor, op.ID); e == nil {
+			_, e = s.runUploadOperation(ctx, op, actor, native, service)
+			return e
+		} else if !fileops.IsCode(e, "not_found") {
+			return e
+		}
 		var updated fileops.Operation
 		if op.Phase == fileops.StagedReady && op.State != fileops.Unknown {
 			updated, err = service.Write(ctx, op.Root, actor, op.ID, native, nil)
@@ -147,6 +153,11 @@ func (s *Server) StartFileOperations(ctx context.Context) {
 		ticker := time.NewTicker(5 * time.Second)
 		defer ticker.Stop()
 		for {
+			if expired, e := s.filesJournal.ExpireUploads(ctx, 32); e == nil {
+				for _, u := range expired {
+					_ = s.queueFileOperation(u.Operation)
+				}
+			}
 			pending, err := s.filesJournal.Pending(ctx, 32)
 			if err != nil && ctx.Err() == nil {
 				slog.Warn("file operation scan unavailable", "error", err)

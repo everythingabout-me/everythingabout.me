@@ -156,8 +156,20 @@ func (p *Postgres) Begin(ctx context.Context, input BeginRequest) (Operation, bo
 		return Operation{}, false, err
 	}
 	var op Operation
-	replayed := false
+	var replayed bool
 	err = p.transaction(ctx, req.Root.OwnerID, func(tx pgx.Tx) error {
+		var err error
+		op, replayed, err = p.beginTx(ctx, tx, req, fingerprint, reserve)
+		return err
+	})
+	return op, replayed, err
+}
+
+// beginTx shares admission with upload sessions under the same owner lock and transaction.
+func (p *Postgres) beginTx(ctx context.Context, tx pgx.Tx, req BeginRequest, fingerprint string, reserve int64) (Operation, bool, error) {
+	var op Operation
+	replayed := false
+	err := func() error {
 		// Replay precedes quota/conflict checks and does not require live native ancestry.
 		if req.IdempotencyKey != "" {
 			var id string
@@ -265,7 +277,7 @@ func (p *Postgres) Begin(ctx context.Context, input BeginRequest) (Operation, bo
 		}
 		_, err = tx.Exec(ctx, `update file_budgets set logical_reserved=logical_reserved+$2,physical_reserved=physical_reserved+$3 where owner_id=$1`, req.Root.OwnerID, reserve, req.Reservation.PhysicalBytes)
 		return err
-	})
+	}()
 	return op, replayed, err
 }
 func (p *Postgres) Get(ctx context.Context, root Root, a Actor, id string) (Operation, error) {
@@ -319,6 +331,14 @@ func (p *Postgres) Claim(ctx context.Context, root Root, a Actor, id string, ttl
 			return err
 		}
 		if op.Terminal() {
+			return E("invalid_transition", nil)
+		}
+		var uploadState string
+		err = tx.QueryRow(ctx, `select state from file_uploads where operation_id=$1 and owner_id=$2`, op.ID, root.OwnerID).Scan(&uploadState)
+		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+			return err
+		}
+		if err == nil && uploadState != string(UploadCommitting) {
 			return E("invalid_transition", nil)
 		}
 		now, err := dbNow(ctx, tx)

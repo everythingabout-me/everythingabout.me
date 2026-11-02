@@ -1,0 +1,337 @@
+package fileops
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"strings"
+	"time"
+
+	"everythingabout.me/backend/internal/storage"
+	"github.com/jackc/pgx/v5"
+)
+
+var _ UploadJournal = (*Postgres)(nil)
+
+func readUpload(ctx context.Context, tx pgx.Tx, root Root, actor Actor, id string, write bool) (Upload, error) {
+	var u Upload
+	if err := validateRoot(root); err != nil {
+		return u, err
+	}
+	if !validID(id) {
+		return u, E("not_found", nil)
+	}
+	// All transitions acquire the owner lock, then operation, then session rows.
+	op, err := readOperation(ctx, tx, id)
+	if err != nil {
+		return u, err
+	}
+	if err = authorizeOperation(op, root, actor, write); err != nil {
+		return u, err
+	}
+	u.ID, u.Operation = id, op
+	err = tx.QueryRow(ctx, `select part_size,part_count,max_parallelism,state,received_parts,received_bytes,created_at,expires_at,chunks_cleaned_at from file_uploads where operation_id=$1 and owner_id=$2 for update`, id, root.OwnerID).Scan(&u.PartSize, &u.PartCount, &u.MaxParallelism, &u.State, &u.ReceivedParts, &u.ReceivedBytes, &u.CreatedAt, &u.ExpiresAt, &u.ChunksCleanedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return Upload{}, E("not_found", nil)
+	}
+	if err != nil {
+		return Upload{}, err
+	}
+	u.State = uploadState(u)
+	return u, nil
+}
+
+func replayUploadTx(ctx context.Context, tx pgx.Tx, root Root, actor Actor, key, fingerprint string) (Upload, bool, error) {
+	if key == "" {
+		return Upload{}, false, nil
+	}
+	var id, original string
+	err := tx.QueryRow(ctx, `select operation_id::text,client_fingerprint from file_uploads where owner_id=$1 and principal_id=$2 and idempotency_key=$3`, root.OwnerID, actor.ID, key).Scan(&id, &original)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return Upload{}, false, nil
+	}
+	if err != nil {
+		return Upload{}, false, err
+	}
+	u, err := readUpload(ctx, tx, root, actor, id, true)
+	if err != nil {
+		return Upload{}, false, err
+	}
+	if original != fingerprint {
+		return Upload{}, false, E("idempotency_conflict", nil)
+	}
+	if err = expireLoadedUpload(ctx, tx, &u); err != nil {
+		return Upload{}, false, err
+	}
+	return u, true, nil
+}
+
+func (p *Postgres) ReplayUpload(ctx context.Context, root Root, actor Actor, key string, clientIntent storage.WriteIntent) (Upload, bool, error) {
+	var u Upload
+	var found bool
+	if err := validateRoot(root); err != nil {
+		return u, false, err
+	}
+	if actor.ID == "" || !actor.CanWrite || storage.ValidatePath(actor.Scope) != nil {
+		return u, false, E("forbidden", nil)
+	}
+	if len(key) > 1024 || strings.ContainsRune(key, 0) {
+		return u, false, E("invalid_request", nil)
+	}
+	fingerprint, err := clientUploadFingerprint(clientIntent)
+	if err != nil {
+		return u, false, err
+	}
+	err = p.transaction(ctx, root.OwnerID, func(tx pgx.Tx) error {
+		var err error
+		u, found, err = replayUploadTx(ctx, tx, root, actor, key, fingerprint)
+		return err
+	})
+	return u, found, err
+}
+
+func (p *Postgres) CreateUpload(ctx context.Context, input BeginRequest, options UploadOptions) (Upload, bool, error) {
+	var u Upload
+	var replay bool
+	fingerprint, err := clientUploadFingerprint(options.ClientIntent)
+	if err != nil {
+		return u, false, err
+	}
+	var w storage.WriteIntent
+	if json.Unmarshal(input.Intent, &w) != nil || input.Kind != "upload_commit" || options.MaxParallelism < 1 || options.MaxParallelism > 1000 || len(input.Manifest) != 0 {
+		return u, false, E("invalid_request", nil)
+	}
+	actual, err := clientUploadFingerprint(w)
+	if err != nil || actual != fingerprint {
+		return u, false, E("intent_conflict", nil)
+	}
+	count, err := uploadPartCount(w.Size, options.PartSize)
+	if err != nil {
+		return u, false, err
+	}
+	// Sessions serialize only the exact destination. Ancestor mutations retain their
+	// own subtree guards and therefore still conflict with this exact path.
+	input.Guards = []Guard{{Path: w.Target}}
+	key := input.IdempotencyKey
+	if len(key) > 1024 || strings.ContainsRune(key, 0) {
+		return u, false, E("invalid_request", nil)
+	}
+	// A session's client key lives in its own index; simple PUT remains independent.
+	input.IdempotencyKey = ""
+	req, opFingerprint, reserve, err := validateBegin(input)
+	if err != nil {
+		return u, false, err
+	}
+	if req.Reservation.PhysicalBytes < w.Size {
+		return u, false, E("invalid_request", nil)
+	}
+	err = p.transaction(ctx, req.Root.OwnerID, func(tx pgx.Tx) error {
+		var err error
+		u, replay, err = replayUploadTx(ctx, tx, req.Root, req.Actor, key, fingerprint)
+		if err != nil || replay {
+			return err
+		}
+		op, _, err := p.beginTx(ctx, tx, req, opFingerprint, reserve)
+		if err != nil {
+			return err
+		}
+		u = Upload{ID: op.ID, Operation: op, PartSize: options.PartSize, PartCount: count, MaxParallelism: options.MaxParallelism, State: UploadOpen, CreatedAt: op.CreatedAt, ExpiresAt: op.CreatedAt.Add(24 * time.Hour)}
+		var dbKey any
+		if key != "" {
+			dbKey = key
+		}
+		_, err = tx.Exec(ctx, `insert into file_uploads(operation_id,owner_id,principal_id,idempotency_key,client_fingerprint,comparison_path,part_size,part_count,max_parallelism,state,created_at,expires_at) values($1,$2,$3,$4,$5,$6,$7,$8,$9,'open',$10,$11)`, u.ID, req.Root.OwnerID, req.Actor.ID, dbKey, fingerprint, comparePath(req.Root, w.Target), u.PartSize, u.PartCount, u.MaxParallelism, u.CreatedAt, u.ExpiresAt)
+		return err
+	})
+	return u, replay, err
+}
+
+func (p *Postgres) GetUpload(ctx context.Context, root Root, actor Actor, id string) (Upload, error) {
+	var u Upload
+	if err := validateRoot(root); err != nil {
+		return u, err
+	}
+	err := p.transaction(ctx, root.OwnerID, func(tx pgx.Tx) error {
+		var err error
+		u, err = readUpload(ctx, tx, root, actor, id, false)
+		if err != nil {
+			return err
+		}
+		return expireLoadedUpload(ctx, tx, &u)
+	})
+	return u, err
+}
+
+// ListUploads uses an opaque UUID keyset, bounded by limit. Authorization and the
+// exact root are checked before a row occupies a result slot.
+func (p *Postgres) ListUploads(ctx context.Context, root Root, actor Actor, limit int, after string) ([]Upload, error) {
+	if err := validateRoot(root); err != nil {
+		return nil, err
+	}
+	if limit < 1 || limit > 1001 || after != "" && !validID(after) {
+		return nil, E("invalid_request", nil)
+	}
+	if actor.ID == "" || (!actor.CanRead && !actor.CanWrite) || storage.ValidatePath(actor.Scope) != nil {
+		return nil, E("forbidden", nil)
+	}
+	var out []Upload
+	err := p.transaction(ctx, root.OwnerID, func(tx pgx.Tx) error {
+		rootJSON, err := json.Marshal(root)
+		if err != nil {
+			return err
+		}
+		rows, err := tx.Query(ctx, `select u.operation_id::text from file_uploads u join file_operations o on o.id=u.operation_id and o.owner_id=u.owner_id where u.owner_id=$1 and ($2='' or u.operation_id>nullif($2,'')::uuid) and (u.principal_id=$3 or $4) and ($6='' or u.comparison_path=$6 or starts_with(u.comparison_path,$6||'/')) and o.snapshot->'Root'=$7::jsonb order by u.operation_id limit $5`, root.OwnerID, after, actor.ID, actor.ManageOwner && actor.ID == "owner:"+root.OwnerID && actor.CanWrite, limit, comparePath(root, actor.Scope), rootJSON)
+		if err != nil {
+			return err
+		}
+		var ids []string
+		for rows.Next() {
+			var id string
+			if err = rows.Scan(&id); err != nil {
+				rows.Close()
+				return err
+			}
+			ids = append(ids, id)
+		}
+		err = rows.Err()
+		rows.Close()
+		if err != nil {
+			return err
+		}
+		for _, id := range ids {
+			u, err := readUpload(ctx, tx, root, actor, id, false)
+			if err != nil {
+				return err
+			}
+			if err = expireLoadedUpload(ctx, tx, &u); err != nil {
+				return err
+			}
+			out = append(out, u)
+		}
+		return nil
+	})
+	return out, err
+}
+
+func uploadWritable(u Upload, now time.Time) error {
+	if u.State == UploadOpen {
+		if !u.ExpiresAt.After(now) {
+			return E("upload_expired", nil)
+		}
+		if u.Operation.Terminal() || u.Operation.CancelRequested {
+			return E("upload_gone", nil)
+		}
+		return nil
+	}
+	switch u.State {
+	case UploadCommitted:
+		return E("already_committed", nil)
+	case UploadCommitting, UploadUnknown:
+		return E("commit_in_progress", nil)
+	default:
+		return E("upload_gone", nil)
+	}
+}
+
+func (p *Postgres) AcceptUploadPart(ctx context.Context, root Root, actor Actor, id string, part PartReceipt) (PartReceipt, bool, error) {
+	var out PartReceipt
+	var replay bool
+	if err := validateRoot(root); err != nil {
+		return out, false, err
+	}
+	if part.Number < 1 || part.Size < 1 || part.Handle == "" || strings.ContainsRune(part.Handle, 0) || len(part.Handle) > 8192 || len(part.SHA256) != 64 {
+		return out, false, E("invalid_request", nil)
+	}
+	for _, c := range part.SHA256 {
+		if !(c >= '0' && c <= '9' || c >= 'a' && c <= 'f') {
+			return out, false, E("invalid_request", nil)
+		}
+	}
+	err := p.transaction(ctx, root.OwnerID, func(tx pgx.Tx) error {
+		u, err := readUpload(ctx, tx, root, actor, id, true)
+		if err != nil {
+			return err
+		}
+		now, err := dbNow(ctx, tx)
+		if err != nil {
+			return err
+		}
+		if err = uploadWritable(u, now); err != nil {
+			return err
+		}
+		w, err := uploadIntent(u)
+		if err != nil {
+			return err
+		}
+		if part.Number > u.PartCount {
+			return E("invalid_part", nil)
+		}
+		want := u.PartSize
+		if part.Number == u.PartCount {
+			want = w.Size - int64(u.PartCount-1)*u.PartSize
+		}
+		if part.Size != want {
+			return E("invalid_part", nil)
+		}
+		err = tx.QueryRow(ctx, `select number,size,sha256,handle,sequence from file_upload_parts where operation_id=$1 and owner_id=$2 and number=$3`, id, root.OwnerID, part.Number).Scan(&out.Number, &out.Size, &out.SHA256, &out.Handle, &out.Sequence)
+		if err == nil {
+			if out.Size != part.Size || out.SHA256 != part.SHA256 {
+				return E("part_conflict", nil)
+			}
+			replay = true
+			return nil
+		}
+		if !errors.Is(err, pgx.ErrNoRows) {
+			return err
+		}
+		err = tx.QueryRow(ctx, `update file_uploads set received_parts=received_parts+1,received_bytes=received_bytes+$3,ack_sequence=ack_sequence+1,expires_at=least(created_at+interval '168 hours',$4::timestamptz+interval '24 hours') where operation_id=$1 and owner_id=$2 returning ack_sequence`, id, root.OwnerID, part.Size, now).Scan(&part.Sequence)
+		if err != nil {
+			return err
+		}
+		_, err = tx.Exec(ctx, `insert into file_upload_parts(operation_id,owner_id,number,size,sha256,handle,sequence) values($1,$2,$3,$4,$5,$6,$7)`, id, root.OwnerID, part.Number, part.Size, part.SHA256, part.Handle, part.Sequence)
+		out = part
+		return err
+	})
+	return out, replay, err
+}
+
+// A zero watermark captures the current maximum ACK sequence. Subsequent pages
+// use after=last.Sequence and the same watermark; ACKs after it never shift pages.
+func (p *Postgres) ListUploadParts(ctx context.Context, root Root, actor Actor, id string, limit int, after, watermark int64) ([]PartReceipt, int64, error) {
+	if err := validateRoot(root); err != nil {
+		return nil, 0, err
+	}
+	if limit < 1 || limit > 1001 || after < 0 || watermark < 0 || watermark == 0 && after != 0 {
+		return nil, 0, E("invalid_request", nil)
+	}
+	var out []PartReceipt
+	err := p.transaction(ctx, root.OwnerID, func(tx pgx.Tx) error {
+		if _, err := readUpload(ctx, tx, root, actor, id, false); err != nil {
+			return err
+		}
+		var current int64
+		if err := tx.QueryRow(ctx, `select ack_sequence from file_uploads where operation_id=$1 and owner_id=$2`, id, root.OwnerID).Scan(&current); err != nil {
+			return err
+		}
+		if watermark == 0 {
+			watermark = current
+		}
+		if watermark > current || after > watermark {
+			return E("invalid_request", nil)
+		}
+		rows, err := tx.Query(ctx, `select number,size,sha256,handle,sequence from file_upload_parts where operation_id=$1 and owner_id=$2 and sequence>$3 and sequence<=$4 order by sequence limit $5`, id, root.OwnerID, after, watermark, limit)
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var r PartReceipt
+			if err = rows.Scan(&r.Number, &r.Size, &r.SHA256, &r.Handle, &r.Sequence); err != nil {
+				return err
+			}
+			out = append(out, r)
+		}
+		return rows.Err()
+	})
+	return out, watermark, err
+}

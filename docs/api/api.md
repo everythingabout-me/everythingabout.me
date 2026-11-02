@@ -4,8 +4,9 @@
 > P4 implements PUT, native namespace actions and Operations for explicitly admitted coordinated Local roots.
 > Writes default off and require a verified root baseline. [COS/S3 mutation adapters](../design/storage-p4-objects.md)
 > additionally require exact-connection native probe evidence and durable single-gateway spool; live provider
-> probes were not configured during implementation. Resumable uploads and thumbnails remain authenticated
-> 501 placeholders. See [P2 reads](../design/storage-p2.md) and
+> probes were not configured during implementation. P5 implements durable numbered-part uploads on admitted
+> roots; thumbnails remain an authenticated 501 placeholder. See [P5 lifecycle and costs](../design/storage-p5.md),
+> [P2 reads](../design/storage-p2.md) and
 > [P4 admission, active endpoints and validation](../design/storage-p4.md) for current limits;
 > the sections below remain the complete target contract.
 >
@@ -16,8 +17,8 @@
 > The existing browser directory/sign/confirm routes now stream file bytes through the backend.
 > Sign returns only a temporary application uploadId; binary confirm publishes then indexes, and JSON
 > confirm retrieves the result. Completed files leave recovery, with no permanent per-file COS polls.
-> See [recovery guarantees](../design/upload-index-recovery.md). This does not activate the unified
-> upload/session resources specified below.
+> See [recovery guarantees](../design/upload-index-recovery.md). These legacy browser receipts are separate
+> from the unified P5 upload/session resources; switching the browser is P6.
 > Legacy browser deletion uses cookie-authenticated `POST /api/fs/delete` with `{path}` and requires
 > `?recursive=1` for every directory, including empty ones (`409` otherwise); file deletion needs no flag.
 > Acceptance atomically captures a durable manifest and removes the indexed subtree, returning
@@ -320,6 +321,14 @@ A retry body is still consumed/validated before claiming it matches a stored res
 ## 7. One resumable upload protocol
 
 Clients always write numbered service parts. No S3 mode, provider offset protocol, or native receipt parsing.
+P5 currently selects 8 MiB parts, `ordering:any`, at most four concurrent byte requests and 10000 parts.
+Receipts return lowercase hexadecimal SHA-256. Session lists use opaque UUID keysets; receipt pages use
+opaque acknowledgement keysets and return their fixed `watermark`. Commit accepts asynchronously with a
+stable Operation until the saved metadata result is settled. Same-path sessions are rejected while an earlier
+guard is active; no session is implicitly cancelled. COS/S3 creation rejects size above the admitted final
+single-publication policy (default 32 MiB, maximum 5 GiB), before accepting any parts. Native multipart
+publication is not implemented. Local maximum is 10000 parts (80000 MiB), subject to physical/logical budgets.
+Unsupported whole-file checksum fields are rejected; optional per-part Content-Digest is supported.
 Create with an Idempotency-Key:
 
 ```http

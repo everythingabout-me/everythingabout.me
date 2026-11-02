@@ -139,7 +139,7 @@ func (w *filesResponseWriter) Flush() {
 
 func (s *Server) fileWrap(fn fileHandler) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != fc.Base+"/content" {
+		if r.URL.Path != fc.Base+"/content" && !(r.Method == http.MethodPut && strings.Contains(r.URL.Path, "/uploads/") && strings.Contains(r.URL.Path, "/parts/")) {
 			ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
 			defer cancel()
 			r = r.WithContext(ctx)
@@ -274,8 +274,8 @@ func (s *Server) filesHandler() http.Handler {
 		case fc.Base + "/thumbnail":
 			routes["GET"] = pending
 		case fc.Base + "/uploads":
-			routes["GET"] = pending
-			routes["POST"] = pending
+			routes["GET"] = s.handleFilesListUploads
+			routes["POST"] = s.handleFilesCreateUpload
 		default:
 			if pendingFileWorkflow.MatchString(r.URL.Path) {
 				switch {
@@ -285,15 +285,15 @@ func (s *Server) filesHandler() http.Handler {
 					} else {
 						routes["GET"] = s.handleFilesGetOperation
 					}
-				case strings.HasSuffix(r.URL.Path, "/commit"), strings.HasSuffix(r.URL.Path, "/cancel"):
-					routes["POST"] = pending
+				case strings.HasSuffix(r.URL.Path, "/commit"):
+					routes["POST"] = s.handleFilesCommitUpload
 				case strings.Contains(r.URL.Path, "/parts/"):
-					routes["PUT"] = pending
+					routes["PUT"] = s.handleFilesUploadPart
 				case strings.HasSuffix(r.URL.Path, "/parts"):
-					routes["GET"] = pending
+					routes["GET"] = s.handleFilesUploadParts
 				case strings.Contains(r.URL.Path, "/uploads/"):
-					routes["GET"] = pending
-					routes["DELETE"] = pending
+					routes["GET"] = s.handleFilesGetUpload
+					routes["DELETE"] = s.handleFilesAbortUpload
 				default:
 					routes["GET"] = pending
 				}

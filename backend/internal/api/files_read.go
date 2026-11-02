@@ -19,6 +19,7 @@ import (
 	"unicode/utf8"
 
 	fc "everythingabout.me/backend/internal/filecontract"
+	"everythingabout.me/backend/internal/fileops"
 	"everythingabout.me/backend/internal/filerevision"
 	"everythingabout.me/backend/internal/nodes"
 	"everythingabout.me/backend/internal/storage"
@@ -656,14 +657,22 @@ func (s *Server) handleFilesCapabilities(w http.ResponseWriter, r *http.Request,
 	if ready {
 		retention = 86400
 	}
+	var partBytes, idleExpiry, maxLifetime any
+	if ready {
+		partBytes, idleExpiry, maxLifetime = filesUploadPartSize, 86400, 604800
+		if native, ok := f.Driver.(fileops.NativeActions); ok {
+			n := filesUploadMaxSize(native)
+			maxFile = &n
+		}
+	}
 	quota, reservations := filesUsageFields(usage, f.Scope == "/" && actual == "/")
 	return writeFilesJSON(w, 200, map[string]any{
 		"path": actual, "read": true, "write": ready, "range": d.RangeRead, "pinnedRead": d.PinnedRead, "strongContentValidators": d.PinnedRead,
-		"thumbnails": false, "uploads": false, "checksums": checksums,
-		"maxFileBytes": maxFile, "maxSinglePutBytes": singlePut, "maxPartBytes": nil,
+		"thumbnails": false, "uploads": ready, "checksums": checksums,
+		"maxFileBytes": maxFile, "maxSinglePutBytes": singlePut, "maxPartBytes": partBytes,
 		"pagination":           map[string]any{"defaultLimit": filesDefaultLimit, "maxLimit": filesMaxLimit},
 		"names":                map[string]any{"caseSensitive": d.Names.CaseSensitive, "maxSegmentBytes": d.Names.MaxSegmentBytes, "maxPathBytes": d.Names.MaxPathBytes, "maxDepth": d.Names.MaxDepth},
-		"sessionExpirySeconds": nil, "terminalRetentionSeconds": retention, "quota": quota, "reservations": reservations,
+		"sessionExpirySeconds": idleExpiry, "sessionMaxLifetimeSeconds": maxLifetime, "maxUploadParts": filesUploadMaxParts, "maxUploadParallelism": filesUploadParallelism, "terminalRetentionSeconds": retention, "quota": quota, "reservations": reservations,
 	})
 }
 

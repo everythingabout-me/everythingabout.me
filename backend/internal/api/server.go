@@ -27,6 +27,7 @@ import (
 	"everythingabout.me/backend/internal/store"
 	"everythingabout.me/backend/internal/timeline"
 	"everythingabout.me/backend/internal/uploadindex"
+	"everythingabout.me/backend/internal/uploadspool"
 )
 
 type OwnerStorageFactory interface {
@@ -40,6 +41,7 @@ type Server struct {
 	filesAuth      FilesAuthenticator
 	filesIndex     FileReadIndex
 	filesJournal   *fileops.Postgres
+	uploadSpools   fileUploadSpoolFactory
 	fileWorkerMu   sync.Mutex
 	fileWorkers    *fileWorkers
 	cfg            *config.Config
@@ -79,6 +81,13 @@ func New(cfg *config.Config, db *store.DB, objectStorage storage.Storage, web ht
 		timeline:   timeline.New(db, objectStorage, cfg.Timeline, eventService),
 		limiter:    ratelimit.New(),
 		web:        web,
+	}
+	server.uploadSpools = func(binding storage.Config) (FileUploadSpool, error) {
+		base := cfg.Storage.ObjectSpoolRoot
+		if cfg.BackendName() == "local" {
+			base = binding.SystemRoot
+		}
+		return uploadspool.New(base, binding)
 	}
 	if db != nil {
 		server.filesJournal = fileops.NewPostgres(db.Pool())

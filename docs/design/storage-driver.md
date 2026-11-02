@@ -5,7 +5,8 @@
 > P4 adds admitted Local actions and conservative COS/S3 staged adapters with explicit capability evidence.
 > Real COS/S3 probes remain unverified; default writes stay disabled. Preserving the readable tree is mandatory.
 > Implementation/configuration limits: [P1](storage-p1.md), [P3](storage-p3.md), [P4](storage-p4.md),
-> [object mutation admission](storage-p4-objects.md).
+> [object mutation admission](storage-p4-objects.md), [P5 durable ingress](storage-p5.md). P5 chunks are
+> temporary durable local files; object files above the admitted single-publication limit are rejected.
 >
 > [Architecture](storage.md) requires original names, complete native folder structure and directly usable
 > file bytes. [The file API](../api/api.md) remains same-origin and backend-neutral. This replaces the

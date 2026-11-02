@@ -35,6 +35,12 @@ func filesMutationProblem(err error) error {
 			status = 403
 		case "not_found":
 			status = 404
+		case "upload_expired", "upload_aborted", "upload_gone", "upload_failed":
+			status = 410
+		case "invalid_part":
+			status = 400
+		case "intent_conflict":
+			code = "idempotency_conflict"
 		case "precondition_required":
 			status = 428
 		case "target_changed", "precondition_failed", "changed":

@@ -107,6 +107,38 @@ export interface FilePrincipal {
   csrfToken?: string;
 }
 
+export interface FileUploadSession {
+  id: string;
+  path: string;
+  state: "open" | "committing" | "committed" | "outcome_unknown" | "failed" | "aborted" | "expired";
+  size: number;
+  partSize: number;
+  partCount: number;
+  maxParallelism: number;
+  ordering: "any" | "ascending";
+  nextPart: number | null;
+  receivedParts: number;
+  receivedBytes: number;
+  createdAt: string;
+  expiresAt: string;
+  partsUrl: string;
+  commitUrl: string;
+  operationId: string;
+  result: FileResource | null;
+}
+
+export interface FileUploadReceipt {
+  number: number;
+  size: number;
+  sha256: string;
+}
+
+export interface FileUploadReceipts {
+  items: FileUploadReceipt[];
+  nextCursor: string | null;
+  watermark: number;
+}
+
 export interface FileCapabilities {
   path: string;
   read: boolean;
@@ -123,6 +155,9 @@ export interface FileCapabilities {
   pagination: { defaultLimit: number; maxLimit: number };
   names: { caseSensitive: boolean; maxSegmentBytes: number; maxPathBytes: number; maxDepth: number };
   sessionExpirySeconds: number | null;
+  sessionMaxLifetimeSeconds: number | null;
+  maxUploadParts: number;
+  maxUploadParallelism: number;
   terminalRetentionSeconds: number | null;
   quota: FileQuota | null;
   reservations: FileReservations | null;

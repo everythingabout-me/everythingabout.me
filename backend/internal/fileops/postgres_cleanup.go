@@ -15,7 +15,18 @@ func (p *Postgres) CleanupCandidates(ctx context.Context, limit int) ([]Operatio
 	if limit < 1 || limit > 1000 {
 		return nil, E("invalid_request", nil)
 	}
-	rows, err := p.pool.Query(ctx, `select snapshot from file_operations where action='upload_commit' and snapshot->>'State' in ('succeeded','failed','cancelled') and (snapshot->'CleanedAt' is null or snapshot->'CleanedAt'='null'::jsonb) order by snapshot->>'FinishedAt',id limit $1`, limit)
+	// Scheduling attempts rotate durably even when an active late body makes
+	// Discard busy. Selecting only the oldest finished rows would starve all later
+	// owners behind one batch of stalled receivers. This mark releases no liability.
+	rows, err := p.pool.Query(ctx, `with candidates as (
+ select id from file_operations
+ where action='upload_commit' and snapshot->>'State' in ('succeeded','failed','cancelled')
+ and (snapshot->'CleanedAt' is null or snapshot->'CleanedAt'='null'::jsonb)
+ order by coalesce((snapshot->>'CleanupAttemptedAt')::timestamptz,(snapshot->>'FinishedAt')::timestamptz),id
+ for update skip locked limit $1
+ ) update file_operations o
+ set snapshot=jsonb_set(o.snapshot,'{CleanupAttemptedAt}',to_jsonb(clock_timestamp()))
+ from candidates c where o.id=c.id returning o.snapshot`, limit)
 	if err != nil {
 		return nil, err
 	}

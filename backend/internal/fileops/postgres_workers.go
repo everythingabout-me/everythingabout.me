@@ -12,6 +12,7 @@ func (p *Postgres) Pending(ctx context.Context, limit int) ([]Operation, error) 
 		return nil, E("invalid_request", nil)
 	}
 	rows, err := p.pool.Query(ctx, `select snapshot from file_operations where snapshot->>'State' in ('queued','running','outcome_unknown')
+ and not exists (select 1 from file_uploads u where u.operation_id=file_operations.id and u.state <> 'committing')
  and (snapshot->>'CreatedAt')::timestamptz < clock_timestamp()-interval '30 seconds'
  and (coalesce(snapshot->'Lease'->>'Token','')='' or (snapshot->'Lease'->>'ExpiresAt')::timestamptz <= clock_timestamp())
  order by snapshot->>'CreatedAt',id limit $1`, limit)

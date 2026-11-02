@@ -96,31 +96,32 @@ type EntryEffect struct {
 	Result     json.RawMessage
 }
 type Operation struct {
-	ID               string
-	Root             Root
-	PrincipalID      string
-	Kind             string
-	State            State
-	Phase            Phase
-	Intent           json.RawMessage
-	Fingerprint      string
-	Checkpoint       []byte
-	RecoveryEvidence []byte
-	Stage            *storage.Staged
-	NativeResult     *storage.MutationResult
-	Result           json.RawMessage
-	Problem          json.RawMessage
-	CancelRequested  bool
-	Guards           []Guard
-	Entries          []EntryEffect
-	CreatedAt        time.Time
-	FinishedAt       *time.Time
-	RetainUntil      time.Time
-	Reservation      ReservationRequest
-	CleanedAt        *time.Time
-	ChargedLogical   int64
-	ChargedPhysical  int64
-	Lease            Lease
+	ID                 string
+	Root               Root
+	PrincipalID        string
+	Kind               string
+	State              State
+	Phase              Phase
+	Intent             json.RawMessage
+	Fingerprint        string
+	Checkpoint         []byte
+	RecoveryEvidence   []byte
+	Stage              *storage.Staged
+	NativeResult       *storage.MutationResult
+	Result             json.RawMessage
+	Problem            json.RawMessage
+	CancelRequested    bool
+	Guards             []Guard
+	Entries            []EntryEffect
+	CreatedAt          time.Time
+	FinishedAt         *time.Time
+	RetainUntil        time.Time
+	Reservation        ReservationRequest
+	CleanedAt          *time.Time
+	CleanupAttemptedAt *time.Time
+	ChargedLogical     int64
+	ChargedPhysical    int64
+	Lease              Lease
 }
 
 func (o Operation) Terminal() bool {

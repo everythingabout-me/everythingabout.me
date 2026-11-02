@@ -41,7 +41,7 @@ may still require per-file copy/delete. Durable journals reconcile backend chang
 | File content (P2 active) | `GET/HEAD /api/files/content?path=/...`: same-origin streaming, safe single ranges |
 | Mutations (P4 admitted roots) | PUT content, POST folder/move/copy, DELETE path; verified baseline and explicit backend capability evidence required |
 | Long operations (P4) | `.../operations/{id}` and `/cancel`: durable progress, partial effects, recovery |
-| Resumable uploads (P5 pending) | `.../uploads` remains authenticated 501 |
+| Resumable uploads (P5 admitted roots) | POST/GET `.../uploads`; GET/DELETE `.../uploads/{id}`; PUT `.../parts/{number}`; GET `.../parts`; POST `.../commit` |
 | Storage tree (P1/P4) | Native reads and admitted Local stage/publish/mkdir/move/copy/empty-only remove |
 
 CDN/regional gateways and NAS connectors are internal deployment choices. Private cache hits require
@@ -62,7 +62,11 @@ Local writers, validate/import the native index, then run the explicit `eam stor
 now add an explicitly attested single-gateway spool strategy: default-off, exact connection probe evidence,
 retained native versions, one-shot requests and permanent guards for uncertain remote effects. Real provider
 probes were not configured here. Object admission also requires explicit `--physical-bytes` including history.
-P5 resumable ingress and P6 browser/media migration remain pending.
+P5 adds [durable numbered-part ingress](docs/design/storage-p5.md) with migration 024, server SHA-256,
+watermarked receipts, restart recovery and P3/P4 publication. Parts are 8 MiB with four concurrent byte
+requests and at most 10000 parts. COS/S3 still reject files above their admitted single-publication policy
+(default 32 MiB, at most 5 GiB); this release does not claim native multipart publication. P6 browser/media
+migration remains pending; the browser's existing sign/confirm receipt is a separate legacy protocol.
 
 The old `/api/files/{path...}` wildcard has been removed. Use `/api/files/content?path=/...` for downloads.
 Other legacy COS routes remain documented in the [legacy reference](docs/api/legacy-api.md) until cutover.

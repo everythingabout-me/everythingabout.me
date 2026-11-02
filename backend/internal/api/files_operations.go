@@ -84,6 +84,14 @@ func (s *Server) handleFilesGetOperation(w http.ResponseWriter, r *http.Request,
 		return filesMutationProblem(err)
 	}
 	if !op.Terminal() {
+		if upload, e := s.filesJournal.GetUpload(r.Context(), root, actor, op.ID); e == nil {
+			if upload.State != "open" {
+				_ = s.queueFileOperation(op)
+			}
+			return writeFilesOperation(w, op, 200)
+		} else if !fileops.IsCode(e, "not_found") {
+			return filesMutationProblem(e)
+		}
 		if op.Kind == "upload_commit" {
 			service, e := s.filesPutRecovery(r, f, native)
 			if e != nil {
@@ -114,6 +122,20 @@ func (s *Server) handleFilesCancelOperation(w http.ResponseWriter, r *http.Reque
 	}
 	if op.State == fileops.Succeeded {
 		return fc.NewProblem(409, "already_committed", "The operation has already completed.")
+	}
+	if !op.Terminal() && op.Kind == "upload_commit" {
+		if upload, e := s.filesJournal.GetUpload(r.Context(), root, actor, op.ID); e == nil {
+			if upload.State == "open" {
+				upload, e = s.filesJournal.AbortUpload(r.Context(), root, actor, op.ID)
+				if e != nil {
+					return filesMutationProblem(e)
+				}
+				op = upload.Operation
+			}
+			_ = s.queueFileOperation(op)
+		} else if !fileops.IsCode(e, "not_found") {
+			return filesMutationProblem(e)
+		}
 	}
 	if !op.Terminal() && op.Kind != "upload_commit" {
 		if err = s.startFilesAction(r, f, op); err != nil && !errors.Is(err, errFilesWorkerBusy) {
