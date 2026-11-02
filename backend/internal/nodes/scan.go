@@ -3,10 +3,14 @@ package nodes
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
+
+	"golang.org/x/text/unicode/norm"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"everythingabout.me/backend/internal/paths"
 	"everythingabout.me/backend/internal/storage"
@@ -49,11 +53,16 @@ func ApplyScan(ctx context.Context, db ScanDB, ownerID string, result *treescan.
 	if db == nil {
 		return report, fmt.Errorf("scan import database is required")
 	}
+	conn, unlock, err := LockScanNamespace(ctx, db, ownerID)
+	if err != nil {
+		return report, err
+	}
+	defer unlock()
 	txOpts := pgx.TxOptions{IsoLevel: pgx.Serializable}
 	if opts.DryRun {
 		txOpts.AccessMode = pgx.ReadOnly
 	}
-	tx, err := db.BeginTx(ctx, txOpts)
+	tx, err := conn.BeginTx(ctx, txOpts)
 	if err != nil {
 		return report, err
 	}
@@ -62,6 +71,34 @@ func ApplyScan(ctx context.Context, db ScanDB, ownerID string, result *treescan.
 		defer cancel()
 		_ = tx.Rollback(rollbackCtx)
 	}()
+	// The session namespace lock precedes the serializable snapshot. Taking a
+	// transaction advisory lock as the first SELECT would establish a snapshot
+	// before the lock and could miss a deletion that just committed.
+	pending, err := tx.Query(ctx, `select from_path from fs_jobs where user_id=$1::uuid and op='delete' and status<>'done'`, ownerID)
+	if err != nil {
+		return report, err
+	}
+	var roots []string
+	for pending.Next() {
+		var root string
+		if err := pending.Scan(&root); err != nil {
+			pending.Close()
+			return report, err
+		}
+		roots = append(roots, norm.NFC.String(root))
+	}
+	pending.Close()
+	if err := pending.Err(); err != nil {
+		return report, err
+	}
+	for _, record := range records {
+		p := norm.NFC.String(string(record.Entry.Path))
+		for _, root := range roots {
+			if p == root || strings.HasPrefix(p, root+"/") {
+				return report, fmt.Errorf("scan path %q is pending permanent deletion; finish deletion before reconciling this subtree", record.Entry.Path)
+			}
+		}
+	}
 	// Existing paths participate in preflight because no-prune imports retain them.
 	rows, err := tx.Query(ctx, `select path, is_dir from nodes where owner_id = $1::uuid`, ownerID)
 	if err != nil {
@@ -179,4 +216,45 @@ func ApplyScan(ctx context.Context, db ScanDB, ownerID string, result *treescan.
 		return ScanApplyReport{}, fmt.Errorf("commit scan index (retry after coordinating writers): %w", err)
 	}
 	return report, nil
+}
+
+// LockScanNamespace retains one connection so the admission lock is acquired
+// before beginning the serializable transaction, then released on that session.
+func LockScanNamespace(ctx context.Context, db ScanDB, ownerID string) (*pgx.Conn, func(), error) {
+	var conn *pgx.Conn
+	release := func() {}
+	switch value := db.(type) {
+	case *pgxpool.Pool:
+		pooled, err := value.Acquire(ctx)
+		if err != nil {
+			return nil, nil, err
+		}
+		conn = pooled.Conn()
+		release = pooled.Release
+	case *pgxpool.Conn:
+		conn = value.Conn()
+	case *pgx.Conn:
+		conn = value
+	default:
+		return nil, nil, fmt.Errorf("scan import requires a dedicated Postgres connection or pool for namespace coordination")
+	}
+	key := "browser-write:" + ownerID
+	var acquired bool
+	if err := conn.QueryRow(ctx, `select pg_try_advisory_lock(hashtextextended($1,0))`, key).Scan(&acquired); err != nil {
+		release()
+		return nil, nil, err
+	}
+	if !acquired {
+		release()
+		return nil, nil, fmt.Errorf("another file change is in progress; retry reconcile shortly")
+	}
+	return conn, func() {
+		unlockCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if _, err := conn.Exec(unlockCtx, `select pg_advisory_unlock(hashtextextended($1,0))`, key); err != nil {
+			// A session lock must never escape back into a shared pool.
+			_ = conn.Close(context.Background())
+		}
+		release()
+	}, nil
 }

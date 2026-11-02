@@ -63,6 +63,7 @@ func New(cfg *config.Config, db *store.DB, objectStorage storage.Storage, web ht
 	var jobService *jobs.Service
 	if cfg.BackendName() == "cos" {
 		jobService = jobs.New(db, objectStorage, nodeService)
+		jobService.SetDeleteBinding(uploadIndexBinding(cfg))
 	}
 	server := &Server{
 		cfg:        cfg,
@@ -147,6 +148,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/fs/rename", s.wrap(s.handleRename))
 	mux.HandleFunc("GET /api/fs/rename/{id}", s.wrap(s.handleRenameStatus))
 	mux.HandleFunc("POST /api/fs/delete", s.wrap(s.handleDelete))
+	mux.HandleFunc("GET /api/fs/delete/{id}", s.wrap(s.handleDeleteStatus))
+	mux.HandleFunc("GET /api/fs/deletions", s.wrap(s.handleDeletions))
 
 	// Account/event and remaining legacy COS actions retain their routes during
 	// migration. The shared file resource family below owns /api/files exclusively.

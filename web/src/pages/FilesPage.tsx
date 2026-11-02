@@ -467,6 +467,9 @@ export function FilesPage() {
   const [renameName, setRenameName] = useState("");
   const [renameJob, setRenameJob] = useState<Job | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<Item | null>(null);
+  const [deletionJobs, setDeletionJobs] = useState<Job[]>([]);
+  const [deletionStatusError, setDeletionStatusError] = useState(false);
+  const deletionRequest = useRef(0);
   const deleting = useRef(false);
   const menuTrigger = useRef<HTMLButtonElement>(null);
 
@@ -504,6 +507,39 @@ export function FilesPage() {
     },
     [],
   );
+
+  const refreshDeletions = useCallback(async () => {
+    const request = ++deletionRequest.current;
+    try {
+      const { jobs } = await api.deletions();
+      if (request !== deletionRequest.current) return;
+      setDeletionJobs(jobs);
+      setDeletionStatusError(false);
+    } catch {
+      if (request === deletionRequest.current) setDeletionStatusError(true);
+    }
+  }, []);
+
+  useEffect(() => {
+    void refreshDeletions();
+    return () => { deletionRequest.current += 1; };
+  }, [refreshDeletions]);
+
+  const activeDeletions = deletionJobs.some((job) => job.status === "pending" || job.status === "running");
+  useEffect(() => {
+    if (!activeDeletions) return;
+    let stopped = false;
+    let timer: number;
+    const tick = async () => {
+      await refreshDeletions();
+      if (!stopped) timer = window.setTimeout(tick, 3000);
+    };
+    timer = window.setTimeout(tick, 3000);
+    return () => {
+      stopped = true;
+      window.clearTimeout(timer);
+    };
+  }, [activeDeletions, refreshDeletions]);
 
   const load = useCallback(
     async (target: string) => {
@@ -771,7 +807,11 @@ export function FilesPage() {
     if (hasUnfinishedUploads(target.path)) throw new Error(t("drive.deleteUploadBlocked"));
     deleting.current = true;
     try {
-      await api.deletePath(target.path, target.is_dir);
+      const { job } = await api.deletePath(target.path, target.is_dir);
+      // Ignore a listing request that began before this deletion was accepted.
+      deletionRequest.current += 1;
+      setDeletionJobs((jobs) => [job, ...jobs.filter((existing) => existing.id !== job.id)]);
+      setDeletionStatusError(false);
       // Retained upload metadata must not recreate rows for content that was just deleted.
       uploads.filter((task) => task.path === target.path || task.path.startsWith(`${target.path}/`))
         .forEach((task) => cancelUpload(task.id));
@@ -943,6 +983,28 @@ export function FilesPage() {
       />
 
       <main className={styles.main}>
+        {(deletionJobs.length > 0 || deletionStatusError) && (
+          <aside className={styles.deletions} aria-label={t("drive.cleanupTitle")} aria-live="polite">
+            {deletionJobs.map((job) => (
+              <div key={job.id} className={styles.deletionStatus}>
+                <span className={styles.deletionPath} title={job.from}>{job.from}</span>
+                <span className={job.status === "failed" ? styles.deletionAttention : undefined}>
+                  {t(job.status === "failed" ? "drive.cleanupAttention" : "drive.cleanupActive")}
+                </span>
+                <span className={styles.deletionProgress}>
+                  {t("drive.cleanupProgress", { done: job.done.toLocaleString(), total: job.total.toLocaleString() })}
+                </span>
+                {job.status === "failed" && <span className={styles.deletionMessage}>{t("drive.cleanupFailed")}</span>}
+              </div>
+            ))}
+            {deletionStatusError && (
+              <p className={styles.deletionMessage}>
+                {t("drive.cleanupUnavailable")} {" "}
+                <button className={styles.textBtn} onClick={() => void refreshDeletions()}>{t("common.retry")}</button>
+              </p>
+            )}
+          </aside>
+        )}
         {/* The path is the title: one row, with this page's controls on the right. */}
         <div className={styles.topbar}>
           <div className={styles.pathArea}>

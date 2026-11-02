@@ -333,16 +333,43 @@ Content-Type: application/json
 Cookie: eam_session=...
 
 {"path":"Documents/old-folder"}
-→ 200 {"ok":true,"data":{"deleted":3}}
+→ 202
+Location: /api/fs/delete/d_...
+Retry-After: 2
+{"ok":true,"data":{"job":{"id":"d_...","op":"delete","from":"Documents/old-folder","to":"","status":"pending","total":3,"done":0}}}
 ```
 
-- Deletion is permanent: native objects and index rows are removed, with no trash.
+- Deletion is permanent, with no trash or undo. Acceptance captures the indexed subtree in a durable
+  manifest and detaches those index rows in one transaction. Lists and search hide it immediately;
+  the response does not wait for native storage removal. Background cleanup resumes after restart.
 - Deleting any directory, including an empty one, requires the exact query value `?recursive=1`.
   Missing or other values return `409` with `{ok:false,error}` before storage or index deletion.
 - Files use the same body without the query flag: `POST /api/fs/delete` with `{"path":"Documents/old.pdf"}`.
-- `deleted` counts removed index rows, including directory rows and all indexed descendants.
+- `job.total` counts captured index rows, including directory rows and indexed descendants. `job.done`
+  counts rows whose captured native objects have been removed. Acceptance never claims cleanup is complete.
+- `GET /api/fs/delete/{id}` returns `{"ok":true,"data":{"job":…}}`. Only the cookie owner can retrieve
+  a deletion job; a missing job, a move/copy job, or another owner's job returns `404`.
+- `GET /api/fs/deletions` returns `{"ok":true,"data":{"jobs":[…]}}` for the owner's unfinished deletions
+  (`status != "done"`), including failures. Both GET routes are browser-only; Bearer auth cannot replace a cookie.
+- Status is `pending`, `running`, `done`, or `failed`. A reservation covers the deleted root and descendants
+  until `done`, including after failure. Browser and legacy public namespace mutations reject overlapping
+  paths at segment boundaries with `409`. Failed cleanup may leave native data and requires attention;
+  the browser exposes no retry, cancel, or undo endpoint and displays safe error copy without provider details.
+- Conflicting browser uploads, legacy upload sessions, unresolved upload index watches, and active move/copy
+  jobs reject admission before detachment. Completed or cancelled legacy sessions are still guards because
+  their previously issued native requests may remain in flight. Expiry alone does not prove settlement.
 - The root cannot be deleted (`400`); a missing path or another owner's path returns `404`.
-- The client should confirm once before deleting (that dialog on the web).
+- The client confirms once, explains immediate hiding and background permanent cleanup, then navigates to the
+  parent on acceptance. A compact status strip reloads unfinished jobs on page mount and polls every three
+  seconds only while jobs are pending/running. Failures persist across refresh.
+
+Before rollout, operators must drain old direct-to-provider upload grants, including historical grants whose
+session records were already removed by earlier cleanup code. Stop old clients from starting writes and
+establish that all final native requests/retries are terminal or fenced. Only after that proof may operators
+retire the corresponding `upload_sessions` rows and unresolved `upload_index_watches`; do not treat elapsed
+URL lifetime, a cancellation flag, or one successful HEAD as proof. Expired session records are now retained
+as evidence. For a failed deletion, inspect the durable job and manifest and resolve the native outcome before
+operator recovery; never release its reservation merely to make the path writable again.
 
 Historical public route:
 

@@ -472,16 +472,60 @@ func (s *Server) handleDelete(w http.ResponseWriter, r *http.Request) error {
 	if err := s.checkBrowserUploadConflict(r.Context(), user.ID, path, true); err != nil {
 		return err
 	}
-	// Permanent delete: drop the objects and index rows together.
-	count, err := s.nodes.Purge(r.Context(), path, user.ID)
+	if err := s.checkDeleteLegacyUploads(r.Context(), user.ID, path); err != nil {
+		return err
+	}
+	if s.jobs == nil {
+		return httpx.NewError(http.StatusServiceUnavailable, "background deletion is unavailable")
+	}
+	job, err := s.jobs.StartDelete(r.Context(), user.ID, path)
 	if err != nil {
 		return err
 	}
-	if count == 0 {
-		return httpx.NotFound("nothing to delete")
-	}
 	s.timeline.Notify(user.ID)
-	return s.ok(w, map[string]any{"deleted": count})
+	w.Header().Set("Location", "/api/fs/delete/"+job.ID)
+	w.Header().Set("Retry-After", "2")
+	httpx.WriteOKStatus(w, http.StatusAccepted, map[string]any{"job": job})
+	return nil
+}
+
+// Deletion progress is browser-only and scoped to its owner and operation.
+func (s *Server) handleDeleteStatus(w http.ResponseWriter, r *http.Request) error {
+	w.Header().Set("Cache-Control", "no-store")
+	user, err := s.requireUser(r)
+	if err != nil {
+		return err
+	}
+	if s.jobs == nil {
+		return httpx.NotFound("deletion job not found")
+	}
+	job, err := s.jobs.Get(r.Context(), user.ID, r.PathValue("id"))
+	if err != nil {
+		return err
+	}
+	if job == nil || job.Op != jobs.OpDelete {
+		return httpx.NotFound("deletion job not found")
+	}
+	return s.ok(w, map[string]any{"job": job})
+}
+
+func (s *Server) handleDeletions(w http.ResponseWriter, r *http.Request) error {
+	w.Header().Set("Cache-Control", "no-store")
+	user, err := s.requireUser(r)
+	if err != nil {
+		return err
+	}
+	pending := []jobs.Job{}
+	if s.jobs != nil {
+		pending, err = s.jobs.PendingDeletes(r.Context(), user.ID)
+		if err != nil {
+			return err
+		}
+		if pending == nil {
+			pending = []jobs.Job{}
+		}
+	}
+	return s.ok(w, map[string]any{"jobs": pending})
 }
 
 func deref(value *string) string {

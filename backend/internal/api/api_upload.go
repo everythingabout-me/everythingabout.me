@@ -106,6 +106,11 @@ func (s *Server) handleAPIUpload(w http.ResponseWriter, r *http.Request) error {
 	if err := p.RequireWrite(path); err != nil {
 		return err
 	}
+	unlock, err := s.lockBrowserMutation(r.Context(), p.User.ID, path)
+	if err != nil {
+		return err
+	}
+	defer unlock()
 	if err := s.assertParentDirs(r.Context(), p.User.ID, path); err != nil {
 		return err
 	}
@@ -247,6 +252,19 @@ func (s *Server) handleAPIComplete(w http.ResponseWriter, r *http.Request) error
 		return err
 	}
 	// someone else's session is also 404, so existence never leaks.
+	if session == nil || session.UserID != p.User.ID {
+		return httpx.NotFound("upload session not found")
+	}
+	unlock, err := s.lockBrowserMutation(r.Context(), p.User.ID, session.Path)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	// Reload after admission so a preceding completion/cancellation is observed.
+	session, err = s.loadUploadSession(r.Context(), body.UploadID)
+	if err != nil {
+		return err
+	}
 	if session == nil || session.UserID != p.User.ID {
 		return httpx.NotFound("upload session not found")
 	}
@@ -411,8 +429,8 @@ func (s *Server) cancelPendingUploads(ctx context.Context, userID, path string) 
 	return err
 }
 
-// cleanupExpiredUploads clears multipart sessions that expired more than a day ago and
-// aborts them along the way.
+// cleanupExpiredUploads aborts multipart sessions that expired more than a day ago.
+// Keep session evidence: an expired URL does not prove an in-flight PUT has settled.
 func (s *Server) cleanupExpiredUploads(ctx context.Context) {
 	rows, err := s.db.Pool().Query(ctx,
 		`select id, path, user_id::text, provider_upload_id from upload_sessions
@@ -438,8 +456,6 @@ func (s *Server) cleanupExpiredUploads(ctx context.Context) {
 			slog.Warn("upload: failed to abort expired multipart upload", "uploadId", item.id, "error", err)
 		}
 	}
-	_, _ = s.db.Pool().Exec(ctx,
-		`delete from upload_sessions where expires_at < now() - interval '1 day' and completed_at is null`)
 }
 
 func (s *Server) loadUploadSession(ctx context.Context, id string) (*uploadSession, error) {

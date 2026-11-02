@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -15,6 +16,7 @@ import (
 
 	"everythingabout.me/backend/internal/auth"
 	"everythingabout.me/backend/internal/config"
+	"everythingabout.me/backend/internal/jobs"
 	"everythingabout.me/backend/internal/nodes"
 	"everythingabout.me/backend/internal/paths"
 	"everythingabout.me/backend/internal/storage"
@@ -25,12 +27,18 @@ import (
 // Unimplemented provider methods panic if a rejected request reaches storage.
 type deleteStorage struct {
 	storage.Storage
-	objects map[string]storage.ObjectInfo
-	calls   int
+	objects   map[string]storage.ObjectInfo
+	calls     int
+	removes   int
+	headErr   error
+	removeErr error
 }
 
 func (s *deleteStorage) Head(_ context.Context, key string) (*storage.ObjectInfo, error) {
 	s.calls++
+	if s.headErr != nil {
+		return nil, s.headErr
+	}
 	info, ok := s.objects[key]
 	if !ok {
 		return nil, nil
@@ -40,6 +48,10 @@ func (s *deleteStorage) Head(_ context.Context, key string) (*storage.ObjectInfo
 
 func (s *deleteStorage) Remove(_ context.Context, key string) error {
 	s.calls++
+	s.removes++
+	if s.removeErr != nil {
+		return s.removeErr
+	}
 	delete(s.objects, key)
 	return nil
 }
@@ -169,14 +181,14 @@ func TestLegacyDeletePostgres(t *testing.T) {
 		var got struct {
 			OK   bool `json:"ok"`
 			Data struct {
-				Deleted int `json:"deleted"`
+				Job jobs.Job `json:"job"`
 			} `json:"data"`
 			Error string `json:"error"`
 		}
 		if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
 			t.Fatal(err)
 		}
-		if w.Code != status || got.OK != (status == http.StatusOK) || got.Data.Deleted != deleted {
+		if w.Code != status || got.OK != (status == http.StatusAccepted) || got.Data.Job.Total != deleted {
 			t.Fatalf("delete %q%s: HTTP=%d body=%s, want status=%d deleted=%d", path, query, w.Code, w.Body.String(), status, deleted)
 		}
 		if status == http.StatusConflict && !strings.Contains(got.Error, "?recursive=1") {
@@ -199,10 +211,80 @@ func TestLegacyDeletePostgres(t *testing.T) {
 	if err = db.Pool().QueryRow(ctx, `select count(*) from nodes`).Scan(&indexed); err != nil || indexed != before {
 		t.Fatal("rejected deletion changed the index", err)
 	}
-	request("file.txt", "", http.StatusOK, 1)
-	request("Docs", "?recursive=1", http.StatusOK, 3)
-	request("empty", "?recursive=1", http.StatusOK, 1)
+	request("file.txt", "", http.StatusAccepted, 1)
+	request("Docs", "?recursive=1", http.StatusAccepted, 3)
+	request("empty", "?recursive=1", http.StatusAccepted, 1)
 	request("Docs", "?recursive=1", http.StatusNotFound, 0)
+	if objects.calls != 0 || len(objects.objects) != before {
+		t.Fatal("acceptance waited for native storage")
+	}
+	if row, e := server.nodes.Live(ctx, "Docs/nested/file.txt", owners[0]); e != nil || row != nil {
+		t.Fatal("accepted subtree is still visible", e)
+	}
+	if e := server.checkBrowserUploadConflict(ctx, owners[0], "Docs/new.txt", true); e == nil {
+		t.Fatal("pending deletion did not reserve subtree")
+	}
+	for _, tc := range []struct{ owner, path string }{{owners[0], "Docs-old.txt"}, {owners[1], "Docs/new.txt"}} {
+		if e := server.checkBrowserUploadConflict(ctx, tc.owner, tc.path, true); e != nil {
+			t.Fatal("reservation escaped owner or segment boundary", e)
+		}
+	}
+	pendingJobs, e := server.jobs.PendingDeletes(ctx, owners[0])
+	if e != nil || len(pendingJobs) != 3 {
+		t.Fatal("pending deletion listing", pendingJobs, e)
+	}
+	otherCookie, _, e := server.auth.CreateSession(ctx, owners[1], "test", "")
+	if e != nil {
+		t.Fatal(e)
+	}
+	for _, tc := range []struct {
+		cookie string
+		status int
+	}{{cookie, 200}, {otherCookie, 404}} {
+		r := httptest.NewRequest(http.MethodGet, "https://files.example/api/fs/delete/"+pendingJobs[0].ID, nil)
+		r.AddCookie(&http.Cookie{Name: auth.SessionCookie, Value: tc.cookie})
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, r)
+		if w.Code != tc.status {
+			t.Fatalf("deletion status HTTP=%d, want %d: %s", w.Code, tc.status, w.Body.String())
+		}
+	}
+	// Retained presigned grants cannot be declared quiescent merely because
+	// cancellation, completion or TTL expiry occurred in the database.
+	if _, e := db.Pool().Exec(ctx, `insert into upload_sessions(id,user_id,path,size,mime,part_size,expires_at,completed_at,cancelled_at)
+	 values('u_delete_guard',$1::uuid,'grants/file.txt',3,'text/plain',3,now()-interval '1 hour',now(),now())`, owners[0]); e != nil {
+		t.Fatal(e)
+	}
+	if e := server.checkDeleteLegacyUploads(ctx, owners[0], "grants"); e == nil {
+		t.Fatal("expired legacy grant allowed deletion")
+	}
+	if e := server.checkDeleteLegacyUploads(ctx, owners[0], "grants-old"); e != nil {
+		t.Fatal("grant guard crossed path boundary", e)
+	}
+	if e := server.checkDeleteLegacyUploads(ctx, owners[1], "grants"); e != nil {
+		t.Fatal("grant guard crossed owner", e)
+	}
+	if _, e := db.Pool().Exec(ctx, `insert into upload_index_watches(binding,owner_id,path,issued_until) values($1,$2::uuid,'watched/file.txt',now()-interval '1 hour')`, uploadIndexBinding(server.cfg), owners[0]); e != nil {
+		t.Fatal(e)
+	}
+	if e := server.checkDeleteLegacyUploads(ctx, owners[0], "watched"); e == nil {
+		t.Fatal("unresolved legacy watch allowed deletion")
+	}
+	// A new service simulates restart before any native effect. Its first pass
+	// resumes the same captured keys instead of rescanning a changed namespace.
+	server.jobs = jobs.New(db, objects, server.nodes)
+	server.jobs.SetDeleteBinding(uploadIndexBinding(server.cfg))
+	for i := 0; i < 2; i++ {
+		if e := server.jobs.RunDeletesOnce(ctx); e != nil {
+			t.Fatal(e)
+		}
+	}
+	if pending, e := server.jobs.PendingDeletes(ctx, owners[0]); e != nil || len(pending) != 0 {
+		t.Fatal("cleanup did not finish", pending, e)
+	}
+	if e := server.checkBrowserUploadConflict(ctx, owners[0], "Docs/new.txt", true); e != nil {
+		t.Fatal("finished deletion still reserves subtree", e)
+	}
 	for key := range objects.objects {
 		path := strings.TrimPrefix(key, paths.KeyFor("", owners[0]))
 		if path == "file.txt" || path == "empty/" || strings.HasPrefix(path, "Docs/") {
@@ -226,5 +308,84 @@ func TestLegacyDeletePostgres(t *testing.T) {
 				}
 			}
 		}
+	}
+
+	// Safe read errors retry without issuing a delete; the durable manifest is
+	// unchanged by rerunning every migration while cleanup is pending.
+	seed(owners[0], "retry.txt", false)
+	request("retry.txt", "", http.StatusAccepted, 1)
+	objects.headErr = errors.New("temporary read failure")
+	removes := objects.removes
+	if e := server.jobs.RunDeletesOnce(ctx); e != nil {
+		t.Fatal(e)
+	}
+	if objects.removes != removes {
+		t.Fatal("failed read issued native delete")
+	}
+	for _, migration := range migrations {
+		data, e := os.ReadFile(migration)
+		if e != nil {
+			t.Fatal(e)
+		}
+		if _, e = db.Pool().Exec(ctx, string(data)); e != nil {
+			t.Fatal(e)
+		}
+	}
+	objects.headErr = nil
+	if _, e := db.Pool().Exec(ctx, `update fs_jobs set next_attempt_at=now() where op='delete'`); e != nil {
+		t.Fatal(e)
+	}
+	if e := server.jobs.RunDeletesOnce(ctx); e != nil {
+		t.Fatal(e)
+	}
+	if objects.removes != removes+1 {
+		t.Fatal("safe retry did not remove captured object")
+	}
+	// A lost native reply must never be blindly retried, including after restart.
+	seed(owners[0], "unknown.txt", false)
+	request("unknown.txt", "", http.StatusAccepted, 1)
+	objects.removeErr = errors.New("lost native reply")
+	if e := server.jobs.RunDeletesOnce(ctx); e != nil {
+		t.Fatal(e)
+	}
+	removes = objects.removes
+	objects.removeErr = nil
+	restarted := jobs.New(db, objects, server.nodes)
+	restarted.SetDeleteBinding(uploadIndexBinding(server.cfg))
+	if e := restarted.RunDeletesOnce(ctx); e != nil {
+		t.Fatal(e)
+	}
+	if objects.removes != removes {
+		t.Fatal("unknown native removal replayed after restart")
+	}
+	pending, e := restarted.PendingDeletes(ctx, owners[0])
+	if e != nil || len(pending) != 1 || pending[0].Status != "failed" {
+		t.Fatal("unknown delete must remain visible as failed", pending, e)
+	}
+	if e := server.checkBrowserUploadConflict(ctx, owners[0], "unknown.txt", true); e == nil {
+		t.Fatal("unknown deletion released path reservation")
+	}
+	// Crash after intent checkpoint is equivalent to a lost reply, even when no
+	// native request was observed locally. Never infer safe replay from HEAD.
+	seed(owners[0], "crash.txt", false)
+	request("crash.txt", "", http.StatusAccepted, 1)
+	if _, e := db.Pool().Exec(ctx, `update fs_delete_entries set state='removing' where path='crash.txt' and owner_id=$1::uuid`, owners[0]); e != nil {
+		t.Fatal(e)
+	}
+	if e := restarted.RunDeletesOnce(ctx); e != nil {
+		t.Fatal(e)
+	}
+	if objects.removes != removes {
+		t.Fatal("checkpointed native removal replayed")
+	}
+	// Old storage generations cannot execute on another bucket/root.
+	seed(owners[0], "binding.txt", false)
+	request("binding.txt", "", http.StatusAccepted, 1)
+	restarted.SetDeleteBinding("other-root")
+	if e := restarted.RunDeletesOnce(ctx); e != nil {
+		t.Fatal(e)
+	}
+	if objects.removes != removes {
+		t.Fatal("old deletion executed against a different root")
 	}
 }

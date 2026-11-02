@@ -160,6 +160,11 @@ func (s *Server) handleAPIMkdir(w http.ResponseWriter, r *http.Request) error {
 	if err := p.RequireWrite(path); err != nil {
 		return err
 	}
+	unlock, err := s.lockBrowserMutation(r.Context(), p.User.ID, path)
+	if err != nil {
+		return err
+	}
+	defer unlock()
 	if err := s.assertParentDirs(r.Context(), p.User.ID, path); err != nil {
 		return err
 	}
@@ -225,6 +230,11 @@ func (s *Server) handleAPICopy(w http.ResponseWriter, r *http.Request) error {
 	if err != nil {
 		return err
 	}
+	unlock, err := s.lockBrowserMutation(r.Context(), p.User.ID, from, to)
+	if err != nil {
+		return err
+	}
+	defer unlock()
 	if err := s.assertParentDirs(r.Context(), p.User.ID, to); err != nil {
 		return err
 	}

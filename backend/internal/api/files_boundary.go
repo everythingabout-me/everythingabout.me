@@ -203,6 +203,10 @@ func (s *Server) fileWrap(fn fileHandler) http.HandlerFunc {
 				return err
 			}
 			defer driver.Close()
+			driver, err = s.filesDeleteOverlay(r.Context(), principal.User.ID, driver)
+			if err != nil {
+				return err
+			}
 			scope := fc.Path("/")
 			if principal.Token != nil {
 				scope, err = fc.FromRelative(principal.Token.Prefix)

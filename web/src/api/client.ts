@@ -151,13 +151,10 @@ export interface SearchResult {
   items: Item[];
 }
 
-/**
- * A background move/copy of a directory. The web API only surfaces it for a directory rename,
- * but the shape is the shared one: the same row backs `/move/{id}` and `/copy/{id}`.
- */
+/** Durable background move, copy, or permanent deletion progress. */
 export interface Job {
   id: string;
-  op: "move" | "copy";
+  op: "move" | "copy" | "delete";
   from: string;
   to: string;
   status: "pending" | "running" | "done" | "failed" | "cancelled";
@@ -614,8 +611,16 @@ export const api = {
     return request<{ job: Job }>(`/api/fs/rename/${encodeURIComponent(id)}`);
   },
 
-  async deletePath(path: string, recursive = false): Promise<void> {
-    await post(`/api/fs/delete${recursive ? "?recursive=1" : ""}`, { path });
+  deletePath(path: string, recursive = false): Promise<{ job: Job }> {
+    return post(`/api/fs/delete${recursive ? "?recursive=1" : ""}`, { path });
+  },
+
+  deletionStatus(id: string): Promise<{ job: Job }> {
+    return request(`/api/fs/delete/${encodeURIComponent(id)}`);
+  },
+
+  deletions(): Promise<{ jobs: Job[] }> {
+    return request("/api/fs/deletions");
   },
 
   /** Timeline: one flat event stream with keyset pagination. */

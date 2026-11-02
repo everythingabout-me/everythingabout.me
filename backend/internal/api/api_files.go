@@ -523,6 +523,11 @@ func (s *Server) handleAPIMove(w http.ResponseWriter, r *http.Request) error {
 	if err != nil {
 		return err
 	}
+	unlock, err := s.lockBrowserMutation(r.Context(), p.User.ID, from, to)
+	if err != nil {
+		return err
+	}
+	defer unlock()
 	if err := s.assertParentDirs(r.Context(), p.User.ID, to); err != nil {
 		return err
 	}

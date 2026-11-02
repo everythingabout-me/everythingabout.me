@@ -86,22 +86,59 @@ func (s *Server) checkBrowserUploadConflict(ctx context.Context, owner, path str
 			return browserUploadError(err)
 		}
 	}
-	// An asynchronous browser rename outlives its admission lock. Its persisted
-	// job keeps both source and destination reserved until native work finishes.
+	// Persisted jobs reserve their paths after the admission lock is released.
+	// Failed deletions keep their reservation until native cleanup is complete.
 	// Match segment boundaries in both directions without interpreting filename
 	// characters as SQL LIKE wildcards.
 	var active bool
 	err := s.db.Pool().QueryRow(ctx, `select exists(select 1 from fs_jobs
-		where user_id=$1::uuid and status in ('pending','running')
-		and exists(select 1 from unnest(array[from_path,to_path]) as target(path)
+		where user_id=$1::uuid
+		and ((op<>'delete' and status in ('pending','running'))
+		  or (op='delete' and status<>'done' and delete_binding=$3))
+		and exists(select 1 from unnest(case when op='delete' then array[from_path] else array[from_path,to_path] end) as target(path)
 		  where target.path=$2 or target.path=''
 		    or left(target.path,length($2)+1)=$2||'/'
-		    or left($2,length(target.path)+1)=target.path||'/'))`, owner, path).Scan(&active)
+		    or left($2,length(target.path)+1)=target.path||'/'))`, owner, path, uploadIndexBinding(s.cfg)).Scan(&active)
 	if err != nil {
 		return err
 	}
 	if active {
-		return httpx.Conflict("a file move or copy affecting this path is unfinished")
+		return httpx.Conflict("a file operation affecting this path is unfinished")
+	}
+	return nil
+}
+
+// lockBrowserMutation admits legacy public actions into the browser namespace.
+// Internal job helpers run under their caller's lock and must not acquire it again.
+func (s *Server) lockBrowserMutation(ctx context.Context, owner string, targets ...string) (func(), error) {
+	unlock, err := s.lockBrowserNamespace(ctx, owner)
+	if err != nil {
+		return nil, err
+	}
+	for _, path := range targets {
+		if err := s.checkBrowserUploadConflict(ctx, owner, path, true); err != nil {
+			unlock()
+			return nil, err
+		}
+	}
+	return unlock, nil
+}
+
+// Presigned requests can outlive expiry, completion, or cancellation. Legacy
+// session evidence and unresolved watches require explicit operator retirement.
+func (s *Server) checkDeleteLegacyUploads(ctx context.Context, owner, path string) error {
+	var active bool
+	err := s.db.Pool().QueryRow(ctx, `select
+		exists(select 1 from upload_sessions where user_id=$1::uuid
+		  and (path=$2 or left(path,length($2)+1)=$2||'/'))
+		or exists(select 1 from upload_index_watches
+		  where owner_id=$1::uuid and binding=$3 and not settled
+		  and (path=$2 or left(path,length($2)+1)=$2||'/'))`, owner, path, uploadIndexBinding(s.cfg)).Scan(&active)
+	if err != nil {
+		return err
+	}
+	if active {
+		return httpx.Conflict("legacy uploads affecting this path require verified settlement before deletion")
 	}
 	return nil
 }

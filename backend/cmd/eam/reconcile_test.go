@@ -110,6 +110,7 @@ func TestReconcilePostgresIdentityDryRunAndAtomicity(t *testing.T) {
     created_at timestamptz not null default now(),updated_at timestamptz not null default now(),
     unique(owner_id,path));
   create table event_media(event_id uuid primary key,node_id uuid not null references nodes(id) on delete cascade);
+  create table fs_jobs(user_id uuid not null,op text not null,status text not null,from_path text not null);
   insert into users values ('11111111-1111-1111-1111-111111111111'),('22222222-2222-2222-2222-222222222222');
   insert into nodes(id,owner_id,key,path,parent,name,is_dir,size,mime,etag,storage_class,source_modified_at,meta,created_at,updated_at) values
    ('aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa','11111111-1111-1111-1111-111111111111','drive/11111111-1111-1111-1111-111111111111/ folder /a ',' folder /a ',' folder ','a ',false,3,'text/plain','prior-etag','STANDARD','2020-01-02T03:04:05Z','{"annotation":"keep"}','2019-01-01T00:00:00Z','2020-01-01T00:00:00Z'),
@@ -151,6 +152,63 @@ func TestReconcilePostgresIdentityDryRunAndAtomicity(t *testing.T) {
 		return s
 	}
 	before := snapshot()
+	guard, err := pool.Acquire(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := guard.Exec(ctx, `select pg_advisory_lock(hashtextextended($1,0))`, "browser-write:"+owner); err != nil {
+		guard.Release()
+		t.Fatal(err)
+	}
+	_, lockedErr := nodes.ApplyScan(ctx, pool, owner, result, nodes.ScanApplyOptions{})
+	_, unlockErr := guard.Exec(ctx, `select pg_advisory_unlock(hashtextextended($1,0))`, "browser-write:"+owner)
+	guard.Release()
+	if lockedErr == nil || !strings.Contains(lockedErr.Error(), "another file change") || unlockErr != nil {
+		t.Fatalf("namespace lock was not respected: %v, unlock: %v", lockedErr, unlockErr)
+	}
+	if !reflect.DeepEqual(before, snapshot()) {
+		t.Fatal("blocked scan changed the index")
+	}
+	scanConn, finishScan, err := nodes.LockScanNamespace(ctx, pool, owner)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, reentrantErr := nodes.ApplyScan(ctx, scanConn, owner, result, nodes.ScanApplyOptions{DryRun: true})
+	finishScan()
+	if reentrantErr != nil {
+		t.Fatalf("whole-scan lock blocked its own import: %v", reentrantErr)
+	}
+	// Failed deletion remains reserved too. Native spellings compare in NFC,
+	// while matching must respect complete segments and the owner's namespace.
+	if _, err := pool.Exec(ctx, `insert into fs_jobs values($1::uuid,'delete','failed','café')`, owner); err != nil {
+		t.Fatal(err)
+	}
+	blocked := scan(prefix + "a-safe,0,\n" + prefix + "cafe\u0301/file,1,\n")
+	for _, dryRun := range []bool{false, true} {
+		if _, err := nodes.ApplyScan(ctx, pool, owner, blocked, nodes.ScanApplyOptions{DryRun: dryRun}); err == nil || !strings.Contains(err.Error(), "pending permanent deletion") {
+			t.Fatalf("pending deletion imported (dry-run=%v): %v", dryRun, err)
+		}
+		if !reflect.DeepEqual(before, snapshot()) {
+			t.Fatal("pending deletion rejection partially wrote")
+		}
+	}
+	allowed := scan(prefix + "café-other,0,\n")
+	if _, err := nodes.ApplyScan(ctx, pool, owner, allowed, nodes.ScanApplyOptions{DryRun: true}); err != nil {
+		t.Fatalf("similarly named sibling was blocked: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `update fs_jobs set from_path='parent/gone'`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := nodes.ApplyScan(ctx, pool, owner, scan(prefix+"parent/,0,\n"), nodes.ScanApplyOptions{DryRun: true}); err != nil {
+		t.Fatalf("ancestor folder was blocked: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `delete from fs_jobs`); err != nil {
+		t.Fatal(err)
+	}
+	otherOwner := "22222222-2222-2222-2222-222222222222"
+	if _, err := pool.Exec(ctx, `insert into fs_jobs values($1::uuid,'delete','failed',' folder '),($2::uuid,'delete','done',' folder ')`, otherOwner, owner); err != nil {
+		t.Fatal(err)
+	}
 	report, err := nodes.ApplyScan(ctx, pool, owner, result, nodes.ScanApplyOptions{DryRun: true})
 	if err != nil {
 		t.Fatal(err)

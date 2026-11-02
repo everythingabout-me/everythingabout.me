@@ -18,7 +18,16 @@
 > upload/session resources specified below.
 > Legacy browser deletion uses cookie-authenticated `POST /api/fs/delete` with `{path}` and requires
 > `?recursive=1` for every directory, including empty ones (`409` otherwise); file deletion needs no flag.
-> See [legacy deletion behavior](legacy-api.md#46-delete). Unified mutations remain pending.
+> Acceptance atomically captures a durable manifest and removes the indexed subtree, returning
+> `202 {ok:true,data:{job}}`, `Location: /api/fs/delete/{id}`, and `Retry-After: 2`. Native cleanup runs
+> in background and resumes after restart. Cookie-only GET status returns `{job}`; `GET /api/fs/deletions`
+> returns `{jobs}` for every unfinished deletion, including failures. Progress counts captured index rows
+> (`done` / `total`). The path remains reserved until `done`; failure needs attention and keeps the
+> reservation. No undo, cancel, or browser retry endpoint is offered. Legacy upload grants and unresolved
+> upload observations must be proven settled before admission. The browser recovers status on mount and
+> polls every three seconds while work is active; failures remain visible after refresh.
+> See [legacy deletion behavior and operator recovery](legacy-api.md#46-delete). This legacy change does not
+> alter the admitted Local mutation contract described above.
 > Architecture: [storage.md](../design/storage.md). Driver contract: [storage-driver.md](../design/storage-driver.md).
 > **Mandatory:** native storage must retain complete readable folders, original names and raw files. Users
 > must be able to leave through ordinary native tools without the database or an Everything export.

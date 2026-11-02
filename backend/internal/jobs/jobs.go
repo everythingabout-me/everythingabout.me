@@ -31,11 +31,15 @@ import (
 type Op string
 
 const (
-	OpMove Op = "move"
-	OpCopy Op = "copy"
+	OpMove   Op = "move"
+	OpCopy   Op = "copy"
+	OpDelete Op = "delete"
 )
 
 func (o Op) prefix() string {
+	if o == OpDelete {
+		return "d_"
+	}
 	if o == OpCopy {
 		return "c_"
 	}
@@ -60,7 +64,8 @@ type Job struct {
 	StartedAt       *string `json:"startedAt"`
 	FinishedAt      *string `json:"finishedAt"`
 
-	userID string
+	userID        string
+	deleteBinding string
 }
 
 // Terminal reports that the action has ended, whether it succeeded or failed.
@@ -73,13 +78,15 @@ func (j *Job) Terminal() bool {
 }
 
 type Service struct {
-	db      *store.DB
-	storage storage.Storage
-	nodes   *nodes.Service
+	db            *store.DB
+	storage       storage.Storage
+	nodes         *nodes.Service
+	deleteBinding string
+	deleteWake    chan struct{}
 }
 
 func New(db *store.DB, objectStorage storage.Storage, nodeService *nodes.Service) *Service {
-	service := &Service{db: db, storage: objectStorage, nodes: nodeService}
+	service := &Service{db: db, storage: objectStorage, nodes: nodeService, deleteWake: make(chan struct{}, 1)}
 	service.recoverStale()
 	return service
 }
@@ -93,7 +100,7 @@ func (s *Service) recoverStale() {
 	if _, err := s.db.Pool().Exec(ctx,
 		`update fs_jobs
 		    set status = 'failed', error = 'server restarted; job interrupted', finished_at = now()
-		  where status in ('pending', 'running')`); err != nil {
+		  where status in ('pending', 'running') and op <> 'delete'`); err != nil {
 		slog.Warn("jobs: failed to mark interrupted jobs", "error", err)
 	}
 }
@@ -111,7 +118,7 @@ const jobColumns = `id, op, from_path, to_path, status, total, done, coalesce(er
 	to_char(created_at at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
 	case when started_at is null then null else to_char(started_at at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') end,
 	case when finished_at is null then null else to_char(finished_at at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') end,
-	user_id::text`
+	user_id::text, delete_binding`
 
 func scanJob(row pgx.Row) (*Job, error) {
 	var (
@@ -119,7 +126,7 @@ func scanJob(row pgx.Row) (*Job, error) {
 		op  string
 	)
 	err := row.Scan(&job.ID, &op, &job.From, &job.To, &job.Status, &job.Total, &job.Done,
-		&job.Error, &job.CancelRequested, &job.CreatedAt, &job.StartedAt, &job.FinishedAt, &job.userID)
+		&job.Error, &job.CancelRequested, &job.CreatedAt, &job.StartedAt, &job.FinishedAt, &job.userID, &job.deleteBinding)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, nil
@@ -133,6 +140,9 @@ func scanJob(row pgx.Row) (*Job, error) {
 // Start creates a job and starts it asynchronously. The caller is responsible for checking
 // that the source exists and the target does not collide.
 func (s *Service) Start(ctx context.Context, op Op, userID, from, to string) (*Job, error) {
+	if op != OpMove && op != OpCopy {
+		return nil, fmt.Errorf("use durable deletion admission for delete operations")
+	}
 	if err := s.nodes.EnsureParents(ctx, to, userID); err != nil {
 		return nil, err
 	}
@@ -155,8 +165,10 @@ func (s *Service) Start(ctx context.Context, op Op, userID, from, to string) (*J
 
 // Get loads a job scoped to the user; someone else's job returns (nil, nil).
 func (s *Service) Get(ctx context.Context, userID, id string) (*Job, error) {
-	return scanJob(s.db.Pool().QueryRow(ctx,
+	job, err := scanJob(s.db.Pool().QueryRow(ctx,
 		`select `+jobColumns+` from fs_jobs where id = $1 and user_id = $2::uuid`, id, userID))
+	s.presentDelete(job)
+	return job, err
 }
 
 // Wait blocks for at most budget, then returns the job's latest state. It returns even when
@@ -189,6 +201,9 @@ func (s *Service) Cancel(ctx context.Context, userID, id string) (*Job, error) {
 	if err != nil || job == nil {
 		return job, err
 	}
+	if job.Op == OpDelete {
+		return nil, fmt.Errorf("accepted permanent deletions cannot be cancelled")
+	}
 	if job.Terminal() {
 		return job, nil
 	}
@@ -209,6 +224,9 @@ func (s *Service) Retry(ctx context.Context, userID, id string) (*Job, error) {
 	job, err := s.Get(ctx, userID, id)
 	if err != nil || job == nil {
 		return job, err
+	}
+	if job.Op == OpDelete {
+		return nil, fmt.Errorf("uncertain deletions require operator recovery")
 	}
 	switch job.Status {
 	case "pending", "running":

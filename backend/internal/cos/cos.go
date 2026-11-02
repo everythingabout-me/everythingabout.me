@@ -107,7 +107,9 @@ func (c *Client) Copy(ctx context.Context, sourceKey, targetKey string) error {
 }
 
 func (c *Client) Remove(ctx context.Context, key string) error {
-	_, err := c.client.Object.Delete(ctx, key)
+	// A successful retry cannot prove an earlier timed-out delete is quiescent.
+	// The journal owns recovery and retains the path after an uncertain reply.
+	_, err := c.publishClient.Object.Delete(ctx, key)
 	return err
 }
 

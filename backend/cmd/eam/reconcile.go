@@ -80,6 +80,20 @@ func runReconcile(args []string) error {
 		return err
 	}
 	defer driver.Close()
+	// Keep deletion admission excluded through enumeration and import. A result
+	// captured before an accepted deletion cannot be applied after it completes.
+	scanConn, unlock, err := nodes.LockScanNamespace(ctx, db.Pool(), ownerID)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	var deleting bool
+	if err := scanConn.QueryRow(ctx, `select exists(select 1 from fs_jobs where user_id=$1::uuid and op='delete' and status<>'done')`, ownerID).Scan(&deleting); err != nil {
+		return err
+	}
+	if deleting {
+		return fmt.Errorf("permanent deletion is unfinished; finish deletion before reconciling this owner")
+	}
 	opts := treescan.Options{Names: driver.Describe().Names, MaxEntries: *maxEntries, MaxPages: *maxPages, MaxDepth: *maxDepth, PageSize: *pageSize, MaxInventoryBytes: *maxInventoryBytes}
 	fmt.Printf("scan owner: %s; index pruning: disabled; dry-run: %t\n", ownerID, *dryRun)
 	var result *treescan.Result
@@ -113,7 +127,7 @@ func runReconcile(args []string) error {
 			return err
 		}
 	}
-	report, err := nodes.ApplyScan(ctx, db.Pool(), ownerID, result, nodes.ScanApplyOptions{DryRun: *dryRun})
+	report, err := nodes.ApplyScan(ctx, scanConn, ownerID, result, nodes.ScanApplyOptions{DryRun: *dryRun})
 	if err != nil {
 		return err
 	}

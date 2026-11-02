@@ -79,6 +79,11 @@ func (s *Server) jobRetry(op jobs.Op) handlerFunc {
 		case "done":
 			return httpx.Conflict("this operation already finished")
 		}
+		unlock, err := s.lockBrowserMutation(r.Context(), p.User.ID, job.From, job.To)
+		if err != nil {
+			return err
+		}
+		defer unlock()
 		updated, err := s.jobs.Retry(r.Context(), p.User.ID, job.ID)
 		if err != nil {
 			return err

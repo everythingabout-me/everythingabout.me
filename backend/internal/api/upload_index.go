@@ -31,6 +31,20 @@ func uploadIndexBinding(cfg *config.Config) string {
 }
 
 func (s *Server) observeUploadedObject(ctx context.Context, ownerID, path string, isDir bool) (string, error) {
+	unlock, err := s.lockBrowserNamespace(ctx, ownerID)
+	if err != nil {
+		return "", err
+	}
+	defer unlock()
+	var deleting bool
+	if err := s.db.Pool().QueryRow(ctx, `select exists(select 1 from fs_jobs
+		where user_id=$1::uuid and op='delete' and status<>'done' and delete_binding=$3
+		and (from_path=$2 or left($2,length(from_path)+1)=from_path||'/'))`, ownerID, path, uploadIndexBinding(s.cfg)).Scan(&deleting); err != nil {
+		return "", err
+	}
+	if deleting {
+		return "", httpx.Conflict("background deletion reserves this path")
+	}
 	key := paths.KeyFor(path, ownerID)
 	if isDir {
 		key = paths.DirKeyFor(path, ownerID)
@@ -82,6 +96,9 @@ func (s *Server) settleUpload(ctx context.Context, ownerID, path string, isDir b
 
 // StartUploadIndex runs independently of the optional timeline organizer.
 func (s *Server) StartUploadIndex(ctx context.Context) {
+	if s.jobs != nil {
+		go s.jobs.RunDeletes(ctx)
+	}
 	if s.browserUploads != nil {
 		go s.browserUploads.Run(ctx)
 	}
