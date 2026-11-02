@@ -223,7 +223,11 @@ func validateFrozenAction(op Operation, b actionBinding, entries []ManifestEntry
 			return E("invalid_intent", nil)
 		}
 	}
-	if q.NewBytes != newBytes || q.OldBytes != oldBytes || q.PhysicalBytes != newBytes || newBytes < 0 || oldBytes < 0 || newBytes > 9007199254740991 || oldBytes > 9007199254740991 {
+	physical, err := PhysicalReservation(op.Root, newBytes)
+	if err != nil {
+		return err
+	}
+	if q.NewBytes != newBytes || q.OldBytes != oldBytes || q.PhysicalBytes != physical || newBytes < 0 || oldBytes < 0 || newBytes > 9007199254740991 || oldBytes > 9007199254740991 {
 		return E("invalid_intent", nil)
 	}
 	return nil

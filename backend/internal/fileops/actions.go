@@ -61,6 +61,9 @@ func validateActionRequest(req ActionRequest, native NativeActions) error {
 	if err := validateNativeBinding(req.Root, native.StorageBinding(), native.StorageNameRules()); err != nil {
 		return err
 	}
+	if req.Root.RetainsVersions != native.Describe().RetainsVersions {
+		return E("root_conflict", nil)
+	}
 	if req.Actor.ID == "" || !req.Actor.CanWrite || storage.ValidatePath(req.Actor.Scope) != nil {
 		return E("forbidden", nil)
 	}
@@ -341,7 +344,10 @@ func captureAction(ctx context.Context, req ActionRequest, native NativeActions)
 				if !ok || reserve.NewBytes > 9007199254740991 {
 					return fail(E("request_too_large", nil))
 				}
-				reserve.PhysicalBytes = reserve.NewBytes
+				reserve.PhysicalBytes, err = PhysicalReservation(req.Root, reserve.NewBytes)
+				if err != nil {
+					return fail(err)
+				}
 			}
 		}
 	}
@@ -478,6 +484,9 @@ func (a *Actions) Run(ctx context.Context, root Root, actor Actor, id string, na
 	}
 	if err := validateNativeBinding(root, native.StorageBinding(), native.StorageNameRules()); err != nil {
 		return Operation{}, err
+	}
+	if root.RetainsVersions != native.Describe().RetainsVersions {
+		return Operation{}, E("root_conflict", nil)
 	}
 	op, err := a.journal.Get(ctx, root, actor, id)
 	if err != nil || op.Terminal() {
@@ -712,7 +721,14 @@ func actionDeltas(op Operation) (int64, int64, error) {
 		if !ok {
 			return 0, 0, E("reservation_exceeded", nil)
 		}
-		physical = logical
+		physicalChange := delta
+		if entry.Action == "delete" && op.Root.RetainsVersions {
+			physicalChange = 0
+		}
+		physical, ok = addOK(physical, physicalChange)
+		if !ok {
+			return 0, 0, E("reservation_exceeded", nil)
+		}
 	}
 	return logical, physical, nil
 }

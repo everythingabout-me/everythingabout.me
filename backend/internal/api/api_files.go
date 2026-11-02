@@ -213,7 +213,7 @@ func (s *Server) handleAPIList(w http.ResponseWriter, r *http.Request) error {
 
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{
 		"path":     path,
-		"writable": s.cfg.BackendName() == "cos" && p.CanWrite(path),
+		"writable": s.cfg.BackendName() == "cos" && !s.cfg.Storage.CoordinatedWrites && p.CanWrite(path),
 		"items":    toAPINodes(items),
 		"cursor":   next,
 	})

@@ -49,8 +49,11 @@ copy/move/delete, durable Operations and bounded restart/cancellation workers. A
 command validates native/index baselines before budgets can enable write admission; configuration defaults off.
 See [P4 admission, semantics and validation](storage-p4.md). Migrations 019/020 persist frozen action bindings
 and evidence-bound content generations so proven moves retain contentRevision without database-only file moves.
-Local/Postgres HTTP and fault-recovery tests are exercised; COS/S3 new writes remain restricted until native
-capability/quiescence proof. P5–P7 and live production migration/provider acceptance remain pending.
+Local/Postgres HTTP and fault-recovery tests are exercised. [COS/S3 mutation code](storage-p4-objects.md)
+adds a separately attested single-gateway spool strategy, one-shot native requests, retained-version accounting
+and permanent unknown-outcome guards. Real COS/S3 isolated probes were not configured in this implementation;
+new object writes remain default-off and require exact-connection capability evidence plus a verified baseline.
+P5–P7 and live production migration/provider acceptance remain pending.
 
 ## 1. Fixed implementation constraints
 

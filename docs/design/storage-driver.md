@@ -2,9 +2,10 @@
 
 > Native-tree contract, 2026-10-30. P1 read-only Local/COS/S3 trees are implemented;
 > mutation/publication interfaces and an opt-in Local create-only writer are implemented in P3.
-> P4 adds an admitted Local mutation wrapper and public native actions; COS/S3 staged publication remains pending.
-> Preserving the readable tree is mandatory. Implementation/configuration limits: [P1](storage-p1.md),
-> [P3](storage-p3.md), [P4](storage-p4.md).
+> P4 adds admitted Local actions and conservative COS/S3 staged adapters with explicit capability evidence.
+> Real COS/S3 probes remain unverified; default writes stay disabled. Preserving the readable tree is mandatory.
+> Implementation/configuration limits: [P1](storage-p1.md), [P3](storage-p3.md), [P4](storage-p4.md),
+> [object mutation admission](storage-p4-objects.md).
 >
 > [Architecture](storage.md) requires original names, complete native folder structure and directly usable
 > file bytes. [The file API](../api/api.md) remains same-origin and backend-neutral. This replaces the

@@ -39,7 +39,7 @@ may still require per-file copy/delete. Durable journals reconcile backend chang
 | Metadata and listing (P2 active) | `GET /api/files?path=/...`; `GET /api/files/list?path=/...` |
 | Search and principal (P2 active) | `GET /api/files/search`; `/api/files/me`; `/api/files/capabilities` |
 | File content (P2 active) | `GET/HEAD /api/files/content?path=/...`: same-origin streaming, safe single ranges |
-| Mutations (P4 admitted Local) | PUT content, POST folder/move/copy, DELETE path; write flag + verified owner baseline required |
+| Mutations (P4 admitted roots) | PUT content, POST folder/move/copy, DELETE path; verified baseline and explicit backend capability evidence required |
 | Long operations (P4) | `.../operations/{id}` and `/cancel`: durable progress, partial effects, recovery |
 | Resumable uploads (P5 pending) | `.../uploads` remains authenticated 501 |
 | Storage tree (P1/P4) | Native reads and admitted Local stage/publish/mkdir/move/copy/empty-only remove |
@@ -58,8 +58,11 @@ on all three backends. P3 adds [durable journals, guards, quota reservations and
 with additive migrations 016/017. P4 adds [admitted Local native writes and Operations](docs/design/storage-p4.md)
 with migrations 019/020. Writes default off: configure `FILE_COORDINATED_WRITES=true` only for coordinated
 Local writers, validate/import the native index, then run the explicit `eam storage-admit` command with
-`--owner-id UUID --writers-quiesced --evidence /secure/proof.json` before serving mutations. No production baseline or writer revocation is automatic.
-COS/S3 new writes remain restricted; P5 resumable ingress and P6 browser/media migration remain pending.
+`--owner-id UUID --writers-quiesced --evidence /secure/proof.json` before serving mutations. No production baseline or writer revocation is automatic. [COS/S3 mutation adapters](docs/design/storage-p4-objects.md)
+now add an explicitly attested single-gateway spool strategy: default-off, exact connection probe evidence,
+retained native versions, one-shot requests and permanent guards for uncertain remote effects. Real provider
+probes were not configured here. Object admission also requires explicit `--physical-bytes` including history.
+P5 resumable ingress and P6 browser/media migration remain pending.
 
 The old `/api/files/{path...}` wildcard has been removed. Use `/api/files/content?path=/...` for downloads.
 Other legacy COS routes remain documented in the [legacy reference](docs/api/legacy-api.md) until cutover.

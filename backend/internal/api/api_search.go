@@ -70,7 +70,7 @@ func (s *Server) handleAPISearch(w http.ResponseWriter, r *http.Request) error {
 	}
 
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{
-		"writable": s.cfg.BackendName() == "cos" && p.CanWrite(scoped),
+		"writable": s.cfg.BackendName() == "cos" && !s.cfg.Storage.CoordinatedWrites && p.CanWrite(scoped),
 		"items":    toAPINodes(items),
 		"cursor":   next,
 	})

@@ -15,18 +15,21 @@ import (
 	"everythingabout.me/backend/internal/config"
 	"everythingabout.me/backend/internal/cos"
 	"everythingabout.me/backend/internal/localstorage"
+	"everythingabout.me/backend/internal/objectmutation"
 	"everythingabout.me/backend/internal/s3storage"
 	"everythingabout.me/backend/internal/storage"
 	"golang.org/x/text/unicode/norm"
 )
 
 type Backend struct {
-	cfg     config.Config
-	factory storage.Factory
-	legacy  storage.Storage
-	close   func() error
-	mu      sync.RWMutex
-	closed  bool
+	cfg           config.Config
+	factory       storage.Factory
+	legacy        storage.Storage
+	close         func() error
+	mu            sync.RWMutex
+	closed        bool
+	objectBackend objectmutation.Backend
+	objectOptions objectmutation.Options
 }
 
 func New(cfg *config.Config) (*Backend, error) {
@@ -68,18 +71,56 @@ func New(cfg *config.Config) (*Backend, error) {
 		client, err = cos.New(cfg.COS)
 		if err == nil {
 			b.factory, err = client.TreeFactory()
-			b.legacy = client
+			if b.cfg.Storage.CoordinatedWrites {
+				b.legacy = &readOnlyLegacy{backend: b}
+			} else {
+				b.legacy = client
+			}
 			b.close = client.Close
+			if err == nil && b.cfg.Storage.CoordinatedWrites {
+				b.objectBackend, err = client.MutationBackend()
+			}
 		}
 	case "s3":
 		if err = validateObjectPrefixes(b.cfg.Storage.S3.ContentPrefix, b.cfg.Storage.S3.SystemPrefix); err != nil {
 			return nil, err
 		}
 		opts := cfg.Storage.S3
-		b.factory, err = s3storage.NewFactory(s3storage.Options{Endpoint: opts.Endpoint, Region: opts.Region, Bucket: opts.Bucket, PathStyle: opts.PathStyle, AccessKeyID: opts.AccessKeyID, SecretAccessKey: opts.SecretAccessKey, SessionToken: opts.SessionToken})
+		var factory *s3storage.Factory
+		factory, err = s3storage.NewFactory(s3storage.Options{Endpoint: opts.Endpoint, Region: opts.Region, Bucket: opts.Bucket, PathStyle: opts.PathStyle, AccessKeyID: opts.AccessKeyID, SecretAccessKey: opts.SecretAccessKey, SessionToken: opts.SessionToken})
+		b.factory = factory
+		if err == nil && b.cfg.Storage.CoordinatedWrites {
+			b.objectBackend, err = factory.MutationBackend()
+		}
 	}
 	if err != nil {
 		return nil, err
+	}
+	if b.objectBackend != nil {
+		admission, e := objectmutation.LoadAdmission(b.cfg.Storage.ObjectAdmissionFile)
+		if e != nil {
+			return nil, e
+		}
+		endpoint, bucket, region := b.cfg.Storage.S3.Endpoint, b.cfg.Storage.S3.Bucket, b.cfg.Storage.S3.Region
+		if b.cfg.BackendName() == "cos" {
+			bucket = b.cfg.COS.Bucket
+			region = b.cfg.COS.Region
+			endpoint = fmt.Sprintf("https://%s.cos.%s.myqcloud.com", bucket, region)
+		}
+		if !admission.Matches(b.cfg.Storage.ConnectionID, endpoint, bucket, region) {
+			return nil, storage.NewError("invalid_config", "", nil)
+		}
+		if !filepath.IsAbs(b.cfg.Storage.ObjectSpoolRoot) {
+			return nil, storage.NewError("invalid_config", "", nil)
+		}
+		max := b.cfg.Storage.MaxSinglePutBytes
+		if max == 0 {
+			max = 32 << 20
+		}
+		if max > 5<<30 {
+			return nil, fmt.Errorf("object single-PUT publication exceeds the admitted 5 GiB limit")
+		}
+		b.objectOptions = objectmutation.Options{Admission: admission, SpoolRoot: b.cfg.Storage.ObjectSpoolRoot, MaxPublishBytes: max}
 	}
 	if b.factory == nil {
 		return nil, fmt.Errorf("unsupported storage backend")
@@ -164,15 +205,34 @@ func (b *Backend) Open(ctx context.Context, ownerID string) (storage.Driver, err
 	}
 	if factory, ok := b.factory.(*localstorage.Factory); ok {
 		driver, err := factory.OpenOwner(ctx, cfg, b.cfg.Storage.Local.ContentRoot, b.cfg.Storage.Local.SystemRoot)
-		if err != nil { return nil, err }
-		if b.cfg.Storage.CoordinatedWrites {
-			mutation, err := localstorage.NewMutationDriver(driver, localstorage.WriteOptions{CoordinatedExclusiveWriter:true})
-			if err != nil { driver.Close(); return nil, err }
-			return mutation,nil
+		if err != nil {
+			return nil, err
 		}
-		return driver,nil
+		if b.cfg.Storage.CoordinatedWrites {
+			mutation, err := localstorage.NewMutationDriver(driver, localstorage.WriteOptions{CoordinatedExclusiveWriter: true})
+			if err != nil {
+				driver.Close()
+				return nil, err
+			}
+			return mutation, nil
+		}
+		return driver, nil
 	}
-	return b.factory.Open(ctx, cfg)
+	driver, err := b.factory.Open(ctx, cfg)
+	if err != nil {
+		return nil, err
+	}
+	if b.objectBackend != nil {
+		options := b.objectOptions
+		options.Admission.ConnectionID = cfg.ConnectionID
+		mutation, e := objectmutation.New(driver, cfg, b.objectBackend, options)
+		if e != nil {
+			driver.Close()
+			return nil, e
+		}
+		return mutation, nil
+	}
+	return driver, nil
 }
 
 // Legacy provides only reads for new backends. It never adds presigning/STS or

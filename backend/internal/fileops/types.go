@@ -13,12 +13,13 @@ import (
 )
 
 type Root struct {
-	OwnerID       string
-	ConnectionID  string
-	Generation    int64
-	ContentRoot   string
-	SystemRoot    string
-	CaseSensitive bool
+	OwnerID         string
+	ConnectionID    string
+	Generation      int64
+	ContentRoot     string
+	SystemRoot      string
+	CaseSensitive   bool
+	RetainsVersions bool // native delete/replace retains previous object generations
 }
 type Actor struct {
 	ID          string // stable creator principal, e.g. owner:<UUID> or token:<private-token-id>

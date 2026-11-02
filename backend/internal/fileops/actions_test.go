@@ -55,7 +55,7 @@ func (n *actionNative) StorageNameRules() storage.NameRules {
 	return storage.NameRules{CaseSensitive: n.root.CaseSensitive, MaxDepth: 256, MaxPathBytes: 4096, MaxSegmentBytes: 255}
 }
 func (n *actionNative) Describe() storage.Descriptor {
-	return storage.Descriptor{AtomicCreate: true, NativeConditionalMutation: true, Names: n.StorageNameRules()}
+	return storage.Descriptor{AtomicCreate: true, NativeConditionalMutation: true, RetainsVersions: n.root.RetainsVersions, Names: n.StorageNameRules()}
 }
 func (n *actionNative) Close() error { return nil }
 func (n *actionNative) Stat(_ context.Context, p storage.Path) (storage.Entry, error) {

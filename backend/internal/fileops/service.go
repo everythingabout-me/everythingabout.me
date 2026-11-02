@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"everythingabout.me/backend/internal/filecontract"
 	"everythingabout.me/backend/internal/storage"
 )
 
@@ -55,6 +56,13 @@ func validateWriterRoot(root Root, writer storage.StagedWriter) error {
 	bound, ok := writer.(storage.BoundStagedWriter)
 	if !ok {
 		return E("unbound_writer", nil)
+	}
+	retains := false
+	if described, ok := writer.(interface{ Describe() storage.Descriptor }); ok {
+		retains = described.Describe().RetainsVersions
+	}
+	if retains != root.RetainsVersions {
+		return E("root_conflict", nil)
 	}
 	return validateNativeBinding(root, bound.StorageBinding(), bound.StorageNameRules())
 }
@@ -154,7 +162,7 @@ func (s *Service) Write(ctx context.Context, root Root, actor Actor, id string, 
 		return s.finishBeforeEffect(work, root, actor, current, writer, checkpoint, Cancelled, nil)
 	}
 	if err = s.options.Authorize(work, current); err != nil {
-		return s.finishBeforeEffect(work, root, actor, current, writer, checkpoint, Failed, problem("authorization_changed", err))
+		return s.finishBeforeEffect(work, root, actor, current, writer, checkpoint, Failed, problem(publicationFailureCode(err), err))
 	}
 	if err = s.journal.StartEffect(work, op.Lease); err != nil {
 		return op, err
@@ -226,6 +234,27 @@ func (r *contextReader) Read(p []byte) (int, error) {
 	}
 	return r.reader.Read(p)
 }
+func publicationFailureCode(err error) string {
+	var own *Error
+	if errors.As(err, &own) {
+		switch own.Code {
+		case "target_changed", "precondition_failed", "forbidden", "parent_missing":
+			return own.Code
+		}
+	}
+	var public *filecontract.Problem
+	if errors.As(err, &public) {
+		switch public.Code {
+		case "target_changed", "precondition_failed", "forbidden", "parent_missing":
+			return public.Code
+		}
+	}
+	if storage.IsCode(err, "changed") {
+		return "target_changed"
+	}
+	return "authorization_changed"
+}
+
 func writeFailureCode(err error) string {
 	switch {
 	case storage.IsCode(err, "digest_mismatch"), storage.IsCode(err, "checksum_mismatch"):

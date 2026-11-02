@@ -61,7 +61,7 @@ func New(cfg *config.Config, db *store.DB, objectStorage storage.Storage, web ht
 	nodeService := nodes.New(db, objectStorage)
 	eventService := events.New(db, objectStorage, nodeService)
 	var jobService *jobs.Service
-	if cfg.BackendName() == "cos" {
+	if cfg.BackendName() == "cos" && !cfg.Storage.CoordinatedWrites {
 		jobService = jobs.New(db, objectStorage, nodeService)
 		jobService.SetDeleteBinding(uploadIndexBinding(cfg))
 	}
@@ -83,7 +83,7 @@ func New(cfg *config.Config, db *store.DB, objectStorage storage.Storage, web ht
 	if db != nil {
 		server.filesJournal = fileops.NewPostgres(db.Pool())
 	}
-	if cfg.BackendName() == "cos" {
+	if cfg.BackendName() == "cos" && !cfg.Storage.CoordinatedWrites {
 		server.uploadIndex = uploadindex.New(uploadIndexBinding(cfg), uploadindex.NewJournal(db.Pool()), uploadindex.ObserverFunc(server.observeUploadedObject))
 		if driver, ok := objectStorage.(browserupload.Driver); ok {
 			server.browserUploads = browserupload.New(uploadIndexBinding(cfg), browserupload.NewJournal(db.Pool()), driver, server.indexBrowserUpload)
@@ -97,7 +97,7 @@ func (s *Server) SetStorageFactory(factory OwnerStorageFactory) { s.trees = fact
 
 // StartTimeline starts the background organizer. Run it after listen, so startup is not delayed.
 func (s *Server) StartTimeline(ctx context.Context) {
-	if s.cfg.BackendName() != "cos" {
+	if s.cfg.BackendName() != "cos" || s.cfg.Storage.CoordinatedWrites {
 		return
 	}
 	s.timeline.Start(ctx)

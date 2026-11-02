@@ -87,6 +87,7 @@ type Descriptor struct {
 	AtomicReplace             bool
 	NativeConditionalMutation bool
 	NativeTreeMove            bool
+	RetainsVersions           bool
 	Names                     NameRules
 }
 type NameRules struct {

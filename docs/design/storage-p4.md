@@ -2,8 +2,9 @@
 
 P4 connects the unified file API to [P3 durable coordination](storage-p3.md) for explicitly admitted
 Local roots. It implements single PUT, native folder creation, finite copy/move/delete workflows and
-Operations. COS/S3 remain read-only through the new contract until their real publication/conditional/
-quiescence capabilities are proven. Existing COS legacy routes are not silently fenced by this release.
+Operations. [COS/S3 adapters](storage-p4-objects.md) add a separately attested single-gateway strategy;
+real provider publication/conditional/quiescence capabilities remain unverified and default writes stay off.
+Enabling that object strategy disables competing legacy COS file writers and their background services.
 
 ## Admission and deployment
 

@@ -96,6 +96,9 @@ func (s *Server) settleUpload(ctx context.Context, ownerID, path string, isDir b
 
 // StartUploadIndex runs independently of the optional timeline organizer.
 func (s *Server) StartUploadIndex(ctx context.Context) {
+	if s.cfg.Storage.CoordinatedWrites {
+		return
+	}
 	if s.jobs != nil {
 		go s.jobs.RunDeletes(ctx)
 	}

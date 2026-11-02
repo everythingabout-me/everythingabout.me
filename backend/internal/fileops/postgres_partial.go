@@ -46,6 +46,9 @@ func (p *Postgres) AccountEntry(ctx context.Context, l Lease, charge EntryCharge
 				if charge.LogicalDelta > entry.Size {
 					return E("reservation_exceeded", nil)
 				}
+				if op.Root.RetainsVersions && (entry.Action != "copy" || charge.LogicalDelta != entry.Size || charge.PhysicalDelta != entry.Size) {
+					return E("reservation_exceeded", nil)
+				}
 				found = true
 				break
 			}

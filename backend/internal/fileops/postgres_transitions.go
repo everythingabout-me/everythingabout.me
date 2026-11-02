@@ -374,6 +374,9 @@ func (p *Postgres) Settle(ctx context.Context, l Lease, s Settlement, commit Ind
 		if len(op.Entries) == 0 && op.Stage != nil && s.LogicalDelta != op.Stage.Size-req.OldBytes {
 			return E("reservation_exceeded", nil)
 		}
+		if !action && op.Root.RetainsVersions && op.Stage != nil && s.PhysicalDelta != PhysicalDelta(op.Root, op.Stage.Size, req.OldBytes) {
+			return E("reservation_exceeded", nil)
+		}
 		// Settled reservations retain a conservative liability, but cannot be spent again.
 		if max(logicalDelta, 0) > logical-s.KeepLogical || max(physicalDelta, 0) > physical-s.KeepPhysical {
 			return E("reservation_exceeded", nil)

@@ -192,6 +192,12 @@ func validateBegin(req BeginRequest) (BeginRequest, string, int64, error) {
 		if json.Unmarshal(req.Intent, &w) != nil || w.ID != "" || w.Size != q.NewBytes || w.Size < 0 || w.Target == "" || storage.ValidatePath(w.Target) != nil || !covered(req.Root, req.Guards, w.Target) || w.Conditions.Absent == (len(w.Conditions.ExpectedVersion) > 0) {
 			return fail()
 		}
+		if req.Root.RetainsVersions {
+			physical, err := PhysicalReservation(req.Root, q.NewBytes)
+			if err != nil || q.PhysicalBytes < physical {
+				return fail()
+			}
+		}
 		if q.OldBytes > 0 && (w.Target != q.CreditPath || !bytes.Equal(w.Conditions.ExpectedVersion, q.CreditVersion)) {
 			return fail()
 		}

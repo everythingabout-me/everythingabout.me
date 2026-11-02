@@ -12,13 +12,15 @@ import (
 // Storage configures one connection with deterministic per-owner roots. Connection
 // identity and generation must be backed up independently from credential rotation.
 type Storage struct {
-	Backend           string
-	ConnectionID      string
-	Generation        int64
-	CoordinatedWrites bool
-	MaxSinglePutBytes int64
-	Local             Local
-	S3                S3
+	Backend             string
+	ConnectionID        string
+	Generation          int64
+	CoordinatedWrites   bool
+	MaxSinglePutBytes   int64
+	ObjectAdmissionFile string
+	ObjectSpoolRoot     string
+	Local               Local
+	S3                  S3
 }
 type Local struct {
 	ContentRoot   string
@@ -62,8 +64,10 @@ func loadStorage(getenv func(string) string) (Storage, error) {
 		}
 		s.CoordinatedWrites = v
 	}
-	if s.CoordinatedWrites && s.Backend != "local" {
-		return s, fmt.Errorf("coordinated native writes currently require STORAGE_BACKEND=local")
+	s.ObjectAdmissionFile = getenv("FILE_OBJECT_ADMISSION_FILE")
+	s.ObjectSpoolRoot = getenv("FILE_OBJECT_SPOOL_ROOT")
+	if s.CoordinatedWrites && s.Backend != "local" && (!filepath.IsAbs(s.ObjectAdmissionFile) || !filepath.IsAbs(s.ObjectSpoolRoot)) {
+		return s, fmt.Errorf("object writes require explicit absolute FILE_OBJECT_ADMISSION_FILE and FILE_OBJECT_SPOOL_ROOT")
 	}
 	if raw := getenv("STORAGE_GENERATION"); raw != "" {
 		var err error
@@ -101,8 +105,8 @@ func (c *Config) BackendName() string {
 }
 
 func (c *Config) ValidateStorage() error {
-	if c.Storage.CoordinatedWrites && c.BackendName() != "local" {
-		return fmt.Errorf("coordinated native writes currently require STORAGE_BACKEND=local")
+	if c.Storage.CoordinatedWrites && c.BackendName() != "local" && (!filepath.IsAbs(c.Storage.ObjectAdmissionFile) || !filepath.IsAbs(c.Storage.ObjectSpoolRoot)) {
+		return fmt.Errorf("object writes require explicit absolute FILE_OBJECT_ADMISSION_FILE and FILE_OBJECT_SPOOL_ROOT")
 	}
 	switch c.BackendName() {
 	case "cos":

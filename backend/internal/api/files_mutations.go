@@ -82,7 +82,7 @@ func (s *Server) fileMutationContext(ctx context.Context, f *fileRequest) (fileo
 		return nil, fileops.Root{}, fileops.Actor{}, fc.NewProblem(422, "unsupported_option", "This root does not support safe native file mutations.")
 	}
 	binding := native.StorageBinding()
-	root := fileops.Root{OwnerID: binding.OwnerID, ConnectionID: binding.ConnectionID, Generation: binding.Generation, ContentRoot: binding.ContentRoot, SystemRoot: binding.SystemRoot, CaseSensitive: native.StorageNameRules().CaseSensitive}
+	root := fileops.Root{OwnerID: binding.OwnerID, ConnectionID: binding.ConnectionID, Generation: binding.Generation, ContentRoot: binding.ContentRoot, SystemRoot: binding.SystemRoot, CaseSensitive: native.StorageNameRules().CaseSensitive, RetainsVersions: native.Describe().RetainsVersions}
 	actor := fileops.Actor{ID: filePrincipalID(f.Principal), Scope: storage.Path(f.Scope.Relative()), CanRead: f.Principal.Token == nil || f.Principal.Token.CanRead, CanWrite: f.Principal.Token == nil || f.Principal.Token.CanWrite, ManageOwner: f.Principal.Token == nil}
 	// This internal readiness query does not disclose owner-wide usage to a token.
 	_, err := s.filesJournal.Usage(ctx, root, fileops.Actor{ID: "owner:" + root.OwnerID, CanRead: true, CanWrite: true, ManageOwner: true})
@@ -243,6 +243,12 @@ func (s *Server) handleFilesPut(w http.ResponseWriter, r *http.Request, f *fileR
 	if err != nil {
 		return err
 	}
+	if root.RetainsVersions && modified != nil {
+		return fc.NewProblem(422, "unsupported_option", "This object route cannot set native source modification time.")
+	}
+	if max := native.Describe().MaxFileBytes; max > 0 && r.ContentLength > max {
+		return fc.NewProblem(413, "request_too_large", "The content exceeds the admitted publication limit.")
+	}
 	intent := storage.WriteIntent{Target: storage.Path(p.Relative()), Size: r.ContentLength, MediaType: media, SourceModifiedAt: modified, Digest: digest, ClientCondition: filesPutClientCondition(condition)}
 	key := r.Header.Get("Idempotency-Key")
 	if len(key) > 1024 || strings.ContainsAny(key, "\r\n\x00") {
@@ -316,8 +322,12 @@ func (s *Server) handleFilesPut(w http.ResponseWriter, r *http.Request, f *fileR
 		}
 		intent.Conditions.Absent = true
 	}
+	physicalReserved, err := fileops.PhysicalReservation(root, intent.Size)
+	if err != nil {
+		return filesMutationProblem(err)
+	}
 	encoded, _ := json.Marshal(intent)
-	op, _, err := s.filesJournal.Begin(r.Context(), fileops.BeginRequest{Root: root, Actor: actor, Kind: "upload_commit", IdempotencyKey: key, Intent: encoded, Guards: []fileops.Guard{{Path: actor.Scope, Subtree: true}}, Reservation: fileops.ReservationRequest{NewBytes: intent.Size, OldBytes: oldBytes, PhysicalBytes: intent.Size, CreditPath: func() storage.Path {
+	op, _, err := s.filesJournal.Begin(r.Context(), fileops.BeginRequest{Root: root, Actor: actor, Kind: "upload_commit", IdempotencyKey: key, Intent: encoded, Guards: []fileops.Guard{{Path: actor.Scope, Subtree: true}}, Reservation: fileops.ReservationRequest{NewBytes: intent.Size, OldBytes: oldBytes, PhysicalBytes: physicalReserved, CreditPath: func() storage.Path {
 		if oldBytes > 0 {
 			return intent.Target
 		}
@@ -570,6 +580,6 @@ func (s *Server) filesAction(w http.ResponseWriter, r *http.Request, f *fileRequ
 }
 func (s *Server) filesPutRecovery(r *http.Request, f *fileRequest, native fileops.NativeActions) (*fileops.Service, error) {
 	return fileops.NewService(s.filesJournal, fileops.ServiceOptions{Authorize: s.filesMutationAuthorize(r, f, native), Commit: nodes.CommitStagedFile, PhysicalDelta: func(op fileops.Operation, _ storage.MutationResult) (int64, error) {
-		return op.Reservation.NewBytes - op.Reservation.OldBytes, nil
+		return fileops.PhysicalDelta(op.Root, op.Reservation.NewBytes, op.Reservation.OldBytes), nil
 	}})
 }
