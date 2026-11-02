@@ -269,6 +269,99 @@ a.crumb:hover {
   cursor: default;
 }
 
+/* ---------- Permanent deletion ---------- */
+
+.deleteBtn,
+.deleteBtn svg {
+  color: var(--danger);
+}
+
+.deleteBtn:hover:not(:disabled) {
+  background: var(--danger-soft);
+}
+
+.detailActions {
+  display: flex;
+  justify-content: flex-end;
+  padding: 12px 0;
+  border-top: 1px solid var(--border);
+}
+
+.deleteDialog {
+  width: min(440px, calc(100vw - 32px));
+  max-height: calc(100dvh - 32px);
+  padding: 24px;
+  overflow-y: auto;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: var(--surface);
+  color: var(--text);
+  box-shadow: var(--shadow-pop);
+}
+
+.deleteDialog::backdrop {
+  background: color-mix(in srgb, var(--overlay) 45%, transparent);
+}
+
+.deleteTitle {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 500;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.deleteDescription {
+  margin: 12px 0;
+  color: var(--text-2);
+  font-size: 14px;
+}
+
+.deletePath {
+  margin: 0;
+  padding: 9px 12px;
+  border-radius: 8px;
+  background: var(--hover);
+  color: var(--text-2);
+  font-family: var(--font-mono);
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+
+.deleteError {
+  margin: 12px 0 0;
+  color: var(--danger);
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+
+.deleteActions {
+  display: flex;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 24px;
+}
+
+.confirmDeleteBtn {
+  height: 36px;
+  padding: 0 14px;
+  border-radius: 10px;
+  background: var(--danger);
+  color: var(--danger-fg);
+  font-size: 14px;
+  font-weight: 500;
+}
+
+.confirmDeleteBtn:hover:not(:disabled) {
+  filter: brightness(0.94);
+}
+
+.confirmDeleteBtn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
 /* ---------- Upload ---------- */
 
 .uploadMenu {

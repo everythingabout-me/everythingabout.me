@@ -14,6 +14,9 @@
 > returning credentials or creating folder markers, so complete native objects are indexed after lost
 > confirmation; see [recovery guarantees](../design/upload-index-recovery.md). This does not activate
 > or change the unified API specified here.
+> Legacy browser deletion uses cookie-authenticated `POST /api/fs/delete` with `{path}` and requires
+> `?recursive=1` for every directory, including empty ones (`409` otherwise); file deletion needs no flag.
+> See [legacy deletion behavior](legacy-api.md#46-delete). Unified mutations remain pending.
 > Architecture: [storage.md](../design/storage.md). Driver contract: [storage-driver.md](../design/storage-driver.md).
 > **Mandatory:** native storage must retain complete readable folders, original names and raw files. Users
 > must be able to leave through ordinary native tools without the database or an Everything export.

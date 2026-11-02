@@ -23,6 +23,7 @@ import {
   PencilIcon,
   PlusIcon,
   SearchIcon,
+  TrashIcon,
   UploadIcon,
 } from "../components/icons";
 import { canPreviewFile } from "../components/preview/supported";
@@ -288,8 +289,79 @@ const UploadRow = memo(function UploadRow({
   );
 });
 
+function DeleteConfirmation({
+  target,
+  onCancel,
+  onConfirm,
+}: {
+  target: Item;
+  onCancel: () => void;
+  onConfirm: () => Promise<void>;
+}) {
+  const dialog = useRef<HTMLDialogElement>(null);
+  const submitting = useRef(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    const element = dialog.current;
+    element?.showModal();
+    return () => element?.close();
+  }, []);
+
+  const confirm = async () => {
+    if (submitting.current) return;
+    submitting.current = true;
+    setBusy(true);
+    setError(null);
+    try {
+      await onConfirm();
+    } catch (error) {
+      setError(error instanceof Error ? error.message : t("drive.deleteFailed"));
+    } finally {
+      submitting.current = false;
+      setBusy(false);
+    }
+  };
+
+  return (
+    <dialog
+      ref={dialog}
+      className={styles.deleteDialog}
+      aria-labelledby="delete-title"
+      aria-describedby="delete-description"
+      onCancel={(event) => {
+        event.preventDefault();
+        if (!submitting.current) onCancel();
+      }}
+    >
+      <h2 id="delete-title" className={styles.deleteTitle}>
+        {t(target.is_dir ? "drive.deleteFolderTitle" : "drive.deleteFileTitle", { name: target.name })}
+      </h2>
+      <p id="delete-description" className={styles.deleteDescription}>
+        {t(target.is_dir ? "drive.deleteFolderWarning" : "drive.deleteFileWarning")}
+      </p>
+      <p className={styles.deletePath}>{target.path}</p>
+      {error && <p className={styles.deleteError} role="alert">{error}</p>}
+      <div className={styles.deleteActions} aria-busy={busy}>
+        <button className={styles.secondaryBtn} autoFocus disabled={busy} onClick={onCancel}>
+          {t("common.cancel")}
+        </button>
+        <button className={styles.confirmDeleteBtn} disabled={busy} onClick={() => void confirm()}>
+          {t(busy ? "drive.deleting" : "drive.delete")}
+        </button>
+      </div>
+    </dialog>
+  );
+}
+
 /** A file's own page: the path bar above it already names the file, so this adds only facts. */
-function FileDetail({ file }: { file: Item }) {
+function FileDetail({ file, onDelete, deleteDisabled, deleteHint }: {
+  file: Item;
+  onDelete: () => void;
+  deleteDisabled: boolean;
+  deleteHint?: string;
+}) {
   return (
     <>
       <p className={styles.fileMeta}>
@@ -354,6 +426,17 @@ function FileDetail({ file }: { file: Item }) {
             <dd>{file.created_at ? formatRelativeTime(file.created_at) : "—"}</dd>
           </div>
         </dl>
+        <div className={styles.detailActions}>
+          <button
+            className={`${styles.secondaryBtn} ${styles.deleteBtn}`}
+            onClick={onDelete}
+            disabled={deleteDisabled}
+            title={deleteHint}
+          >
+            <TrashIcon size={14} />
+            {t("file.delete")}
+          </button>
+        </div>
       </section>
     </>
   );
@@ -383,6 +466,9 @@ export function FilesPage() {
   const [renaming, setRenaming] = useState(false);
   const [renameName, setRenameName] = useState("");
   const [renameJob, setRenameJob] = useState<Job | null>(null);
+  const [deleteTarget, setDeleteTarget] = useState<Item | null>(null);
+  const deleting = useRef(false);
+  const menuTrigger = useRef<HTMLButtonElement>(null);
 
   const fileInput = useRef<HTMLInputElement>(null);
   const folderInput = useRef<HTMLInputElement>(null);
@@ -456,6 +542,8 @@ export function FilesPage() {
 
   useEffect(() => {
     setRenaming(false);
+    setMenuOpen(false);
+    setDeleteTarget(null);
   }, [path]);
 
   /** Once a file's confirm succeeds, swap its placeholder row for the returned node. */
@@ -666,6 +754,42 @@ export function FilesPage() {
 
   // A rename only ever changes the last segment, so the parent stays put.
   const parentPath = path.includes("/") ? path.slice(0, path.lastIndexOf("/")) : "";
+  const hasUnfinishedUploads = (target: string) => uploads.some((task) =>
+    (task.path === target || task.path.startsWith(`${target}/`)) && task.status !== "completed",
+  );
+  const deleteBlocked = hasUnfinishedUploads(path);
+
+  const startDelete = (target: Item) => {
+    // The menu item unmounts; return keyboard focus to its persistent trigger on cancel.
+    if (menuOpen) menuTrigger.current?.focus();
+    setMenuOpen(false);
+    setDeleteTarget(target);
+  };
+
+  const applyDelete = async (target: Item) => {
+    if (deleting.current) return;
+    if (hasUnfinishedUploads(target.path)) throw new Error(t("drive.deleteUploadBlocked"));
+    deleting.current = true;
+    try {
+      await api.deletePath(target.path, target.is_dir);
+      // Retained upload metadata must not recreate rows for content that was just deleted.
+      uploads.filter((task) => task.path === target.path || task.path.startsWith(`${target.path}/`))
+        .forEach((task) => cancelUpload(task.id));
+      setDeleteTarget(null);
+      showToast(t("drive.deleted", { name: target.name }));
+      // A browser back/forward navigation may have left the deleted path while the request ran.
+      if (listingRef.current.path === target.path) {
+        navigate(filesHref(target.parent), { replace: true });
+      }
+    } catch (error) {
+      if (error instanceof ApiError && error.status === 401) {
+        navigate("/login", { replace: true });
+      }
+      throw error;
+    } finally {
+      deleting.current = false;
+    }
+  };
 
   const startCreateFolder = () => {
     setMenuOpen(false);
@@ -865,6 +989,7 @@ export function FilesPage() {
                   <div className={styles.menuWrap}>
                     {/* The menu belongs to the folder you are in, so it hangs off its name. */}
                     <button
+                      ref={menuTrigger}
                       className={styles.menuTrigger}
                       onClick={() => setMenuOpen((open) => !open)}
                       aria-haspopup="menu"
@@ -914,6 +1039,18 @@ export function FilesPage() {
                             >
                               <PencilIcon size={14} />
                               {t("drive.rename")}
+                            </button>
+                          )}
+                          {!pending && !loadError && current?.is_dir && path !== "" && (
+                            <button
+                              className={`${styles.menuItem} ${styles.deleteBtn}`}
+                              role="menuitem"
+                              onClick={() => startDelete(current)}
+                              disabled={Boolean(renameJob) || deleteBlocked}
+                              title={deleteBlocked ? t("drive.deleteUploadBlocked") : undefined}
+                            >
+                              <TrashIcon size={14} />
+                              {t("drive.delete")}
                             </button>
                           )}
                         </div>
@@ -1061,7 +1198,12 @@ export function FilesPage() {
             inert={navigating}
             className={`${styles.enter} ${navigating ? styles.dim : ""}`}
           >
-            <FileDetail file={file} />
+            <FileDetail
+              file={file}
+              onDelete={() => startDelete(file)}
+              deleteDisabled={pending || Boolean(renameJob) || deleteBlocked}
+              deleteHint={deleteBlocked ? t("drive.deleteUploadBlocked") : undefined}
+            />
           </div>
         ) : notFound ? (
           <>
@@ -1180,6 +1322,15 @@ export function FilesPage() {
             <span>{t("drive.dropToUpload", { target: currentName })}</span>
           </div>
         </div>
+      )}
+
+      {deleteTarget && (
+        <DeleteConfirmation
+          key={deleteTarget.path}
+          target={deleteTarget}
+          onCancel={() => setDeleteTarget(null)}
+          onConfirm={() => applyDelete(deleteTarget)}
+        />
       )}
 
       {toast && (

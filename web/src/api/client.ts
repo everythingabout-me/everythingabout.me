@@ -525,8 +525,8 @@ export const api = {
     return request<{ job: Job }>(`/api/fs/rename/${encodeURIComponent(id)}`);
   },
 
-  async deletePath(path: string): Promise<void> {
-    await post("/api/fs/delete", { path });
+  async deletePath(path: string, recursive = false): Promise<void> {
+    await post(`/api/fs/delete${recursive ? "?recursive=1" : ""}`, { path });
   },
 
   /** Timeline: one flat event stream with keyset pagination. */

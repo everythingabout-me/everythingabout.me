@@ -381,7 +381,7 @@ the rewrite.
 | POST | `/api/fs/mkdir` | Create a directory (writes a zero-byte placeholder object) |
 | POST | `/api/fs/rename` | Rename a file in one request; a directory answers `202` + `Location` because every object inside has to move |
 | GET | `/api/fs/rename/{id}` | Progress of a directory rename (`done` / `total`, `status`, `error`) |
-| POST | `/api/fs/delete` | Permanent delete (every record in the subtree) |
+| POST | `/api/fs/delete` | Permanent delete using `{path}`; directories (including empty ones) require `?recursive=1` or return `409`; files need no flag |
 | GET | `/api/health` | Liveness probe |
 
 The auth write endpoints validate `Origin`/`Host` and rate limit in in-process memory (code sends: 30 per hour per

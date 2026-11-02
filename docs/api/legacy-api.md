@@ -319,15 +319,36 @@ Single-part mode returns an empty `received` — just retransmit the whole part,
 
 ### 4.6 Delete
 
+The historical public `DELETE /api/files/<path>` route below has been removed. The running browser API uses
+cookie-authenticated `POST /api/fs/delete` with a JSON body; it retains the legacy `{ok,data}` / `{ok,error}`
+envelope and same-origin validation. Bearer authentication does not replace the session cookie.
+
+```http
+POST /api/fs/delete?recursive=1
+Content-Type: application/json
+Cookie: eam_session=...
+
+{"path":"Documents/old-folder"}
+→ 200 {"ok":true,"data":{"deleted":3}}
+```
+
+- Deletion is permanent: native objects and index rows are removed, with no trash.
+- Deleting any directory, including an empty one, requires the exact query value `?recursive=1`.
+  Missing or other values return `409` with `{ok:false,error}` before storage or index deletion.
+- Files use the same body without the query flag: `POST /api/fs/delete` with `{"path":"Documents/old.pdf"}`.
+- `deleted` counts removed index rows, including directory rows and all indexed descendants.
+- The root cannot be deleted (`400`); a missing path or another owner's path returns `404`.
+- The client should confirm once before deleting (that dialog on the web).
+
+Historical public route:
+
 ```http
 DELETE /api/files/Documents/old.pdf
 → 204
 ```
 
-- **Permanent delete**: the object and the index go together, with no trash.
-- `DELETE /api/files/<dir>` requires `?recursive=1`, otherwise `409` — the parameter is there as a guardrail against
-  slips.
-- The client should confirm once before deleting (that dialog on the web).
+That route required `?recursive=1` for directories (`409` otherwise). It is not an active alias for the
+browser endpoint or the pending unified DELETE resource.
 
 ### 4.7 Move / rename
 

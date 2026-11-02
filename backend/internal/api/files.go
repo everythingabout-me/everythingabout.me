@@ -453,7 +453,18 @@ func (s *Server) handleDelete(w http.ResponseWriter, r *http.Request) error {
 		return err
 	}
 
-	// permanent delete: drop the object and the index row together.
+	node, err := s.nodes.Live(r.Context(), path, user.ID)
+	if err != nil {
+		return err
+	}
+	if node == nil {
+		return httpx.NotFound("nothing to delete")
+	}
+	if node.IsDir && r.URL.Query().Get("recursive") != "1" {
+		return httpx.Conflict("deleting a directory requires ?recursive=1")
+	}
+
+	// Permanent delete: drop the objects and index rows together.
 	count, err := s.nodes.Purge(r.Context(), path, user.ID)
 	if err != nil {
 		return err
