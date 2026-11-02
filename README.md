@@ -383,10 +383,10 @@ the rewrite.
 | POST | `/api/timeline/rebuild` | Force a full re-organize of the current account (drops the analysis results and backfills from scratch) |
 | GET | `/api/fs/list?path=` | List the current level (Postgres only, not the bucket; also returns the path's own `node`, so the UI can tell a folder from a file) |
 | GET | `/api/fs/search?q=` | Fuzzy search by name/path |
-| POST | `/api/fs/upload/sign` | Create a temporary upload receipt from `{path,size,overwrite,mime?,modifiedAt?}`; returns `{uploadId}` without provider credentials |
+| POST | `/api/fs/upload/sign` | Create a temporary upload receipt from `{path,size,overwrite,mime?,modifiedAt?}`; returns `{uploadId}` without provider credentials; `409 deletion_in_progress` lets the browser wait for cleanup before uploading |
 | POST | `/api/fs/upload/confirm` | Binary body with `?uploadId=` receives/publishes/indexes; JSON `{uploadId}` retrieves or repairs the recorded result |
 | GET | `/api/fs/download?path=` | 302 to a presigned URL (`&json=1` returns JSON) |
-| POST | `/api/fs/mkdir` | Create a directory (writes a zero-byte placeholder object) |
+| POST | `/api/fs/mkdir` | Create a directory (writes a zero-byte placeholder object); pending deletion returns `409 deletion_in_progress` with its operation identity |
 | POST | `/api/fs/rename` | Rename a file in one request; a directory answers `202` + `Location` because every object inside has to move |
 | GET | `/api/fs/rename/{id}` | Progress of a directory rename (`done` / `total`, `status`, `error`) |
 | POST | `/api/fs/delete` | Immediately hide `{path}` and return `202 {job}` with `Location` and `Retry-After: 2`; permanent cleanup runs in background; directories require `?recursive=1` (`409` otherwise) |

@@ -12,6 +12,7 @@ export interface UploadSummary {
   percent: number;
   cancelIds: string[];
   retryIds: string[];
+  waitMessage?: string;
 }
 
 export interface UploadRowEntry {
@@ -79,6 +80,10 @@ export function buildUploadRows(items: Item[], tasks: UploadTask[], directory: s
     const files = grouped.filter((task) => !task.isDir);
     const pending = grouped.filter((task) => task.status !== "completed");
     const failed = pending.filter((task) => task.status === "failed");
+    const waiting = pending.filter((task) => task.status === "waiting");
+    const waitingReason = waiting.find((task) => task.waitingFor?.statusUnavailable)
+      ?? waiting.find((task) => task.waitingFor?.state === "failed" || task.waitingFor?.state === "cancelled")
+      ?? waiting[0];
     const size = files.reduce((sum, task) => sum + task.size, 0);
     const loaded = files.reduce((sum, task) => sum + (
       task.status === "completed" ? task.size : Math.max(0, Math.min(task.size, task.loaded))
@@ -88,7 +93,7 @@ export function buildUploadRows(items: Item[], tasks: UploadTask[], directory: s
       : pending.some((task) => task.status === "uploading") ? "uploading"
         : pending.some((task) => task.status === "finalizing")
           ? row.isDir && pending.some((task) => task.status === "queued") ? "uploading" : "finalizing"
-          : pending.length ? "queued" : "completed";
+          : waiting.length ? "waiting" : pending.length ? "queued" : "completed";
     const cancelable = pending.filter((task) => task.status !== "finalizing");
     row.upload = {
       status,
@@ -102,6 +107,7 @@ export function buildUploadRows(items: Item[], tasks: UploadTask[], directory: s
         : files.length > 0 ? Math.floor(completedFiles / files.length * 100) : 0,
       cancelIds: cancelable.length === 0 ? [] : row.task?.isDir ? [row.task.id] : cancelable.map((task) => task.id),
       retryIds: failed.map((task) => task.id),
+      ...(waitingReason?.waitMessage ? { waitMessage: waitingReason.waitMessage } : {}),
     };
   }
   return [...rows.values()].sort(compareRows);

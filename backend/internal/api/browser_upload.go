@@ -10,6 +10,7 @@ import (
 	"everythingabout.me/backend/internal/browserupload"
 	"everythingabout.me/backend/internal/httpx"
 	"everythingabout.me/backend/internal/nodes"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -86,19 +87,31 @@ func (s *Server) checkBrowserUploadConflict(ctx context.Context, owner, path str
 			return browserUploadError(err)
 		}
 	}
-	// Persisted jobs reserve their paths after the admission lock is released.
-	// Failed deletions keep their reservation until native cleanup is complete.
-	// Match segment boundaries in both directions without interpreting filename
-	// characters as SQL LIKE wildcards.
+	// Only an explicit completed deletion releases a waiting upload. Return its
+	// owner-scoped identity so clients never infer completion from a missing path
+	// or mistake this reservation for an overwrite/name collision.
+	var deletionID, deletionPath, deletionStatus string
+	err := s.db.Pool().QueryRow(ctx, `select id,from_path,status from fs_jobs
+		where user_id=$1::uuid and op='delete' and status<>'done' and delete_binding=$3
+		and (from_path=$2 or left(from_path,length($2)+1)=$2||'/'
+		  or left($2,length(from_path)+1)=from_path||'/')
+		order by created_at,id limit 1`, owner, path, uploadIndexBinding(s.cfg)).Scan(&deletionID, &deletionPath, &deletionStatus)
+	if err == nil {
+		return &httpx.Error{Status: http.StatusConflict,
+			Message: "this path is waiting for permanent deletion to finish",
+			Code:    "deletion_in_progress", OperationID: deletionID, Path: deletionPath, DeletionStatus: deletionStatus}
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return err
+	}
+	// Other operations retain their existing generic conflict behavior.
 	var active bool
-	err := s.db.Pool().QueryRow(ctx, `select exists(select 1 from fs_jobs
-		where user_id=$1::uuid
-		and ((op<>'delete' and status in ('pending','running'))
-		  or (op='delete' and status<>'done' and delete_binding=$3))
-		and exists(select 1 from unnest(case when op='delete' then array[from_path] else array[from_path,to_path] end) as target(path)
+	err = s.db.Pool().QueryRow(ctx, `select exists(select 1 from fs_jobs
+		where user_id=$1::uuid and op<>'delete' and status in ('pending','running')
+		and exists(select 1 from unnest(array[from_path,to_path]) as target(path)
 		  where target.path=$2 or target.path=''
 		    or left(target.path,length($2)+1)=$2||'/'
-		    or left($2,length(target.path)+1)=target.path||'/'))`, owner, path, uploadIndexBinding(s.cfg)).Scan(&active)
+		    or left($2,length(target.path)+1)=target.path||'/'))`, owner, path).Scan(&active)
 	if err != nil {
 		return err
 	}

@@ -16,6 +16,7 @@ import (
 
 	"everythingabout.me/backend/internal/auth"
 	"everythingabout.me/backend/internal/config"
+	"everythingabout.me/backend/internal/httpx"
 	"everythingabout.me/backend/internal/jobs"
 	"everythingabout.me/backend/internal/nodes"
 	"everythingabout.me/backend/internal/paths"
@@ -224,6 +225,40 @@ func TestLegacyDeletePostgres(t *testing.T) {
 	if e := server.checkBrowserUploadConflict(ctx, owners[0], "Docs/new.txt", true); e == nil {
 		t.Fatal("pending deletion did not reserve subtree")
 	}
+	// Both folder creation and file allocation identify the blocking deletion
+	// before any native effect; clients can wait without treating it as overwrite.
+	var blockingID string
+	for _, tc := range []struct{ endpoint, body string }{
+		{"/api/fs/mkdir", `{"path":"Docs"}`},
+		{"/api/fs/upload/sign", `{"path":"Docs/new.txt","size":3}`},
+		{"/api/fs/upload/sign", `{"path":"Docs/new.txt","size":3,"overwrite":true}`},
+	} {
+		r := httptest.NewRequest(http.MethodPost, "https://files.example"+tc.endpoint, strings.NewReader(tc.body))
+		r.AddCookie(&http.Cookie{Name: auth.SessionCookie, Value: cookie})
+		r.Header.Set("Origin", "https://files.example")
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, r)
+		var conflict struct {
+			OK          bool   `json:"ok"`
+			Code        string `json:"code"`
+			OperationID string `json:"operationId"`
+			Path        string `json:"path"`
+			Status      string `json:"deletionStatus"`
+		}
+		if err := json.Unmarshal(w.Body.Bytes(), &conflict); err != nil {
+			t.Fatal(err)
+		}
+		if w.Code != http.StatusConflict || conflict.OK || conflict.Code != "deletion_in_progress" || conflict.OperationID == "" || conflict.Path != "Docs" || conflict.Status != "pending" {
+			t.Fatalf("upload admission did not explain deletion wait: HTTP=%d body=%s", w.Code, w.Body.String())
+		}
+		if blockingID != "" && conflict.OperationID != blockingID {
+			t.Fatal("same subtree returned different deletion identities")
+		}
+		blockingID = conflict.OperationID
+	}
+	if objects.calls != 0 {
+		t.Fatal("waiting upload reached native storage")
+	}
 	for _, tc := range []struct{ owner, path string }{{owners[0], "Docs-old.txt"}, {owners[1], "Docs/new.txt"}} {
 		if e := server.checkBrowserUploadConflict(ctx, tc.owner, tc.path, true); e != nil {
 			t.Fatal("reservation escaped owner or segment boundary", e)
@@ -284,6 +319,9 @@ func TestLegacyDeletePostgres(t *testing.T) {
 	}
 	if e := server.checkBrowserUploadConflict(ctx, owners[0], "Docs/new.txt", true); e != nil {
 		t.Fatal("finished deletion still reserves subtree", e)
+	}
+	if finished, e := server.jobs.Get(ctx, owners[0], blockingID); e != nil || finished == nil || finished.Status != "done" {
+		t.Fatal("waiting uploader cannot observe explicit deletion completion", finished, e)
 	}
 	for key := range objects.objects {
 		path := strings.TrimPrefix(key, paths.KeyFor("", owners[0]))
@@ -364,6 +402,11 @@ func TestLegacyDeletePostgres(t *testing.T) {
 	}
 	if e := server.checkBrowserUploadConflict(ctx, owners[0], "unknown.txt", true); e == nil {
 		t.Fatal("unknown deletion released path reservation")
+	} else {
+		var conflict *httpx.Error
+		if !errors.As(e, &conflict) || conflict.Code != "deletion_in_progress" || conflict.DeletionStatus != "failed" || conflict.OperationID != pending[0].ID {
+			t.Fatalf("failed deletion did not preserve typed wait reason: %v", e)
+		}
 	}
 	// Crash after intent checkpoint is equivalent to a lost reply, even when no
 	// native request was observed locally. Never infer safe replay from HEAD.

@@ -1,12 +1,29 @@
 /** The only backend entry point. Legacy account/event calls use envelopes; files use resources/Problems. */
 
-export class ApiError extends Error {
+export interface DeletionConflict {
+  code?: string;
+  operationId?: string;
+  path?: string;
+  deletionStatus?: "pending" | "running" | "failed";
+}
+
+export class ApiError extends Error implements DeletionConflict {
+  readonly code?: string;
+  readonly operationId?: string;
+  readonly path?: string;
+  readonly deletionStatus?: DeletionConflict["deletionStatus"];
+
   constructor(
     message: string,
     readonly status: number,
+    metadata: DeletionConflict = {},
   ) {
     super(message);
     this.name = "ApiError";
+    this.code = metadata.code;
+    this.operationId = metadata.operationId;
+    this.path = metadata.path;
+    this.deletionStatus = metadata.deletionStatus;
   }
 }
 
@@ -318,13 +335,24 @@ function unpack<T>(payload: unknown, status: number): T {
   if (typeof payload !== "object" || payload === null || !("ok" in payload)) {
     throw httpError(status);
   }
-  const envelope = payload as { ok?: unknown; data?: unknown; error?: unknown };
+  const envelope = payload as Record<string, unknown>;
   if (envelope.ok !== true) {
     const message =
       typeof envelope.error === "string" && envelope.error !== ""
         ? envelope.error
         : `request failed (HTTP ${status})`;
-    throw new ApiError(message, status);
+    const metadata: DeletionConflict = {};
+    if (typeof envelope.code === "string" && envelope.code) metadata.code = envelope.code;
+    // Incomplete deletion metadata must never enable an automatic retry.
+    if (status === 409 && metadata.code === "deletion_in_progress"
+      && typeof envelope.operationId === "string" && envelope.operationId.trim()
+      && typeof envelope.path === "string" && envelope.path.trim()
+      && (envelope.deletionStatus === "pending" || envelope.deletionStatus === "running" || envelope.deletionStatus === "failed")) {
+      metadata.operationId = envelope.operationId;
+      metadata.path = envelope.path;
+      metadata.deletionStatus = envelope.deletionStatus;
+    }
+    throw new ApiError(message, status, metadata);
   }
   return envelope.data as T;
 }
@@ -615,8 +643,8 @@ export const api = {
     return post(`/api/fs/delete${recursive ? "?recursive=1" : ""}`, { path });
   },
 
-  deletionStatus(id: string): Promise<{ job: Job }> {
-    return request(`/api/fs/delete/${encodeURIComponent(id)}`);
+  deletionStatus(id: string, signal?: AbortSignal): Promise<{ job: Job }> {
+    return request(`/api/fs/delete/${encodeURIComponent(id)}`, { signal });
   },
 
   deletions(): Promise<{ jobs: Job[] }> {

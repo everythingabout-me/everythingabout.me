@@ -15,8 +15,12 @@ import (
 
 // Error is a business error that maps straight onto an HTTP status code.
 type Error struct {
-	Status  int
-	Message string
+	Status         int
+	Message        string
+	Code           string
+	OperationID    string
+	Path           string
+	DeletionStatus string
 }
 
 func (e *Error) Error() string { return e.Message }
@@ -41,8 +45,12 @@ type okEnvelope struct {
 }
 
 type errEnvelope struct {
-	OK    bool   `json:"ok"`
-	Error string `json:"error"`
+	OK             bool   `json:"ok"`
+	Error          string `json:"error"`
+	Code           string `json:"code,omitempty"`
+	OperationID    string `json:"operationId,omitempty"`
+	Path           string `json:"path,omitempty"`
+	DeletionStatus string `json:"deletionStatus,omitempty"`
 }
 
 // WriteJSON writes a JSON response as-is.
@@ -69,7 +77,8 @@ func WriteOKStatus(w http.ResponseWriter, status int, data any) {
 func WriteError(w http.ResponseWriter, err error) {
 	var apiErr *Error
 	if errors.As(err, &apiErr) {
-		WriteJSON(w, apiErr.Status, errEnvelope{OK: false, Error: apiErr.Message})
+		WriteJSON(w, apiErr.Status, errEnvelope{OK: false, Error: apiErr.Message,
+			Code: apiErr.Code, OperationID: apiErr.OperationID, Path: apiErr.Path, DeletionStatus: apiErr.DeletionStatus})
 		return
 	}
 	var pathErr *paths.Error

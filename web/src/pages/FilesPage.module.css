@@ -1053,6 +1053,13 @@ a.crumb:hover {
   color: var(--text-2);
 }
 
+.uploadWaitMessage {
+  color: var(--text-2);
+  font-size: 13px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
 .uploadSep {
   opacity: 0.45;
 }

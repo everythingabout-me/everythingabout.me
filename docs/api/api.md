@@ -26,6 +26,10 @@
 > reservation. No undo, cancel, or browser retry endpoint is offered. Legacy upload grants and unresolved
 > upload observations must be proven settled before admission. The browser recovers status on mount and
 > polls every three seconds while work is active; failures remain visible after refresh.
+> A conflicting legacy mkdir/upload allocation returns `409` with `code: "deletion_in_progress"`,
+> `operationId`, `path` (the deletion root), and `deletionStatus` in its error envelope. The browser retains
+> the local upload, displays the wait reason, and resumes only after the exact deletion reports `done`.
+> Failed cleanup or unavailable status keeps the upload waiting; cancellation drops the local waiting upload.
 > See [legacy deletion behavior and operator recovery](legacy-api.md#46-delete). This legacy change does not
 > alter the admitted Local mutation contract described above.
 > Architecture: [storage.md](../design/storage.md). Driver contract: [storage-driver.md](../design/storage-driver.md).

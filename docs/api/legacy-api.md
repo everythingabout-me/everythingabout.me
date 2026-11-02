@@ -355,6 +355,18 @@ Retry-After: 2
   until `done`, including after failure. Browser and legacy public namespace mutations reject overlapping
   paths at segment boundaries with `409`. Failed cleanup may leave native data and requires attention;
   the browser exposes no retry, cancel, or undo endpoint and displays safe error copy without provider details.
+- Overlapping browser mkdir/upload allocation returns `409` with the existing `ok:false,error` fields
+  plus `code:"deletion_in_progress"`, `operationId:"d_..."`, `path:"Documents/old-folder"`, and
+  `deletionStatus:"running"` in the same JSON error object.
+  The deletion root and identity are owner- and storage-binding-scoped; unrelated conflicts keep their
+  existing error shape. Failed cleanup returns the same code with `deletionStatus: "failed"`.
+- New uploads to that path enter a visible waiting state. Folder descendants wait with their parent;
+  unrelated uploads continue. The queue retains local File objects and checks the exact deletion status
+  every three seconds, with bounded status requests, resuming automatically only on `done`. An
+  unavailable/missing status or failed
+  cleanup never releases the upload; the UI explains the reason and keeps cancellation available.
+  Cancelling a waiting upload does not cancel deletion. The queue is local to the open page: refreshing
+  discards selected uploads as before, while the server's durable deletion continues.
 - Conflicting browser uploads, legacy upload sessions, unresolved upload index watches, and active move/copy
   jobs reject admission before detachment. Completed or cancelled legacy sessions are still guards because
   their previously issued native requests may remain in flight. Expiry alone does not prove settlement.

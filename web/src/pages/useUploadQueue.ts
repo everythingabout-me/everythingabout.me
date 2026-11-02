@@ -2,7 +2,7 @@
  * An ephemeral upload queue. The application API owns native publication and
  * index finalization. Refreshing discards remaining local tasks.
  */
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { ApiError, api, type Item } from "../api/client";
 import { t } from "../i18n";
 import type { UploadEntry } from "./uploadSelection";
@@ -36,7 +36,42 @@ class SpeedMeter {
   }
 }
 
-export type UploadStatus = "queued" | "uploading" | "finalizing" | "failed" | "completed";
+export type UploadStatus = "queued" | "waiting" | "uploading" | "finalizing" | "failed" | "completed";
+
+export interface DeletionWait {
+  operationId: string;
+  path: string;
+  state: "pending" | "running" | "failed" | "cancelled";
+  statusUnavailable?: boolean;
+  /** Inherited waits are display/dependency state; only the owning task resumes. */
+  ancestorId?: string;
+}
+
+function waitMessage(wait: DeletionWait): string {
+  if (wait.statusUnavailable) return t("drive.deletionStatusUnavailable");
+  if (wait.state === "failed" || wait.state === "cancelled") return t("drive.deletionNeedsAttention");
+  return t("drive.waitingForDeletion", { path: wait.path });
+}
+
+/** Keep descendants visibly waiting while retaining their directory dependency. */
+function inheritWaiting(tasks: UploadTask[]): UploadTask[] {
+  const roots = new Map(tasks.filter((task) => task.isDir && task.status === "waiting"
+    && task.waitingFor && !task.waitingFor.ancestorId).map((task) => [task.path, task]));
+  if (!roots.size && !tasks.some((task) => task.waitingFor?.ancestorId)) return tasks;
+  return tasks.map((task) => {
+    if (task.status !== "queued" && !(task.status === "waiting" && task.waitingFor?.ancestorId)) return task;
+    let ancestor: UploadTask | undefined;
+    let slash = task.path.lastIndexOf("/");
+    while (slash >= 0 && !ancestor) {
+      ancestor = roots.get(task.path.slice(0, slash));
+      slash = task.path.lastIndexOf("/", slash - 1);
+    }
+    if (ancestor) return { ...task, status: "waiting", speed: 0,
+      waitingFor: { ...ancestor.waitingFor!, ancestorId: ancestor.id }, waitMessage: ancestor.waitMessage };
+    if (task.waitingFor?.ancestorId) return { ...task, status: "queued", waitingFor: undefined, waitMessage: undefined };
+    return task;
+  });
+}
 
 export interface UploadTask {
   id: string;
@@ -56,6 +91,8 @@ export interface UploadTask {
   uploaded: boolean;
   /** A retry checks this receipt before it may allocate another transfer. */
   uploadId?: string;
+  waitingFor?: DeletionWait;
+  waitMessage?: string;
   error?: string;
 }
 
@@ -110,13 +147,111 @@ export function useUploadQueue(
   const runtimesRef = useRef(new Map<string, UploadRuntime>());
   const metersRef = useRef(new Map<string, SpeedMeter>());
   const onUploadedRef = useRef(onUploaded);
+  const mountedRef = useRef(true);
+  const pollGenerationRef = useRef(0);
+  const pollTimerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  const pollingRef = useRef(false);
+  const statusRequestsRef = useRef(new Map<string, { controller: AbortController; timer: ReturnType<typeof setTimeout> }>());
+  const schedulePollRef = useRef<() => void>(() => {});
   onUploadedRef.current = onUploaded;
 
   /** Update ref and state together; async flows always read tasksRef. */
   const update = useCallback((mutate: (current: UploadTask[]) => UploadTask[]) => {
-    const next = mutate(tasksRef.current);
+    if (!mountedRef.current) return;
+    const next = inheritWaiting(mutate(tasksRef.current));
     tasksRef.current = next;
     setTasks(next);
+  }, []);
+
+  const schedulePoll = useCallback(() => {
+    const waitingIds = new Set(tasksRef.current.filter((task) => task.status === "waiting"
+      && task.waitingFor && !task.waitingFor.ancestorId).map((task) => task.waitingFor!.operationId));
+    for (const [operationId, request] of statusRequestsRef.current) {
+      if (waitingIds.has(operationId)) continue;
+      clearTimeout(request.timer);
+      request.controller.abort();
+    }
+    const waiting = waitingIds.size > 0;
+    if (!waiting && pollTimerRef.current !== undefined) {
+      clearTimeout(pollTimerRef.current);
+      pollTimerRef.current = undefined;
+    }
+    if (!mountedRef.current || !waiting || pollingRef.current || pollTimerRef.current !== undefined) return;
+    pollTimerRef.current = setTimeout(async () => {
+      pollTimerRef.current = undefined;
+      pollingRef.current = true;
+      const generation = pollGenerationRef.current;
+      // Snapshot task IDs as well as job IDs so late results cannot revive a canceled task.
+      const jobs = new Map<string, Set<string>>();
+      for (const task of tasksRef.current) {
+        if (task.status !== "waiting" || !task.waitingFor || task.waitingFor.ancestorId) continue;
+        const ids = jobs.get(task.waitingFor.operationId) ?? new Set<string>();
+        ids.add(task.id);
+        jobs.set(task.waitingFor.operationId, ids);
+      }
+      try {
+        await Promise.all([...jobs].map(async ([operationId, ids]) => {
+          const controller = new AbortController();
+          const aborted = new Promise<never>((_, reject) => {
+            controller.signal.addEventListener("abort", () => reject(new Error("deletion status request interrupted")), { once: true });
+          });
+          const timer = setTimeout(() => controller.abort(), 15000);
+          const request = { controller, timer };
+          statusRequestsRef.current.set(operationId, request);
+          try {
+            const { job } = await Promise.race([api.deletionStatus(operationId, controller.signal), aborted]);
+            if (!job || job.id !== operationId || !["pending", "running", "done", "failed", "cancelled"].includes(job.status)) {
+              throw new Error("invalid deletion status response");
+            }
+            if (!mountedRef.current || generation !== pollGenerationRef.current) return;
+            update((current) => current.map((task) => {
+              if (!ids.has(task.id) || task.status !== "waiting" || task.waitingFor?.operationId !== operationId) return task;
+              if (job.status === "done") return { ...task, status: "queued", waitingFor: undefined, waitMessage: undefined };
+              const waitingFor: DeletionWait = { ...task.waitingFor, state: job.status, statusUnavailable: false };
+              return { ...task, waitingFor, waitMessage: waitMessage(waitingFor), speed: 0 };
+            }));
+            pumpRef.current();
+          } catch {
+            if (!mountedRef.current || generation !== pollGenerationRef.current) return;
+            update((current) => current.map((task) => {
+              if (!ids.has(task.id) || task.status !== "waiting" || task.waitingFor?.operationId !== operationId) return task;
+              const waitingFor = { ...task.waitingFor, statusUnavailable: true };
+              return { ...task, waitingFor, waitMessage: waitMessage(waitingFor), speed: 0 };
+            }));
+          } finally {
+            clearTimeout(timer);
+            if (statusRequestsRef.current.get(operationId) === request) statusRequestsRef.current.delete(operationId);
+          }
+        }));
+      } finally {
+        if (generation === pollGenerationRef.current) {
+          pollingRef.current = false;
+          schedulePollRef.current();
+        }
+      }
+    }, 3000);
+  }, [update]);
+  schedulePollRef.current = schedulePoll;
+
+  useEffect(() => {
+    mountedRef.current = true;
+    schedulePollRef.current();
+    return () => {
+      mountedRef.current = false;
+      pollGenerationRef.current += 1;
+      if (pollTimerRef.current !== undefined) clearTimeout(pollTimerRef.current);
+      pollTimerRef.current = undefined;
+      pollingRef.current = false;
+      for (const request of statusRequestsRef.current.values()) {
+        clearTimeout(request.timer);
+        request.controller.abort();
+      }
+      statusRequestsRef.current.clear();
+      for (const runtime of runtimesRef.current.values()) {
+        runtime.canceled = true;
+        runtime.controller.abort();
+      }
+    };
   }, []);
 
   const run = useCallback(
@@ -133,6 +268,7 @@ export function useUploadQueue(
           try {
             await api.mkdir(task.path);
           } catch (error) {
+            if (error instanceof ApiError && error.code === "deletion_in_progress") throw error;
             if (!(error instanceof ApiError) || error.status !== 409) throw error;
           }
           if (runtime.canceled) return;
@@ -170,6 +306,7 @@ export function useUploadQueue(
           try {
             sign = await api.signUpload(task.path, task.size, task.overwrite, file.type || undefined, file.lastModified);
           } catch (error) {
+            if (error instanceof ApiError && error.code === "deletion_in_progress") throw error;
             if (!(error instanceof ApiError) || error.status !== 409 || task.overwrite) throw error;
             const { node } = await api.list(task.path);
             if (runtime.canceled) return;
@@ -219,6 +356,14 @@ export function useUploadQueue(
         onUploadedRef.current(task, item);
       } catch (error) {
         if (runtime.canceled) return;
+        if (error instanceof ApiError && error.status === 409 && error.code === "deletion_in_progress"
+          && error.operationId && error.path && error.deletionStatus) {
+          const waitingFor: DeletionWait = { operationId: error.operationId, path: error.path, state: error.deletionStatus };
+          update((current) => current.map((entry) => entry.id === id
+            ? { ...entry, status: "waiting", waitingFor, waitMessage: waitMessage(waitingFor), speed: 0, error: undefined }
+            : entry));
+          return;
+        }
         update((current) =>
           current.map((entry) =>
             entry.id === id
@@ -231,13 +376,14 @@ export function useUploadQueue(
         metersRef.current.delete(id);
         runningRef.current = Math.max(0, runningRef.current - 1);
         pumpRef.current();
+        schedulePollRef.current();
       }
     },
     [update],
   );
 
   const pump = useCallback(() => {
-    if (pumpingRef.current) return;
+    if (!mountedRef.current || pumpingRef.current) return;
     pumpingRef.current = true;
     try {
       while (runningRef.current < MAX_PARALLEL_UPLOADS) {
@@ -284,6 +430,7 @@ export function useUploadQueue(
         runtime.controller.abort();
       }
       update((current) => current.filter((task) => !canceled.has(task.id)));
+      schedulePollRef.current();
       pumpRef.current();
     },
     [update],

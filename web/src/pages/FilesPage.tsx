@@ -88,6 +88,8 @@ function uploadStatusText(status: UploadStatus): string {
   switch (status) {
     case "queued":
       return t("drive.queued");
+    case "waiting":
+      return t("drive.waiting");
     case "uploading":
       return t("drive.uploading");
     case "finalizing":
@@ -102,6 +104,7 @@ function uploadStatusText(status: UploadStatus): string {
 function uploadStatusClass(status: UploadStatus): string {
   switch (status) {
     case "queued":
+    case "waiting":
       return styles.statusQueued;
     case "failed":
       return styles.statusFailed;
@@ -175,7 +178,7 @@ const UploadRow = memo(function UploadRow({
   if (!upload) return null;
   const completed = upload.status === "completed";
   const navigable = isDir || completed;
-  const showProgress = !completed && (!isDir || upload.files > 0);
+  const showProgress = !completed && upload.status !== "waiting" && (!isDir || upload.files > 0);
   const content = (
     <>
       <span className={styles.glyph}>
@@ -219,6 +222,7 @@ const UploadRow = memo(function UploadRow({
             </>
           )}
         </div>
+        {upload.waitMessage && <div className={styles.uploadWaitMessage}>{upload.waitMessage}</div>}
       </div>
       {showProgress ? (
         <div className={styles.uploadProgress}>
@@ -245,12 +249,12 @@ const UploadRow = memo(function UploadRow({
             />
           </div>
         </div>
-      ) : (
+      ) : completed ? (
         <span className={styles.uploadFinishedMeta}>
           {isDir ? (upload.size > 0 ? formatBytes(upload.size) : "")
             : item ? formatRelativeTime(item.updated_at) : t("drive.uploadCompleted")}
         </span>
-      )}
+      ) : <span />}
       {isDir && <span className={styles.folderChevron}><ChevronRightIcon size={14} /></span>}
     </>
   );
