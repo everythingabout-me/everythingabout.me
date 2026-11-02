@@ -43,12 +43,27 @@ try {
   let release;
   const held = new Promise((resolve) => { release = resolve; });
   let intercepted = false;
-  await page.route("**/api/files/uploads/*/parts/2", async (route) => { intercepted = true; await held; await route.abort().catch(() => {}); });
+  let resumeSession;
+  await page.route("**/api/files/uploads/*/parts/2", async (route) => {
+    intercepted = true;
+    resumeSession = new URL(route.request().url()).pathname.split("/")[4];
+    await held; await route.abort().catch(() => {});
+  });
   const large = { name: "resume.bin", mimeType: "application/octet-stream", buffer: Buffer.alloc(9 * 1024 * 1024, 65) };
   await page.locator('input[type="file"]').first().setInputFiles(large);
   await page.waitForFunction(() => Object.keys(localStorage).some((key) => key.startsWith("eam.uploads.v1:") && localStorage.getItem(key).includes("resume.bin")));
   for (let i = 0; i < 200 && !intercepted; i++) await page.waitForTimeout(50);
-  assert.equal(intercepted, true, "the second part was reached after the first durable ACK");
+  assert.equal(intercepted, true, "the second parallel part was reached");
+  // Parallel dispatch does not imply that part one has been acknowledged yet.
+  // Refresh only after the authoritative receipt is durable, with part two held.
+  let firstPartDurable = false;
+  for (let i = 0; i < 200 && !firstPartDurable; i++) {
+    const response = await context.request.get(`${config.url}/api/files/uploads/${resumeSession}/parts`);
+    assert.equal(response.status(), 200);
+    firstPartDurable = (await response.json()).items.some((part) => part.number === 1);
+    if (!firstPartDurable) await page.waitForTimeout(50);
+  }
+  assert.equal(firstPartDurable, true, "part one must have a durable receipt before refresh");
   release();
   await page.reload();
   await page.unroute("**/api/files/uploads/*/parts/2");

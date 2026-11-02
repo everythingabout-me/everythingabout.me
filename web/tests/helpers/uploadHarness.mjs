@@ -81,7 +81,7 @@ export async function setup(overrides = {}, { storage = memoryStorage(), owner =
   const slots = [], effects = [], timers = new Map(), completed = [];
   let timerId = 0, cursor = 0, mounted = true;
   const same = (a, b) => a && b && a.length === b.length && a.every((value, i) => Object.is(value, b[i]));
-  const schedule = (callback, delay, repeat) => { assert.ok(delay === 2000 || delay === 15000, `unexpected timer ${delay}`); timers.set(++timerId, { callback, delay, repeat }); return timerId; };
+  const schedule = (callback, delay, repeat) => { assert.ok([250, 500, 2000, 15000].includes(delay), `unexpected timer ${delay}`); timers.set(++timerId, { callback, delay, repeat }); return timerId; };
   const runtime = {
     api: { me: async () => ({ id: owner }), ...overrides }, ApiError: TestApiError,
     localStorage: storage, crypto: webcrypto, window: { confirm },

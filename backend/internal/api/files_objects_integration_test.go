@@ -50,6 +50,11 @@ type objectAPIProvider struct {
 	invalidVersionKey string
 	sequence          int
 	versionReads      map[string]int
+	multipart         map[string]*objectAPIMultipart
+	partRequests      int
+	completeRequests  map[string]int
+	partEntered       chan int
+	partRelease       chan struct{}
 }
 
 func newObjectAPIProvider() *objectAPIProvider {
@@ -81,7 +86,18 @@ func (p *objectAPIProvider) serve(t *testing.T, w http.ResponseWriter, r *http.R
 	}
 	key := strings.TrimPrefix(r.URL.Path, "/bucket/")
 	p.mu.Lock()
+	entered, release := p.partEntered, p.partRelease
+	p.mu.Unlock()
+	if entered != nil && r.Method == "PUT" && r.URL.Query().Get("uploadId") != "" {
+		number, _ := strconv.Atoi(r.URL.Query().Get("partNumber"))
+		entered <- number
+		<-release
+	}
+	p.mu.Lock()
 	defer p.mu.Unlock()
+	if p.serveMultipart(t, w, r, key) {
+		return
+	}
 	if r.Method == "GET" && r.URL.Query().Get("list-type") == "2" {
 		prefix := r.URL.Query().Get("prefix")
 		type item struct {
@@ -306,7 +322,7 @@ func newObjectsAPIFixture(t *testing.T) *objectsAPIFixture {
 	provider := newObjectAPIProvider()
 	native := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { provider.serve(t, w, r) }))
 	t.Cleanup(native.Close)
-	proof := objectmutation.Admission{ConnectionID: "default", Endpoint: native.URL, Bucket: "bucket", Region: "test-region", CheckedAt: time.Now().UTC(), ProbeReference: "isolated stateful S3 SDK fixture, not live cloud evidence", AtomicPublish: true, VersionedReads: true, ConditionalCreate: true, CurrentKeyDelete: true, CoordinatedExclusiveWriter: true, SingleGateway: true, LegacyWritersDrained: true}
+	proof := objectmutation.Admission{ConnectionID: "default", Endpoint: native.URL, Bucket: "bucket", Region: "test-region", CheckedAt: time.Now().UTC(), ProbeReference: "isolated stateful S3 SDK fixture, not live cloud evidence", AtomicPublish: true, VersionedReads: true, ConditionalCreate: true, CurrentKeyDelete: true, CoordinatedExclusiveWriter: true, SingleGateway: true, LegacyWritersDrained: true, MultipartUploads: true}
 	proofPath := filepath.Join(t.TempDir(), "admission.json")
 	encoded, _ := json.Marshal(proof)
 	if err = os.WriteFile(proofPath, encoded, 0600); err != nil {

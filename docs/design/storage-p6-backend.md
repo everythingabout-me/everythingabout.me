@@ -76,8 +76,10 @@ out of reports. Retain application/account metadata backups independently from n
    write-serving cutover, an operator must prepare an admitted Local configuration or an exact-connection
    COS/S3 capability report, durable shared spool/lock namespace, version inventory and declared coordinated
    writer model as specified by P4. Real provider positive/negative probes remain a deployment gate. Configure
-   `FILE_COOKIE_ORIGINS` explicitly for session mutations. Review advertised publication limits; P5 resumable
-   ingress does not enable native multipart publication or remove the object single-publication size limit.
+   `FILE_COOKIE_ORIGINS` explicitly for session mutations. Review advertised limits. The subsequent
+   [native upload extension](native-upload-deployment.md) requires explicit multipart capability evidence
+   and supports independent byte ingress; the original P5 whole-file staging/PUT limit is historical.
+   Drain old upload sessions before changing their native strategy or admitted connection identity.
 6. **Initialize the verified root budget before serving writes.** Run `storage-admit --owner-id ...
    --writers-quiesced --evidence /secure/baseline-proof.json --dry-run`, review it and repeat without dry-run.
    Object admission additionally requires `--physical-bytes` covering retained versions and the required

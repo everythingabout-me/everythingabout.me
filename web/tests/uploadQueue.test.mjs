@@ -21,13 +21,15 @@ for (const lostAck of ["create", "part", "commit"]) {
     };
     const harness = await mount(t, server.api);
     enqueue(harness, [entry("file", "ab")], "Health");
-    let queue = await harness.until((queue) => queue.tasks[0]?.status === "failed");
-    const before = JSON.parse(harness.storage.getItem("eam.uploads.v1:owner-a"))[0];
-    assert.ok(before.intent, "intent persists before sending create");
-    assert.equal(before.file, undefined, "never serialize browser File handles");
+    let queue = await harness.until(lostAck === "part" ? allComplete : (queue) => queue.tasks[0]?.status === "failed");
     const id = queue.tasks[0].id;
-    queue.retry(id);
-    queue = await harness.until(allComplete);
+    if (lostAck !== "part") {
+      const before = JSON.parse(harness.storage.getItem("eam.uploads.v1:owner-a"))[0];
+      assert.ok(before.intent, "intent persists before sending create");
+      assert.equal(before.file, undefined, "never serialize browser File handles");
+      queue.retry(id);
+      queue = await harness.until(allComplete);
+    }
     assert.equal(queue.tasks[0].id, id);
     assert.equal(queue.tasks[0].file, null);
     assert.equal(server.sessions.size, 1);
@@ -87,7 +89,9 @@ test("known rejected allocation stays failed on reload, cancels locally and retr
 test("reload requires reselection, verifies stored receipt hashes and sends only missing numbered parts", async (t) => {
   const server = uploadServer();
   const send = server.api.uploadPart;
-  server.api.uploadPart = async (...args) => { await send(...args); throw new TestApiError("ACK dropped"); };
+  const create = server.api.createUpload;
+  server.api.createUpload = async (...args) => ({ ...await create(...args), maxParallelism: 1 });
+  server.api.uploadPart = async (...args) => { await send(...args); throw new TestApiError("ACK unavailable", 400); };
   const storage = memoryStorage();
   const first = await mount(t, server.api, { storage });
   enqueue(first, [entry("folder/file", "abcd")]);
@@ -159,29 +163,37 @@ test("zero-byte upload commits an empty session without a part request", async (
   assert.equal(callsOf(server, "commit").length, 1);
 });
 
-test("part turns let a small file finish while two larger files are partially uploaded", async (t) => {
+test("four files each send four parts concurrently and yield to a later small file", async (t) => {
   const server = uploadServer();
   const send = server.api.uploadPart;
-  const gates = [deferred(), deferred()];
+  const create = server.api.createUpload;
+  server.api.createUpload = async (...args) => ({ ...await create(...args), maxParallelism: 8 });
+  server.api.uploadStatus = async (id) => ({ ...server.sessions.get(id), maxParallelism: 8 });
+  const gate = deferred();
   let active = 0, peak = 0;
+  const perFile = new Map(), peaks = new Map();
   server.api.uploadPart = async (...args) => {
+    const id = args[0];
     active++; peak = Math.max(peak, active);
+    perFile.set(id, (perFile.get(id) ?? 0) + 1);
+    peaks.set(id, Math.max(peaks.get(id) ?? 0, perFile.get(id)));
     try {
-      if (args[1] === 1 && args[0] !== "session-3") await gates[Number(args[0].slice(-1)) - 1].promise;
+      if (args[1] <= 4 && id !== "session-5") await gate.promise;
       return await send(...args);
-    } finally { active--; }
+    } finally { active--; perFile.set(id, perFile.get(id) - 1); }
   };
   const harness = await mount(t, server.api);
-  enqueue(harness, [entry("large-a", "abcdefgh"), entry("large-b", "abcdefgh"), entry("small", "x")]);
-  await harness.settle();
-  assert.equal(server.sessions.size, 2, "only two active files may allocate/send");
-  gates.forEach((gate) => gate.resolve());
+  enqueue(harness, [...Array.from({ length: 4 }, (_, i) => entry(`large-${i}`, "abcdefghijklmnop")), entry("small", "x")]);
+  await harness.until(() => active === 16);
+  assert.equal(server.sessions.size, 4, "only four active files may allocate/send");
+  assert.equal(peak, 16);
+  assert.deepEqual([...peaks.values()], [4, 4, 4, 4]);
+  gate.resolve();
   await harness.until(allComplete);
-  assert.ok(peak <= 2);
+  assert.equal(peak, 16);
   const parts = callsOf(server, "part");
-  const small = parts.findIndex(([, id]) => id === "session-3");
-  assert.ok(small >= 0 && small < parts.findIndex(([, id, number]) => id === "session-1" && number === 4), "small file receives a turn before large-a drains");
-  assert.ok(small < parts.findIndex(([, id, number]) => id === "session-2" && number === 4), "small file receives a turn before large-b drains");
+  const small = parts.findIndex(([, id]) => id === "session-5");
+  for (let i = 1; i <= 4; i++) assert.ok(small < parts.findIndex(([, id, number]) => id === `session-${i}` && number === 8), "small file advances before the original large files drain");
 });
 
 test("shared delete Operation polls once, retains Files, frees slots and resumes only exact succeeded identity", async (t) => {

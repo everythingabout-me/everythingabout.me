@@ -37,6 +37,8 @@ func main() {
 	switch command {
 	case "server":
 		err = runServer(args)
+	case "upload-gateway":
+		err = runUploadGateway(args)
 	case "migrate":
 		err = runMigrate(args)
 	case "doctor":
@@ -71,6 +73,7 @@ func usage() {
 
 usage:
   eam [server]                     start the HTTP server
+  eam upload-gateway               start the restricted same-origin part receiver
   eam migrate                      create tables / run sql/*.sql
   eam doctor [--owner-id UUID] [--write]  check config, database, selected storage
   eam reconcile --owner email-or-UUID [--inventory inventory.csv] [--dry-run]

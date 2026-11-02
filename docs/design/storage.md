@@ -19,8 +19,17 @@ Explicit Bearer authentication takes precedence; invalid Authorization never fal
 Authorization, the session cookie may authenticate, with CSRF validation on mutations. Authorization/file
 services are shared. Files/folders are addressed only by paths; database/provider IDs remain private.
 There is no version path segment. Hosted origin is `https://everythingabout.me`; self-hosted origin
-is the user's domain or LAN endpoint. CDN, regional byte gateways and NAS connectors are internal deployment
-choices. Self-hosting must work in one process without a CDN.
+is the user's domain or LAN endpoint. The official service uses COS with an independent upload receiver behind
+that same origin. File-part bytes travel from the browser through the receiver to unpublished COS multipart
+state; they do not cross the application server. The application owns admission, authorization, durable receipts,
+commit and index settlement. A CDN may route the byte path to the receiver; ordinary download caching alone
+is not an upload implementation.
+
+Self-hosting defaults to an embedded receiver in the application process, without a CDN or another service.
+It accepts the same numbered-part protocol and writes to the configured Local or object storage. With COS,
+parts are uploaded during reception; with Local, bytes remain isolated until native publication. Neither mode
+requires clients to know provider URLs, credentials or native upload handles. Other cloud-drive/NAS adapters
+are future integrations, not a requirement for the current official COS and self-hosted Local/COS delivery.
 
 ## 2. Native readable layout is a requirement
 
@@ -143,6 +152,18 @@ committed path merely because its final database result was lost.
 Prefer local streaming/range seeks, native rename, server-side copy/reflink, connection reuse, bounded
 buffers/backpressure, native multipart and measured fair scheduling across files and parts. A public upload
 still uses one same-origin numbered-part protocol; native multipart/offset details stay inside the driver.
+
+For COS numbered uploads, durable parts must reach native unpublished multipart storage during the upload
+phase. Do not wait until commit to assemble a full local file and send it in a second whole-file PUT. Bounded
+per-part buffering for hashing and immutable retry identity is permitted. Application and independent receiver
+share durable session/native-part metadata, not a filesystem containing uploaded file bytes. Commit verifies
+coverage and current conditions, performs native multipart completion once, then settles the index/result; it
+is a control/publication operation, not merely a database update and not another full-byte transfer.
+
+The browser schedules four files concurrently and up to four numbered parts per file, respecting each session's
+maxParallelism and ordering. This permits at most sixteen simultaneous browser part requests. Yield between
+bounded batches so selected small files can progress. Transient retries query durable receipts before replaying
+an uncertain part; acknowledged content is immutable and refresh/reselection verifies hashes before reuse.
 
 Readable final paths can cost an extra publish copy on S3 or require per-file copies for a folder move. These
 are accepted costs when unavoidable; never optimize them by quietly replacing the native tree with anonymous

@@ -5,8 +5,9 @@
 > P4 adds admitted Local actions and conservative COS/S3 staged adapters with explicit capability evidence.
 > Real COS/S3 probes remain unverified; default writes stay disabled. Preserving the readable tree is mandatory.
 > Implementation/configuration limits: [P1](storage-p1.md), [P3](storage-p3.md), [P4](storage-p4.md),
-> [object mutation admission](storage-p4-objects.md), [P5 durable ingress](storage-p5.md). P5 chunks are
-> temporary durable local files; object files above the admitted single-publication limit are rejected.
+> [object mutation admission](storage-p4-objects.md), [P5 durable ingress](storage-p5.md) and
+> [native multipart/receiver deployment](native-upload-deployment.md). Local parts use durable local staging;
+> admitted COS/S3 parts use unpublished native multipart, independent of small content-PUT policy.
 >
 > [Architecture](storage.md) requires original names, complete native folder structure and directly usable
 > file bytes. [The file API](../api/api.md) remains same-origin and backend-neutral. This replaces the
@@ -337,9 +338,16 @@ chunk before irreversible offset append if native checksum rejection is not atom
 after ambiguity and keep bounded spool as needed. Credential refresh does not extend native session retention;
 cap public expiry or retain enough data to recreate it. Explicitly fail unrecoverable native session loss.
 
-The exact generic native upload extension is deferred until local/S3 implementations validate the lifecycle;
-basic S3 multipart can exist inside its adapter. Do not invent a universal token/offset abstraction without
-real integrations, and do not require STS or client presigning from every driver.
+The official COS delivery uses native multipart reception, not whole-file gateway assembly at commit. Native
+allocation identity, immutable part hashes and native part receipts live in the owner/root-bound database
+journal so an independent receiver and application can use separate filesystems. A receiver may buffer one
+bounded part to verify it before writing its native slot; it must not retain the full file as the publication
+source. SealStage verifies the manifest without reading file bytes; Publish issues native completion and
+settles the normal staged-write result. Final-path condition and uncertain-outcome guarantees in §3 still apply.
+
+Self-hosted Local writes keep their embedded durable reception/publication implementation. Other provider
+adapters remain optional future integrations; do not introduce a universal token/offset abstraction merely to
+anticipate them. Public clients continue using one numbered-part protocol without STS or client presigning.
 
 ## 5. Backend mappings and conformance
 

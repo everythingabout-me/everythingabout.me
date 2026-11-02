@@ -217,7 +217,11 @@ For a write-only connection, 403 from file introspection means those limits are 
 create a session with the exact file size and honor its admission result and returned part geometry.
 A rejected admission grants no upload authority. Do not retry with guessed read permissions.
 
-Save a short text (create only):
+Small content PUT is optional: use the following example only after capabilities reports
+maxSinglePutBytes > 0 and the content fits that limit. External-ingress deployments report
+maxSinglePutBytes=0; use the session flow below for every file, including short text.
+Write-only connections with unavailable capabilities should use sessions as well.
+Save a short text when content PUT is enabled (create only):
   curl -X PUT -H "Authorization: Bearer %s" \
        -H "Content-Type: text/markdown" -H "If-None-Match: *" \
        -H "Idempotency-Key: <unique-write-key>" \

@@ -133,6 +133,9 @@ func (c *Config) ValidateStorage() error {
 // ValidateServer refuses an accidental identity reset: migrating deployments must
 // explicitly set APP_SECRET to the old save-link derivation seed before switching.
 func (c *Config) ValidateServer() error {
+	if err := c.ValidateUploadIngress(); err != nil {
+		return err
+	}
 	for _, origin := range c.FileCookieOrigins {
 		if _, err := filecontract.NewCookieMutationPolicy(origin); err != nil {
 			return fmt.Errorf("FILE_COOKIE_ORIGINS requires explicit HTTP(S) origins without paths")

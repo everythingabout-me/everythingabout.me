@@ -47,7 +47,7 @@ func TestP6GeneratedPromptsUseOnlyUnifiedTransfers(t *testing.T) {
 				t.Fatalf("generated instructions advertise obsolete transfer %q", obsolete)
 			}
 		}
-		for _, required := range []string{"/api/files/content?path=", "If-None-Match: *", "Idempotency-Key:", "/api/files/uploads", "/parts/{number}", "/commit", "/api/files/operations/", "Content-Length", "state is succeeded", "explicitly admitted"} {
+		for _, required := range []string{"/api/files/content?path=", "If-None-Match: *", "Idempotency-Key:", "/api/files/uploads", "/parts/{number}", "/commit", "/api/files/operations/", "Content-Length", "state is succeeded", "explicitly admitted", "maxSinglePutBytes=0", "use the session flow below for every file"} {
 			if !strings.Contains(prompt, required) {
 				t.Fatalf("generated instructions omit %q", required)
 			}

@@ -164,8 +164,9 @@ func (s *Server) Handler() http.Handler {
 
 	mux.HandleFunc("GET /me", s.api(s.handleAPIMe))
 	mux.HandleFunc("PATCH /me", s.api(s.handleAPIPatchMe))
-	mux.Handle("/api/files", s.filesHandler())
-	mux.Handle("/api/files/", s.filesHandler())
+	files := s.fileIngressHandler(s.filesHandler())
+	mux.Handle("/api/files", files)
+	mux.Handle("/api/files/", files)
 
 	// A save link is an instruction page using the unified file API.
 	// The sub-router registers GET only; ServeMux answers 405 for POST, with no business handler.

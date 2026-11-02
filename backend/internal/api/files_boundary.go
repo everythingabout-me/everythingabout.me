@@ -139,6 +139,8 @@ func (w *filesResponseWriter) Flush() {
 
 func (s *Server) fileWrap(fn fileHandler) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		clearReadDeadline := partReadIdle(w, r, uploadPartReadIdleTimeout)
+		defer clearReadDeadline()
 		if r.URL.Path != fc.Base+"/content" && !(r.Method == http.MethodPut && strings.Contains(r.URL.Path, "/uploads/") && strings.Contains(r.URL.Path, "/parts/")) {
 			ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
 			defer cancel()

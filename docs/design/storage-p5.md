@@ -1,5 +1,12 @@
 # P5: durable numbered-part upload sessions
 
+> The original P5 byte path and cost model below are historical for object uploads. The current
+> [native upload implementation and deployment](native-upload-deployment.md) receives COS/S3 parts into
+> unpublished native multipart state during upload, with shared Postgres metadata and no full-file
+> assembly/PUT at commit. Local retains durable local staging. Native multipart requires explicit connection
+> evidence; its numbered-upload limit is independent of the small single-PUT limit. P6 now uses four file
+> slots with up to four concurrent parts per file. The public session/receipt/Operation contract remains.
+
 P5 implements the shared `/api/files/uploads` lifecycle on explicitly admitted Local/COS/S3 roots.
 The existing browser sign/confirm receipt is a separate legacy protocol; switching Web, media and generated
 instructions is P6. Native publication still uses P3/P4. Real COS/S3 capability probes, production baselines

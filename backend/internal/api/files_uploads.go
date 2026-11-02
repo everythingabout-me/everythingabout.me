@@ -60,6 +60,9 @@ func filesUploadReceipt(p fileops.PartReceipt) map[string]any {
 }
 func filesUploadMaxSize(native fileops.NativeActions) int64 {
 	max := int64(filesUploadMaxParts) * filesUploadPartSize
+	if numbered, ok := native.(storage.NumberedUploadWriter); ok {
+		return min(max, numbered.UploadMaxFileBytes())
+	}
 	if limit := native.Describe().MaxFileBytes; limit > 0 && limit < max {
 		max = limit
 	}
@@ -125,6 +128,9 @@ func (s *Server) handleFilesCreateUpload(w http.ResponseWriter, r *http.Request,
 	if err != nil {
 		return err
 	}
+	if numbered, ok := native.(storage.NumberedUploadWriter); ok && numbered.UploadMaxFileBytes() == 0 {
+		return fc.NewProblem(422, "unsupported_option", "Native multipart uploads require explicit provider admission evidence.")
+	}
 	if *req.Size > filesUploadMaxSize(native) {
 		return fc.NewProblem(413, "file_too_large", "The file exceeds the admitted publication or part-count limit.")
 	}
@@ -187,8 +193,12 @@ func (s *Server) handleFilesCreateUpload(w http.ResponseWriter, r *http.Request,
 	if err != nil {
 		return filesMutationProblem(err)
 	}
-	// Chunks coexist with the assembled stage; bounded replay attempts need headroom.
-	physical += intent.Size + filesUploadParallelism*min(intent.Size, filesUploadPartSize)
+	// Native parts coexist with final publication; Local chunks coexist with its
+	// assembled stage. Both reserve bounded concurrent receive headroom.
+	if _, ok := native.(storage.NumberedUploadWriter); !ok {
+		physical += intent.Size
+	}
+	physical += filesUploadParallelism * min(intent.Size, filesUploadPartSize)
 	reservation := fileops.ReservationRequest{NewBytes: intent.Size, OldBytes: oldBytes, PhysicalBytes: physical}
 	if oldBytes > 0 {
 		reservation.CreditPath = intent.Target
@@ -288,6 +298,10 @@ func (s *Server) handleFilesUploadPart(w http.ResponseWriter, r *http.Request, f
 	if err != nil {
 		return err
 	}
+	if numbered, ok := native.(storage.NumberedUploadWriter); ok {
+		intent.ID = u.ID
+		return s.receiveNativeUploadPart(w, r, numbered, root, actor, u.ID, intent, number, expected, digest)
+	}
 	spool, err := s.uploadSpools(native.StorageBinding())
 	if err != nil {
 		return err
@@ -318,6 +332,12 @@ func (s *Server) handleFilesUploadPart(w http.ResponseWriter, r *http.Request, f
 }
 func filesUploadSpoolProblem(err error) error {
 	switch {
+	case storage.IsCode(err, "upload_busy"):
+		return fc.NewProblem(429, "rate_limited", "The upload receiver has reached its concurrent request limit.")
+	case storage.IsCode(err, "upload_aborted"):
+		return fc.NewProblem(410, "upload_aborted", "The upload no longer accepts bytes.")
+	case storage.IsCode(err, "part_conflict"):
+		return fc.NewProblem(409, "part_conflict", "The part is bound to different bytes.")
 	case storage.IsCode(err, "digest_mismatch"):
 		return fc.NewProblem(422, "checksum_mismatch", "The part digest did not match its bytes.")
 	case storage.IsCode(err, "size_mismatch"):
@@ -438,6 +458,9 @@ func (s *Server) runUploadOperation(ctx context.Context, op fileops.Operation, a
 	}
 	if u.State == "open" {
 		return op, fileops.E("commit_not_started", nil)
+	}
+	if numbered, ok := native.(storage.NumberedUploadWriter); ok {
+		return s.runNativeUploadOperation(ctx, op, actor, native, numbered, u, service)
 	}
 	spool, err := s.uploadSpools(native.StorageBinding())
 	if err != nil {

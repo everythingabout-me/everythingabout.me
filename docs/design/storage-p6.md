@@ -14,8 +14,11 @@ management retain their intentionally separate envelope APIs. Cookie mutations o
 token and preserve explicit Origin checks; no invalid Bearer fallback is introduced.
 
 The browser queue uses P5 sessions, exact numbered parts, server receipts, explicit commit and standard
-Operations. Two files can advance concurrently and each gets one part per scheduler turn, preserving small-file
-progress beside larger files. Folder selection/drop retains all original paths, parents and explicit empty
+Operations. Four files can advance concurrently and each sends up to four parts per scheduler turn, capped
+by the session's maxParallelism and ordering (at most sixteen byte requests). Bounded batches yield so smaller
+files can advance beside large files. Transient part errors allow three total attempts with 250/500 ms backoff;
+each uncertain result queries and verifies durable receipts before any identical replay. Parallel progress sums
+confirmed bytes and current per-part progress without double-counting. Folder selection/drop retains all original paths, parents and explicit empty
 folders; existing folders merge, and file overwrite uses a confirmed observed contentRevision. Folder rows
 aggregate descendant progress/failure/cancellation. Failed siblings do not block unrelated queue roots.
 
@@ -59,7 +62,7 @@ routes alone does not establish stale-writer fencing.
 
 ## Validation
 
-All 87 Web tests pass. Web tests exercise the actual transformed queue/client/persistence source, not an independently implemented
+All 95 Web tests pass after the parallel-upload extension. Web tests exercise the actual transformed queue/client/persistence source, not an independently implemented
 model. They cover lost create/part/commit ACKs, immutable receipt verification, refresh/reselection, owner
 isolation, bounded fairness, folder merge/dependencies, exact deletion waits, timeout/unmount, partial failures,
 terminal retry and cancellation races. Path tests cover absolute resources and literal encoded-looking names.
@@ -86,5 +89,7 @@ EAM_TEST_CHROME='/Applications/Google Chrome.app/Contents/MacOS/Google Chrome' \
 
 P0–P5 code foundations and P6 client/routing cutover are implemented. Live provider evidence, production
 admission and old-authority drain remain unverified. P7 fresh-install/upgrade, metadata restore, no-database
-native exit and measured deployment performance/release acceptance remain outstanding. Object ingress still
-rejects files above the admitted single-publication limit; no native multipart acceleration is claimed.
+native exit and measured deployment performance/release acceptance remain outstanding. The subsequent
+[native upload extension](native-upload-deployment.md) replaces object whole-file staging/PUT at commit with
+native multipart, shared metadata and optional external ingress. Small content PUT retains its separate limit;
+real provider admission/probes and actual gateway/CDN deployment remain distinct from implementation tests.

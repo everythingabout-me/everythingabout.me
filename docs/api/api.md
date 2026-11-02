@@ -29,6 +29,16 @@ Every metadata request and file byte uses the configured origin: hosted `https:/
 self-hosted the operator's domain or LAN endpoint. No provider URLs, redirects, credentials, native upload IDs,
 or SDKs reach clients. One origin may route internally to multiple services or CDN nodes.
 
+The official service uses COS and routes only numbered-part PUTs to an independent upload gateway. Control
+requests remain on the application server. With `FILE_UPLOAD_INGRESS=external`, the application refuses byte
+PUTs before consuming their bodies; clients use upload sessions and the front router sends
+`PUT /api/files/uploads/{id}/parts/{number}` to `eam upload-gateway`. The gateway authenticates through the
+same Cookie/Bearer/Origin/CSRF boundary and shares owner/root-bound session/native-part metadata in Postgres.
+no application-server byte relay or shared file-byte filesystem is required. Misrouted byte PUTs return
+`503 upload_gateway_required` and external-mode capabilities report maxSinglePutBytes=0. Keep uploads uncached and preserve
+method, path, Content-Length, Origin, cookies, Authorization and X-CSRF-Token through the front router.
+Self-hosted `embedded` mode runs the receiver inside `eam server` and accepts the same public protocol.
+
 **One base, `/api/files`, serves Web, iOS, Android, CLIs and third-party clients.** There is no separate
 browser route and no file-ID resource. All returned transfer/operation locations are origin-relative below
 this same base. In examples, `B` means `/api/files`.
@@ -365,6 +375,16 @@ part; replay of earlier acknowledged parts remains allowed. An out-of-order new 
 `409 part_out_of_order`, with nextPart. This is a service scheduling rule; clients implement one part protocol
 and scheduling rule, not separate provider protocols. The service may use durable staging to support more
 parallelism when its quotas and benchmarks justify the cost. `maxParallelism` is an upper bound, not a target.
+
+The browser advances at most four files concurrently, with up to four part requests per file (sixteen byte
+requests overall), capped by session.maxParallelism and ordering. It yields between bounded batches for
+fairness. Transient part failures have bounded backoff; before replaying an uncertain request, query the original
+session and verify its durable part receipt. Acknowledged parts are skipped, including after refresh/reselection.
+
+For admitted native COS/S3 multipart sessions, each acknowledged service part already resides in unpublished
+provider multipart state. Bounded per-part buffering verifies exact length/hash and binds immutable identity;
+no full-file local assembly or whole-file PUT follows. Commit performs native completion and result/index
+settlement, with provider latency and unknown-outcome protection; it is not a database-only operation.
 
 ### Part acknowledgement and retries
 

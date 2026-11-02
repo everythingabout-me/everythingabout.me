@@ -10,13 +10,18 @@ Next.js.
 Current browser and Bearer upload implementation:
 
 ```
-client ──/api/files/uploads + parts + commit──▶ Go API ──▶ admitted Local/COS/S3 tree
-                                                   └──▶ Postgres (sessions, receipts, Operations, index)
+Official:   client --same-origin part PUT--> upload gateway --> unpublished COS multipart
+            client --create/status/commit--> application API --> Complete + index/result
+Self-host:  client --same public protocol--> embedded receiver --> Local or native COS/S3
+                                             |
+                                             +--> Postgres sessions/receipts/native metadata
 ```
 
-The API acknowledges durable numbered parts, then commits through staged native publication and index/result
-settlement. Unknown native effects remain guarded. Small clients may use streaming content PUT. Browser
-session identities survive refresh; local File reselection may be required to resume acknowledged chunks.
+Native COS/S3 parts are durable before acknowledgement. Commit seals metadata and completes native publication,
+then settles the index/result; it does not assemble and reupload the entire file. Local uses its embedded durable
+staging. Unknown native effects remain guarded. Browser session identities survive refresh; local File reselection
+may be required to resume acknowledged chunks. Four files and up to four parts per file advance concurrently.
+See [native uploads and receiver deployment](docs/design/native-upload-deployment.md) for the exact boundaries.
 
 ## Accepted storage architecture
 
@@ -41,7 +46,7 @@ may still require per-file copy/delete. Durable journals reconcile backend chang
 | File content (P2 active) | `GET/HEAD /api/files/content?path=/...`: same-origin streaming, safe single ranges |
 | Mutations (P4 admitted roots) | PUT content, POST folder/move/copy, DELETE path; verified baseline and explicit backend capability evidence required |
 | Long operations (P4) | `.../operations/{id}` and `/cancel`: durable progress, partial effects, recovery |
-| Resumable uploads (P5 admitted roots) | POST/GET `.../uploads`; GET/DELETE `.../uploads/{id}`; PUT `.../parts/{number}`; GET `.../parts`; POST `.../commit` |
+| Resumable uploads (admitted roots) | POST/GET `.../uploads`; GET/DELETE `.../uploads/{id}`; PUT `.../parts/{number}` (native object parts or durable Local parts); GET `.../parts`; POST `.../commit` (publication + index, no object-body retransmission) |
 | Storage tree (P1/P4) | Native reads and admitted Local stage/publish/mkdir/move/copy/empty-only remove |
 
 CDN/regional gateways and NAS connectors are internal deployment choices. Private cache hits require
@@ -63,9 +68,12 @@ now add an explicitly attested single-gateway spool strategy: default-off, exact
 retained native versions, one-shot requests and permanent guards for uncertain remote effects. Real provider
 probes were not configured here. Object admission also requires explicit `--physical-bytes` including history.
 P5 adds [durable numbered-part ingress](docs/design/storage-p5.md) with migration 024, server SHA-256,
-watermarked receipts, restart recovery and P3/P4 publication. Parts are 8 MiB with four concurrent byte
-requests and at most 10000 parts. COS/S3 still reject files above their admitted single-publication policy
-(default 32 MiB, at most 5 GiB); this release does not claim native multipart publication.
+watermarked receipts and restart recovery. The [native upload extension](docs/design/native-upload-deployment.md)
+adds shared native metadata (migration 025), direct unpublished object parts and lightweight native completion.
+Parts are 8 MiB with four concurrent requests per session and at most 10000 parts. Explicit `multipartUploads`
+connection evidence is required; numbered object uploads no longer inherit the default 32 MiB single-PUT policy.
+The browser advances four files and up to four parts per file. `FILE_UPLOAD_INGRESS=embedded` keeps reception in
+`eam server`; `external` routes part PUTs to `eam upload-gateway` and prevents byte reception on the app server.
 P6 [switches Web/media/generated instructions](docs/design/storage-p6.md) to the same resources and Problems,
 removes browser storage SDKs, and retires legacy file routes with 410. [Old authority drain](docs/design/storage-p6-backend.md)
 is a separate deployment gate; issued grants and in-flight effects were not revoked by this code change.
@@ -92,7 +100,16 @@ The backend is one binary that serves both the JSON API and the built frontend:
 ```bash
 make build          # build web/dist, then compile bin/eam
 ./bin/eam server    # production: / serves the SPA, /api/* serves the API
+# Official external ingress: run separately on the upload host, behind the same origin:
+# FILE_UPLOAD_INGRESS=external on the application; router sends only part PUTs here.
+# ADDR=127.0.0.1:8081 ./bin/eam upload-gateway
 ```
+
+The gateway shares authentication/session/native-part metadata in Postgres and the exact storage binding,
+but does not require a shared file-byte filesystem. It serves no SPA, sign-in or control APIs. Configure the
+same public cookie origins and stable APP_SECRET. CDN/front routing must preserve auth/CSRF headers and upload
+bodies without caching. External ingress disables simple content PUT; use resumable sessions for all uploads.
+See [the deployment steps](docs/design/native-upload-deployment.md#official--external-receiver).
 
 In development the frontend runs on Vite (5173, proxying `/api` to 8080) and the backend runs on Go (8080):
 
@@ -307,13 +324,13 @@ The table lists the active shared file resources and retained account/Connect en
 | GET | `/api/files/search?q=&path=&kind=&mediaType=` | Authorized indexed search with scoped opaque cursors |
 | GET | `/api/files/me` · `/api/files/capabilities` | Authenticated scope/usage/read limits and cookie CSRF bootstrap |
 | GET, HEAD | `/api/files/content?path=` | Same-origin bytes and representation headers; single Range support |
-| PUT | `/api/files/content?path=` | Admitted Local create/conditional replacement after staged bytes and durable settlement |
+| PUT | `/api/files/content?path=` | Small admitted content write; disabled with `503 upload_gateway_required` in external ingress mode |
 | POST | `/api/files` · `/api/files/move` · `/api/files/copy` | Admitted Local folder creation and finite native move/copy, no target merge |
 | DELETE | `/api/files?path=&recursive=true` | Captured native deletion; explicit recursion for nonempty folders |
 | GET, POST | `/api/files/operations/{id}` · `.../cancel` | Durable state/result and safe cancellation |
 | POST, GET | `/api/files/uploads` | Create/list persistent principal-bound upload sessions |
 | GET, DELETE | `/api/files/uploads/{id}` | Compact durable status or open-session abort |
-| PUT | `/api/files/uploads/{id}/parts/{number}` | Exact immutable numbered part and SHA-256 receipt |
+| PUT | `/api/files/uploads/{id}/parts/{number}` | Durable native object part or Local chunk; same-origin gateway route in external mode; SHA-256 receipt |
 | GET | `/api/files/uploads/{id}/parts?limit=&cursor=` | Watermarked durable receipt pages |
 | POST | `/api/files/uploads/{id}/commit` | Frozen-manifest commit; metadata or stable Operation |
 | GET | `/me` | Current account, token permissions, usage |

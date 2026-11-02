@@ -511,7 +511,7 @@ func (d *Driver) checkTarget(ctx context.Context, r *ledger) error {
 }
 func (d *Driver) Publish(ctx context.Context, staged storage.Staged, cp storage.Checkpoint) (storage.MutationResult, error) {
 	in := staged.Intent
-	if err := d.validateIntent(in); err != nil {
+	if err := validateRecoveryIntent(in); err != nil {
 		return storage.MutationResult{}, err
 	}
 	ctx, done, err := d.operation(ctx)
@@ -556,6 +556,12 @@ func (d *Driver) publishLocked(ctx context.Context, r *ledger, cp storage.Checkp
 	}
 	if r.Phase != "ready" {
 		return storage.MutationResult{}, &storage.NoFinalEffect{Cause: fail("invalid_state", r.Intent.Target)}
+	}
+	if r.Native != nil {
+		return d.publishNativeLocked(ctx, r, cp)
+	}
+	if err := d.validateIntent(r.Intent); err != nil {
+		return storage.MutationResult{}, err
 	}
 	parent, err := d.Stat(ctx, parentPath(r.Intent.Target))
 	if err == nil && (parent.Kind != storage.Folder || !bytes.Equal(parent.Version, r.ParentVersion)) {

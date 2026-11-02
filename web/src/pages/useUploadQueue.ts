@@ -5,7 +5,10 @@ import { t } from "../i18n";
 import type { UploadEntry } from "./uploadSelection";
 import { pendingFileOperation, setUploadOwner, settleFileOperation } from "./uploadPersistence";
 
-const MAX_PARALLEL_UPLOADS = 2;
+const MAX_PARALLEL_UPLOADS = 4;
+const MAX_PARALLEL_PARTS = 4;
+const PART_UPLOAD_ATTEMPTS = 3;
+const PART_RETRY_DELAY_MS = 250;
 export type UploadStatus = "queued" | "waiting" | "uploading" | "finalizing" | "failed" | "completed";
 export interface DeletionWait {
   operationId: string;
@@ -198,49 +201,120 @@ export function useUploadQueue(onUploaded: (task: UploadTask, item: Item) => voi
       }
       if (!task.file) { patch(id, { status: "failed", error: t("drive.reselectUpload"), speed: 0 }); return; }
       if (task.file.size !== session.size) throw new Error("The selected file has a different size.");
-      const receipts = new Map<number, { size: number; sha256: string }>();
-      let next: string | undefined;
-      let watermark: number | undefined;
-      do {
-        const page = await api.uploadParts(session.id, next, signal);
-        if (watermark !== undefined && page.watermark !== watermark) throw new Error("The receipt watermark changed.");
-        watermark = page.watermark;
-        for (const receipt of page.items) {
-          if (receipt.number < 1 || receipt.number > session.partCount || receipts.has(receipt.number)) throw new Error("Invalid part receipt.");
-          receipts.set(receipt.number, receipt);
-        }
-        next = page.nextCursor ?? undefined;
-      } while (next);
-      let received = 0;
+      const file = task.file;
+      if (!Number.isSafeInteger(session.partSize) || session.partSize < 1 || !Number.isSafeInteger(session.partCount)
+        || session.partCount !== Math.ceil(session.size / session.partSize) || !Number.isSafeInteger(session.maxParallelism)
+        || session.maxParallelism < 1 || !["any", "ascending"].includes(session.ordering)) throw new Error("Invalid upload session geometry.");
+      const parallelism = session.ordering === "ascending" ? 1 : Math.min(MAX_PARALLEL_PARTS, session.maxParallelism);
       let verification = verified.current.get(session.id);
-      if (!verification || verification.file !== task.file) {
-        verification = { file: task.file, parts: new Map() };
+      if (!verification || verification.file !== file) {
+        verification = { file, parts: new Map() };
         verified.current.set(session.id, verification);
       }
-      for (const [number, receipt] of receipts) {
+      const chunkFor = (number: number) => {
         const start = (number - 1) * session.partSize;
-        const chunk = task.file.slice(start, Math.min(start + session.partSize, session.size));
-        if (receipt.size !== chunk.size || (verification.parts.get(number) !== receipt.sha256 && await sha256(chunk) !== receipt.sha256)) throw new Error(t("drive.reselectedFileChanged"));
-        verification.parts.set(number, receipt.sha256);
-        received += chunk.size;
-      }
+        return file.slice(start, Math.min(start + session.partSize, session.size));
+      };
+      const verifyReceipt = async (receipt: { number: number; size: number; sha256: string }) => {
+        if (!Number.isSafeInteger(receipt.number) || receipt.number < 1 || receipt.number > session.partCount) throw new Error("Invalid part receipt.");
+        const chunk = chunkFor(receipt.number);
+        if (receipt.size !== chunk.size || (verification.parts.get(receipt.number) !== receipt.sha256 && await sha256(chunk) !== receipt.sha256)) throw new Error(t("drive.reselectedFileChanged"));
+        verification.parts.set(receipt.number, receipt.sha256);
+      };
+      const readReceipts = async (requestSignal: AbortSignal) => {
+        const result = new Map<number, { number: number; size: number; sha256: string }>();
+        let next: string | undefined;
+        let watermark: number | undefined;
+        do {
+          const page = await api.uploadParts(session.id, next, requestSignal);
+          if (watermark !== undefined && page.watermark !== watermark) throw new Error("The receipt watermark changed.");
+          watermark = page.watermark;
+          for (const receipt of page.items) {
+            if (result.has(receipt.number)) throw new Error("Invalid part receipt.");
+            await verifyReceipt(receipt);
+            result.set(receipt.number, receipt);
+          }
+          next = page.nextCursor ?? undefined;
+        } while (next);
+        return result;
+      };
+      const receipts = await readReceipts(signal);
       if (signal.aborted) return;
+      let received = [...receipts.values()].reduce((sum, receipt) => sum + receipt.size, 0);
       patch(id, { loaded: received });
-      let number = 1;
-      while (receipts.has(number)) number++;
-      if (number <= session.partCount) {
-        const start = (number - 1) * session.partSize;
-        const chunk = task.file.slice(start, Math.min(start + session.partSize, session.size));
+      const missing: number[] = [];
+      for (let number = 1; number <= session.partCount && missing.length < parallelism; number++) {
+        if (!receipts.has(number)) missing.push(number);
+      }
+      if (session.ordering === "ascending" && missing.length && session.nextPart !== missing[0]) throw new Error("The next upload part changed.");
+      if (missing.length) {
+        const batch = new AbortController();
+        const abortBatch = () => batch.abort();
+        signal.addEventListener("abort", abortBatch, { once: true });
+        const inFlight = new Map<number, number>();
         const began = performance.now();
-        await api.uploadPart(session.id, number, chunk, signal, (progress) => {
-          if (signal.aborted) return;
-          patch(id, { loaded: received + Math.min(chunk.size, progress.loaded), speed: progress.loaded * 1000 / Math.max(300, performance.now() - began) });
+        const baseline = received;
+        const progress = () => {
+          if (signal.aborted || batch.signal.aborted) return;
+          const loaded = Math.min(session.size, received + [...inFlight.values()].reduce((sum, bytes) => sum + bytes, 0));
+          patch(id, { loaded, speed: Math.max(0, loaded - baseline) * 1000 / Math.max(300, performance.now() - began) });
+        };
+        const retryDelay = (attempt: number) => new Promise<void>((resolve, reject) => {
+          if (batch.signal.aborted) { reject(new DOMException("Upload canceled", "AbortError")); return; }
+          const abort = () => { clearTimeout(timer); deadlines.current.delete(timer); reject(new DOMException("Upload canceled", "AbortError")); };
+          const timer = setTimeout(() => { deadlines.current.delete(timer); batch.signal.removeEventListener("abort", abort); resolve(); }, PART_RETRY_DELAY_MS * 2 ** attempt);
+          deadlines.current.add(timer);
+          batch.signal.addEventListener("abort", abort, { once: true });
         });
+        let failure: unknown;
+        try {
+          await Promise.all(missing.map(async (number) => {
+            const chunk = chunkFor(number);
+            try {
+              for (let attempt = 0; attempt < PART_UPLOAD_ATTEMPTS; attempt++) {
+                if (batch.signal.aborted) throw new DOMException("Upload canceled", "AbortError");
+                let receipt;
+                try {
+                  receipt = await api.uploadPart(session.id, number, chunk, batch.signal, (sample) => {
+                    if (batch.signal.aborted || receipts.has(number)) return;
+                    inFlight.set(number, Math.max(inFlight.get(number) ?? 0, Math.max(0, Math.min(chunk.size, sample.loaded))));
+                    progress();
+                  });
+                } catch (error) {
+                  if (batch.signal.aborted) throw error;
+                  if (!(error instanceof ApiError) || ![0, 408, 425, 429, 500, 502, 503, 504].includes(error.status)) throw error;
+                  // A lost ACK may already represent durable success. Inspect the
+                  // original session and exact byte identity before any replay.
+                  const status = await api.uploadStatus(session.id, batch.signal);
+                  if (status.state !== "open") throw error;
+                  receipt = (await readReceipts(batch.signal)).get(number);
+                  if (!receipt) {
+                    if (attempt + 1 === PART_UPLOAD_ATTEMPTS) throw error;
+                    inFlight.delete(number); progress();
+                    await retryDelay(attempt);
+                    continue;
+                  }
+                }
+                if (receipt.number !== number) throw new Error("The part receipt identity changed.");
+                await verifyReceipt(receipt);
+                if (batch.signal.aborted) return;
+                receipts.set(number, receipt);
+                received += receipt.size;
+                inFlight.delete(number);
+                progress();
+                return;
+              }
+            } catch (error) {
+              if (failure === undefined) failure = error;
+              batch.abort();
+            }
+          }));
+        } finally { signal.removeEventListener("abort", abortBatch); }
         if (signal.aborted) return;
-        received += chunk.size;
+        if (failure !== undefined) { patch(id, { loaded: received }); throw failure; }
         patch(id, { loaded: received, status: "queued", speed: 0 });
-        // One part per turn lets small files advance beside large files.
-        if (receipts.size + 1 !== session.partCount) return;
+        // Yield after one bounded part batch so later files get a turn too.
+        if (receipts.size !== session.partCount) return;
       }
       patch(id, { status: "finalizing", uploaded: true, loaded: session.size, speed: 0 });
       const result = await api.commitUpload(session.id, signal);

@@ -501,7 +501,7 @@ func TestFilesUploadsPostgresObjectPublicationLimitAndUnknown(t *testing.T) {
 		body, _ := json.Marshal(map[string]any{"path": path, "size": size})
 		return f.request(t, "POST", "/uploads", "", body, http.Header{"Idempotency-Key": {key}, "Content-Type": {"application/json"}})
 	}
-	uploadsHTTPProblem(t, create("/beyond-native-limit", "limit", (32<<20)+1), 413, "file_too_large")
+	uploadsHTTPProblem(t, create("/beyond-native-limit", "limit", filesUploadPartSize*filesUploadMaxParts+1), 413, "file_too_large")
 	id := uploadsHTTPJSON(t, create("/unknown-upload", "unknown", 4), 201)["id"].(string)
 	uploadsHTTPJSON(t, f.request(t, "PUT", "/uploads/"+id+"/parts/1", "", []byte("data"), nil), 201)
 	key := "drive/" + f.owners[0] + "/unknown-upload"
@@ -528,10 +528,11 @@ func TestFilesUploadsPostgresObjectPublicationLimitAndUnknown(t *testing.T) {
 	uploadsHTTPProblem(t, f.request(t, "DELETE", "/uploads/"+id, "", nil, nil), 409, "commit_in_progress")
 	f.provider.mu.Lock()
 	puts := f.provider.puts[key]
+	completes := f.provider.completeRequests[key]
 	native, exists := f.provider.current(key)
 	f.provider.mu.Unlock()
-	if !exists || !bytes.Equal(native.Body, []byte("data")) || puts != 1 {
-		t.Fatalf("unexpected native attempts count=%d exists=%v", puts, exists)
+	if !exists || !bytes.Equal(native.Body, []byte("data")) || puts != 0 || completes != 1 {
+		t.Fatalf("unexpected native attempts puts=%d completes=%d exists=%v", puts, completes, exists)
 	}
 	usage, err := fileops.NewPostgres(f.db.Pool()).Usage(f.ctx, f.roots[0], workerActor(f.roots[0]))
 	if err != nil {

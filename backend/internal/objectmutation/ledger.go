@@ -29,6 +29,7 @@ type ledger struct {
 	ExpectedETag  string
 	Result        *storage.MutationResult
 	MetadataReady bool
+	Native        *nativeStage
 }
 type receipt struct {
 	Format                            int
@@ -90,11 +91,11 @@ func (d *Driver) load(kind, id string) (*ledger, error) {
 	if err != nil {
 		return nil, err
 	}
-	if !info.Mode().IsRegular() || info.Size() > 1<<20 {
+	if !info.Mode().IsRegular() || info.Size() > 4<<20 {
 		return nil, fail("invalid_evidence", "")
 	}
 	var r ledger
-	decoder := json.NewDecoder(io.LimitReader(file, (1<<20)+1))
+	decoder := json.NewDecoder(io.LimitReader(file, (4<<20)+1))
 	decoder.DisallowUnknownFields()
 	if decoder.Decode(&r) != nil || decoder.Decode(new(any)) != io.EOF || r.Format != 1 || r.Binding != d.namespace || r.Kind != kind || r.ID != id || !validAttempt(r.Attempt) {
 		return nil, fail("invalid_evidence", "")
@@ -108,7 +109,7 @@ func (d *Driver) save(r *ledger) error {
 	if err != nil {
 		return err
 	}
-	if len(data) > 1<<20 {
+	if len(data) > 4<<20 {
 		return fail("invalid_evidence", r.Intent.Target)
 	}
 	attempt, err := randomAttempt()
@@ -278,11 +279,13 @@ func (d *Driver) inspect(ctx context.Context, kind, id string, in *storage.Write
 	case "publishing", "unknown":
 		return storage.Inspection{State: storage.OutcomeUnknown, Evidence: d.receipt(r)}, nil
 	case "ready":
-		file, err := d.verifiedSpool(ctx, r)
-		if err != nil {
-			return storage.Inspection{}, err
+		if r.Native == nil {
+			file, err := d.verifiedSpool(ctx, r)
+			if err != nil {
+				return storage.Inspection{}, err
+			}
+			file.Close()
 		}
-		file.Close()
 		stage := d.staged(r)
 		return storage.Inspection{State: storage.StagedReady, Stage: &stage, Evidence: d.receipt(r)}, nil
 	case "receiving", "new":

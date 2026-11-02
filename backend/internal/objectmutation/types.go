@@ -26,6 +26,10 @@ type Admission struct {
 	CoordinatedExclusiveWriter bool      `json:"coordinatedExclusiveWriter"`
 	SingleGateway              bool      `json:"singleGateway"`
 	LegacyWritersDrained       bool      `json:"legacyWritersDrained"`
+	// MultipartUploads additionally attests native part persistence and conditional
+	// create on Complete for this exact provider endpoint. Existing PUT evidence
+	// alone never enables numbered native uploads.
+	MultipartUploads bool `json:"multipartUploads,omitempty"`
 }
 type Options struct {
 	Admission       Admission
@@ -55,6 +59,20 @@ type Put struct {
 // Backend executes exactly ONE SDK attempt per mutating request, with redirects
 // and replay disabled. A successful result means the sole native request has a
 // complete terminal response; ambiguous errors never get an automatic replay.
+// MultipartBackend keeps numbered payloads unpublished until one conditional
+// Complete request. Part retries may replay identical bytes only; completion and
+// allocation never use implicit SDK retries.
+type MultipartBackend interface {
+	BeginMultipart(context.Context, Put) (string, error)
+	PutPart(context.Context, string, string, int, io.Reader, int64) (string, error)
+	CompleteMultipart(context.Context, Put, string, []NativePart) (Object, error)
+	AbortMultipart(context.Context, string, string) error
+}
+type NativePart struct {
+	Number int
+	ETag   string
+}
+
 type Backend interface {
 	Head(context.Context, string) (Object, error)
 	Open(context.Context, string, string) (io.ReadCloser, error) // exact retained native version
