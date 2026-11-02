@@ -9,11 +9,11 @@
 > There is no requirement to preserve old clients or provide compatibility adapters. The running COS
 > implementation is documented separately in [legacy-api.md](legacy-api.md). Account login, Connect,
 > and event authoring are separate APIs; this specification defines the files they consume.
-> The legacy browser folder-upload fix uses existing directory/sign/confirm routes; sign now accepts
-> zero-byte files. Legacy browser uploads also persist root-bound index observation watches before
-> returning credentials or creating folder markers, so complete native objects are indexed after lost
-> confirmation; see [recovery guarantees](../design/upload-index-recovery.md). This does not activate
-> or change the unified API specified here.
+> The existing browser directory/sign/confirm routes now stream file bytes through the backend.
+> Sign returns only a temporary application uploadId; binary confirm publishes then indexes, and JSON
+> confirm retrieves the result. Completed files leave recovery, with no permanent per-file COS polls.
+> See [recovery guarantees](../design/upload-index-recovery.md). This does not activate the unified
+> upload/session resources specified below.
 > Legacy browser deletion uses cookie-authenticated `POST /api/fs/delete` with `{path}` and requires
 > `?recursive=1` for every directory, including empty ones (`409` otherwise); file deletion needs no flag.
 > See [legacy deletion behavior](legacy-api.md#46-delete). Unified mutations remain pending.

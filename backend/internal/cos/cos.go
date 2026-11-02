@@ -23,12 +23,13 @@ import (
 )
 
 type Client struct {
-	bucket    string
-	region    string
-	appID     string
-	client    *cos.Client
-	cred      tencent.Credentials
-	transport *http.Transport
+	bucket        string
+	region        string
+	appID         string
+	client        *cos.Client
+	publishClient *cos.Client
+	cred          tencent.Credentials
+	transport     *http.Transport
 }
 
 func (c *Client) Close() error {
@@ -50,24 +51,21 @@ func New(cfg config.COS) (*Client, error) {
 		IdleConnTimeout: 90 * time.Second, TLSHandshakeTimeout: 10 * time.Second,
 		ResponseHeaderTimeout: 30 * time.Second, ExpectContinueTimeout: time.Second,
 	}
-	client := cos.NewClient(
-		&cos.BaseURL{BucketURL: bucketURL},
-		&http.Client{
-			Timeout: 60 * time.Second,
-			Transport: &cos.AuthorizationTransport{
-				SecretID:  cfg.SecretID,
-				SecretKey: cfg.SecretKey,
-				Transport: transport,
-			},
-		},
-	)
+	httpClient := &http.Client{
+		Timeout:   60 * time.Second,
+		Transport: &cos.AuthorizationTransport{SecretID: cfg.SecretID, SecretKey: cfg.SecretKey, Transport: transport},
+	}
+	client := cos.NewClient(&cos.BaseURL{BucketURL: bucketURL}, httpClient)
+	publishClient := cos.NewClient(&cos.BaseURL{BucketURL: bucketURL}, httpClient)
+	publishClient.Conf.RetryOpt.Count = 1
 	return &Client{
-		bucket:    cfg.Bucket,
-		region:    cfg.Region,
-		appID:     config.COSAppID(cfg.Bucket),
-		client:    client,
-		transport: transport,
-		cred:      tencent.Credentials{SecretID: cfg.SecretID, SecretKey: cfg.SecretKey},
+		bucket:        cfg.Bucket,
+		region:        cfg.Region,
+		appID:         config.COSAppID(cfg.Bucket),
+		client:        client,
+		publishClient: publishClient,
+		transport:     transport,
+		cred:          tencent.Credentials{SecretID: cfg.SecretID, SecretKey: cfg.SecretKey},
 	}, nil
 }
 

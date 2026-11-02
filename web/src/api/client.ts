@@ -256,16 +256,12 @@ export interface AccountSummary {
 }
 
 export interface UploadSignResult {
-  bucket: string;
-  region: string;
-  key: string;
-  credentials: {
-    tmpSecretId: string;
-    tmpSecretKey: string;
-    sessionToken: string;
-    startTime: number;
-    expiredTime: number;
-  };
+  uploadId: string;
+}
+
+export interface UploadProgress {
+  loaded: number;
+  total: number;
 }
 
 export interface CodeResult {
@@ -479,28 +475,78 @@ export const api = {
     return request<SearchResult>(`/api/fs/search?q=${encodeURIComponent(keyword)}`);
   },
 
-  /** Zero bytes are valid. The backend persists an index watch before returning credentials. */
-  signUpload(path: string, size: number, overwrite = false): Promise<UploadSignResult> {
-    return post<UploadSignResult>("/api/fs/upload/sign", { path, size, overwrite });
+  /** Allocate a server-owned upload receipt before sending bytes. */
+  signUpload(
+    path: string,
+    size: number,
+    overwrite = false,
+    mime?: string,
+    modifiedAt?: number,
+  ): Promise<UploadSignResult> {
+    return post<UploadSignResult>("/api/fs/upload/sign", { path, size, overwrite, mime, modifiedAt });
   },
 
-  /**
-   * After the bytes land, have the server verify the object and write the index; returns the new
-   * file node, ready to insert into the list.
-   */
-  async confirmUpload(
-    path: string,
-    mime?: string,
-    sha256?: string,
-    modifiedAt?: number,
-  ): Promise<Item> {
-    const data = await post<{ node: Item }>("/api/fs/upload/confirm", {
-      path,
-      mime,
-      sha256,
-      modifiedAt,
-    });
+  /** Retry finalization/result retrieval without sending the file body again. */
+  async confirmUpload(uploadId: string): Promise<Item> {
+    const data = await post<{ node: Item }>("/api/fs/upload/confirm", { uploadId });
     return data.node;
+  },
+
+  /** Stream a File to the configured API origin; the backend publishes and indexes it. */
+  uploadFile(
+    uploadId: string,
+    file: File,
+    onProgress: (progress: UploadProgress) => void,
+    onSent: () => void,
+    signal: AbortSignal,
+  ): Promise<Item> {
+    return new Promise((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
+      let settled = false;
+      const finish = (error?: unknown, item?: Item) => {
+        if (settled) return;
+        settled = true;
+        signal.removeEventListener("abort", abort);
+        if (error) reject(error);
+        else resolve(item!);
+      };
+      const abort = () => {
+        xhr.abort();
+        finish(new DOMException("Upload canceled", "AbortError"));
+      };
+      if (signal.aborted) {
+        finish(new DOMException("Upload canceled", "AbortError"));
+        return;
+      }
+      const query = new URLSearchParams({ uploadId });
+      xhr.open("POST", `/api/fs/upload/confirm?${query}`);
+      xhr.withCredentials = true;
+      xhr.setRequestHeader("Content-Type", "application/octet-stream");
+      xhr.upload.onprogress = (event) => {
+        if (!settled && !signal.aborted) onProgress({ loaded: event.loaded, total: file.size });
+      };
+      xhr.upload.onload = () => {
+        if (!settled && !signal.aborted) onSent();
+      };
+      xhr.onload = () => {
+        try {
+          const data = unpack<{ node: Item }>(JSON.parse(xhr.responseText), xhr.status);
+          if (xhr.status < 200 || xhr.status >= 300) throw httpError(xhr.status);
+          finish(undefined, data.node);
+        } catch (error) {
+          finish(error instanceof ApiError ? error : httpError(xhr.status));
+        }
+      };
+      xhr.onerror = () => finish(new ApiError("upload connection interrupted", 0));
+      xhr.ontimeout = () => finish(new ApiError("upload request timed out", 0));
+      xhr.onabort = () => finish(new DOMException("Upload canceled", "AbortError"));
+      signal.addEventListener("abort", abort, { once: true });
+      try {
+        xhr.send(file);
+      } catch (error) {
+        finish(error);
+      }
+    });
   },
 
   async mkdir(path: string): Promise<void> {

@@ -7,14 +7,16 @@ Tencent Cloud COS.
 Frontend and backend are split: **a Go backend (net/http) + a React frontend (Vite + React Router)**, with no
 Next.js.
 
-Current implementation (COS transfers; migration pending):
+Current browser upload implementation (unified resource migration remains pending):
 
 ```
-browser ──session cookie──▶ Go API ──▶ Postgres (users / sessions / nodes)
-   │                          │
-   │                          └──▶ COS (drive/<userID>/…)
-   └──STS temporary credentials, direct upload──▶ COS
+browser ──session cookie + file stream──▶ Go API ──▶ COS (drive/<userID>/…)
+                                           │        complete native file
+                                           └──▶ Postgres (upload receipt + index)
 ```
+
+The backend completes native upload and immediately indexes it. Only unfinished or uncertain records
+need recovery; completed files are not permanently polled. Legacy public `/upload` is separate.
 
 ## Accepted storage architecture
 
@@ -125,7 +127,7 @@ The key sits directly on the path (`drive/<userID>/Photos/2024/a.jpg`), which me
   so nothing downloads on first paint and a single chunk (~191KB gzip) is fetched when you open one, with the per-format renderer loading on top of that; formats without a preview still offer a download
 - Drag / multi-select upload: placeholder rows appear immediately, with a queue, progress, and speed, cancelable, retryable on failure; `/` focuses search
 - Folder uploads: drag folders or choose **Upload → Upload folder** to retain the selected root and nested paths. The list shows only immediate children throughout upload; each folder summarizes selected descendant file counts, confirmed files, bytes and percentage. Pending folders are navigable, completed rows lose their progress bars, and folder actions cancel/retry the remaining descendants. Dragged folders also preserve empty directories; the browser folder picker only exposes directories containing files. Existing directories merge, while replacing files requires confirmation.
-- Refreshing discards the browser queue. Before credentials or folder markers are returned/written, the backend persists owner/root-bound index observations. A separate startup worker repairs complete COS objects even when browser confirmation is lost; it never uploads missing files or deletes native bytes. Apply migrations (including `018_upload_index_watches.sql`) and restart the backend when upgrading. Recovery is eventual, not an atomic COS/Postgres transaction; see [upload recovery](docs/design/upload-index-recovery.md).
+- Refreshing discards unfinished browser tasks. A started file receives a temporary upload ID, then streams through the backend to unpublished COS multipart state. The backend publishes complete bytes and immediately writes the index; only unfinished/uncertain records enter recovery. Successful files leave the recovery query and retain a 24-hour result receipt without COS polling. Apply forward migrations (including `021_upload_watch_retirement.sql` and `022_browser_uploads.sql`) and restart the backend when upgrading; see [upload recovery and cutover](docs/design/upload-index-recovery.md).
 - Search matches both the filename and the full path, and each result shows its directory on the right
 - New directories use an inline input, and deletion has a confirmation dialog (it is permanent)
 - One shared top bar on every signed-in page: brand, `Home` / `Files` navigation with the current page highlighted, the account chip, and the file page's search and upload actions
@@ -375,8 +377,8 @@ the rewrite.
 | POST | `/api/timeline/rebuild` | Force a full re-organize of the current account (drops the analysis results and backfills from scratch) |
 | GET | `/api/fs/list?path=` | List the current level (Postgres only, not the bucket; also returns the path's own `node`, so the UI can tell a folder from a file) |
 | GET | `/api/fs/search?q=` | Fuzzy search by name/path |
-| POST | `/api/fs/upload/sign` | Persist an index watch before returning existing STS credentials (`size` may be zero) |
-| POST | `/api/fs/upload/confirm` | Verify HeadObject, write the index, and retain a cold recovery watch |
+| POST | `/api/fs/upload/sign` | Create a temporary upload receipt from `{path,size,overwrite,mime?,modifiedAt?}`; returns `{uploadId}` without provider credentials |
+| POST | `/api/fs/upload/confirm` | Binary body with `?uploadId=` receives/publishes/indexes; JSON `{uploadId}` retrieves or repairs the recorded result |
 | GET | `/api/fs/download?path=` | 302 to a presigned URL (`&json=1` returns JSON) |
 | POST | `/api/fs/mkdir` | Create a directory (writes a zero-byte placeholder object) |
 | POST | `/api/fs/rename` | Rename a file in one request; a directory answers `202` + `Location` because every object inside has to move |

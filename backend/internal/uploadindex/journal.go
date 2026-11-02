@@ -7,8 +7,9 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-// PostgresJournal retains observations indefinitely. Expiry only changes polling
-// frequency; it never establishes provider quiescence or authorizes data removal.
+// PostgresJournal retains unresolved legacy observations. Confirmed paths and
+// recovered folder markers retire without touching native objects. Grant expiry
+// alone never establishes quiescence or retires an unresolved legacy file watch.
 type PostgresJournal struct {
 	pool *pgxpool.Pool
 }
@@ -31,13 +32,11 @@ on conflict (binding,owner_id,path,is_dir) do update set
 	return err
 }
 
-func (j *PostgresJournal) Settle(ctx context.Context, key Key, now, nextCheck time.Time) error {
+func (j *PostgresJournal) Settle(ctx context.Context, key Key, _, _ time.Time) error {
 	_, err := j.pool.Exec(ctx, `
-update upload_index_watches set
-  settled=true,next_check_at=$5,generation=generation+1,
-  lease_until=null,retry_count=0,last_error='',updated_at=$6
+delete from upload_index_watches
 where binding=$1 and owner_id=$2::uuid and path=$3 and is_dir=$4`,
-		key.Binding, key.OwnerID, key.Path, key.IsDir, nextCheck, now)
+		key.Binding, key.OwnerID, key.Path, key.IsDir)
 	return err
 }
 
@@ -45,7 +44,7 @@ func (j *PostgresJournal) Claim(ctx context.Context, binding string, now, leaseU
 	rows, err := j.pool.Query(ctx, `
 with due as (
   select binding,owner_id,path,is_dir from upload_index_watches
-  where binding=$1 and next_check_at <= $2
+  where binding=$1 and settled=false and next_check_at <= $2
     and (lease_until is null or lease_until <= $2)
   order by next_check_at,owner_id,path,is_dir
   limit $4 for update skip locked
@@ -55,7 +54,7 @@ update upload_index_watches w set
 from due d
 where w.binding=d.binding and w.owner_id=d.owner_id
   and w.path=d.path and w.is_dir=d.is_dir
-returning w.binding,w.owner_id::text,w.path,w.is_dir,
+returning w.binding,w.owner_id::text,w.path,w.is_dir,w.watch_id::text,
   w.issued_until,w.settled,w.generation,w.lease_version`, binding, now, leaseUntil, limit)
 	if err != nil {
 		return nil, err
@@ -64,7 +63,7 @@ returning w.binding,w.owner_id::text,w.path,w.is_dir,
 	var watches []Watch
 	for rows.Next() {
 		var watch Watch
-		if err := rows.Scan(&watch.Binding, &watch.OwnerID, &watch.Path, &watch.IsDir,
+		if err := rows.Scan(&watch.Binding, &watch.OwnerID, &watch.Path, &watch.IsDir, &watch.ID,
 			&watch.IssuedUntil, &watch.Settled, &watch.Generation, &watch.LeaseVersion); err != nil {
 			return nil, err
 		}
@@ -74,6 +73,15 @@ returning w.binding,w.owner_id::text,w.path,w.is_dir,
 }
 
 func (j *PostgresJournal) Finish(ctx context.Context, watch Watch, result Result) error {
+	if watch.IsDir && result.Error == "" && result.Fingerprint != "" {
+		_, err := j.pool.Exec(ctx, `
+delete from upload_index_watches
+where binding=$1 and owner_id=$2::uuid and path=$3 and is_dir=$4
+  and generation=$5 and lease_version=$6 and watch_id=$7::uuid`,
+			watch.Binding, watch.OwnerID, watch.Path, watch.IsDir,
+			watch.Generation, watch.LeaseVersion, watch.ID)
+		return err
+	}
 	_, err := j.pool.Exec(ctx, `
 update upload_index_watches set
   next_check_at=$7,checked_at=$8,last_error=$10,
@@ -82,9 +90,9 @@ update upload_index_watches set
   retry_count=case when $10='' then 0 else least(retry_count+1,1000000) end,
   lease_until=null,updated_at=$8
 where binding=$1 and owner_id=$2::uuid and path=$3 and is_dir=$4
-  and generation=$5 and lease_version=$6`,
+  and generation=$5 and lease_version=$6 and watch_id=$11::uuid`,
 		watch.Binding, watch.OwnerID, watch.Path, watch.IsDir, watch.Generation, watch.LeaseVersion,
-		result.NextCheck, result.CheckedAt, result.Fingerprint, result.Error)
+		result.NextCheck, result.CheckedAt, result.Fingerprint, result.Error, watch.ID)
 	return err
 }
 

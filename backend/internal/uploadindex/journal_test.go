@@ -55,13 +55,15 @@ func TestPostgresJournalConformance(t *testing.T) {
 	if _, err := pool.Exec(ctx, "create table users (id uuid primary key)"); err != nil {
 		t.Fatal(err)
 	}
-	migration, err := os.ReadFile("../../../sql/018_upload_index_watches.sql")
-	if err != nil {
-		t.Fatal(err)
-	}
 	for range 2 {
-		if _, err := pool.Exec(ctx, string(migration)); err != nil {
-			t.Fatalf("migration is not re-runnable: %v", err)
+		for _, migrationPath := range []string{"../../../sql/018_upload_index_watches.sql", "../../../sql/021_upload_watch_retirement.sql"} {
+			migration, err := os.ReadFile(migrationPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := pool.Exec(ctx, string(migration)); err != nil {
+				t.Fatalf("migration is not re-runnable: %v", err)
+			}
 		}
 	}
 	if _, err := pool.Exec(ctx, "insert into users (id) values ($1::uuid)", testOwner); err != nil {
@@ -139,19 +141,28 @@ from upload_index_watches where binding=$1 and owner_id=$2::uuid and path=$3 and
 	if err := j.Finish(ctx, renewed, staleResult); err != nil {
 		t.Fatal(err)
 	}
-	if next, _, _, settled, _ := read(); !settled || !next.Equal(now.Add(coldInterval)) {
-		t.Fatal("stale acknowledgment undid explicit settlement")
+	if watches := claim(now.Add(30 * coldInterval)); len(watches) != 0 {
+		t.Fatal("explicit completion retained future polling")
 	}
-	if watches := claim(now); len(watches) != 0 {
-		t.Fatal("settled watch stayed hot")
+	if err := j.Register(ctx, key, now.Add(time.Hour), now); err != nil {
+		t.Fatal(err)
 	}
-	cold := one(now.Add(coldInterval))
-	good := Result{CheckedAt: now.Add(coldInterval), NextCheck: now.Add(2 * coldInterval), Fingerprint: "actual-native-facts"}
-	if err := j.Finish(ctx, cold, good); err != nil {
+	fresh := one(now)
+	if fresh.ID == renewed.ID {
+		t.Fatal("recreated watch reused its incarnation")
+	}
+	if err := j.Finish(ctx, renewed, staleResult); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, _, _, fp := read(); fp != "" {
+		t.Fatal("stale old incarnation altered recreated row")
+	}
+	good := Result{CheckedAt: now, NextCheck: now.Add(coldInterval), Fingerprint: "actual-native-facts"}
+	if err := j.Finish(ctx, fresh, good); err != nil {
 		t.Fatal(err)
 	}
 	if _, _, _, _, fp := read(); fp != good.Fingerprint {
-		t.Fatal("cold observation did not retain actual native facts")
+		t.Fatal("unresolved legacy file lost its observation")
 	}
 
 	// Binding and marker kind are part of the key, not merely query filters.
@@ -165,15 +176,53 @@ from upload_index_watches where binding=$1 and owner_id=$2::uuid and path=$3 and
 	if err := j.Register(ctx, folder, now.Add(time.Hour), now); err != nil {
 		t.Fatal(err)
 	}
-	if watches := claim(now); len(watches) != 1 || !watches[0].IsDir || watches[0].Binding != key.Binding {
+	marker := claim(now)
+	if len(marker) != 1 || !marker[0].IsDir || marker[0].Binding != key.Binding {
 		t.Fatal("binding or folder/file isolation failed")
+	}
+	if err := j.Finish(ctx, marker[0], good); err != nil {
+		t.Fatal(err)
+	}
+	if watches := claim(now.Add(30 * coldInterval)); len(watches) != 1 || watches[0].IsDir {
+		t.Fatal("completed marker kept polling or unresolved file disappeared")
+	}
+	// Replaying the old marker completion must not retire a new incarnation.
+	if err := j.Register(ctx, folder, now, now); err != nil {
+		t.Fatal(err)
+	}
+	newMarker := one(now)
+	if newMarker.ID == marker[0].ID {
+		t.Fatal("folder incarnation was reused")
+	}
+	if err := j.Finish(ctx, marker[0], good); err != nil {
+		t.Fatal(err)
+	}
+	if err := j.Finish(ctx, newMarker, good); err != nil {
+		t.Fatal(err)
+	}
+	// The cutover migration retires historical completed rows of both kinds.
+	if _, err := pool.Exec(ctx, `insert into upload_index_watches (binding,owner_id,path,is_dir,issued_until,settled)
+values ($1,$2::uuid,'completed-file',false,$3,true),($1,$2::uuid,'completed-folder',true,$3,true)`, key.Binding, key.OwnerID, now); err != nil {
+		t.Fatal(err)
+	}
+	if watches := claim(now); len(watches) != 0 {
+		t.Fatal("settled historical rows were claimed")
+	}
+	retirement, err := os.ReadFile("../../../sql/021_upload_watch_retirement.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for range 2 {
+		if _, err := pool.Exec(ctx, string(retirement)); err != nil {
+			t.Fatal(err)
+		}
 	}
 	var count int
 	if err := pool.QueryRow(ctx, "select count(*) from upload_index_watches").Scan(&count); err != nil {
 		t.Fatal(err)
 	}
-	if count != 3 {
-		t.Fatalf("expected three independent retained watches, got %d", count)
+	if count != 2 {
+		t.Fatalf("expected two independent unresolved file watches, got %d", count)
 	}
 	if _, err := pool.Exec(ctx, "delete from users where id=$1::uuid", testOwner); err != nil {
 		t.Fatal(err)

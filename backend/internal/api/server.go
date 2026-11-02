@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"everythingabout.me/backend/internal/auth"
+	"everythingabout.me/backend/internal/browserupload"
 	"everythingabout.me/backend/internal/config"
 	"everythingabout.me/backend/internal/emailcode"
 	"everythingabout.me/backend/internal/events"
@@ -31,22 +32,23 @@ type OwnerStorageFactory interface {
 }
 
 type Server struct {
-	uploadIndex UploadIndex
-	trees       OwnerStorageFactory
-	filesAuth   FilesAuthenticator
-	filesIndex  FileReadIndex
-	cfg         *config.Config
-	db          *store.DB
-	auth        *auth.Service
-	codes       *emailcode.Service
-	mail        *mail.Sender
-	storage     storage.Storage
-	nodes       *nodes.Service
-	jobs        *jobs.Service
-	eventsSvc   *events.Service
-	timeline    *timeline.Service
-	limiter     *ratelimit.Limiter
-	web         http.Handler
+	browserUploads *browserupload.Service
+	uploadIndex    UploadIndex
+	trees          OwnerStorageFactory
+	filesAuth      FilesAuthenticator
+	filesIndex     FileReadIndex
+	cfg            *config.Config
+	db             *store.DB
+	auth           *auth.Service
+	codes          *emailcode.Service
+	mail           *mail.Sender
+	storage        storage.Storage
+	nodes          *nodes.Service
+	jobs           *jobs.Service
+	eventsSvc      *events.Service
+	timeline       *timeline.Service
+	limiter        *ratelimit.Limiter
+	web            http.Handler
 }
 
 // New wires dependencies. web is the handler for the frontend build (SPA) and may be nil.
@@ -74,6 +76,9 @@ func New(cfg *config.Config, db *store.DB, objectStorage storage.Storage, web ht
 	}
 	if cfg.BackendName() == "cos" {
 		server.uploadIndex = uploadindex.New(uploadIndexBinding(cfg), uploadindex.NewJournal(db.Pool()), uploadindex.ObserverFunc(server.observeUploadedObject))
+		if driver, ok := objectStorage.(browserupload.Driver); ok {
+			server.browserUploads = browserupload.New(uploadIndexBinding(cfg), browserupload.NewJournal(db.Pool()), driver, server.indexBrowserUpload)
+		}
 	}
 	return server
 }

@@ -11,10 +11,11 @@ import (
 
 	"everythingabout.me/backend/internal/config"
 	"everythingabout.me/backend/internal/httpx"
+	"everythingabout.me/backend/internal/paths"
 )
 
-// UploadIndex observes legacy native effects; it never owns publication or bytes.
-// Persisting a watch is required before the browser receives write credentials.
+// UploadIndex recovers old direct-upload grants and temporary folder markers.
+// New browser files use server-owned temporary upload receipts instead.
 type UploadIndex interface {
 	Register(context.Context, string, string, bool, time.Time) error
 	Settle(context.Context, string, string, bool) error
@@ -30,6 +31,17 @@ func uploadIndexBinding(cfg *config.Config) string {
 }
 
 func (s *Server) observeUploadedObject(ctx context.Context, ownerID, path string, isDir bool) (string, error) {
+	key := paths.KeyFor(path, ownerID)
+	if isDir {
+		key = paths.DirKeyFor(path, ownerID)
+	}
+	info, err := s.storage.Head(ctx, key)
+	if err != nil {
+		return "", err
+	}
+	if info == nil {
+		return "", nil
+	}
 	changed, err := s.nodes.ObserveUpload(ctx, ownerID, path, isDir)
 	if err != nil {
 		return "", err
@@ -37,8 +49,17 @@ func (s *Server) observeUploadedObject(ctx context.Context, ownerID, path string
 	if changed {
 		s.timeline.Notify(ownerID)
 	}
-	// The observer schedules independently of this value: presence is never
-	// proof that all potentially delayed native requests are terminal.
+	if isDir {
+		node, err := s.nodes.Live(ctx, path, ownerID)
+		if err != nil {
+			return "", err
+		}
+		if node == nil || !node.IsDir {
+			return "", nil
+		}
+	}
+	// Directory markers created by the backend retire once indexed. Legacy
+	// unresolved file grants retain separate observation until cutover is drained.
 	return "observed", nil
 }
 
@@ -52,15 +73,18 @@ func (s *Server) watchUpload(ctx context.Context, ownerID, path string, isDir bo
 func (s *Server) settleUpload(ctx context.Context, ownerID, path string, isDir bool) {
 	if s.uploadIndex != nil {
 		if err := s.uploadIndex.Settle(ctx, ownerID, path, isDir); err != nil {
-			// The index already committed. Keeping the durable watch hot is safe;
-			// failure to lower its polling frequency does not undo that success.
-			slog.Warn("upload index: could not lower observation frequency", "error", err)
+			// The index already committed. A failed retirement is retried by
+			// recovery; it must not undo the successful native/index result.
+			slog.Warn("upload index: could not retire observation", "error", err)
 		}
 	}
 }
 
 // StartUploadIndex runs independently of the optional timeline organizer.
 func (s *Server) StartUploadIndex(ctx context.Context) {
+	if s.browserUploads != nil {
+		go s.browserUploads.Run(ctx)
+	}
 	if s.uploadIndex != nil {
 		go s.uploadIndex.Run(ctx)
 	}

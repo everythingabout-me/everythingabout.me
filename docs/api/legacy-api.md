@@ -2,11 +2,15 @@
 > New file API work follows [api.md](api.md); compatibility with these routes is not a design requirement.
 > This file also preserves the existing event/Connect descriptions until their implementation is updated.
 >
-> Browser transfer recovery: `/api/fs/upload/sign` durably watches the owner/path before returning STS;
-> `/api/fs/mkdir` watches before writing its marker. A backend worker indexes complete native objects
-> after a lost browser confirmation and resumes after restart. Normal confirm retains a cold watch.
-> Request/response shapes are unchanged; public `/upload` is not covered by these browser hooks.
-> See [index recovery and limits](../design/upload-index-recovery.md).
+> Browser uploads now use backend reception and completion. `/api/fs/upload/sign` accepts
+> `{path,size,overwrite,mime?,modifiedAt?}` and returns only `{uploadId}`. POST raw bytes with exact
+> Content-Length to `/api/fs/upload/confirm?uploadId=...`; the backend publishes then indexes and
+> returns `{ok:true,data:{node:...}}`. POST JSON `{uploadId}` to the same confirm route to retrieve
+> or repair the result without resending bytes. Pending/unknown returns 409; definitive aborted/expired
+> returns 410. Successful receipts expire after 24 hours and never trigger COS polling.
+> `/api/fs/mkdir` keeps a temporary observation until its marker/index succeeds. Public `/upload`
+> and previously issued broad STS grants remain separate legacy behavior; see
+> [recovery and cutover](../design/upload-index-recovery.md).
 
 # Everything About Me API
 

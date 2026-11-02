@@ -26,6 +26,7 @@ type memoryJournal struct {
 	rows        map[Key]memoryRecord
 	registerErr error
 	finishErr   error
+	incarnation int
 }
 
 func newMemoryJournal() *memoryJournal { return &memoryJournal{rows: make(map[Key]memoryRecord)} }
@@ -36,7 +37,11 @@ func (j *memoryJournal) Register(_ context.Context, key Key, until, now time.Tim
 	if j.registerErr != nil {
 		return j.registerErr
 	}
-	row := j.rows[key]
+	row, exists := j.rows[key]
+	if !exists {
+		j.incarnation++
+		row.ID = fmt.Sprint(j.incarnation)
+	}
 	row.Key = key
 	row.Generation++
 	row.Settled = false
@@ -51,14 +56,7 @@ func (j *memoryJournal) Register(_ context.Context, key Key, until, now time.Tim
 func (j *memoryJournal) Settle(_ context.Context, key Key, now, next time.Time) error {
 	j.mu.Lock()
 	defer j.mu.Unlock()
-	row, ok := j.rows[key]
-	if !ok {
-		return nil
-	}
-	row.Settled = true
-	row.Generation++
-	row.next, row.lease = next, time.Time{}
-	j.rows[key] = row
+	delete(j.rows, key)
 	return nil
 }
 
@@ -67,7 +65,7 @@ func (j *memoryJournal) Claim(_ context.Context, binding string, now, lease time
 	defer j.mu.Unlock()
 	var result []Watch
 	for key, row := range j.rows {
-		if key.Binding != binding || row.next.After(now) || row.lease.After(now) {
+		if key.Binding != binding || row.Settled || row.next.After(now) || row.lease.After(now) {
 			continue
 		}
 		row.LeaseVersion++
@@ -87,8 +85,12 @@ func (j *memoryJournal) Finish(_ context.Context, watch Watch, result Result) er
 	if j.finishErr != nil {
 		return j.finishErr
 	}
-	row := j.rows[watch.Key]
-	if row.Generation != watch.Generation || row.LeaseVersion != watch.LeaseVersion {
+	row, exists := j.rows[watch.Key]
+	if !exists || row.ID != watch.ID || row.Generation != watch.Generation || row.LeaseVersion != watch.LeaseVersion {
+		return nil
+	}
+	if watch.IsDir && result.Error == "" && result.Fingerprint != "" {
+		delete(j.rows, watch.Key)
 		return nil
 	}
 	row.next, row.lease, row.result = result.NextCheck, time.Time{}, result
@@ -178,39 +180,22 @@ func TestMissingAndProviderErrorsRemainRetryable(t *testing.T) {
 	}
 }
 
-func TestExpiryAndExplicitConfirmDoNotDiscardLateObjects(t *testing.T) {
-	for _, settled := range []bool{false, true} {
-		t.Run(fmt.Sprintf("settled=%t", settled), func(t *testing.T) {
-			now := time.Date(2026, 10, 31, 10, 0, 0, 0, time.UTC)
-			j := newMemoryJournal()
-			object := ""
-			calls := 0
-			s := testService(j, ObserverFunc(func(context.Context, string, string, bool) (string, error) { calls++; return object, nil }), &now)
-			registerTest(t, s, now)
-			if settled {
-				if err := s.Settle(context.Background(), testOwner, testKey().Path, false); err != nil {
-					t.Fatal(err)
-				}
-				runTest(t, s)
-				if calls != 0 {
-					t.Fatal("settled watch did not wait for cold schedule")
-				}
-				now = now.Add(coldInterval)
-			} else {
-				now = now.Add(2*time.Hour + time.Second)
-			}
-			runTest(t, s)
-			if row := j.record(testKey()); !row.next.Equal(now.Add(coldInterval)) {
-				t.Fatal("expired/settled watch should remain on cold schedule")
-			}
-			// A provider operation authenticated earlier finishes well after expiry.
-			object = "late-native-object"
-			now = now.Add(coldInterval)
-			runTest(t, s)
-			if j.record(testKey()).result.Fingerprint != object {
-				t.Fatal("late object disappeared from observation after expiry or confirm")
-			}
-		})
+func TestUnresolvedLegacyExpiryDoesNotDiscardLateObjects(t *testing.T) {
+	now := time.Date(2026, 10, 31, 10, 0, 0, 0, time.UTC)
+	j := newMemoryJournal()
+	object := ""
+	s := testService(j, ObserverFunc(func(context.Context, string, string, bool) (string, error) { return object, nil }), &now)
+	registerTest(t, s, now)
+	now = now.Add(2*time.Hour + time.Second)
+	runTest(t, s)
+	if row := j.record(testKey()); !row.next.Equal(now.Add(coldInterval)) {
+		t.Fatal("expired unresolved legacy watch should remain on cold schedule")
+	}
+	object = "late-native-object"
+	now = now.Add(coldInterval)
+	runTest(t, s)
+	if j.record(testKey()).result.Fingerprint != object {
+		t.Fatal("late unresolved legacy object disappeared from observation after expiry")
 	}
 }
 
@@ -229,14 +214,16 @@ func TestRenewalAndConfirmFenceStaleAcknowledgment(t *testing.T) {
 			registerTest(t, s, now)
 			runTest(t, s)
 			row := j.record(testKey())
+			if settle {
+				if row.ID != "" {
+					t.Fatal("old acknowledgment recreated explicitly completed watch")
+				}
+				return
+			}
 			if row.result.Fingerprint != "" || row.Generation != 2 {
 				t.Fatal("old observation overwrote renewed generation")
 			}
-			if settle {
-				if !row.next.Equal(now.Add(coldInterval)) || !row.Settled {
-					t.Fatal("old observation undid explicit confirm")
-				}
-			} else if !row.next.Equal(now) || !row.IssuedUntil.Equal(now.Add(3*time.Hour)) {
+			if !row.next.Equal(now) || !row.IssuedUntil.Equal(now.Add(3*time.Hour)) {
 				t.Fatal("old observation postponed renewed upload")
 			}
 		})

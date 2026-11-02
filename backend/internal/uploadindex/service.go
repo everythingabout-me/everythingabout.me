@@ -36,10 +36,12 @@ type Key struct {
 	IsDir   bool
 }
 
-// Watch includes two independent fences: Generation changes on Register/Settle;
-// LeaseVersion changes on every claim, including reclaim after a crashed worker.
+// Watch includes an incarnation ID plus two scheduling fences. ID changes when a
+// completed watch is deleted and recreated; Generation changes on Register and
+// LeaseVersion changes on every claim, including recovery after worker restart.
 type Watch struct {
 	Key
+	ID           string
 	IssuedUntil  time.Time
 	Settled      bool
 	Generation   int64
@@ -54,8 +56,10 @@ type Result struct {
 	Error       string
 }
 
-// Journal durably schedules observations. Finish must condition its update on both
-// watch fences, so a stale worker cannot override renewed or explicitly settled work.
+// Journal durably schedules unresolved observations. Settle retires a confirmed
+// path. Finish must fence updates and retirement by incarnation and both counters,
+// so a stale worker cannot affect renewed or recreated work. A successfully
+// observed folder retires; unresolved legacy file watches remain conservative.
 type Journal interface {
 	Register(context.Context, Key, time.Time, time.Time) error
 	Settle(context.Context, Key, time.Time, time.Time) error
@@ -112,8 +116,9 @@ func (s *Service) Register(ctx context.Context, ownerID, path string, isDir bool
 	return s.journal.Register(ctx, key, issuedUntil, s.now())
 }
 
-// Settle is only an explicit client-confirmation scheduling hint. It does not
-// delete the watch: already authenticated provider requests can still finish late.
+// Settle retires an explicitly confirmed watch. New file uploads use a separate
+// server-owned journal and do not register watches. Old direct-upload grants must
+// be drained during deployment; retiring a watch is not a provider publication fence.
 func (s *Service) Settle(ctx context.Context, ownerID, path string, isDir bool) error {
 	key, err := s.key(ownerID, path, isDir)
 	if err != nil {

@@ -1,6 +1,7 @@
 package api
 
 import (
+	"encoding/json"
 	"math"
 	"net/http"
 	"strings"
@@ -25,18 +26,11 @@ type pathBody struct {
 }
 
 type signBody struct {
-	Path      string  `json:"path"`
-	Size      float64 `json:"size"`
-	Overwrite bool    `json:"overwrite"`
-}
-
-type confirmBody struct {
-	Path   string `json:"path"`
-	Mime   string `json:"mime"`
-	SHA256 string `json:"sha256"`
-	// ModifiedAt is the browser's File.lastModified (milliseconds). When uploading old
-	// photos it is closer to the real time than object storage's LastModified (= today).
-	ModifiedAt int64 `json:"modifiedAt"`
+	Path       string  `json:"path"`
+	Size       float64 `json:"size"`
+	Overwrite  bool    `json:"overwrite"`
+	Mime       string  `json:"mime"`
+	ModifiedAt int64   `json:"modifiedAt"`
 }
 
 type renameBody struct {
@@ -140,13 +134,24 @@ func (s *Server) handleUploadSign(w http.ResponseWriter, r *http.Request) error 
 	if path == "" {
 		return httpx.BadRequest("path cannot be empty")
 	}
-	if math.IsNaN(body.Size) || math.IsInf(body.Size, 0) || body.Size < 0 {
+	if math.IsNaN(body.Size) || math.IsInf(body.Size, 0) || body.Size < 0 || math.Trunc(body.Size) != body.Size {
 		return httpx.BadRequest("invalid file size")
 	}
 	if body.Size > float64(maxFileSize) {
 		return httpx.NewError(http.StatusRequestEntityTooLarge, "a single file is limited to 48GB")
 	}
 
+	unlock, err := s.lockBrowserNamespace(r.Context(), user.ID)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	if err := s.checkBrowserUploadConflict(r.Context(), user.ID, path, true); err != nil {
+		return err
+	}
+	if err := s.assertParentDirs(r.Context(), user.ID, path); err != nil {
+		return err
+	}
 	existing, err := s.nodes.Live(r.Context(), path, user.ID)
 	if err != nil {
 		return err
@@ -158,22 +163,18 @@ func (s *Server) handleUploadSign(w http.ResponseWriter, r *http.Request) error 
 		return httpx.Conflict("file already exists; send overwrite: true to overwrite")
 	}
 
-	key := paths.KeyFor(path, user.ID)
-	credentials, err := s.storage.TemporaryCredentials(r.Context(), key, 3600)
+	if err := s.requireBrowserUploads(); err != nil {
+		return err
+	}
+	mime := body.Mime
+	if mime == "" {
+		mime = "application/octet-stream"
+	}
+	session, err := s.browserUploads.Begin(r.Context(), user.ID, path, int64(body.Size), mime, body.ModifiedAt)
 	if err != nil {
-		return err
+		return browserUploadError(err)
 	}
-
-	if err := s.watchUpload(r.Context(), user.ID, path, false, time.Unix(credentials.ExpiredTime, 0)); err != nil {
-		return err
-	}
-
-	return s.ok(w, map[string]any{
-		"bucket":      s.cfg.COS.Bucket,
-		"region":      s.cfg.COS.Region,
-		"key":         key,
-		"credentials": credentials,
-	})
+	return s.ok(w, map[string]any{"uploadId": session.ID})
 }
 
 func (s *Server) handleUploadConfirm(w http.ResponseWriter, r *http.Request) error {
@@ -184,47 +185,28 @@ func (s *Server) handleUploadConfirm(w http.ResponseWriter, r *http.Request) err
 	if err != nil {
 		return err
 	}
-	body, err := httpx.ReadJSON[confirmBody](r)
-	if err != nil {
+	if err := s.requireBrowserUploads(); err != nil {
 		return err
 	}
-	path, err := paths.Normalize(body.Path)
-	if err != nil {
-		return err
-	}
-	if path == "" {
-		return httpx.BadRequest("path cannot be empty")
-	}
-
-	meta := map[string]any{}
-	var mime *string
-	if body.Mime != "" {
-		meta["mime"] = body.Mime
-		mime = &body.Mime
-	}
-	if body.SHA256 != "" {
-		meta["sha256"] = body.SHA256
-	}
-
-	var modified *time.Time
-	if body.ModifiedAt > 0 {
-		candidate := time.UnixMilli(body.ModifiedAt)
-		if candidate.Year() >= 1990 && candidate.Before(time.Now().AddDate(0, 0, 2)) {
-			modified = &candidate
+	var node json.RawMessage
+	if uploadID := r.URL.Query().Get("uploadId"); uploadID != "" {
+		defer r.Body.Close()
+		node, err = s.browserUploads.Receive(r.Context(), user.ID, uploadID, r.Body, r.ContentLength)
+	} else {
+		body, readErr := httpx.ReadJSON[struct {
+			UploadID string `json:"uploadId"`
+		}](r)
+		if readErr != nil {
+			return readErr
 		}
+		if body.UploadID == "" {
+			return httpx.BadRequest("uploadId cannot be empty")
+		}
+		node, err = s.browserUploads.Confirm(r.Context(), user.ID, body.UploadID)
 	}
-	node, err := s.nodes.ConfirmUpload(r.Context(), nodes.UpsertInput{
-		OwnerID:          user.ID,
-		Path:             path,
-		Mime:             mime,
-		SourceModifiedAt: modified,
-		Meta:             meta,
-	})
 	if err != nil {
-		return err
+		return browserUploadError(err)
 	}
-	s.settleUpload(r.Context(), user.ID, path, false)
-	s.timeline.Notify(user.ID)
 	return s.ok(w, map[string]any{"node": node})
 }
 
@@ -291,6 +273,14 @@ func (s *Server) handleMkdir(w http.ResponseWriter, r *http.Request) error {
 		return httpx.BadRequest("directory path cannot be empty")
 	}
 
+	unlock, err := s.lockBrowserNamespace(r.Context(), user.ID)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	if err := s.checkBrowserUploadConflict(r.Context(), user.ID, path, true); err != nil {
+		return err
+	}
 	existing, err := s.nodes.Live(r.Context(), path, user.ID)
 	if err != nil {
 		return err
@@ -351,6 +341,17 @@ func (s *Server) handleRename(w http.ResponseWriter, r *http.Request) error {
 		return httpx.BadRequest("path did not change")
 	}
 
+	unlock, err := s.lockBrowserNamespace(r.Context(), user.ID)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	if err := s.checkBrowserUploadConflict(r.Context(), user.ID, from, true); err != nil {
+		return err
+	}
+	if err := s.checkBrowserUploadConflict(r.Context(), user.ID, to, true); err != nil {
+		return err
+	}
 	source, err := s.nodes.Live(r.Context(), from, user.ID)
 	if err != nil {
 		return err
@@ -453,6 +454,11 @@ func (s *Server) handleDelete(w http.ResponseWriter, r *http.Request) error {
 		return err
 	}
 
+	unlock, err := s.lockBrowserNamespace(r.Context(), user.ID)
+	if err != nil {
+		return err
+	}
+	defer unlock()
 	node, err := s.nodes.Live(r.Context(), path, user.ID)
 	if err != nil {
 		return err
@@ -463,7 +469,9 @@ func (s *Server) handleDelete(w http.ResponseWriter, r *http.Request) error {
 	if node.IsDir && r.URL.Query().Get("recursive") != "1" {
 		return httpx.Conflict("deleting a directory requires ?recursive=1")
 	}
-
+	if err := s.checkBrowserUploadConflict(r.Context(), user.ID, path, true); err != nil {
+		return err
+	}
 	// Permanent delete: drop the objects and index rows together.
 	count, err := s.nodes.Purge(r.Context(), path, user.ID)
 	if err != nil {
