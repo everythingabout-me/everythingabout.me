@@ -157,6 +157,7 @@ export interface FileCapabilities {
   path: string;
   read: boolean;
   write: boolean;
+  createOnly: boolean;
   range: boolean;
   pinnedRead: boolean;
   strongContentValidators: boolean;

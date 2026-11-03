@@ -99,8 +99,18 @@ recoverable independently; never infer ownership by exposing all provider data t
 Reconcile/import must index an existing readable tree without rewriting all file bytes. Native IDs can help
 recognize external moves; when identity is ambiguous, do not guess from size/name alone. External edits are
 supported through explicit scan/change feeds, not instant global linearizability. Operational guidance must
-coordinate external writes with active application mutations. A database-only lock does not lock rclone,
-Finder or another cloud client.
+coordinate external writes with active application mutations according to the admitted strategy. A database-only
+lock does not lock rclone, Finder or another cloud client.
+
+**Restricted object writes:** an explicitly admitted `createOnly` strategy may accept new files with proven
+native atomic absence conditions while external tools remain active. It requires neither bucket versioning
+nor exclusive external-writer access. It rejects replacement, mkdir, move, copy and delete, uses ordinary prefix
+parents without fabricated folder identities, and advertises no pinned reads or strong content validators.
+The existing full mutation strategy retains its version and coordinated-writer requirements. Both use durable
+publication evidence and retain unknown-outcome guards. Initial native/index comparison is a matched observation;
+budget counters retain that baseline plus application journal changes and reservations. Synchronization updates
+external metadata in the index but does not update budgets. A separate reviewed budget resynchronization is
+not implemented; this mode makes no exact global quota or snapshot claim across external writers.
 
 Keep native names intact. Advertise backend name/case/length limits; reject unsupported names and ambiguous
 collisions before writing. Preserve display spelling where native Unicode normalization differs. Do not accept

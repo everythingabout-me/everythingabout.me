@@ -20,6 +20,12 @@ then settles the index/result; it does not assemble and reupload the entire file
 staging. Unknown native effects remain guarded. Browser session identities survive refresh; local File reselection
 may be required to resume acknowledged chunks. Four files and up to four parts per file advance concurrently.
 See [native uploads and receiver deployment](docs/design/native-upload-deployment.md) for the exact boundaries.
+Object connections may explicitly admit `createOnly` uploads without enabling bucket versioning or excluding
+external writers. This mode only creates absent file keys; replacement, folder creation, move, copy and deletion
+are unavailable. Reads have no strong content validators or version pinning. External changes appear after
+index synchronization. Budget counters retain the initial compared baseline plus application journal changes;
+reconcile updates index metadata, not those counters. Separate reviewed budget resynchronization is not yet
+implemented, so limits do not enforce exact total native usage across external writers.
 
 ## Accepted storage architecture
 
@@ -47,7 +53,7 @@ Existing reconcile/import is additive and does not prune externally deleted entr
 | Metadata and listing (P2 active) | `GET /api/files?path=/...`; `GET /api/files/list?path=/...` |
 | Search and principal (P2 active) | `GET /api/files/search`; `/api/files/me`; `/api/files/capabilities` |
 | File content (P2 active) | `GET/HEAD /api/files/content?path=/...`: same-origin streaming, safe single ranges |
-| Mutations (P4 admitted roots) | PUT content, POST folder/move/copy, DELETE path; verified baseline and explicit backend capability evidence required |
+| Mutations (P4 admitted roots) | Verified baseline and explicit capability evidence; create-only roots permit new file content only; full roots also support folder/move/copy/delete |
 | Long operations (P4) | `.../operations/{id}` and `/cancel`: durable progress, partial effects, recovery |
 | Resumable uploads (admitted roots) | POST/GET `.../uploads`; GET/DELETE `.../uploads/{id}`; PUT `.../parts/{number}` (native object parts or durable Local parts); GET `.../parts`; POST `.../commit` (publication + index, no object-body retransmission) |
 | Storage tree (P1/P4) | Native reads and admitted Local stage/publish/mkdir/move/copy/empty-only remove |
@@ -67,9 +73,11 @@ with additive migrations 016/017. P4 adds [admitted Local native writes and Oper
 with migrations 019/020. Writes default off: configure `FILE_COORDINATED_WRITES=true` only for coordinated
 Local writers, validate/import the native index, then run the explicit `eam storage-admit` command with
 `--owner-id UUID --writers-quiesced --evidence /secure/proof.json` before serving mutations. No production baseline or writer revocation is automatic. [COS/S3 mutation adapters](docs/design/storage-p4-objects.md)
-now add an explicitly attested single-gateway spool strategy: default-off, exact connection probe evidence,
-retained native versions, one-shot requests and permanent guards for uncertain remote effects. Real provider
-probes were not configured here. Object admission also requires explicit `--physical-bytes` including history.
+now support two explicit strategies: native create-only publication with external writers, or the full
+coordinated writer with retained versions and namespace actions. Both require exact connection probe evidence,
+a durable single-gateway spool, one-shot requests and permanent guards for uncertain remote effects.
+Create-only admission omits `--writers-quiesced`; it still compares the observed native/index tree and requires
+explicit `--physical-bytes` with inventory evidence. Full object admission retains its version and writer-drain gates.
 P5 adds [durable numbered-part ingress](docs/design/storage-p5.md) with migration 024, server SHA-256,
 watermarked receipts and restart recovery. The [native upload extension](docs/design/native-upload-deployment.md)
 adds shared native metadata (migration 025), direct unpublished object parts and lightweight native completion.
@@ -265,10 +273,12 @@ directory with coscli first, then run `reconcile --owner you@example.com`.
 ### COS connection admission
 
 Clients use the application origin for all file requests and bytes. Browser bucket CORS and STS issuance
-are no longer part of the file protocol. Keep provider credentials server-side, then establish the exact
-connection's retained-version, single-attempt and coordinated-writer evidence described in
-[object admission](docs/design/storage-p4-objects.md). Follow the separate [legacy-authority drain](docs/design/storage-p6-backend.md)
-before enabling replacement writes. Unsupported image conversions use authorized raw content or placeholders.
+are no longer part of the file protocol. Keep provider credentials server-side and select the connection's
+explicit [object admission](docs/design/storage-p4-objects.md) mode. Create-only uploads require proven native
+absence conditions, without bucket changes or exclusive external-writer access. The full mutation mode requires
+retained-version and coordinated-writer evidence, including the separate
+[legacy-authority drain](docs/design/storage-p6-backend.md). Unsupported image conversions use authorized raw
+content or placeholders.
 
 ## Loading terabytes of data the first time
 
@@ -287,9 +297,9 @@ At millions of objects, switch to a COS **inventory** to avoid the request fees 
 go run ./cmd/eam reconcile --owner you@example.com --inventory ./inventory.csv
 ```
 
-`reconcile` does three things: add new entries, update the ones that changed (size/etag), and drop records whose
-objects have disappeared from the bucket. It only scans the given user's prefix and never touches other accounts;
-it also never deletes any object — the power to delete stays with you.
+`reconcile` adds new entries and updates observed metadata (including size/etag). It does not prune externally
+deleted entries; stale deletion cleanup requires explicit index repair. It scans only the given user's prefix
+and never deletes native objects.
 
 ## Deletion
 
@@ -326,11 +336,11 @@ The table lists the active shared file resources and retained account/Connect en
 | GET | `/api/files?path=` | Path-based indexed metadata; no synchronous storage lookup |
 | GET | `/api/files/list?path=&limit=&cursor=` | Indexed immediate children; owner-scoped SQL keyset pagination |
 | GET | `/api/files/search?q=&path=&kind=&mediaType=` | Authorized indexed search with scoped opaque cursors |
-| GET | `/api/files/me` · `/api/files/capabilities` | Indexed scope/usage and configured limits; cookie CSRF bootstrap |
+| GET | `/api/files/me` · `/api/files/capabilities` | Indexed scope/usage and effective limits, including `createOnly`; cookie CSRF bootstrap |
 | GET, HEAD | `/api/files/content?path=` | Same-origin bytes and representation headers; single Range support |
-| PUT | `/api/files/content?path=` | Small admitted content write; disabled with `503 edgeone_route_required` in edgeone mode |
-| POST | `/api/files` · `/api/files/move` · `/api/files/copy` | Admitted Local folder creation and finite native move/copy, no target merge |
-| DELETE | `/api/files?path=&recursive=true` | Captured native deletion; explicit recursion for nonempty folders |
+| PUT | `/api/files/content?path=` | Small admitted write; create-only roots reject replacement; disabled with `503 edgeone_route_required` in edgeone mode |
+| POST | `/api/files` · `/api/files/move` · `/api/files/copy` | Admitted folder creation and finite native move/copy, no target merge; unavailable on create-only roots |
+| DELETE | `/api/files?path=&recursive=true` | Captured native deletion; explicit recursion for nonempty folders; unavailable on create-only roots |
 | GET, POST | `/api/files/operations/{id}` · `.../cancel` | Durable state/result and safe cancellation |
 | POST, GET | `/api/files/uploads` | Create/list persistent principal-bound upload sessions |
 | GET, DELETE | `/api/files/uploads/{id}` | Compact durable status or open-session abort |

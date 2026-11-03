@@ -149,8 +149,11 @@ func (s *Server) handleFilesCreateUpload(w http.ResponseWriter, r *http.Request,
 	if *req.Size > filesUploadMaxSize(native) {
 		return fc.NewProblem(413, "file_too_large", "The file exceeds the admitted publication or part-count limit.")
 	}
-	if root.RetainsVersions && req.SourceModifiedAt != nil {
+	if s.cfg.BackendName() != "local" && req.SourceModifiedAt != nil {
 		return fc.NewProblem(422, "unsupported_option", "This object route cannot set native source modification time.")
+	}
+	if condition.Mode == fc.PutReplace && !native.Describe().AtomicReplace {
+		return fc.NewProblem(422, "unsupported_option", "This storage connection supports new files only.")
 	}
 	if req.SourceModifiedAt != nil {
 		v := req.SourceModifiedAt.UTC()
@@ -188,6 +191,9 @@ func (s *Server) handleFilesCreateUpload(w http.ResponseWriter, r *http.Request,
 	if err == nil {
 		if existing.Kind != storage.File {
 			return fc.NewProblem(409, "name_conflict", "A folder occupies the destination.")
+		}
+		if condition.Mode == fc.PutCreate {
+			return fc.NewProblem(409, "name_conflict", "The destination already exists.")
 		}
 		revision, e := s.filesObservedContentRevision(r.Context(), f, existing)
 		if e != nil {

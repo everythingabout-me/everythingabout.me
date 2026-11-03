@@ -9,6 +9,13 @@ import (
 	"everythingabout.me/backend/internal/config"
 )
 
+func validateAdmissionQuiescence(quiesced, createOnly bool) error {
+	if !quiesced && !createOnly {
+		return fmt.Errorf("storage-admit requires --writers-quiesced unless the object admission explicitly enables create-only publication")
+	}
+	return nil
+}
+
 // validateAdmissionAccounting cannot establish provider quiescence or inventory
 // correctness. It binds the operator's explicit physical declaration to evidence;
 // current native HEAD/list observations are checked separately without mutation.

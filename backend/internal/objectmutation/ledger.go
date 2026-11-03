@@ -371,6 +371,9 @@ func cloneEffect(in storage.EffectIntent) *storage.EffectIntent {
 }
 
 func (d *Driver) Mkdir(ctx context.Context, in storage.Mutation, cp storage.Checkpoint) (storage.MutationResult, error) {
+	if d.options.Admission.CreateOnly {
+		return storage.MutationResult{}, &storage.NoFinalEffect{Cause: fail("unsupported", in.Path)}
+	}
 	if in.Path == "" || !in.Conditions.Absent || len(in.Conditions.ExpectedVersion) > 0 {
 		return storage.MutationResult{}, fail("unsupported", in.Path)
 	}
@@ -421,6 +424,9 @@ func (d *Driver) Move(context.Context, storage.MoveRequest, storage.Checkpoint) 
 	return storage.MutationResult{}, &storage.NoFinalEffect{Cause: fail("unsupported", "")}
 }
 func (d *Driver) Copy(ctx context.Context, in storage.MoveRequest, cp storage.Checkpoint) (storage.MutationResult, error) {
+	if d.options.Admission.CreateOnly {
+		return storage.MutationResult{}, &storage.NoFinalEffect{Cause: fail("unsupported", in.Target)}
+	}
 	if in.Source == "" || in.Target == "" || in.Source == in.Target || storage.ValidatePath(in.Source) != nil || !in.TargetConditions.Absent || len(in.TargetConditions.ExpectedVersion) > 0 {
 		return storage.MutationResult{}, fail("unsupported", in.Target)
 	}
@@ -496,6 +502,9 @@ func (d *Driver) Copy(ctx context.Context, in storage.MoveRequest, cp storage.Ch
 	return result, err
 }
 func (d *Driver) Remove(ctx context.Context, in storage.Mutation, cp storage.Checkpoint) (storage.MutationResult, error) {
+	if d.options.Admission.CreateOnly {
+		return storage.MutationResult{}, &storage.NoFinalEffect{Cause: fail("unsupported", in.Path)}
+	}
 	if in.Path == "" || storage.ValidatePath(in.Path) != nil || in.Conditions.Absent {
 		return storage.MutationResult{}, fail("unsupported", in.Path)
 	}

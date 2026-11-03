@@ -324,7 +324,7 @@ func (s *Server) handleFilesCapabilities(w http.ResponseWriter, r *http.Request,
 	quota, reservations := filesUsageFields(usage, f.Scope == "/" && actual == "/")
 	return writeFilesJSON(w, 200, map[string]any{
 		"path": actual, "read": true, "write": ready, "range": d.RangeRead, "pinnedRead": d.PinnedRead, "strongContentValidators": d.PinnedRead,
-		"thumbnails": false, "uploads": uploadsReady, "uploadTransport": transport, "checksums": checksums, "sourceModifiedAt": ready && !d.RetainsVersions,
+		"createOnly": ready && d.CreateOnly, "thumbnails": false, "uploads": uploadsReady, "uploadTransport": transport, "checksums": checksums, "sourceModifiedAt": ready && s.cfg.BackendName() == "local",
 		"maxFileBytes": maxFile, "maxSinglePutBytes": singlePut, "maxPartBytes": partBytes,
 		"pagination":           map[string]any{"defaultLimit": filesDefaultLimit, "maxLimit": filesMaxLimit},
 		"names":                map[string]any{"caseSensitive": d.Names.CaseSensitive, "maxSegmentBytes": d.Names.MaxSegmentBytes, "maxPathBytes": d.Names.MaxPathBytes, "maxDepth": d.Names.MaxDepth},

@@ -11,6 +11,36 @@ import (
 func validAdmissionFixture() Admission {
 	return Admission{ConnectionID: "fixture", Endpoint: "https://objects.example", Bucket: "bucket", Region: "region", CheckedAt: time.Now().UTC(), ProbeReference: "isolated-positive-negative-probes", AtomicPublish: true, VersionedReads: true, ConditionalCreate: true, CurrentKeyDelete: true, CoordinatedExclusiveWriter: true, SingleGateway: true, LegacyWritersDrained: true}
 }
+func TestCreateOnlyAdmissionDoesNotRequireExclusiveOrVersionedCapabilities(t *testing.T) {
+	a := validAdmissionFixture()
+	a.CreateOnly = true
+	a.VersionedReads = false
+	a.CurrentKeyDelete = false
+	a.CoordinatedExclusiveWriter = false
+	a.LegacyWritersDrained = false
+	if err := ValidateAdmission(a); err != nil {
+		t.Fatalf("safe create-only evidence was rejected: %v", err)
+	}
+	for _, field := range []string{"AtomicPublish", "ConditionalCreate", "SingleGateway"} {
+		b := a
+		switch field {
+		case "AtomicPublish":
+			b.AtomicPublish = false
+		case "ConditionalCreate":
+			b.ConditionalCreate = false
+		case "SingleGateway":
+			b.SingleGateway = false
+		}
+		if ValidateAdmission(b) == nil {
+			t.Fatalf("create-only admission omitted required %s evidence", field)
+		}
+	}
+	a.CreateOnly = false
+	if ValidateAdmission(a) == nil {
+		t.Fatal("create-only evidence admitted broader native mutations")
+	}
+}
+
 func TestAdmissionExplicitConnectionAndCapabilityEvidence(t *testing.T) {
 	a := validAdmissionFixture()
 	if err := ValidateAdmission(a); err != nil {

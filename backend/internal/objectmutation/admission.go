@@ -42,7 +42,10 @@ func LoadAdmission(path string) (Admission, error) {
 	return a, nil
 }
 func ValidateAdmission(a Admission) error {
-	if strings.TrimSpace(a.ConnectionID) == "" || a.Endpoint == "" || a.Bucket == "" || a.Region == "" || a.CheckedAt.IsZero() || a.CheckedAt.After(time.Now().Add(5*time.Minute)) || strings.TrimSpace(a.ProbeReference) == "" || !a.AtomicPublish || !a.VersionedReads || !a.ConditionalCreate || !a.CurrentKeyDelete || !a.CoordinatedExclusiveWriter || !a.SingleGateway || !a.LegacyWritersDrained {
+	if strings.TrimSpace(a.ConnectionID) == "" || a.Endpoint == "" || a.Bucket == "" || a.Region == "" || a.CheckedAt.IsZero() || a.CheckedAt.After(time.Now().Add(5*time.Minute)) || strings.TrimSpace(a.ProbeReference) == "" || !a.AtomicPublish || !a.ConditionalCreate || !a.SingleGateway {
+		return storage.NewError("invalid_config", "", nil)
+	}
+	if !a.CreateOnly && (!a.VersionedReads || !a.CurrentKeyDelete || !a.CoordinatedExclusiveWriter || !a.LegacyWritersDrained) {
 		return storage.NewError("invalid_config", "", nil)
 	}
 	return nil

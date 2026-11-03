@@ -54,8 +54,8 @@ func runStorageAdmit(args []string) error {
 			physicalProvided = true
 		}
 	})
-	if flags.NArg() != 0 || !baselineOwner.MatchString(*owner) || !*quiesced || *proofFile == "" || *physicalLimit < 0 || (physicalProvided && (*physicalBytes < 0 || *physicalBytes > 9007199254740991)) {
-		return fmt.Errorf("storage-admit requires --owner-id lowercase-UUID, --writers-quiesced, --evidence and a nonnegative physical limit")
+	if flags.NArg() != 0 || !baselineOwner.MatchString(*owner) || *proofFile == "" || *physicalLimit < 0 || (physicalProvided && (*physicalBytes < 0 || *physicalBytes > 9007199254740991)) {
+		return fmt.Errorf("storage-admit requires --owner-id lowercase-UUID, --evidence and a nonnegative physical limit")
 	}
 	proof, err := readAdmissionEvidence(*proofFile)
 	if err != nil {
@@ -85,6 +85,10 @@ func runStorageAdmit(args []string) error {
 			return fmt.Errorf("storage-admit object capability admission: %w", err)
 		}
 		defer objectValidation.Close()
+	}
+	createOnly := objectValidation != nil && objectValidation.CreateOnly()
+	if err = validateAdmissionQuiescence(*quiesced, createOnly); err != nil {
+		return err
 	}
 	binding, err := backend.Binding(*owner)
 	if err != nil {
@@ -118,7 +122,7 @@ func runStorageAdmit(args []string) error {
 		return err
 	}
 	defer driver.Close()
-	root := fileops.Root{OwnerID: binding.OwnerID, ConnectionID: binding.ConnectionID, Generation: binding.Generation, ContentRoot: binding.ContentRoot, SystemRoot: binding.SystemRoot, CaseSensitive: driver.Describe().Names.CaseSensitive, RetainsVersions: objects}
+	root := fileops.Root{OwnerID: binding.OwnerID, ConnectionID: binding.ConnectionID, Generation: binding.Generation, ContentRoot: binding.ContentRoot, SystemRoot: binding.SystemRoot, CaseSensitive: driver.Describe().Names.CaseSensitive, RetainsVersions: objects && !createOnly, CreateOnly: createOnly}
 	var storedBinding []byte
 	var usage fileops.Usage
 	err = tx.QueryRow(ctx, `select root_binding,logical_bytes,logical_reserved,physical_bytes,physical_reserved,logical_limit,physical_limit from file_budgets where owner_id=$1::uuid`, *owner).Scan(&storedBinding, &usage.LogicalBytes, &usage.LogicalReserved, &usage.PhysicalBytes, &usage.PhysicalReserved, &usage.LogicalLimit, &usage.PhysicalLimit)
@@ -208,7 +212,7 @@ func runStorageAdmit(args []string) error {
 		PhysicalBytes   int64           `json:"physicalBytes"`
 		RetainsVersions bool            `json:"retainsVersions"`
 		OperatorProof   json.RawMessage `json:"operatorProof"`
-	}{1, root, started, time.Now().UTC(), len(records), logical, physical, objects, proof})
+	}{1, root, started, time.Now().UTC(), len(records), logical, physical, root.RetainsVersions, proof})
 	if err != nil {
 		return err
 	}
@@ -216,7 +220,7 @@ func runStorageAdmit(args []string) error {
 		fmt.Printf("[dry-run] baseline verified: entries=%d logical=%d physical=%d; no database writes\n", len(records), logical, physical)
 		return nil
 	}
-	if err = fileops.NewPostgres(db.Pool()).Initialize(ctx, root, fileops.Baseline{LogicalBytes: logical, PhysicalBytes: physical, LogicalLimit: cfg.QuotaBytes, PhysicalLimit: *physicalLimit, NativeComplete: true, IndexCompared: true, LegacyWritersDrained: true, Evidence: evidence}); err != nil {
+	if err = fileops.NewPostgres(db.Pool()).Initialize(ctx, root, fileops.Baseline{LogicalBytes: logical, PhysicalBytes: physical, LogicalLimit: cfg.QuotaBytes, PhysicalLimit: *physicalLimit, NativeComplete: true, IndexCompared: true, LegacyWritersDrained: *quiesced, Evidence: evidence}); err != nil {
 		return err
 	}
 	fmt.Printf("budget initialized: entries=%d logical=%d physical=%d; native files and index unchanged\n", len(records), logical, physical)

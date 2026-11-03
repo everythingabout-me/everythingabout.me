@@ -46,7 +46,7 @@ func New(tree storage.Driver, binding storage.Config, backend Backend, options O
 	if err := ValidateAdmission(a); err != nil {
 		return nil, err
 	}
-	if tree == nil || backend == nil || storage.ValidateBinding(binding) != nil || !a.AtomicPublish || !a.VersionedReads || !a.ConditionalCreate || !a.CurrentKeyDelete || !a.CoordinatedExclusiveWriter || !a.SingleGateway || !a.LegacyWritersDrained || a.ConnectionID == "" || a.Endpoint == "" || a.Bucket == "" || a.Region == "" || a.CheckedAt.IsZero() || strings.TrimSpace(a.ProbeReference) == "" {
+	if tree == nil || backend == nil || storage.ValidateBinding(binding) != nil {
 		return nil, fail("unsupported", "")
 	}
 	if a.ConnectionID != binding.ConnectionID {
@@ -107,11 +107,12 @@ func (d *Driver) Describe() storage.Descriptor {
 	desc := d.tree.Describe()
 	desc.MaxFileBytes = d.options.MaxPublishBytes
 	desc.AtomicCreate = true
-	desc.AtomicReplace = true
-	desc.PinnedRead = true
+	desc.CreateOnly = d.options.Admission.CreateOnly
+	desc.AtomicReplace = !desc.CreateOnly
+	desc.PinnedRead = !desc.CreateOnly
 	desc.NativeConditionalMutation = false
 	desc.NativeTreeMove = false
-	desc.RetainsVersions = true
+	desc.RetainsVersions = !desc.CreateOnly
 	desc.Names = d.StorageNameRules()
 	return desc
 }
@@ -154,11 +155,14 @@ func parseVersion(value []byte) (string, error) {
 	return s, nil
 }
 func (d *Driver) objectEntry(p storage.Path, kind storage.Kind, obj Object) (storage.Entry, error) {
-	if obj.Key != d.key(p, kind) || obj.Size < 0 || len(nativeVersion(obj.VersionID)) == 0 || kind == storage.Folder && obj.Size != 0 {
+	if obj.Key != d.key(p, kind) || obj.Size < 0 || !d.options.Admission.CreateOnly && len(nativeVersion(obj.VersionID)) == 0 || kind == storage.Folder && obj.Size != 0 {
 		return storage.Entry{}, fail("unsupported", p)
 	}
 	modified := obj.ModifiedAt
 	e := storage.Entry{Path: p, Kind: kind, NativeRef: []byte(obj.Key), Version: nativeVersion(obj.VersionID), Size: obj.Size, ModifiedAt: modified, MediaType: obj.MediaType}
+	if d.options.Admission.CreateOnly {
+		e.Version = nil
+	}
 	if kind == storage.Folder {
 		e.Size = 0
 		e.MediaType = ""
@@ -190,6 +194,9 @@ func (d *Driver) Stat(ctx context.Context, p storage.Path) (storage.Entry, error
 	if e.Path != p {
 		return storage.Entry{}, fail("invalid_backend_response", p)
 	}
+	if d.options.Admission.CreateOnly {
+		return e, nil
+	}
 	if p == "" {
 		return d.rootEntry(e), nil
 	}
@@ -214,6 +221,9 @@ func (d *Driver) List(ctx context.Context, p storage.Path, req storage.PageReque
 	page, err := d.tree.List(ctx, p, req)
 	if err != nil {
 		return storage.Page{}, err
+	}
+	if d.options.Admission.CreateOnly {
+		return page, nil
 	}
 	out := storage.Page{NextCursor: page.NextCursor, Entries: make([]storage.Entry, 0, len(page.Entries))}
 	for _, e := range page.Entries {
@@ -248,14 +258,17 @@ func (d *Driver) Open(ctx context.Context, p storage.Path, options storage.ReadO
 		done()
 		return storage.Read{}, err
 	}
-	if read.Body == nil || read.Entry.Path != p || read.Entry.Kind != storage.File || len(read.Entry.Version) == 0 || len(options.Version) > 0 && !bytes.Equal(options.Version, read.Entry.Version) {
+	if read.Body == nil || read.Entry.Path != p || read.Entry.Kind != storage.File || !d.options.Admission.CreateOnly && len(read.Entry.Version) == 0 || len(options.Version) > 0 && !bytes.Equal(options.Version, read.Entry.Version) {
 		if read.Body != nil {
 			read.Body.Close()
 		}
 		done()
 		return storage.Read{}, fail("changed", p)
 	}
-	if _, err = parseVersion(read.Entry.Version); err != nil {
+	if !d.options.Admission.CreateOnly {
+		_, err = parseVersion(read.Entry.Version)
+	}
+	if err != nil {
 		read.Body.Close()
 		done()
 		return storage.Read{}, err
@@ -308,7 +321,7 @@ func (d *Driver) validateIntent(in storage.WriteIntent) error {
 	if err := validateRecoveryIntent(in); err != nil {
 		return err
 	}
-	if in.SourceModifiedAt != nil {
+	if in.SourceModifiedAt != nil || d.options.Admission.CreateOnly && !in.Conditions.Absent {
 		return fail("unsupported", in.Target)
 	}
 	if len(d.binding.ContentRoot)+len(in.Target) > 1024 {
@@ -511,6 +524,9 @@ func (d *Driver) checkTarget(ctx context.Context, r *ledger) error {
 }
 func (d *Driver) Publish(ctx context.Context, staged storage.Staged, cp storage.Checkpoint) (storage.MutationResult, error) {
 	in := staged.Intent
+	if d.options.Admission.CreateOnly && !in.Conditions.Absent {
+		return storage.MutationResult{}, fail("unsupported", in.Target)
+	}
 	if err := validateRecoveryIntent(in); err != nil {
 		return storage.MutationResult{}, err
 	}
@@ -649,6 +665,12 @@ func (d *Driver) publishLocked(ctx context.Context, r *ledger, cp storage.Checkp
 func (d *Driver) refreshApplied(ctx context.Context, r *ledger) error {
 	if r.MetadataReady || r.Result == nil || r.Result.Entry == nil {
 		return nil
+	}
+	if d.options.Admission.CreateOnly {
+		// The sole successful publish response proves this operation applied. A later
+		// HEAD may describe an external replacement and cannot refine that receipt.
+		r.MetadataReady = true
+		return d.save(r)
 	}
 	expected := r.Result.Entry
 	obj, err := d.backend.Head(ctx, string(expected.NativeRef))

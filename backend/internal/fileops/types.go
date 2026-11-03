@@ -20,6 +20,7 @@ type Root struct {
 	SystemRoot      string
 	CaseSensitive   bool
 	RetainsVersions bool // native delete/replace retains previous object generations
+	CreateOnly      bool `json:",omitempty"` // native absence-fenced creates; usage is an indexed observation
 }
 type Actor struct {
 	ID          string // stable creator principal, e.g. owner:<UUID> or token:<private-token-id>
@@ -128,9 +129,10 @@ func (o Operation) Terminal() bool {
 	return o.State == Succeeded || o.State == Failed || o.State == Cancelled
 }
 
-// Baseline is trusted operator evidence. Initialization is never an automatic
-// index SUM/backfill. Complete native usage and drained legacy/native writers must
-// be established outside the new DB guard protocol, then bound to this exact root.
+// Baseline is trusted operator evidence, never an automatic index SUM/backfill.
+// Broad mutation roots require drained native writers. Create-only roots admit a
+// compared observation plus subsequent application charges. External changes do
+// not update these counters; index synchronization is a separate operation.
 type Baseline struct {
 	LogicalBytes         int64
 	PhysicalBytes        int64

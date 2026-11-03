@@ -12,8 +12,11 @@ import (
 
 // Admission is deployment evidence, not an assertion of S3 compatibility. The
 // file must describe positive/negative isolated probes for this exact connection.
-// All flags are required for the coordinated single-gateway strategy in P4.
+// Capability assertions apply only to the selected publication strategy.
 type Admission struct {
+	// CreateOnly admits native no-overwrite publication on an unversioned bucket.
+	// It grants no replace/delete authority or exclusion of external writers.
+	CreateOnly                 bool      `json:"createOnly,omitempty"`
 	ConnectionID               string    `json:"connectionId"`
 	Endpoint                   string    `json:"endpoint"`
 	Bucket                     string    `json:"bucket"`

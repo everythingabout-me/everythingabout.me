@@ -92,7 +92,7 @@ func (s *Server) fileMutationContext(ctx context.Context, f *fileRequest) (fileo
 		return nil, fileops.Root{}, fileops.Actor{}, fc.NewProblem(422, "unsupported_option", "This root does not support safe native file mutations.")
 	}
 	binding := native.StorageBinding()
-	root := fileops.Root{OwnerID: binding.OwnerID, ConnectionID: binding.ConnectionID, Generation: binding.Generation, ContentRoot: binding.ContentRoot, SystemRoot: binding.SystemRoot, CaseSensitive: native.StorageNameRules().CaseSensitive, RetainsVersions: native.Describe().RetainsVersions}
+	root := fileops.Root{OwnerID: binding.OwnerID, ConnectionID: binding.ConnectionID, Generation: binding.Generation, ContentRoot: binding.ContentRoot, SystemRoot: binding.SystemRoot, CaseSensitive: native.StorageNameRules().CaseSensitive, RetainsVersions: native.Describe().RetainsVersions, CreateOnly: native.Describe().CreateOnly}
 	actor := fileops.Actor{ID: filePrincipalID(f.Principal), Scope: storage.Path(f.Scope.Relative()), CanRead: f.Principal.Token == nil || f.Principal.Token.CanRead, CanWrite: f.Principal.Token == nil || f.Principal.Token.CanWrite, ManageOwner: f.Principal.Token == nil}
 	// This internal readiness query does not disclose owner-wide usage to a token.
 	_, err := s.filesJournal.Usage(ctx, root, fileops.Actor{ID: "owner:" + root.OwnerID, CanRead: true, CanWrite: true, ManageOwner: true})
@@ -253,8 +253,11 @@ func (s *Server) handleFilesPut(w http.ResponseWriter, r *http.Request, f *fileR
 	if err != nil {
 		return err
 	}
-	if root.RetainsVersions && modified != nil {
+	if s.cfg.BackendName() != "local" && modified != nil {
 		return fc.NewProblem(422, "unsupported_option", "This object route cannot set native source modification time.")
+	}
+	if condition.Mode == fc.PutReplace && !native.Describe().AtomicReplace {
+		return fc.NewProblem(422, "unsupported_option", "This storage connection supports new files only.")
 	}
 	if max := native.Describe().MaxFileBytes; max > 0 && r.ContentLength > max {
 		return fc.NewProblem(413, "request_too_large", "The content exceeds the admitted publication limit.")
@@ -314,6 +317,12 @@ func (s *Server) handleFilesPut(w http.ResponseWriter, r *http.Request, f *fileR
 		if existing.Kind != storage.File {
 			return fc.NewProblem(409, "name_conflict", "A folder occupies the destination.")
 		}
+		if condition.Mode == fc.PutCreate {
+			if condition.ExplicitCreate {
+				return fc.NewProblem(412, "precondition_failed", "The destination already exists.")
+			}
+			return fc.NewProblem(409, "name_conflict", "The destination already exists.")
+		}
 		revision, e := s.filesObservedContentRevision(r.Context(), f, existing)
 		if e != nil {
 			return e
@@ -333,6 +342,9 @@ func (s *Server) handleFilesPut(w http.ResponseWriter, r *http.Request, f *fileR
 		intent.Conditions.Absent = true
 	}
 	physicalReserved, err := fileops.PhysicalReservation(root, intent.Size)
+	if !root.RetainsVersions && s.cfg.BackendName() != "local" {
+		physicalReserved += intent.Size
+	}
 	if err != nil {
 		return filesMutationProblem(err)
 	}
@@ -535,6 +547,9 @@ func (s *Server) handleFilesDelete(w http.ResponseWriter, r *http.Request, f *fi
 	return s.filesAction(w, r, f, fileops.ActionRequest{Kind: "delete", From: storage.Path(p.Relative()), Recursive: recursive, IfRevision: r.Header.Get("If-Revision")})
 }
 func (s *Server) filesAction(w http.ResponseWriter, r *http.Request, f *fileRequest, request fileops.ActionRequest) error {
+	if f.Driver.Describe().CreateOnly {
+		return fc.NewProblem(422, "unsupported_option", "This storage connection supports new files only.")
+	}
 	native, root, actor, err := s.fileMutationContext(r.Context(), f)
 	if err != nil {
 		return err

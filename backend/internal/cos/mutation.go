@@ -100,7 +100,7 @@ func (b *mutationBackend) Put(ctx context.Context, in objectmutation.Put) (objec
 	}
 	response, err := b.client.Object.Put(ctx, in.Key, body, &sdk.ObjectPutOptions{ObjectPutHeaderOptions: &sdk.ObjectPutHeaderOptions{ContentLength: in.Size, ContentType: in.MediaType, XOptionHeader: &headers}})
 	if err != nil {
-		return objectmutation.Object{}, mutationWriteError(in.Key, err)
+		return objectmutation.Object{}, mutationPublishError(in, err)
 	}
 	if response == nil || response.StatusCode < 200 || response.StatusCode >= 300 {
 		return objectmutation.Object{}, storage.NewError("outcome_unknown", storage.Path(in.Key), nil)
@@ -172,6 +172,17 @@ func validateMutationPut(in objectmutation.Put) error {
 	}
 	return nil
 }
+
+// mutationPublishError recognizes COS's occupied-target response to the native
+// If-None-Match: * create condition. A 304 from another mutation remains unknown.
+func mutationPublishError(in objectmutation.Put, err error) error {
+	var response *sdk.ErrorResponse
+	if in.Absent && errors.As(err, &response) && response.Response != nil && response.Response.StatusCode == http.StatusNotModified {
+		return storage.NewError("precondition_failed", storage.Path(in.Key), err)
+	}
+	return mutationWriteError(in.Key, err)
+}
+
 func mutationWriteError(key string, err error) error {
 	code := "outcome_unknown"
 	var response *sdk.ErrorResponse

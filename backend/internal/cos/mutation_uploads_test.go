@@ -82,6 +82,44 @@ func TestMutationMultipartNativeWireAndConditionalComplete(t *testing.T) {
 	}
 }
 
+func TestMutationMultipartCreateOnlyNotModifiedIsPreconditionFailure(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		status int
+		absent bool
+		etag   string
+		want   string
+	}{
+		{"create_not_modified", http.StatusNotModified, true, "", "precondition_failed"},
+		{"create_conflict", http.StatusConflict, true, "", "outcome_unknown"},
+		{"replace_not_modified", http.StatusNotModified, false, `"old"`, "outcome_unknown"},
+		{"unconditional_not_modified", http.StatusNotModified, false, "", "outcome_unknown"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var calls atomic.Int32
+			_, backend, _ := mutationFixture(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				calls.Add(1)
+				if r.Method != http.MethodPost || r.URL.Query().Get("uploadId") != "upload" || r.Header.Get("If-Match") != tc.etag {
+					t.Error("unexpected Complete method, upload or replacement condition")
+				}
+				if tc.absent {
+					if r.Header.Get("If-None-Match") != "*" || r.Header.Get("X-Cos-Forbid-Overwrite") != "true" {
+						t.Error("create-only native headers missing")
+					}
+				} else if r.Header.Get("If-None-Match") != "" || r.Header.Get("X-Cos-Forbid-Overwrite") != "" {
+					t.Error("create-only native headers added to another Complete")
+				}
+				_, _ = io.Copy(io.Discard, r.Body)
+				w.WriteHeader(tc.status)
+			}))
+			_, err := backend.(objectmutation.MultipartBackend).CompleteMultipart(context.Background(), objectmutation.Put{Key: "occupied", Size: 4, Absent: tc.absent, ExpectedETag: tc.etag}, "upload", []objectmutation.NativePart{{Number: 1, ETag: "part"}})
+			if !storage.IsCode(err, tc.want) || calls.Load() != 1 {
+				t.Fatalf("calls=%d error=%v; want one attempt and %s", calls.Load(), err, tc.want)
+			}
+		})
+	}
+}
+
 func TestMutationMultipartCompleteErrorsNeverReplay(t *testing.T) {
 	for _, status := range []int{412, 500, 503} {
 		t.Run(strconv.Itoa(status), func(t *testing.T) {

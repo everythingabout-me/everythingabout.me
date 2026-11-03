@@ -11,10 +11,12 @@ report is required before the new adapter can be constructed. Local P4 behavior 
 
 ## Required evidence and configuration
 
-Use a dedicated isolated bucket/root for positive and negative native probes first. Evidence must cover
-atomic complete-object publication, absence conditions, retained native version reads, current-key
-delete semantics, single-attempt responses, and the declared writer model. Do not infer these from
-S3 compatibility, accepted headers, ETags, size/mtime, or a passing mocked test.
+Use an isolated root for positive and negative native probes first. Both strategies require exact-connection
+atomic complete-object publication, native absence conditions and single-attempt response evidence. The full
+mutation strategy additionally requires retained native version reads, current-key delete semantics and a
+coordinated exclusive writer model. The restricted `createOnly` strategy accepts external writers and does
+not require bucket versioning. Do not infer capabilities from S3 compatibility, accepted headers, ETags,
+size/mtime, or a passing mocked test.
 
 ```dotenv
 FILE_COORDINATED_WRITES=true
@@ -29,7 +31,57 @@ uses its own private hashed namespace. **Only one gateway or processes sharing t
 spool/lock namespace may serve that connection.** Identical path strings on different machines are not
 shared fencing. A DB lease cannot fence provider requests; do not run this mode as an uncoordinated fleet.
 
-The strict JSON report contains these fields, with actual values and every capability assertion true:
+The strict JSON report selects one strategy. For restricted embedded uploads, use actual connection values
+and measured probe references:
+
+```json
+{
+  "connectionId": "default",
+  "endpoint": "https://verified-bucket-1234567890.cos.ap-guangzhou.myqcloud.com",
+  "bucket": "verified-bucket-1234567890",
+  "region": "ap-guangzhou",
+  "checkedAt": "2026-11-03T00:00:00Z",
+  "probeReference": "/secure/release-evidence/create-only-probes.json",
+  "createOnly": true,
+  "atomicPublish": true,
+  "conditionalCreate": true,
+  "singleGateway": true,
+  "multipartUploads": true,
+  "versionedReads": false,
+  "currentKeyDelete": false,
+  "coordinatedExclusiveWriter": false,
+  "legacyWritersDrained": false,
+  "signedMultipartParts": false
+}
+```
+
+`multipartUploads` requires evidence for native unpublished parts and absence enforcement on Complete,
+independent of ordinary PUT evidence. No bucket setting or existing object rewrite is required. This mode
+only creates absent file keys: replacement, mkdir, move, copy and delete are rejected. Existing unversioned
+files and implicit prefix folders remain usable; parents carry paths, not invented version tokens. Reads
+have no retained-version pinning, strong content ETags or `contentRevision`; `sourceModifiedAt` is unsupported.
+Native conditions prevent application overwrite at publication, without preventing later external edits.
+
+Initialize a create-only root after importing and comparing the current observed native/index tree:
+
+```bash
+cd backend
+go run ./cmd/eam storage-admit --owner-id 00000000-0000-0000-0000-000000000001 \
+  --evidence /secure/baseline-proof.json --physical-bytes 123456789 --dry-run
+# Review, then repeat without --dry-run before serving writes.
+```
+
+Do not add `--writers-quiesced` unless it is independently true; create-only admission does not require it.
+The binding's spool must still be empty before and after verification. Initial comparison is a matched
+observation, not a globally consistent snapshot. The JSON proof still needs `retainedVersionInventory` and
+the explicit physical total must cover current objects plus any history that actually exists. External tools
+may continue writing; synchronize their metadata changes into the index. Budgets retain the initial compared
+baseline plus application journal changes; reconcile does not update budget counters. External additions or
+deletions need a separately reviewed budget resynchronization, which is not implemented. Limits therefore do
+not claim exact total native usage across external writers.
+
+For the full versioned mutation strategy, omit `createOnly` or set it false and establish every capability
+assertion below. This strategy retains its exclusive-writer and retained-version requirements:
 
 ```json
 {
@@ -52,14 +104,16 @@ The strict JSON report contains these fields, with actual values and every capab
 The report is trusted deployment evidence, not a request to automatically claim those capabilities.
 When admitted COS object writes are enabled, legacy grant/native-action routes are gated before handlers,
 legacy browser upload/job/index/timeline writer services are not started, and the legacy storage bridge is
-read-only. This stops the same gateway from issuing new effects that bypass the durable guards; previously
-issued grants and already accepted remote requests still require independent drain/quiescence evidence.
+read-only. This stops the same gateway from issuing new effects that bypass the durable guards. In full
+mutation mode, previously issued grants and already accepted remote requests still require independent
+drain/quiescence evidence. Create-only mode relies on native absence conditions and does not assert a drain.
 Startup matches connection ID, endpoint, bucket and region exactly; COS endpoint is its configured
 `https://<bucket>.cos.<region>.myqcloud.com`. Root configuration/generation and owner remain bound in
 the actual driver identity. Secret rotation is separate from root identity. The file is bounded to 1 MiB,
 unknown fields and extra JSON values are rejected. Never store secrets in the report or commit it.
 
-After draining all legacy/native writers and importing the current native index, initialize each owner:
+For the full mutation strategy, after draining all legacy/native writers and importing the current native
+index, initialize each owner:
 
 ```bash
 cd backend
@@ -72,8 +126,8 @@ go run ./cmd/eam storage-admit --owner-id 00000000-0000-0000-0000-000000000001 \
 Object baseline evidence must contain a nonempty `retainedVersionInventory` reference. The explicit
 physical byte amount must include retained object versions/history and be at least current logical bytes;
 listing only current keys cannot compute it. Native/index comparison checks exact current names, kinds,
-size and parents. Read-only HEAD checks require actual non-null native version IDs and explicit versioned
-zero-byte folder markers; implicit-prefix-only folders remain readable but are not admitted mutation anchors.
+size and parents. In full mutation mode, read-only HEAD checks require actual non-null native version IDs and
+explicit versioned zero-byte folder markers; implicit-prefix-only folders are not admitted mutation anchors.
 The exact binding's spool must be empty before and after verification. Dry-run sends only provider reads,
 creates no spool state and writes no budget. Existing budgets are not reset. Local admission still measures
 its physical bytes and rejects this object-only override.
@@ -98,7 +152,9 @@ response can prove Applied automatically. A timeout, connection loss, truncated 
 process death after dispatch, or uncertain response remains `outcome_unknown` across restart. **HEAD showing
 the desired file or absence does not prove old requests terminal.** No polling, lease expiry, elapsed timeout,
 matching checksum or current object version releases that guard. A definite completed HTTP 412 is a
-precondition rejection; other errors do not become a safe rollback by guesswork.
+precondition rejection. COS HTTP 304 is also a precondition rejection for create-only PUT or multipart
+Complete requests that sent `If-None-Match: *`; a 304 for replacement or deletion remains unknown.
+Other errors do not become a safe rollback by guesswork.
 
 Retained receipts are monotonic evidence. If a database checkpoint says a dispatch started but the spool
 record is missing or restored to an older ready phase, recovery must remain unknown rather than use the
@@ -106,8 +162,9 @@ older state to retry/discard. Permanent unknown effects require explicit operato
 resolution; this release does not automatically resolve them from object inspection. Preserve spool and
 journal backups together. Do not delete a spool/lock directory to unblock a path.
 
-For confirmed success, read-only metadata refresh is tied to the acknowledged native version. It cannot
-attribute an earlier ambiguous write. Public checksum is null when HEAD/read metadata cannot prove a
+For full-mode confirmed success, read-only metadata refresh is tied to the acknowledged native version.
+Create-only mode records no version or strong content validator; later reads observe the current native path.
+Refresh cannot attribute an earlier ambiguous write. Public checksum is null when HEAD/read metadata cannot prove a
 verified digest, even though ingress replay still uses the durable server hash. This keeps the settled
 resource and later native-authoritative GET consistent without trusting arbitrary user metadata or ETags.
 `X-Source-Modified-At` is rejected for this initial object strategy: providers generally cannot set native
@@ -115,7 +172,8 @@ Last-Modified, and the adapter does not silently pretend that it did.
 
 ## Namespace and version restrictions
 
-Files and explicit standard folder markers need non-null retained VersionId evidence. Native version IDs
+In full mutation mode, files and explicit standard folder markers need non-null retained VersionId evidence.
+Native version IDs
 stay private; the wrapper provides the P4 bound native tree and verifies exact-version content reads.
 Folder marker versions are stable identity anchors as children change. The root is the configured owner
 binding, never an unversioned arbitrary provider prefix inferred to belong to a new owner.
@@ -134,7 +192,10 @@ or their history. Unknown allocations are retained for reviewed reconciliation.
 
 ## Physical budgets and remaining gates
 
-Object roots persist `RetainsVersions=true` in their immutable budget identity. A new version is charged in
+Full mutation roots persist `RetainsVersions=true` in their immutable budget identity. Create-only roots
+persist `CreateOnly=true` and `RetainsVersions=false`; this describes the admitted strategy, not proof that
+the provider has no historical bytes. Their baseline still includes any actual retained history. For full roots,
+a new version is charged in
 full even when it replaces an old logical file; current-key deletion releases logical size but not retained
 physical history. Copy/delete move ends at zero net logical growth while target copies add physical bytes.
 Gateway spool plus final version reserve two times admitted new bytes. Known partial charges consume only

@@ -88,6 +88,7 @@ type Descriptor struct {
 	NativeConditionalMutation bool
 	NativeTreeMove            bool
 	RetainsVersions           bool
+	CreateOnly                bool // native creates only; no replacement or destructive actions
 	Names                     NameRules
 }
 type NameRules struct {

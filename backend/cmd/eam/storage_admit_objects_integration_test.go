@@ -25,6 +25,16 @@ import (
 // This is the actual CLI, official S3 SDK and a native HTTP fixture. Provider
 // mutation methods are forbidden; the fixture cannot establish live COS guarantees.
 func TestStorageAdmitObjectsPostgresCLI(t *testing.T) {
+	for _, createOnly := range []bool{false, true} {
+		name := "versioned"
+		if createOnly {
+			name = "create-only"
+		}
+		t.Run(name, func(t *testing.T) { testStorageAdmitObjectsPostgresCLI(t, createOnly) })
+	}
+}
+
+func testStorageAdmitObjectsPostgresCLI(t *testing.T, createOnly bool) {
 	address := os.Getenv("EAM_TEST_DATABASE_URL")
 	if address == "" {
 		t.Skip("EAM_TEST_DATABASE_URL unset; disposable object baseline integration not run")
@@ -106,7 +116,7 @@ func TestStorageAdmitObjectsPostgresCLI(t *testing.T) {
 			}
 			w.Header().Set("Content-Length", fmt.Sprint(size))
 			w.Header().Set("ETag", `"opaque"`)
-			if key != prefix+"Empty/" || markerVersion {
+			if !createOnly && (key != prefix+"Empty/" || markerVersion) {
 				w.Header().Set("X-Amz-Version-Id", "native-version-"+fmt.Sprint(len(key)))
 			}
 			w.WriteHeader(200)
@@ -118,13 +128,24 @@ func TestStorageAdmitObjectsPostgresCLI(t *testing.T) {
 	}))
 	defer provider.Close()
 	admission := objectmutation.Admission{ConnectionID: "objects", Endpoint: provider.URL, Bucket: "fixture-bucket", Region: "test-region", CheckedAt: time.Now().UTC(), ProbeReference: "isolated-http-fixture", AtomicPublish: true, VersionedReads: true, ConditionalCreate: true, CurrentKeyDelete: true, CoordinatedExclusiveWriter: true, SingleGateway: true, LegacyWritersDrained: true}
+	if createOnly {
+		admission.CreateOnly = true
+		admission.VersionedReads = false
+		admission.CurrentKeyDelete = false
+		admission.CoordinatedExclusiveWriter = false
+		admission.LegacyWritersDrained = false
+	}
 	admissionFile := filepath.Join(root, "admission.json")
 	data, _ := json.Marshal(admission)
 	if err = os.WriteFile(admissionFile, data, 0600); err != nil {
 		t.Fatal(err)
 	}
 	proof := filepath.Join(root, "proof.json")
-	if err = os.WriteFile(proof, []byte(`{"writers":"drained","retainedVersionInventory":"verified-fixture-history-owner-root"}`), 0600); err != nil {
+	proofDocument := `{"writers":"drained","retainedVersionInventory":"verified-fixture-history-owner-root"}`
+	if createOnly {
+		proofDocument = `{"retainedVersionInventory":"unversioned-fixture-current-objects-no-retained-generations"}`
+	}
+	if err = os.WriteFile(proof, []byte(proofDocument), 0600); err != nil {
 		t.Fatal(err)
 	}
 	sqlDir, err := filepath.Abs("../../../sql")
@@ -168,7 +189,13 @@ func TestStorageAdmitObjectsPostgresCLI(t *testing.T) {
 	if err = db.QueryRow(ctx, `select jsonb_agg(to_jsonb(n) order by path)::text from nodes n where owner_id=$1::uuid`, owner).Scan(&before); err != nil {
 		t.Fatal(err)
 	}
-	args := []string{"storage-admit", "--owner-id", owner, "--writers-quiesced", "--evidence", proof}
+	args := []string{"storage-admit", "--owner-id", owner, "--evidence", proof}
+	if !createOnly {
+		if out, err := run(append(append([]string(nil), args...), "--physical-bytes", "20", "--dry-run")...); err == nil || !strings.Contains(out, "--writers-quiesced") {
+			t.Fatalf("versioned CLI admitted unquiesced writers: %v %s", err, out)
+		}
+		args = append(args, "--writers-quiesced")
+	}
 	for _, extra := range [][]string{{"--dry-run"}, {"--physical-bytes", "6", "--dry-run"}} {
 		if out, err := run(append(append([]string(nil), args...), extra...)...); err == nil {
 			t.Fatalf("underdeclared physical baseline admitted: %s", out)
@@ -177,7 +204,11 @@ func TestStorageAdmitObjectsPostgresCLI(t *testing.T) {
 	mu.Lock()
 	markerVersion = false
 	mu.Unlock()
-	if out, err := run(append(append([]string(nil), args...), "--physical-bytes", "20", "--dry-run")...); err == nil {
+	if out, err := run(append(append([]string(nil), args...), "--physical-bytes", "20", "--dry-run")...); createOnly {
+		if err != nil || !strings.Contains(out, "logical=7 physical=20") {
+			t.Fatalf("create-only CLI rejected unversioned current objects: %v %s", err, out)
+		}
+	} else if err == nil {
 		t.Fatalf("unversioned folder marker admitted: %s", out)
 	}
 	mu.Lock()
@@ -198,13 +229,13 @@ func TestStorageAdmitObjectsPostgresCLI(t *testing.T) {
 		t.Fatalf("object admission: %v %s", err, out)
 	}
 	var logical, physical int64
-	var retains bool
+	var retains, boundCreateOnly, drained bool
 	var evidence json.RawMessage
-	if err = db.QueryRow(ctx, `select logical_bytes,physical_bytes,(root_binding->>'RetainsVersions')::boolean,baseline->'Evidence' from file_budgets where owner_id=$1::uuid`, owner).Scan(&logical, &physical, &retains, &evidence); err != nil {
+	if err = db.QueryRow(ctx, `select logical_bytes,physical_bytes,(root_binding->>'RetainsVersions')::boolean,coalesce((root_binding->>'CreateOnly')::boolean,false),(baseline->>'LegacyWritersDrained')::boolean,baseline->'Evidence' from file_budgets where owner_id=$1::uuid`, owner).Scan(&logical, &physical, &retains, &boundCreateOnly, &drained, &evidence); err != nil {
 		t.Fatal(err)
 	}
-	if logical != 7 || physical != 20 || !retains || !strings.Contains(string(evidence), "retainedVersionInventory") {
-		t.Fatalf("wrong retained physical baseline %d %d %t %s", logical, physical, retains, evidence)
+	if logical != 7 || physical != 20 || retains != !createOnly || boundCreateOnly != createOnly || drained != !createOnly || !strings.Contains(string(evidence), "retainedVersionInventory") {
+		t.Fatalf("wrong object baseline logical=%d physical=%d retains=%t createOnly=%t drained=%t evidence=%s", logical, physical, retains, boundCreateOnly, drained, evidence)
 	}
 	if _, err = db.Exec(ctx, `update file_budgets set physical_bytes=25 where owner_id=$1::uuid`, owner); err != nil {
 		t.Fatal(err)

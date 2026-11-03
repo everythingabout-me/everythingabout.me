@@ -54,6 +54,9 @@ func (d *Driver) validateUploadIntent(in storage.WriteIntent) error {
 	if err := validateRecoveryIntent(in); err != nil {
 		return err
 	}
+	if d.options.Admission.CreateOnly && !in.Conditions.Absent {
+		return fail("unsupported", in.Target)
+	}
 	if d.UploadMaxFileBytes() == 0 || in.Size > d.UploadMaxFileBytes() || in.SourceModifiedAt != nil || in.Digest != nil || len(d.binding.ContentRoot)+len(in.Target) > 1024 {
 		return fail("unsupported", in.Target)
 	}

@@ -9,6 +9,9 @@ bin/
 # Task worktrees (see the Git workflow in AGENTS.md)
 .worktrees/
 
+# Local upload admission evidence and durable publication state (not a cache)
+.eam/
+
 # Local environment and caches
 .env
 .env.local

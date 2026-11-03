@@ -7,6 +7,17 @@ import (
 	"everythingabout.me/backend/internal/config"
 )
 
+func TestAdmissionQuiescenceOnlyOptionalForCreateOnly(t *testing.T) {
+	for _, tc := range []struct {
+		quiesced, createOnly, valid bool
+	}{{false, false, false}, {true, false, true}, {false, true, true}, {true, true, true}} {
+		err := validateAdmissionQuiescence(tc.quiesced, tc.createOnly)
+		if (err == nil) != tc.valid {
+			t.Fatalf("unexpected quiescence validation for %+v: %v", tc, err)
+		}
+	}
+}
+
 func TestObjectAdmissionRequiresExplicitRetainedPhysicalEvidence(t *testing.T) {
 	valid := json.RawMessage(`{"writers":"drained","retainedVersionInventory":"inventory://owner/root/generations-20261102"}`)
 	for _, backend := range []string{"cos", "s3"} {

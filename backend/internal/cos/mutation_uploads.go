@@ -52,7 +52,7 @@ func (b *mutationBackend) CompleteMultipart(ctx context.Context, in objectmutati
 	}
 	result, response, err := b.client.Object.CompleteMultipartUpload(ctx, in.Key, id, options)
 	if err != nil {
-		return objectmutation.Object{}, mutationWriteError(in.Key, err)
+		return objectmutation.Object{}, mutationPublishError(in, err)
 	}
 	if response == nil || response.StatusCode < 200 || response.StatusCode >= 300 || result == nil {
 		return objectmutation.Object{}, storage.NewError("outcome_unknown", storage.Path(in.Key), nil)
