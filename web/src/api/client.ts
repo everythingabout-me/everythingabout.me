@@ -107,8 +107,11 @@ export interface FilePrincipal {
   csrfToken?: string;
 }
 
+export type FileUploadTransport = "embedded" | "cos-signed";
+
 export interface FileUploadSession {
   id: string;
+  transport?: FileUploadTransport;
   path: string;
   state: "open" | "committing" | "committed" | "outcome_unknown" | "failed" | "aborted" | "expired";
   size: number;
@@ -131,6 +134,14 @@ export interface FileUploadReceipt {
   number: number;
   size: number;
   sha256: string;
+  checksumSource?: "client-sha256-cos-md5";
+}
+
+export interface FileUploadAuthorization {
+  method: "PUT";
+  url: string;
+  headers: Record<string, string>;
+  expiresAt: string;
 }
 
 export interface FileUploadReceipts {
@@ -148,6 +159,7 @@ export interface FileCapabilities {
   strongContentValidators: boolean;
   thumbnails: boolean;
   uploads: boolean;
+  uploadTransport?: FileUploadTransport;
   sourceModifiedAt: boolean;
   checksums: string[];
   maxFileBytes: number | null;
@@ -456,6 +468,85 @@ function filePost<T>(resource: string, body?: unknown, headers?: HeadersInit, si
   });
 }
 
+function signedPartTarget(grant: FileUploadAuthorization, md5: string): { url: string; headers: Record<string, string> } {
+  const prefix = "/api/files/transfer/";
+  if (grant?.method !== "PUT" || typeof grant.url !== "string" || !grant.url.startsWith(prefix)
+    || /[\\\\#\s\u0000-\u001f\u007f]/.test(grant.url) || /%(?:0[0-9a-f]|1[0-9a-f]|7f|5c)/i.test(grant.url)) throw new Error("Invalid signed upload target.");
+  const parsed = new URL(grant.url, "https://upload.invalid");
+  if (parsed.origin !== "https://upload.invalid" || !parsed.pathname.startsWith(prefix)
+    || parsed.pathname.length === prefix.length || !parsed.search || parsed.hash) throw new Error("Invalid signed upload target.");
+  if (!Number.isFinite(Date.parse(grant.expiresAt)) || Date.parse(grant.expiresAt) <= Date.now()) throw new Error("The signed upload authorization has expired.");
+  const entries = Object.entries(grant.headers ?? {});
+  const headers: Record<string, string> = {};
+  for (const [name, value] of entries) {
+    const lower = name.toLowerCase();
+    if (!["content-md5", "content-type"].includes(lower) || typeof value !== "string" || headers[lower] !== undefined) throw new Error("Invalid signed upload headers.");
+    headers[lower] = value;
+  }
+  if (headers["content-md5"] !== md5 || headers["content-type"] !== "application/octet-stream") throw new Error("Invalid signed upload headers.");
+  return { url: grant.url, headers };
+}
+
+function sendSignedPart(target: { url: string; headers: Record<string, string> }, blob: Blob, signal?: AbortSignal,
+  onProgress?: (progress: UploadProgress) => void): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) { reject(new DOMException("Upload canceled", "AbortError")); return; }
+    const xhr = new XMLHttpRequest();
+    let settled = false;
+    const finish = (error?: unknown) => {
+      if (settled) return;
+      settled = true;
+      signal?.removeEventListener("abort", abort);
+      if (error) reject(error); else resolve();
+    };
+    const abort = () => { xhr.abort(); finish(new DOMException("Upload canceled", "AbortError")); };
+    xhr.open("PUT", target.url);
+    // Same-origin cookies are still sent by browsers; EdgeOne must strip them
+    // before COS. Never attach application Authorization or CSRF to this request.
+    xhr.withCredentials = false;
+    for (const [name, value] of Object.entries(target.headers)) xhr.setRequestHeader(name, value);
+    xhr.upload.onprogress = (event) => {
+      if (!settled && !signal?.aborted) onProgress?.({ loaded: event.loaded, total: blob.size });
+    };
+    // COS returns XML/empty bodies, not application JSON receipts. Its reply is
+    // only a transport outcome; the application confirms the native part below.
+    xhr.onload = () => finish(xhr.status >= 200 && xhr.status < 300 ? undefined : new ApiError("signed part transfer failed", xhr.status));
+    xhr.onerror = () => finish(new ApiError("upload connection interrupted", 0));
+    xhr.ontimeout = () => finish(new ApiError("upload request timed out", 0));
+    xhr.onabort = () => finish(new DOMException("Upload canceled", "AbortError"));
+    signal?.addEventListener("abort", abort, { once: true });
+    try { xhr.send(blob); } catch (error) { finish(error); }
+  });
+}
+
+async function uploadSignedPart(id: string, number: number, blob: Blob, signal?: AbortSignal,
+  onProgress?: (progress: UploadProgress) => void): Promise<FileUploadReceipt> {
+  if (signal?.aborted) throw new DOMException("Upload canceled", "AbortError");
+  const { uploadDigests } = await import("./uploadDigests");
+  const digests = await uploadDigests(blob);
+  if (signal?.aborted) throw new DOMException("Upload canceled", "AbortError");
+  const part = `/uploads/${encodeURIComponent(id)}/parts/${number}`;
+  const grant = await filePost<FileUploadAuthorization>(`${part}/authorize`, { size: blob.size, ...digests }, undefined, signal);
+  const target = signedPartTarget(grant, digests.md5);
+  const confirm = async () => {
+    const receipt = await filePost<FileUploadReceipt>(`${part}/confirm`, undefined, undefined, signal);
+    if (receipt.number !== number || receipt.size !== blob.size || receipt.sha256 !== digests.sha256
+      || receipt.checksumSource !== "client-sha256-cos-md5") throw new Error("The confirmed upload part identity changed.");
+    return receipt;
+  };
+  try { return await confirm(); }
+  catch (error) {
+    if (!(error instanceof ApiError) || error.status !== 409 || error.code !== "part_pending") throw error;
+  }
+  try { await sendSignedPart(target, blob, signal, onProgress); }
+  catch (error) {
+    if (signal?.aborted) throw error;
+    // A lost COS reply may hide durable success. Always confirm before allowing
+    // a caller to obtain a new grant and replay this immutable part.
+  }
+  return confirm();
+}
+
 export function isFileOperation(result: FileResource | FileOperation | void): result is FileOperation {
   return Boolean(result && "state" in result && "id" in result);
 }
@@ -657,7 +748,10 @@ export const api = {
     return filePost("/uploads", { ...input, path: filePath(input.path) }, { "Idempotency-Key": key }, signal);
   },
 
-  async uploadPart(id: string, number: number, blob: Blob, signal?: AbortSignal, onProgress?: (progress: UploadProgress) => void): Promise<FileUploadReceipt> {
+  async uploadPart(id: string, number: number, blob: Blob, signal?: AbortSignal, onProgress?: (progress: UploadProgress) => void,
+    transport: FileUploadTransport = "embedded"): Promise<FileUploadReceipt> {
+    if (transport === "cos-signed") return uploadSignedPart(id, number, blob, signal, onProgress);
+    if (transport !== "embedded") throw new Error("Unsupported upload transport.");
     const token = await fileCSRF();
     if (signal?.aborted) throw new DOMException("Upload canceled", "AbortError");
     return new Promise((resolve, reject) => {

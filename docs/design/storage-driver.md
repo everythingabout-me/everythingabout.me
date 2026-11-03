@@ -338,16 +338,26 @@ chunk before irreversible offset append if native checksum rejection is not atom
 after ambiguity and keep bounded spool as needed. Credential refresh does not extend native session retention;
 cap public expiry or retain enough data to recreate it. Explicitly fail unrecoverable native session loss.
 
-The official COS delivery uses native multipart reception, not whole-file gateway assembly at commit. Native
-allocation identity, immutable part hashes and native part receipts live in the owner/root-bound database
-journal so an independent receiver and application can use separate filesystems. A receiver may buffer one
-bounded part to verify it before writing its native slot; it must not retain the full file as the publication
-source. SealStage verifies the manifest without reading file bytes; Publish issues native completion and
-settles the normal staged-write result. Final-path condition and uncertain-outcome guarantees in §3 still apply.
+The official COS delivery uses signed UploadPart requests carried through EdgeOne ordinary forwarding. The
+application binds size, client SHA-256 assertion and Content-MD5 before issuing a short-lived exact request;
+only UploadPart is authorized, never completion, deletion or arbitrary writes. The browser receives an
+origin-relative transfer URL and required headers, with no signing secret or broad temporary credentials.
+COS verifies the signature and Content-MD5; the application independently lists native parts and checks exact
+size and admitted ETag=MD5 semantics before accepting the service receipt. The client SHA-256 remains an
+assertion, not an application-computed checksum. Receipts expose checksumSource accordingly. Do not relabel
+COS ETags as SHA-256 or claim cryptographic verification that the provider did not perform.
 
-Self-hosted Local writes keep their embedded durable reception/publication implementation. Other provider
-adapters remain optional future integrations; do not introduce a universal token/offset abstraction merely to
-anticipate them. Public clients continue using one numbered-part protocol without STS or client presigning.
+Self-hosted embedded reception computes SHA-256 while receiving and keeps the existing native multipart or
+Local staging path. Both transports retain the same immutable service-part identity and staged publication
+journal. Signed grants can survive client cancellation/revocation until their actual expiry, and provider
+requests may outlive it; cleanup retains unresolved physical liability and final-path guards as required.
+Complete is still server-controlled and native success is required before index/result settlement. No full
+file is downloaded or assembled at commit. Native allocation and part metadata are owner/root-bound database
+records, while the application's final-publication ledger retains its admitted durability requirements.
+
+Other provider adapters remain optional future integrations. Do not introduce a universal offset/token
+abstraction merely to anticipate them, or expose broad STS credentials. The user-confirmed same-origin signed
+part transport supersedes earlier blanket no-presigning/no-native-parameter language for official COS only.
 
 ## 5. Backend mappings and conformance
 

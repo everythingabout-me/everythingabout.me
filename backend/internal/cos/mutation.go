@@ -16,7 +16,10 @@ import (
 	sdk "github.com/tencentyun/cos-go-sdk-v5"
 )
 
-type mutationBackend struct{ client *sdk.Client }
+type mutationBackend struct {
+	client *sdk.Client
+	signer *sdk.Client
+}
 
 var _ objectmutation.Backend = (*mutationBackend)(nil)
 
@@ -34,7 +37,7 @@ func (c *Client) MutationBackend() (objectmutation.Backend, error) {
 	client.Conf.RetryOpt.Count = 1
 	client.Conf.RetryOpt.Interval = 0
 	client.Conf.RetryOpt.AutoSwitchHost = false
-	return &mutationBackend{client: client}, nil
+	return &mutationBackend{client: client, signer: c.uploadSigner}, nil
 }
 
 type mutationTransport struct{ base http.RoundTripper }

@@ -170,7 +170,8 @@ Access:  %s
 Scope:   %s
 Expires: %s
 
-Use Authorization: Bearer %s on every API request.
+Use Authorization: Bearer %s on application control requests and embedded uploads.
+Signed transfer requests use only their returned scoped signature and headers, as described below.
 First call GET /me to confirm the connection and its current permissions.
 PATCH /me manages the Connect identity; POST /events authors events.
 Use only the configured API origin for metadata and bytes. Never use provider credentials or URLs.
@@ -218,7 +219,7 @@ create a session with the exact file size and honor its admission result and ret
 A rejected admission grants no upload authority. Do not retry with guessed read permissions.
 
 Small content PUT is optional: use the following example only after capabilities reports
-maxSinglePutBytes > 0 and the content fits that limit. External-ingress deployments report
+maxSinglePutBytes > 0 and the content fits that limit. EdgeOne signed deployments report
 maxSinglePutBytes=0; use the session flow below for every file, including short text.
 Write-only connections with unavailable capabilities should use sessions as well.
 Save a short text when content PUT is enabled (create only):
@@ -234,11 +235,21 @@ For resumable files within the advertised limits:
   Idempotency-Key: <unique-session-key>
   {"path":%q,"size":12345,"mediaType":"image/jpeg","condition":{"mode":"create"}}
 
-Use the returned id, partSize, partCount and maxParallelism. Split exactly at partSize;
-the final part has the exact remainder. PUT each part's bytes with Content-Length to:
+Use the returned id, partSize, partCount, maxParallelism and transport. Split exactly at partSize;
+the final part has the exact remainder. For transport=embedded, PUT each part with Content-Length to:
   /api/files/uploads/{id}/parts/{number}
+For transport=cos-signed, compute the part's lowercase hexadecimal SHA-256 and base64 MD5, then POST:
+  /api/files/uploads/{id}/parts/{number}/authorize
+  {"size":<exact bytes>,"sha256":"<hex>","md5":"<base64>"}
+Use the returned method=PUT, origin-relative /api/files/transfer/ URL and exact Content-MD5/Content-Type.
+Do not add application Authorization, CSRF or cookie headers to this signed byte PUT; never replace its
+host, path or signed query, and never follow a redirect to another origin. COS verifies this narrow signature.
+POST /api/files/uploads/{id}/parts/{number}/confirm to recover an earlier native success before resending.
+On 409 part_pending, send the signed part then confirm again, including after a lost PUT reply. Only the
+application's durable confirm receipt counts as acknowledgement. checksumSource=client-sha256-cos-md5 means
+the SHA-256 is a client assertion and COS verifies MD5, not an independently server-computed SHA-256.
 Numbers start at 1; a zero-byte file has no parts. Persist the id and recover receipts with
-GET /api/files/uploads/{id}/parts. Identical-byte retries are safe; changed bytes conflict.
+GET /api/files/uploads/{id}/parts. Identical-byte retries are safe; changed digests conflict.
 After every part is acknowledged:
   POST /api/files/uploads/{id}/commit
 Commit may return 202 with Location pointing to /api/files/operations/{operationId}.
@@ -246,7 +257,8 @@ Poll that same-origin Operation until state is succeeded; failed, cancelled or
 outcome_unknown is not success. Resume status with GET /api/files/uploads/{id}.
 A 409 operation_in_progress may include operationId: wait for that exact Operation to
 succeed, then retry admission before sending bytes; unavailable status keeps the wait.
-Use Authorization: Bearer on every request, including parts, commit and Operation status.
+Use Authorization: Bearer on application control requests, embedded parts, commit and Operation status.
+Signed /api/files/transfer/ byte requests use only the returned COS signature/query and headers.
 Choose a unique path. When file reads are permitted, to replace deliberately read its contentRevision and use
 If-Match: "<contentRevision>" for PUT or condition.mode=replace plus contentRevision
 for a session. A write-only connection must obtain an authorized revision separately or use create-only.

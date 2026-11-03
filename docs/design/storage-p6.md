@@ -32,6 +32,13 @@ for the same File object and receipt identity, then released on completion/cance
 original File and no previously captured intent waits for reselection rather than inventing MIME metadata.
 Local roots advertise sourceModifiedAt support; browser timestamps are sent only when explicitly supported.
 
+Official sessions declare cos-signed transport: the shared client lazily computes per-part SHA-256/MD5,
+authorizes an exact short-lived request, confirms any earlier native result, sends bytes through the same-origin
+EO transfer path and obtains a storage-verified confirm receipt. The COS XML/empty upload reply is not a public
+receipt. No application Authorization/CSRF header is attached to the byte PUT; EO strips ambient browser cookies
+and provider operation-selector headers. Signed receipt checksumSource identifies client SHA-256 plus
+COS-verified MD5, not server-computed SHA-256. Embedded transport retains its existing server hash boundary.
+
 Cancellation aborts the current byte request, then reconciles/aborts the exact server session. Lost allocation
 ACKs are recovered before cancellation. Committing work uses Operation cancellation. Already-committed races
 retrieve and report the saved result; they cannot hide or delete published content. Cancellation identity
@@ -62,7 +69,7 @@ routes alone does not establish stale-writer fencing.
 
 ## Validation
 
-All 95 Web tests pass after the parallel-upload extension. Web tests exercise the actual transformed queue/client/persistence source, not an independently implemented
+All 132 Web tests pass after the signed-transport extension. Web tests exercise the actual transformed queue/client/persistence source, not an independently implemented
 model. They cover lost create/part/commit ACKs, immutable receipt verification, refresh/reselection, owner
 isolation, bounded fairness, folder merge/dependencies, exact deletion waits, timeout/unmount, partial failures,
 terminal retry and cancellation races. Path tests cover absolute resources and literal encoded-looking names.
@@ -91,5 +98,6 @@ P0–P5 code foundations and P6 client/routing cutover are implemented. Live pro
 admission and old-authority drain remain unverified. P7 fresh-install/upgrade, metadata restore, no-database
 native exit and measured deployment performance/release acceptance remain outstanding. The subsequent
 [native upload extension](native-upload-deployment.md) replaces object whole-file staging/PUT at commit with
-native multipart, shared metadata and optional external ingress. Small content PUT retains its separate limit;
-real provider admission/probes and actual gateway/CDN deployment remain distinct from implementation tests.
+native multipart and signed COS part requests through ordinary EdgeOne forwarding. Small content PUT retains
+its separate limit and is disabled in edgeone mode. The superseded standalone upload gateway has been removed;
+real provider admission/IAM probes and live EO routing remain distinct from implementation tests.

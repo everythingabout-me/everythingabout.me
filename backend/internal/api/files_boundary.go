@@ -244,7 +244,7 @@ func (s *Server) fileWrap(fn fileHandler) http.HandlerFunc {
 	}
 }
 
-var pendingFileWorkflow = regexp.MustCompile(`^/api/files/(uploads/[^/]+(/parts(/[0-9]+)?|/commit)?|operations/[^/]+(/cancel)?)$`)
+var pendingFileWorkflow = regexp.MustCompile(`^/api/files/(uploads/[^/]+(/parts(/[0-9]+(/authorize|/confirm)?)?|/commit)?|operations/[^/]+(/cancel)?)$`)
 
 func (s *Server) filesHandler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -289,6 +289,10 @@ func (s *Server) filesHandler() http.Handler {
 					}
 				case strings.HasSuffix(r.URL.Path, "/commit"):
 					routes["POST"] = s.handleFilesCommitUpload
+				case strings.HasSuffix(r.URL.Path, "/authorize"):
+					routes["POST"] = s.handleFilesAuthorizeUploadPart
+				case strings.HasSuffix(r.URL.Path, "/confirm"):
+					routes["POST"] = s.handleFilesConfirmUploadPart
 				case strings.Contains(r.URL.Path, "/parts/"):
 					routes["PUT"] = s.handleFilesUploadPart
 				case strings.HasSuffix(r.URL.Path, "/parts"):

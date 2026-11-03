@@ -3,6 +3,7 @@ package storage
 import (
 	"context"
 	"io"
+	"time"
 )
 
 // UploadPart identifies immutable, durably stored native part bytes. Handle is
@@ -36,4 +37,27 @@ type NumberedUploadWriter interface {
 	ReceivePart(context.Context, WriteIntent, UploadPart, io.Reader, UploadMetadata, func(UploadPart) (UploadPart, error)) (UploadPart, error)
 	SealStage(context.Context, WriteIntent, []UploadPart, UploadMetadata, Checkpoint) (Staged, error)
 	DiscardParts(context.Context, WriteIntent, UploadMetadata) error
+}
+
+// SignedUploadPart binds the client SHA-256 assertion and the COS-verified MD5.
+// SHA-256 is not server-computed when file bytes bypass the application.
+type SignedUploadPart struct {
+	Number int
+	Size   int64
+	SHA256 string
+	MD5    string
+}
+type SignedPartGrant struct {
+	Method    string
+	URL       string // private provider URL; API rewrites it to the reserved same-origin prefix
+	Headers   map[string]string
+	ExpiresAt time.Time
+}
+
+// SignedNumberedUploadWriter delegates byte authentication to COS while keeping
+// immutable identities, native completion and receipt acceptance server-owned.
+type SignedNumberedUploadWriter interface {
+	SignedUploadSupported() bool
+	AuthorizePart(context.Context, WriteIntent, SignedUploadPart, UploadMetadata, time.Time) (SignedPartGrant, error)
+	ConfirmPart(context.Context, WriteIntent, int, UploadMetadata, func(UploadPart) (UploadPart, error)) (UploadPart, error)
 }

@@ -27,7 +27,7 @@ func TestFilesNativeUploadsPostgresIndependentReceiverAndCommit(t *testing.T) {
 	receiverConfig := *f.cfg
 	receiverConfig.Storage = f.cfg.Storage
 	receiverConfig.Storage.ObjectSpoolRoot = t.TempDir()
-	f.cfg.FileUploadIngress = "external"
+	receiverConfig.FileUploadIngress = "embedded"
 	backend, err := storagebackend.New(&receiverConfig)
 	if err != nil {
 		t.Fatal(err)
@@ -52,7 +52,7 @@ func TestFilesNativeUploadsPostgresIndependentReceiverAndCommit(t *testing.T) {
 		req := httptest.NewRequest("PUT", "https://files.example"+uploadRoute(id, fmt.Sprintf("/parts/%d", n)), bytes.NewReader(data)).WithContext(f.ctx)
 		req.Header.Set("Authorization", "Bearer "+f.tokens[0])
 		response := httptest.NewRecorder()
-		receiver.UploadGatewayHandler().ServeHTTP(response, req)
+		receiver.Handler().ServeHTTP(response, req)
 		return response
 	}
 	data := bytes.Repeat([]byte("x"), int(5*filesUploadPartSize+13))

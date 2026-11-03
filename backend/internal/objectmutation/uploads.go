@@ -33,6 +33,8 @@ type nativePartReceipt struct {
 	UploadID  string
 	ETag      string
 	Uncertain bool
+	MD5       string `json:",omitempty"`
+	Signed    bool   `json:",omitempty"`
 }
 type nativeStage struct {
 	UploadID string
@@ -209,7 +211,7 @@ func (d *Driver) ReceivePart(ctx context.Context, in storage.WriteIntent, part s
 				return e
 			}
 		}
-		if candidate.Number != part.Number || candidate.Size != part.Size || candidate.SHA256 != hash || candidate.UploadID != session.UploadID {
+		if candidate.Signed || candidate.Number != part.Number || candidate.Size != part.Size || candidate.SHA256 != hash || candidate.UploadID != session.UploadID {
 			return fail("part_conflict", in.Target)
 		}
 		if candidate.ETag == "" {

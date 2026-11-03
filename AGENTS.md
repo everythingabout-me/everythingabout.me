@@ -263,10 +263,12 @@ Variants: `Committed locally main@abc1234, not pushed` / `Not committed (tests f
 ## Do not
 
 - Commit `.env`, secrets, `bin/`, `.gocache/`, or `web/dist/` (all gitignored).
-- Introduce new client-to-provider transfers, provider credential responses, or provider download redirects.
-  The accepted target is one configured API origin for control and file bytes, with streaming/CDN/gateways
-  behind it (see `docs/design/storage.md`). Existing STS/presigned routes are legacy pending migration;
-  the former prohibition on proxying bytes is superseded.
+- Never expose signing secrets, broad STS credentials, provider download redirects or arbitrary upload origins.
+  The official COS transport is the user-approved exception to earlier no-presigning/no-provider-parameter rules:
+  the app signs an exact short-lived UploadPart request under the same API origin, EdgeOne ordinary forwarding
+  sends its bytes to COS, COS validates the signature/Content-MD5, and the app verifies native part state before
+  recording a receipt. No edge function or separate upload server is required. Self-hosting retains embedded
+  reception. See `docs/design/storage.md` and `docs/design/native-upload-deployment.md`.
 - Delete or rewrite an existing migration; only append.
 - Change the 5173 port or the `/api` proxy in `web/vite.config.ts` — COS CORS and the development flow depend
   on it.

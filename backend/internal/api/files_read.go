@@ -664,6 +664,15 @@ func (s *Server) handleFilesCapabilities(w http.ResponseWriter, r *http.Request,
 	if numbered, ok := f.Driver.(storage.NumberedUploadWriter); ok && numbered.UploadMaxFileBytes() == 0 {
 		uploadsReady = false
 	}
+	transport := "embedded"
+	if s.cfg.EdgeOneUploadIngress() {
+		transport = "cos-signed"
+		signed, ok := f.Driver.(storage.SignedNumberedUploadWriter)
+		if !ok || !signed.SignedUploadSupported() {
+			uploadsReady = false
+		}
+		checksums = []string{"md5"}
+	}
 	var partBytes, idleExpiry, maxLifetime any
 	parallelism := 0
 	if uploadsReady {
@@ -677,7 +686,7 @@ func (s *Server) handleFilesCapabilities(w http.ResponseWriter, r *http.Request,
 	quota, reservations := filesUsageFields(usage, f.Scope == "/" && actual == "/")
 	return writeFilesJSON(w, 200, map[string]any{
 		"path": actual, "read": true, "write": ready, "range": d.RangeRead, "pinnedRead": d.PinnedRead, "strongContentValidators": d.PinnedRead,
-		"thumbnails": false, "uploads": uploadsReady, "checksums": checksums, "sourceModifiedAt": ready && !d.RetainsVersions,
+		"thumbnails": false, "uploads": uploadsReady, "uploadTransport": transport, "checksums": checksums, "sourceModifiedAt": ready && !d.RetainsVersions,
 		"maxFileBytes": maxFile, "maxSinglePutBytes": singlePut, "maxPartBytes": partBytes,
 		"pagination":           map[string]any{"defaultLimit": filesDefaultLimit, "maxLimit": filesMaxLimit},
 		"names":                map[string]any{"caseSensitive": d.Names.CaseSensitive, "maxSegmentBytes": d.Names.MaxSegmentBytes, "maxPathBytes": d.Names.MaxPathBytes, "maxDepth": d.Names.MaxDepth},

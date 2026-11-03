@@ -1,115 +1,144 @@
-# Native uploads and receiver deployment
+# Native uploads through EdgeOne and embedded reception
 
-This implements the user-confirmed upload scope: the official service uses COS; self-hosting uses an embedded
-receiver with Local or configured object storage. Every client uses one origin and the same `/api/files`
-numbered-part protocol. Other cloud-drive protocols are future work, not a dependency of this delivery.
+The official service uses COS. File bytes travel from the browser through ordinary EdgeOne forwarding directly
+to COS, which validates a narrowly scoped signature issued by the application. There is no edge function, extra
+upload server or `eam upload-gateway` command. Self-hosting defaults to byte reception inside `eam server`.
+
+This user-approved signed transport supersedes the earlier prohibition on client-visible native upload
+parameters. Clients still use one origin and receive no signing secret, broad STS credential or provider SDK.
+The returned request is an opaque short-lived capability for one exact part, not a general COS API credential.
 
 ## Byte and control paths
 
 | Deployment | File-part bytes | Control and completion |
 |---|---|---|
-| Official / external ingress | Browser -> same-origin front router -> `eam upload-gateway` -> unpublished COS multipart | Browser -> application API -> native completion, index and saved result |
-| Self-hosted COS | Browser -> `eam server` embedded receiver -> unpublished COS multipart | The same process performs completion and index settlement |
-| Self-hosted Local | Browser -> `eam server` -> private durable local part storage | The same process verifies and publishes through the Local driver |
+| Official, FILE_UPLOAD_INGRESS=edgeone | Browser -> same-origin `/api/files/transfer/` -> EdgeOne -> COS UploadPart | Browser -> application authorize/confirm/commit; application -> COS ListParts/Complete; index/result |
+| Self-hosted COS, embedded | Browser -> application part PUT -> native unpublished multipart | Application-controlled Complete and index/result |
+| Self-hosted Local, embedded | Browser -> application part PUT -> isolated durable Local staging | Application verifies and publishes using the Local driver |
 
-COS/S3 numbered parts reach native storage before the public receipt is acknowledged. Commit freezes complete
-coverage, seals the native manifest without reading the file body, performs native completion once, and settles
-the existing Operation/index/result. It does not assemble a whole local file or send a second whole-file PUT.
-Commit is not merely a database update: native completion and its uncertain outcomes still require journaling.
-Local publication retains its existing durable staging implementation; it is not required to emulate COS RPCs.
+COS parts are unpublished until server-controlled completion. Commit verifies exact acknowledged coverage,
+seals the manifest and performs native completion once, followed by index/result settlement. It never assembles
+or uploads another whole-file body. It is a native publication operation, not just a database update.
 
-An individual native part may be buffered within the assigned part bound to hash/verify its immutable identity
-before writing a provider slot. This buffer is not a full-file publication source. Native upload IDs, provider
-ETags, credentials and metadata handles remain private. Public receipts contain number, exact size and SHA-256.
+Both transports retain four concurrent files, up to four parts per file (maximum sixteen browser data requests),
+8 MiB parts and at most 10000 parts (80000 MiB before budgets or lower storage limits). Small single-content PUT
+has its separate default 32 MiB/object maximum 5 GiB policy and is disabled in edgeone mode. Zero-byte sessions
+have no parts and use the existing guarded zero-byte publication at commit.
 
-## Parallelism and recovery
+## Signed part lifecycle
 
-The browser advances four file tasks and up to four parts per file, capped by the session's maxParallelism and
-ordering. This allows at most sixteen simultaneous data requests; browser/network transport may use fewer
-connections. Bounded part batches yield to later files, rather than reserving all file slots for an entire large
-file. Progress combines unique acknowledged bytes and active part bytes. Both embedded and external receivers
-apply a 60-second read-idle deadline, renewed before each body read and cleared after handling; this is not a
-60-second total upload limit. Metadata lock admission reserves database connection capacity for receipt commits.
-The four-by-four browser limit is a scheduling ceiling; gateway memory, database capacity and native provider
-limits may apply backpressure below sixteen active native requests. Size the receiver's connection pool and
-bandwidth from measured load rather than assuming sixteen requests guarantee a particular throughput.
+Sessions declare `transport: "cos-signed"` or `"embedded"`. For a signed part:
 
-Transient part failures receive at most three attempts with 250/500 ms backoff. A lost ACK is resolved by querying
-the original session and validating its receipt before replay. Original create idempotency keys and exact session
-identities survive refresh; a reselected File must match every acknowledged part hash. Cancellation aborts the
-active batch and reconciles/aborts the exact server session. A committing or unknown native effect never permits
-a fresh publication merely because a request timed out.
+1. The client computes the assigned Blob's SHA-256 and base64 MD5. It POSTs size, sha256 and md5 to
+   `/api/files/uploads/{id}/parts/{number}/authorize` with ordinary application authentication/CSRF.
+2. The application checks current authorization, root/session state and exact part geometry. Under the durable
+   part fence, it binds size, client SHA-256 assertion and Content-MD5 before issuing authority. A different
+   digest for the same slot conflicts. It creates/reuses the recorded native multipart allocation.
+3. The application returns `{method:"PUT",url,headers,expiresAt}`. The URL is origin-relative below
+   `/api/files/transfer/`. Its signature binds the final COS Host, object path, PUT method, uploadId,
+   partNumber, Content-Length, Content-Type and Content-MD5. Expiry is five minutes. The browser cannot set a
+   different Host; EdgeOne rewrites it to exactly the Host used for signing. The URL exposes the native upload
+   parameters needed for this one request but no secret key.
+4. The client first calls POST `/api/files/uploads/{id}/parts/{number}/confirm` to recover an already stored
+   part after a lost reply. `409 part_pending` means no verified native part is ready yet. Only then does it
+   PUT the exact Blob with the returned Content-MD5 and Content-Type through EO. COS checks signature and MD5.
+5. After transfer (including an ambiguous network error), confirm queries COS server-side ListParts for the
+   recorded native upload. Exact part size and the admitted native ETag=MD5 semantics must match the bound
+   candidate. Browser-supplied ETag or a successful browser XHR alone is never sufficient. Only then does the
+   application persist the public part receipt. Duplicate confirm returns that receipt.
+6. Normal commit freezes complete service receipts, rechecks current authorization and target/parent conditions,
+   performs guarded native Complete, and settles the existing Operation/index. No Complete/Delete authority is
+   delegated to the browser.
 
-Native allocation identities and immutable part metadata are owner/root/configuration-bound records in Postgres
-(migration `025_native_upload_metadata.sql`). Separate application and receiver machines share this metadata,
-not a filesystem containing file bytes. Per-session/per-part concurrency coordination applies across receiver
-processes. The application's existing publication ledger still requires the admitted durable application-side
-metadata/lock namespace; receiver storage is independent. Keep both database and native session evidence for
-restore/recovery; a database rollback is not proof that native parts never existed.
+A signed receipt includes `checksumSource: "client-sha256-cos-md5"`. Its SHA-256 is the client assertion bound
+before the grant; the application did not read the file body and cannot claim to have independently computed
+or verified SHA-256. COS validates Content-MD5, and confirm checks native size/ETag. This mode requires exact-bucket
+`signedMultipartParts: true` capability evidence in addition to `multipartUploads: true`: Content-MD5 enforcement,
+ETag=MD5 without incompatible encryption/transformation, signature scoping and native part listing must all be
+verified. ETags are never relabeled as SHA-256. Embedded receipts retain server-computed SHA-256. MD5 provides
+COS's supported content-integrity binding, not SHA-256 collision resistance against chosen malicious content.
 
-## Self-hosted embedded receiver
+COS verifies the signature and Content-MD5; application confirmation verifies storage state. Grants must be
+signed with separate `COS_UPLOAD_SIGN_SECRET_ID` / `COS_UPLOAD_SIGN_SECRET_KEY`, never the broad mutation key.
+The signing principal's effective policy must allow **only name/cos:UploadPart** on the configured bucket/root,
+with no inherited UploadPartCopy, PutObject, CompleteMultipartUpload, AbortMultipartUpload or DeleteObject.
+An extra unsigned x-cos-copy-source header can select a different COS operation on a similar PUT URL; signed
+fields alone do not prove absence of extra headers. Verify negative action-policy probes against the actual
+signing principal, and strip all x-cos-* request headers on the EO transfer rule unless a specifically reviewed
+header is required. A distinct SecretID is enforced by code, but effective IAM scope is a deployment proof.
 
-`FILE_UPLOAD_INGRESS=embedded` is the default. Run `eam server` as usual after migrations, backend configuration,
-explicit coordinated-write admission and verified logical/physical budgets. No additional service or CDN is
-required. The application receives bytes in this mode. COS/S3 require exact-connection `multipartUploads: true`
-evidence before their numbered native multipart route is enabled; adding this field is an operator assertion
-based on actual positive and negative provider probes, not a substitute for those probes.
+## EdgeOne configuration
 
-Parts remain 8 MiB, with four requests per session and at most 10000 parts (80000 MiB before lower provider or
-budget limits). Native numbered object uploads are independent of `FILE_MAX_SINGLE_PUT_BYTES`. The small direct
-content PUT retains its separate configured default 32 MiB / object maximum 5 GiB policy. Local native limits
-and available budgets still apply. Capabilities report the actual active limits. Zero-byte sessions have no
-parts and use their existing guarded zero-byte native publication.
+Configure `FILE_UPLOAD_INGRESS=edgeone` on the existing application with the admitted COS connection, explicit
+FILE_COOKIE_ORIGINS and stable application identity. The old `external` mode is rejected. Do not deploy another
+Go process. All control routes, including authorize, confirm, receipts and commit, continue to reach the app.
 
-## Official / external receiver
+At the existing public origin, configure an EO rule matching **PUT** with the exact literal prefix
+`/api/files/transfer/`. Its source is the explicit COS bucket HTTPS endpoint. Do not use a browser redirect.
 
-1. Apply all migrations, including native upload metadata. Establish the exact root's admission and native
-   multipart evidence, retained-version inventory and legacy-writer drain before serving new writes.
-2. Configure the application with `FILE_UPLOAD_INGRESS=external`. It still serves authentication, create/list/
-   status/receipts/commit/abort and Operations. Part PUT and simple content PUT return a Problem before reading
-   their bodies; maxSinglePutBytes is zero. External clients must use sessions.
-3. Run `eam upload-gateway` on a separate host with its own listen address, the same database, stable APP_SECRET,
-   approved public FILE_COOKIE_ORIGINS, storage connection/generation/owner-root mapping, provider credentials
-   and multipart admission evidence. It serves only exact numbered-part PUT routes, with the same live auth,
-   scope, Origin and CSRF validation. It does not serve login, the SPA, upload control endpoints or workers.
-4. At the one public HTTPS origin, route `PUT /api/files/uploads/{id}/parts/{number}` to the gateway. Route all
-   control requests to the application. Do not configure a fallback that forwards a failed upload to the
-   application. Do not redirect the browser to a bucket URL or another origin.
-5. Disable caching for upload/control endpoints. Preserve the method, full path, Content-Length, content type,
-   Origin, Cookie, Authorization, X-CSRF-Token and optional Content-Digest. Set body limits/timeouts for the
-   advertised part size; disable proxy full-request buffering when streaming ingress is required. Keep private
-   service origins inaccessible to unauthorized clients except through the same authenticated boundaries.
-6. Verify that a part causes native UploadPart before its 201 receipt, and that commit sends native completion
-   but no object-body PUT/download/assembly on the application host. Test owner isolation, dropped receipts,
-   receiver restart, cross-host commit, abort races and native unknown outcomes before enabling real traffic.
+| Forwarding setting | Required behavior |
+|---|---|
+| Origin | The actual configured COS bucket endpoint, not the application server |
+| Origin Host | Exact bucket host used by the server-side COS signer |
+| Path rewrite | Remove only the literal `/api/files/transfer` prefix, leaving the leading `/` and exact encoded object path |
+| Query parameters | Preserve every signed query parameter, uploadId and partNumber; do not sort/decode/re-encode or append parameters covered by signing |
+| Method/body | Preserve PUT and original binary bytes |
+| Required headers | Preserve Content-Length, Content-MD5 and Content-Type exactly |
+| App/provider selector headers | Remove Cookie, application Authorization, X-CSRF-Token, all x-cos-* headers and unrelated application identity headers before COS |
+| Cache | Disable caching for transfers and all upload control routes |
+| Redirects/fallback | No redirects, URL normalization or fallback to application ingress; route failure must fail the upload |
+| Body limit/timeouts | At least the advertised 8 MiB part size and suitable transfer timeouts; the site's 800 MB ordinary upload limit is sufficient |
 
-A CDN/load balancer provides same-origin routing. It must support the required methods, request bodies and
-timeouts. Ordinary download cache support is insufficient. This repository does not provision a CDN account,
-DNS, TLS or a cloud receiver host; those remain deployment configuration.
+The byte request intentionally carries COS authorization in the signed query, not the application Bearer header.
+Control requests use the normal Cookie/CSRF or explicit Bearer rules. XHR does not explicitly add application
+headers to byte requests, but same-origin cookies may be attached by the browser; the EO stripping rule is
+required. Do not send application credentials to the COS origin. Redact signed queries from access logs and
+analytics; do not cache grant responses or place a signed URL in a persistent/public document.
 
-## Publication and cleanup guarantees
+The app refuses all requests under `/api/files/transfer` and refuses ordinary file-body PUTs in edgeone mode,
+returning `503 edgeone_route_required` before body reads. This prevents a missing EO rule from silently consuming
+application bandwidth. Client validation rejects cross-origin/protocol-relative URLs and unexpected methods,
+headers or transfer paths. EO rules must preserve special filenames including `+`, spaces, `%`, `?`, `#` and
+Unicode. A literal encoded-looking filename must not be decoded twice.
 
-Native multipart stays unpublished until commit at the original readable path. The captured target/parent and
-current authorization are checked before completion, with admitted native conditions. Reusing a part number
-with different bytes is rejected even after a failed or ambiguous earlier attempt. Successful native response
-plus a durable service receipt is required before acknowledging that part.
+Private COS origin read authorization is not the upload credential: the per-part signature supplies that
+permission. Do not configure EO to replace it with an unrelated read-only Authorization header. Rule availability
+and exact UI/action names depend on the account/plan. These requirements describe the necessary transformations;
+this repository does not provision the live EO site, DNS/TLS or attest that a specific account's rule is active.
 
-Publication guards also serialize commit against receiving parts. Native physical reservation is
-`2*S + 4*min(S, 8 MiB)` for file size S, covering native multipart/final coexistence and bounded replay buffers;
-Local retains its existing conservative staging reservation. A lost native part response can leave an older
-request uncertain even after a same-byte retry succeeds. If such a session is aborted before definitive native
-completion, cleanup retains physical liability for provider/operator reconciliation rather than pretending
-Abort alone proves all older native requests terminal.
+References: [COS request signatures](https://cloud.tencent.com/document/product/436/7778),
+[Upload Part](https://cloud.tencent.com/document/api/436/7750),
+[EO Host rewrite](https://edgeone.ai/zh/document/46965),
+[EO origin request parameters](https://edgeone.ai/zh/document/52036),
+[EO ordinary upload size](https://cloud.tencent.com/document/product/1552/70782).
+The edge-function 1 MB limit does not apply because no edge function is used.
 
-Final completion is sent once per guarded publication attempt. Ambiguous final effects retain the existing
-outcome_unknown state and path guard; HEAD alone does not prove old effects terminal. Cancellation does not
-remove a committed file. Cleanup aborts only the recorded unpublished upload and never deletes the final path.
-Lost allocation replies still require provider multipart lifecycle/recovery evidence; do not claim exactly-once
-allocation or blindly expire guards for unknown final effects. Provider multipart lifecycle rules must retain
-acknowledged parts for at least the advertised session lifetime (up to seven days). A lost native upload is never
-silently replaced underneath acknowledged receipts. Unit and SDK-fixture integration tests do not constitute
-positive/negative capability evidence for a real COS bucket.
+## Embedded reception and recovery
 
-Existing P4 object single-PUT sessions/metadata must be drained or explicitly migrated before changing storage
-admission on a live connection. Route removal and configuration changes do not revoke old native authority.
-See [the authority-drain runbook](storage-p6-backend.md) and [driver guarantees](storage-driver.md).
+`FILE_UPLOAD_INGRESS=embedded` remains the self-hosted default. The app receives each part, computes SHA-256,
+and persists Local bytes or native COS/S3 parts before acknowledging the receipt. Native metadata remains
+owner/root/configuration bound in Postgres (migration025); embedded byte handling has a 60-second read-idle
+limit, not a total upload timeout. The application's admitted publication metadata/locks remain durable.
+
+The browser retains four-by-four scheduling, combined progress, bounded retries and exact session/create-key
+recovery. It verifies receipt hashes against a reselected File before skipping bytes. Signed retries always
+reconcile provider state through confirm before retransmission; an unknown confirm grants no durable ACK.
+Cancellation aborts browser requests and the exact server session/Operation, never a committed readable file.
+
+Issued signed requests cannot be revoked merely by logout, application cancellation or expiry of the session
+cookie. They authorize only the bound part of the old unpublished native upload. Future grants/confirm/commit
+still require current application authorization. Cleanup aborts recorded native allocations and retains physical
+liability for outstanding signed authority/uncertain native requests, rather than treating wall-clock expiry as
+proof that provider work is terminal. Final-path unknown outcomes retain their existing guard; no repeated
+Complete or timeout-based unlock is introduced. Native publication remains server-controlled.
+
+Provider lifecycle must retain acknowledged native parts for the advertised session lifetime (up to seven days),
+and handle orphaned allocations after a lost initiation reply. Do not recreate an allocation beneath acknowledged
+receipts after provider loss. Drain existing sessions and old issued authority before changing transport or
+admission. Keep database, root bindings and application publication ledger recoverable; restored metadata may
+be behind actual native effects. See [authority drain](storage-p6-backend.md) and [driver contract](storage-driver.md).
+
+Validation uses disposable databases, SDK/EO forwarding fixtures and browser tests. A local forwarding fixture
+can verify signature/path/header contracts, missing/tampered grants and app byte isolation, but is not evidence
+that the live EdgeOne site or real COS bucket has been configured correctly. Run a scoped positive/negative
+upload probe on the actual deployment before enabling production signed grants.

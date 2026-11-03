@@ -1,45 +1,27 @@
 package config
 
-import (
-	"fmt"
+import "fmt"
 
-	"everythingabout.me/backend/internal/filecontract"
-)
+// EdgeOneUploadIngress sends signed file-part bytes through ordinary same-origin
+// EdgeOne forwarding to COS. No application receiver or edge function handles them.
+func (c *Config) EdgeOneUploadIngress() bool { return c.FileUploadIngress == "edgeone" }
 
-// ExternalUploadIngress separates byte reception from the application HTTP process.
-// Both processes still use the same public origin and durable upload database.
-func (c *Config) ExternalUploadIngress() bool { return c.FileUploadIngress == "external" }
+// ExternalUploadIngress identifies modes in which the app must refuse byte PUTs.
+func (c *Config) ExternalUploadIngress() bool { return c.EdgeOneUploadIngress() }
 
 func (c *Config) ValidateUploadIngress() error {
 	switch c.FileUploadIngress {
 	case "", "embedded":
 		return nil
-	case "external":
-		if !c.Storage.CoordinatedWrites || c.BackendName() == "local" {
-			return fmt.Errorf("external upload ingress requires admitted COS or S3 coordinated writes")
+	case "edgeone":
+		if !c.Storage.CoordinatedWrites || c.BackendName() != "cos" {
+			return fmt.Errorf("edgeone upload ingress requires admitted COS coordinated writes")
+		}
+		if c.COS.UploadSignSecretID == "" || c.COS.UploadSignSecretKey == "" || c.COS.UploadSignSecretID == c.COS.SecretID {
+			return fmt.Errorf("edgeone ingress requires separate COS_UPLOAD_SIGN_SECRET_ID and COS_UPLOAD_SIGN_SECRET_KEY limited to UploadPart")
 		}
 		return nil
 	default:
-		return fmt.Errorf("FILE_UPLOAD_INGRESS must be embedded or external")
+		return fmt.Errorf("FILE_UPLOAD_INGRESS must be embedded or edgeone; external upload gateways are no longer supported")
 	}
-}
-
-// ValidateUploadGateway validates the restricted receiver without requiring mail
-// settings: a gateway has no login, account management, web or background workers.
-func (c *Config) ValidateUploadGateway() error {
-	if err := c.ValidateUploadIngress(); err != nil {
-		return err
-	}
-	if c.AppSecret == "" {
-		return fmt.Errorf("APP_SECRET must match the application deployment")
-	}
-	for _, origin := range c.FileCookieOrigins {
-		if _, err := filecontract.NewCookieMutationPolicy(origin); err != nil {
-			return fmt.Errorf("FILE_COOKIE_ORIGINS requires explicit HTTP(S) origins without paths")
-		}
-	}
-	if !c.Storage.CoordinatedWrites || c.BackendName() == "local" {
-		return fmt.Errorf("upload-gateway requires admitted COS or S3 coordinated writes")
-	}
-	return c.ValidateStorage()
 }

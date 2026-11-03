@@ -46,17 +46,26 @@ func filesUploadStateError(state fileops.UploadState) error {
 	}
 	return nil
 }
-func filesUploadResource(u fileops.Upload) map[string]any {
+func (s *Server) filesUploadResource(u fileops.Upload) map[string]any {
 	var intent storage.WriteIntent
 	_ = json.Unmarshal(u.Operation.Intent, &intent)
 	var result any
 	if len(u.Operation.Result) > 0 {
 		result = json.RawMessage(u.Operation.Result)
 	}
-	return map[string]any{"id": u.ID, "path": "/" + string(intent.Target), "state": u.State, "size": intent.Size, "partSize": u.PartSize, "partCount": u.PartCount, "maxParallelism": u.MaxParallelism, "ordering": "any", "nextPart": nil, "receivedParts": u.ReceivedParts, "receivedBytes": u.ReceivedBytes, "createdAt": u.CreatedAt.UTC(), "expiresAt": u.ExpiresAt.UTC(), "partsUrl": "/api/files/uploads/" + u.ID + "/parts", "commitUrl": "/api/files/uploads/" + u.ID + "/commit", "operationId": u.Operation.ID, "result": result}
+	transport := "embedded"
+	if s.cfg.EdgeOneUploadIngress() {
+		transport = "cos-signed"
+	}
+	return map[string]any{"transport": transport, "id": u.ID, "path": "/" + string(intent.Target), "state": u.State, "size": intent.Size, "partSize": u.PartSize, "partCount": u.PartCount, "maxParallelism": u.MaxParallelism, "ordering": "any", "nextPart": nil, "receivedParts": u.ReceivedParts, "receivedBytes": u.ReceivedBytes, "createdAt": u.CreatedAt.UTC(), "expiresAt": u.ExpiresAt.UTC(), "partsUrl": "/api/files/uploads/" + u.ID + "/parts", "commitUrl": "/api/files/uploads/" + u.ID + "/commit", "operationId": u.Operation.ID, "result": result}
 }
 func filesUploadReceipt(p fileops.PartReceipt) map[string]any {
-	return map[string]any{"number": p.Number, "size": p.Size, "sha256": p.SHA256}
+	out := map[string]any{"number": p.Number, "size": p.Size, "sha256": p.SHA256}
+	var provenance struct{ Signed bool }
+	if json.Unmarshal([]byte(p.Handle), &provenance) == nil && provenance.Signed {
+		out["checksumSource"] = "client-sha256-cos-md5"
+	}
+	return out
 }
 func filesUploadMaxSize(native fileops.NativeActions) int64 {
 	max := int64(filesUploadMaxParts) * filesUploadPartSize
@@ -128,6 +137,12 @@ func (s *Server) handleFilesCreateUpload(w http.ResponseWriter, r *http.Request,
 	if err != nil {
 		return err
 	}
+	if s.cfg.EdgeOneUploadIngress() {
+		signed, ok := native.(storage.SignedNumberedUploadWriter)
+		if !ok || !signed.SignedUploadSupported() {
+			return fc.NewProblem(422, "unsupported_option", "Signed COS parts require explicit provider admission evidence.")
+		}
+	}
 	if numbered, ok := native.(storage.NumberedUploadWriter); ok && numbered.UploadMaxFileBytes() == 0 {
 		return fc.NewProblem(422, "unsupported_option", "Native multipart uploads require explicit provider admission evidence.")
 	}
@@ -146,7 +161,7 @@ func (s *Server) handleFilesCreateUpload(w http.ResponseWriter, r *http.Request,
 		return filesMutationProblem(e)
 	} else if found {
 		w.Header().Set("Location", "/api/files/uploads/"+old.ID)
-		return writeFilesJSON(w, 200, filesUploadResource(old))
+		return writeFilesJSON(w, 200, s.filesUploadResource(old))
 	}
 	intent := client
 	parentName := path.Dir(p.Relative())
@@ -210,7 +225,7 @@ func (s *Server) handleFilesCreateUpload(w http.ResponseWriter, r *http.Request,
 		return filesMutationProblem(err)
 	}
 	w.Header().Set("Location", "/api/files/uploads/"+u.ID)
-	return writeFilesJSON(w, 201, filesUploadResource(u))
+	return writeFilesJSON(w, 201, s.filesUploadResource(u))
 }
 func (s *Server) filesUploadContext(r *http.Request, f *fileRequest) (fileops.NativeActions, fileops.Root, fileops.Actor, fileops.Upload, error) {
 	native, root, actor, err := s.fileMutationContext(r.Context(), f)
@@ -228,7 +243,7 @@ func (s *Server) handleFilesGetUpload(w http.ResponseWriter, r *http.Request, f 
 	if err != nil {
 		return err
 	}
-	return writeFilesJSON(w, 200, filesUploadResource(u))
+	return writeFilesJSON(w, 200, s.filesUploadResource(u))
 }
 func (s *Server) handleFilesListUploads(w http.ResponseWriter, r *http.Request, f *fileRequest) error {
 	_, root, actor, err := s.fileMutationContext(r.Context(), f)
@@ -262,7 +277,7 @@ func (s *Server) handleFilesListUploads(w http.ResponseWriter, r *http.Request, 
 	}
 	resources := make([]any, 0, len(items))
 	for _, u := range items {
-		resources = append(resources, filesUploadResource(u))
+		resources = append(resources, s.filesUploadResource(u))
 	}
 	return writeFilesJSON(w, 200, map[string]any{"items": resources, "nextCursor": next})
 }

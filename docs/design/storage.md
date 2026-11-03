@@ -11,25 +11,30 @@
 ## 1. Two layers, one public origin
 
 The API layer owns user authentication, authorization, search/indexing, quota, transfer sessions and operation
-coordination. The storage layer exposes real files and folders through local disk, S3/COS, cloud drives,
-WebDAV or NAS. Clients use one API origin and no provider SDK, credential or transfer URL.
+coordination. The current delivery targets official COS and self-hosted Local/COS; other storage adapters remain
+optional. Clients use one API origin and no provider SDK, signing secret or broad STS credentials. The official
+EdgeOne upload mode is an explicit exception to the previous prohibition on client-visible provider parameters:
+clients receive a short-lived signed part request under the same origin, containing the required native upload
+parameters but no key material. Public file identity remains the native path.
 
 All clients use `/api/files`: Web, iOS, Android, CLI and third parties. There is no browser-only file API.
 Explicit Bearer authentication takes precedence; invalid Authorization never falls back to cookies. Without
 Authorization, the session cookie may authenticate, with CSRF validation on mutations. Authorization/file
 services are shared. Files/folders are addressed only by paths; database/provider IDs remain private.
 There is no version path segment. Hosted origin is `https://everythingabout.me`; self-hosted origin
-is the user's domain or LAN endpoint. The official service uses COS with an independent upload receiver behind
-that same origin. File-part bytes travel from the browser through the receiver to unpublished COS multipart
-state; they do not cross the application server. The application owns admission, authorization, durable receipts,
-commit and index settlement. A CDN may route the byte path to the receiver; ordinary download caching alone
-is not an upload implementation.
+is the user's domain or LAN endpoint. The official service uses `FILE_UPLOAD_INGRESS=edgeone`: the application
+checks the user, target and quota, then signs an exact COS UploadPart request. The browser sends that request
+to a reserved path on the same public origin. EdgeOne ordinary forwarding removes the fixed route prefix,
+sets the COS bucket Host and forwards the unchanged signed query, required headers and body directly to COS.
+COS authenticates the request and validates its bound Content-MD5. No edge function, separate upload server,
+full-file local assembly or application-server byte relay is involved. Application control endpoints verify
+COS part state, persist receipts and retain sole authority to complete/publish and settle the index.
 
 Self-hosting defaults to an embedded receiver in the application process, without a CDN or another service.
-It accepts the same numbered-part protocol and writes to the configured Local or object storage. With COS,
-parts are uploaded during reception; with Local, bytes remain isolated until native publication. Neither mode
-requires clients to know provider URLs, credentials or native upload handles. Other cloud-drive/NAS adapters
-are future integrations, not a requirement for the current official COS and self-hosted Local/COS delivery.
+It accepts the same upload-session lifecycle and writes to configured Local or object storage. With COS,
+parts are uploaded during reception; with Local, bytes remain isolated until native publication. Embedded
+clients receive no native handles or signatures. The official signed transport is selected by session metadata;
+clients do not select arbitrary storage providers or upload origins.
 
 ## 2. Native readable layout is a requirement
 
@@ -150,15 +155,17 @@ committed path merely because its final database result was lost.
 ## 6. Performance within the portability boundary
 
 Prefer local streaming/range seeks, native rename, server-side copy/reflink, connection reuse, bounded
-buffers/backpressure, native multipart and measured fair scheduling across files and parts. A public upload
-still uses one same-origin numbered-part protocol; native multipart/offset details stay inside the driver.
+buffers/backpressure, native multipart and measured fair scheduling across files and parts. Clients share one
+session/receipt/commit lifecycle with explicit embedded or same-origin signed transport. Provider request details
+remain private except the narrow signed request needed for EO ordinary forwarding.
 
 For COS numbered uploads, durable parts must reach native unpublished multipart storage during the upload
-phase. Do not wait until commit to assemble a full local file and send it in a second whole-file PUT. Bounded
-per-part buffering for hashing and immutable retry identity is permitted. Application and independent receiver
-share durable session/native-part metadata, not a filesystem containing uploaded file bytes. Commit verifies
-coverage and current conditions, performs native multipart completion once, then settles the index/result; it
-is a control/publication operation, not merely a database update and not another full-byte transfer.
+phase. Do not wait until commit to assemble a full local file and send it in a second whole-file PUT. Embedded
+reception may buffer one bounded part for server hashing. Official signed mode keeps file bytes entirely off the
+application and binds a client digest tuple before issuing authority; COS validates Content-MD5 and the app checks
+native size/ETag before a provenance-labeled receipt. Session/native-part metadata live in Postgres, with no
+extra receiver machine. Commit verifies coverage and current conditions, completes native multipart once and
+settles the index/result; it is not merely a database update or another full-byte transfer.
 
 The browser schedules four files concurrently and up to four numbered parts per file, respecting each session's
 maxParallelism and ordering. This permits at most sixteen simultaneous browser part requests. Yield between

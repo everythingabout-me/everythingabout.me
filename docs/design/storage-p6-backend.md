@@ -77,9 +77,12 @@ out of reports. Retain application/account metadata backups independently from n
    COS/S3 capability report, durable shared spool/lock namespace, version inventory and declared coordinated
    writer model as specified by P4. Real provider positive/negative probes remain a deployment gate. Configure
    `FILE_COOKIE_ORIGINS` explicitly for session mutations. Review advertised limits. The subsequent
-   [native upload extension](native-upload-deployment.md) requires explicit multipart capability evidence
-   and supports independent byte ingress; the original P5 whole-file staging/PUT limit is historical.
-   Drain old upload sessions before changing their native strategy or admitted connection identity.
+   [native upload extension](native-upload-deployment.md) requires multipart capability evidence. Official
+   COS uses edgeone mode with narrow per-part signatures, separate UploadPart-only signing credentials and
+   native confirm before receipts; no extra receiver process is needed. Prove unsigned action-selector headers
+   cannot turn the signing principal's grant into UploadPartCopy/other writes. Drain existing sessions and
+   issued authority before changing transport, native strategy or admitted connection identity. The old P5
+   whole-file staging/PUT limit is historical.
 6. **Initialize the verified root budget before serving writes.** Run `storage-admit --owner-id ...
    --writers-quiesced --evidence /secure/baseline-proof.json --dry-run`, review it and repeat without dry-run.
    Object admission additionally requires `--physical-bytes` covering retained versions and the required

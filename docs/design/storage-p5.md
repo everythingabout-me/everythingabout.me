@@ -6,6 +6,9 @@
 > assembly/PUT at commit. Local retains durable local staging. Native multipart requires explicit connection
 > evidence; its numbered-upload limit is independent of the small single-PUT limit. P6 now uses four file
 > slots with up to four concurrent parts per file. The public session/receipt/Operation contract remains.
+> Official COS now uses same-origin signed part requests through ordinary EdgeOne forwarding, not an extra
+> upload server or edge function. Authorize/confirm supplement the embedded part PUT; signed receipt provenance
+> distinguishes client SHA-256 assertions from COS-verified MD5. See the current deployment document above.
 
 P5 implements the shared `/api/files/uploads` lifecycle on explicitly admitted Local/COS/S3 roots.
 The existing browser sign/confirm receipt is a separate legacy protocol; switching Web, media and generated

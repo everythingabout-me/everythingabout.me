@@ -5,52 +5,40 @@ import "testing"
 func TestUploadIngressDefaultsAndValidation(t *testing.T) {
 	isolatedConfigEnv(t)
 	cfg, err := Load()
-	if err != nil || cfg.FileUploadIngress != "embedded" || cfg.ExternalUploadIngress() {
+	if err != nil || cfg.FileUploadIngress != "embedded" || cfg.ExternalUploadIngress() || cfg.EdgeOneUploadIngress() {
 		t.Fatalf("default ingress: %+v %v", cfg, err)
 	}
-	for _, bad := range []string{"gateway", "External", "external ", "false"} {
+	for _, bad := range []string{"external", "gateway", "EdgeOne", "edgeone ", "false"} {
 		t.Setenv("FILE_UPLOAD_INGRESS", bad)
 		if _, err = Load(); err == nil {
 			t.Fatalf("invalid ingress %q accepted", bad)
 		}
 	}
-	t.Setenv("FILE_UPLOAD_INGRESS", "external")
+	t.Setenv("FILE_UPLOAD_INGRESS", "edgeone")
 	if _, err = Load(); err == nil {
-		t.Fatal("external ingress accepted without coordinated storage")
+		t.Fatal("edgeone ingress accepted without coordinated storage")
 	}
 	t.Setenv("FILE_COORDINATED_WRITES", "true")
 	t.Setenv("FILE_OBJECT_ADMISSION_FILE", "/synthetic/admission.json")
 	t.Setenv("FILE_OBJECT_SPOOL_ROOT", "/synthetic/spool")
-	cfg, err = Load()
-	if err != nil || !cfg.ExternalUploadIngress() {
-		t.Fatalf("explicit external ingress: %v", err)
-	}
-	t.Setenv("STORAGE_BACKEND", "local")
 	if _, err = Load(); err == nil {
-		t.Fatal("external ingress accepted for local filesystems")
+		t.Fatal("edgeone ingress accepted without isolated part signing credentials")
 	}
-}
-
-func TestUploadGatewayValidatesStorageAndIdentityWithoutMail(t *testing.T) {
-	cfg := &Config{AppEnv: "production", AppSecret: "shared-app-identity", FileCookieOrigins: []string{"https://files.example"}, Storage: Storage{Backend: "cos", CoordinatedWrites: true, ObjectAdmissionFile: "/synthetic/admission.json", ObjectSpoolRoot: "/synthetic/gateway-spool"}, COS: COS{SecretID: "synthetic-id", SecretKey: "synthetic-secret", Region: "test-region", Bucket: "synthetic-123456"}}
-	if err := cfg.ValidateUploadGateway(); err != nil {
-		t.Fatal("gateway should not require SES:", err)
+	t.Setenv("COS_UPLOAD_SIGN_SECRET_ID", "upload-only-id")
+	t.Setenv("COS_UPLOAD_SIGN_SECRET_KEY", "upload-only-secret")
+	cfg, err = Load()
+	if err != nil || !cfg.EdgeOneUploadIngress() || !cfg.ExternalUploadIngress() {
+		t.Fatalf("explicit edgeone ingress: %v", err)
 	}
-	if err := cfg.ValidateServer(); err == nil {
-		t.Fatal("ordinary production server lost its SES requirement")
+	t.Setenv("COS_SECRET_ID", "upload-only-id")
+	if _, err = Load(); err == nil {
+		t.Fatal("edgeone signer reused general storage credentials")
 	}
-	for _, mutate := range []func(*Config){
-		func(c *Config) { c.AppSecret = "" },
-		func(c *Config) { c.FileCookieOrigins = []string{"*"} },
-		func(c *Config) { c.Storage.CoordinatedWrites = false },
-		func(c *Config) { c.Storage.Backend = "local" },
-		func(c *Config) { c.Storage.ObjectSpoolRoot = "relative" },
-		func(c *Config) { c.COS.SecretKey = "" },
-	} {
-		copy := *cfg
-		mutate(&copy)
-		if err := copy.ValidateUploadGateway(); err == nil {
-			t.Fatal("incomplete gateway configuration accepted")
+	t.Setenv("COS_SECRET_ID", "control-id")
+	for _, backend := range []string{"local", "s3"} {
+		t.Setenv("STORAGE_BACKEND", backend)
+		if _, err = Load(); err == nil {
+			t.Fatalf("edgeone ingress accepted for %s", backend)
 		}
 	}
 }

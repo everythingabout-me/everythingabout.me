@@ -10,11 +10,9 @@ Next.js.
 Current browser and Bearer upload implementation:
 
 ```
-Official:   client --same-origin part PUT--> upload gateway --> unpublished COS multipart
-            client --create/status/commit--> application API --> Complete + index/result
-Self-host:  client --same public protocol--> embedded receiver --> Local or native COS/S3
-                                             |
-                                             +--> Postgres sessions/receipts/native metadata
+Official:   client --same-origin signed part PUT--> EdgeOne ordinary forwarding --> COS
+            client --create/authorize/confirm/commit--> application API --> COS control + index
+Self-host:  client --session + part PUT--> embedded application receiver --> Local or native COS/S3
 ```
 
 Native COS/S3 parts are durable before acknowledgement. Commit seals metadata and completes native publication,
@@ -28,7 +26,9 @@ See [native uploads and receiver deployment](docs/design/native-upload-deploymen
 The [architecture](docs/design/storage.md) defines two layers: a unified API consumed by every app,
 and storage drivers for local filesystems, S3/COS, cloud drives, WebDAV, and NAS. Control requests and file
 bytes use one configured origin: `https://everythingabout.me` when hosted, or the operator's domain/LAN
-endpoint when self-hosted. Clients do not receive provider URLs, credentials, or SDK requirements.
+endpoint when self-hosted. No provider SDK or signing secret reaches clients. Official uploads receive an
+origin-relative short-lived signed COS part request; EO forwards it and COS authenticates it. Native request
+parameters are an explicit approved exception to earlier blanket no-presigning rules.
 
 The [new file API](docs/api/api.md) and [driver contract](docs/design/storage-driver.md) are clean-slate
 specifications with no legacy-client compatibility requirement. The actual storage retains complete native
@@ -73,7 +73,10 @@ adds shared native metadata (migration 025), direct unpublished object parts and
 Parts are 8 MiB with four concurrent requests per session and at most 10000 parts. Explicit `multipartUploads`
 connection evidence is required; numbered object uploads no longer inherit the default 32 MiB single-PUT policy.
 The browser advances four files and up to four parts per file. `FILE_UPLOAD_INGRESS=embedded` keeps reception in
-`eam server`; `external` routes part PUTs to `eam upload-gateway` and prevents byte reception on the app server.
+`eam server`. Official `edgeone` mode signs exact parts and verifies COS state after ordinary EO forwarding;
+no edge function or additional upload server is needed. It requires `signedMultipartParts` evidence in addition
+to native multipart admission. Receipts label client SHA-256 assertions plus COS-verified MD5 distinctly from
+embedded server-computed SHA-256.
 P6 [switches Web/media/generated instructions](docs/design/storage-p6.md) to the same resources and Problems,
 removes browser storage SDKs, and retires legacy file routes with 410. [Old authority drain](docs/design/storage-p6-backend.md)
 is a separate deployment gate; issued grants and in-flight effects were not revoked by this code change.
@@ -100,16 +103,14 @@ The backend is one binary that serves both the JSON API and the built frontend:
 ```bash
 make build          # build web/dist, then compile bin/eam
 ./bin/eam server    # production: / serves the SPA, /api/* serves the API
-# Official external ingress: run separately on the upload host, behind the same origin:
-# FILE_UPLOAD_INGRESS=external on the application; router sends only part PUTs here.
-# ADDR=127.0.0.1:8081 ./bin/eam upload-gateway
 ```
 
-The gateway shares authentication/session/native-part metadata in Postgres and the exact storage binding,
-but does not require a shared file-byte filesystem. It serves no SPA, sign-in or control APIs. Configure the
-same public cookie origins and stable APP_SECRET. CDN/front routing must preserve auth/CSRF headers and upload
-bodies without caching. External ingress disables simple content PUT; use resumable sessions for all uploads.
-See [the deployment steps](docs/design/native-upload-deployment.md#official--external-receiver).
+For the official COS deployment set `FILE_UPLOAD_INGRESS=edgeone`. Configure the existing EO site to forward
+only PUT `/api/files/transfer/…` directly to the COS origin after removing the fixed prefix, preserving signed
+query/headers/body and setting the bucket Host. All application control requests stay on `eam server`. No edge
+function or extra upload machine is required. App byte ingress fails closed if EO routing is missing; short
+content PUT is disabled in this mode. See [EO deployment requirements](docs/design/native-upload-deployment.md#edgeone-configuration).
+The previous `external` mode and extra gateway command have been removed.
 
 In development the frontend runs on Vite (5173, proxying `/api` to 8080) and the backend runs on Go (8080):
 
@@ -324,13 +325,16 @@ The table lists the active shared file resources and retained account/Connect en
 | GET | `/api/files/search?q=&path=&kind=&mediaType=` | Authorized indexed search with scoped opaque cursors |
 | GET | `/api/files/me` · `/api/files/capabilities` | Authenticated scope/usage/read limits and cookie CSRF bootstrap |
 | GET, HEAD | `/api/files/content?path=` | Same-origin bytes and representation headers; single Range support |
-| PUT | `/api/files/content?path=` | Small admitted content write; disabled with `503 upload_gateway_required` in external ingress mode |
+| PUT | `/api/files/content?path=` | Small admitted content write; disabled with `503 edgeone_route_required` in edgeone mode |
 | POST | `/api/files` · `/api/files/move` · `/api/files/copy` | Admitted Local folder creation and finite native move/copy, no target merge |
 | DELETE | `/api/files?path=&recursive=true` | Captured native deletion; explicit recursion for nonempty folders |
 | GET, POST | `/api/files/operations/{id}` · `.../cancel` | Durable state/result and safe cancellation |
 | POST, GET | `/api/files/uploads` | Create/list persistent principal-bound upload sessions |
 | GET, DELETE | `/api/files/uploads/{id}` | Compact durable status or open-session abort |
-| PUT | `/api/files/uploads/{id}/parts/{number}` | Durable native object part or Local chunk; same-origin gateway route in external mode; SHA-256 receipt |
+| PUT | `/api/files/uploads/{id}/parts/{number}` | Embedded durable object part or Local chunk; server SHA-256 |
+| POST | `/api/files/uploads/{id}/parts/{number}/authorize` | Bind exact digest/size and issue a five-minute same-origin COS part request (edgeone mode) |
+| PUT | `/api/files/transfer/{encoded-object-key}?…` | EO directly forwards signed bytes to COS; application always refuses this route |
+| POST | `/api/files/uploads/{id}/parts/{number}/confirm` | Verify native COS part size/ETag against bound MD5, persist receipt with checksum provenance |
 | GET | `/api/files/uploads/{id}/parts?limit=&cursor=` | Watermarked durable receipt pages |
 | POST | `/api/files/uploads/{id}/commit` | Frozen-manifest commit; metadata or stable Operation |
 | GET | `/me` | Current account, token permissions, usage |

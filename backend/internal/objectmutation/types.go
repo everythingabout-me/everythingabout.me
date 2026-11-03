@@ -5,6 +5,7 @@ package objectmutation
 
 import (
 	"context"
+	"everythingabout.me/backend/internal/storage"
 	"io"
 	"time"
 )
@@ -30,6 +31,8 @@ type Admission struct {
 	// create on Complete for this exact provider endpoint. Existing PUT evidence
 	// alone never enables numbered native uploads.
 	MultipartUploads bool `json:"multipartUploads,omitempty"`
+	// SignedMultipartParts attests COS Content-MD5 rejection and no-SSE part ETag=MD5.
+	SignedMultipartParts bool `json:"signedMultipartParts,omitempty"`
 }
 type Options struct {
 	Admission       Admission
@@ -67,6 +70,18 @@ type MultipartBackend interface {
 	PutPart(context.Context, string, string, int, io.Reader, int64) (string, error)
 	CompleteMultipart(context.Context, Put, string, []NativePart) (Object, error)
 	AbortMultipart(context.Context, string, string) error
+}
+
+// SignedMultipartBackend is intentionally COS-specific capability, not a generic
+// S3 compatibility claim. SignPart binds exact content MD5/length and native slot.
+type SignedMultipartBackend interface {
+	SignedPartsSupported() bool
+	SignPart(context.Context, string, string, int, int64, string, time.Time) (storage.SignedPartGrant, error)
+	QueryPart(context.Context, string, string, int) (NativePartInfo, bool, error)
+}
+type NativePartInfo struct {
+	Size int64
+	ETag string
 }
 type NativePart struct {
 	Number int

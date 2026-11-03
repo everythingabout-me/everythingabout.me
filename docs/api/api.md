@@ -26,18 +26,25 @@
 ## 1. Contract and addressing
 
 Every metadata request and file byte uses the configured origin: hosted `https://everythingabout.me`,
-self-hosted the operator's domain or LAN endpoint. No provider URLs, redirects, credentials, native upload IDs,
-or SDKs reach clients. One origin may route internally to multiple services or CDN nodes.
+self-hosted the operator's domain or LAN endpoint. Signing secrets, broad temporary credentials and storage
+SDKs never reach clients. The official COS transport returns narrowly scoped signed part requests under this
+same origin; their native upload parameters are opaque to the client. This user-confirmed transport supersedes
+the former blanket prohibition on client-visible provider signatures/parameters. No provider-origin redirect
+or client-selected upload host is allowed.
 
-The official service uses COS and routes only numbered-part PUTs to an independent upload gateway. Control
-requests remain on the application server. With `FILE_UPLOAD_INGRESS=external`, the application refuses byte
-PUTs before consuming their bodies; clients use upload sessions and the front router sends
-`PUT /api/files/uploads/{id}/parts/{number}` to `eam upload-gateway`. The gateway authenticates through the
-same Cookie/Bearer/Origin/CSRF boundary and shares owner/root-bound session/native-part metadata in Postgres.
-no application-server byte relay or shared file-byte filesystem is required. Misrouted byte PUTs return
-`503 upload_gateway_required` and external-mode capabilities report maxSinglePutBytes=0. Keep uploads uncached and preserve
-method, path, Content-Length, Origin, cookies, Authorization and X-CSRF-Token through the front router.
-Self-hosted `embedded` mode runs the receiver inside `eam server` and accepts the same public protocol.
+With `FILE_UPLOAD_INGRESS=edgeone`, control requests stay on the application server. A browser obtains a signed
+part request from the authenticated authorize endpoint and PUTs its body to `/api/files/transfer/<object-key>`
+with the returned signed query/headers. EdgeOne ordinary forwarding removes `/api/files/transfer`, sets the
+COS bucket Host and sends the request directly to COS. No edge function or additional Go upload service is
+needed. COS validates the signature and bound Content-MD5; application confirm queries COS and persists a
+verified native part receipt. The application refuses transfer traffic and ordinary byte PUTs before reading
+their bodies (`503 edgeone_route_required`); maxSinglePutBytes=0 in this mode. Uploads are uncached and the
+transfer path must never redirect or fall back to the application. Strip application cookies, Authorization
+and X-CSRF-Token on COS-bound transfer requests; signed query parameters remain untouched.
+
+Self-hosted `embedded` mode receives parts in `eam server` with the normal Cookie/Bearer/Origin/CSRF boundary.
+Sessions advertise their transport. Logical session/part identity, recovery, cancellation and server-controlled
+commit remain shared; only the byte transport differs.
 
 **One base, `/api/files`, serves Web, iOS, Android, CLIs and third-party clients.** There is no separate
 browser route and no file-ID resource. All returned transfer/operation locations are origin-relative below
@@ -166,15 +173,18 @@ All suffixes are below `B`:
 | GET | `/thumbnail?path=/Photos/a.jpg&width=&format=` | Authorized image representation |
 | POST, GET | `/uploads` | Create/list this principal's resumable sessions |
 | GET | `/uploads/{uploadId}` | Compact state/progress and target path |
-| PUT | `/uploads/{uploadId}/parts/{number}` | Immutable numbered part |
+| PUT | `/uploads/{uploadId}/parts/{number}` | Embedded immutable numbered part |
+| POST | `/uploads/{uploadId}/parts/{number}/authorize` | COS-signed exact part authorization |
+| PUT | `/transfer/{encoded-object-key}?…` | Same-origin EO-to-COS byte forwarding; not handled by application |
+| POST | `/uploads/{uploadId}/parts/{number}/confirm` | Server checks native part and accepts durable receipt |
 | GET | `/uploads/{uploadId}/parts?limit=&cursor=` | Durable part receipts |
 | POST | `/uploads/{uploadId}/commit` | Complete at the bound target path |
 | DELETE | `/uploads/{uploadId}` | Abort temporary upload |
 | GET | `/operations/{operationId}` | Durable workflow state/result |
 | POST | `/operations/{operationId}/cancel` | Request stopping further safe steps |
 
-All capabilities are service-level behavior. There is no driver selection, presigning, or backend capability
-negotiation for clients. Storage connection administration is an operator/account API, outside this contract.
+All capabilities are service-level behavior. Clients follow the session's declared embedded or signed transport;
+they do not select drivers or arbitrary upload origins. Storage connection administration remains outside this contract.
 
 ## 4. Lookup, folders, search, and namespace operations
 
@@ -313,15 +323,16 @@ A retry body is still consumed/validated before claiming it matches a stored res
 
 ## 7. One resumable upload protocol
 
-Clients always write numbered service parts. No S3 mode, provider offset protocol, or native receipt parsing.
-P5 currently selects 8 MiB parts, `ordering:any`, at most four concurrent byte requests and 10000 parts.
-Receipts return lowercase hexadecimal SHA-256. Session lists use opaque UUID keysets; receipt pages use
-opaque acknowledgement keysets and return their fixed `watermark`. Commit accepts asynchronously with a
-stable Operation until the saved metadata result is settled. Same-path sessions are rejected while an earlier
-guard is active; no session is implicitly cancelled. COS/S3 creation rejects size above the admitted final
-single-publication policy (default 32 MiB, maximum 5 GiB), before accepting any parts. Native multipart
-publication is not implemented. Local maximum is 10000 parts (80000 MiB), subject to physical/logical budgets.
-Unsupported whole-file checksum fields are rejected; optional per-part Content-Digest is supported.
+Clients use numbered service parts and the same create/status/receipt/commit lifecycle. Sessions explicitly
+advertise transport `embedded` or `cos-signed`; they never let clients choose an arbitrary origin or provider.
+Current geometry is 8 MiB parts, `ordering:any`, at most four parallel parts per file and 10000 parts.
+Session lists use opaque UUID keysets; receipt pages use acknowledgement keysets and a fixed `watermark`.
+Commit returns a stable Operation until index/result settlement. Same-path sessions are rejected while an
+older guard is active; no session is silently cancelled. Admitted native COS/S3 uploads support up to 80000 MiB
+subject to budgets, independently of the small content-PUT policy. Native multipart completion is implemented.
+EdgeOne signed transport is COS-only and requires additional exact-endpoint signature/MD5/listing evidence.
+Whole-file checksum input remains unsupported. Embedded parts optionally accept Content-Digest; signed parts
+require per-part MD5 and a separately identified client SHA-256 assertion.
 Create with an Idempotency-Key:
 
 ```http
@@ -351,6 +362,7 @@ Example response (numbers are illustrative, not universal defaults):
 {
   "id":"u_...",
   "state":"open",
+  "transport":"embedded",
   "size":18234122311,
   "partSize":33554432,
   "partCount":544,
@@ -386,7 +398,44 @@ provider multipart state. Bounded per-part buffering verifies exact length/hash 
 no full-file local assembly or whole-file PUT follows. Commit performs native completion and result/index
 settlement, with provider latency and unknown-outcome protection; it is not a database-only operation.
 
-### Part acknowledgement and retries
+### COS-signed transport through EdgeOne
+
+When transport is `cos-signed`, use these control endpoints instead of sending bytes to the embedded part URL:
+
+```http
+POST B/uploads/u_.../parts/1/authorize
+Content-Type: application/json
+
+{"size":8388608,"sha256":"<64 lowercase hexadecimal characters>","md5":"<canonical base64 of 16 bytes>"}
+```
+
+Success returns `{method:"PUT",url,headers,expiresAt}`. The URL is origin-relative below
+`/api/files/transfer/`, contains a five-minute exact COS part signature, and must not be changed by the client.
+The only returned request headers are Content-MD5 and Content-Type=application/octet-stream. The signature also
+binds Content-Length, final COS Host/path, PUT, uploadId and partNumber. No secret/STS key or Complete authority
+is returned. The native parameters in this short-lived request are the explicit official-transport exception
+to the earlier no-provider-parameters rule. Grant responses use no-store caching.
+
+The application persists the immutable digest tuple before issuing authority. A different tuple for the same
+part returns part_conflict; renewal cannot retarget bytes. After authorization, POST
+`B/uploads/u_.../parts/1/confirm` (no browser ETag) first recovers a previously stored native part. On
+`409 part_pending`, PUT the exact Blob to the signed URL, then confirm again, including after a lost PUT reply.
+EO forwards bytes directly to COS using the deployment rules, with no edge function. App credentials/CSRF are
+used only on control endpoints, never added to the transfer. Same-origin cookies must be stripped at EO.
+
+Confirm lists recorded native COS parts and checks exact size plus ETag against the bound MD5 under admitted
+ETag=MD5 semantics. It returns `{number,size,sha256,checksumSource:"client-sha256-cos-md5"}` only after durable
+receipt acceptance; repeated confirmation reuses that receipt. The SHA-256 is a client assertion bound to the
+grant, not a server-computed or COS-verified SHA-256. COS validates Content-MD5; this is not SHA-256 collision
+resistance. Commit relies on these storage-confirmed receipts, not a browser success response. Missing/wrong
+native parts get no receipt. All control actions recheck live authentication, creator/scope and session state.
+
+Issued grants remain usable for their exact native part until expiry and accepted provider requests may outlive
+expiry; logout/abort is not immediate signature revocation. Only the server can Complete. Cleanup retains
+unresolved native liability and never uses grant expiry alone to release an uncertain final-path guard.
+See [EO routing and admission](../design/native-upload-deployment.md) for header/path preservation and byte isolation.
+
+### Embedded part acknowledgement and retries
 
 ```http
 PUT B/uploads/u_.../parts/1

@@ -204,7 +204,8 @@ export function useUploadQueue(onUploaded: (task: UploadTask, item: Item) => voi
       const file = task.file;
       if (!Number.isSafeInteger(session.partSize) || session.partSize < 1 || !Number.isSafeInteger(session.partCount)
         || session.partCount !== Math.ceil(session.size / session.partSize) || !Number.isSafeInteger(session.maxParallelism)
-        || session.maxParallelism < 1 || !["any", "ascending"].includes(session.ordering)) throw new Error("Invalid upload session geometry.");
+        || session.maxParallelism < 1 || !["any", "ascending"].includes(session.ordering)
+        || session.transport !== undefined && !["embedded", "cos-signed"].includes(session.transport)) throw new Error("Invalid upload session geometry.");
       const parallelism = session.ordering === "ascending" ? 1 : Math.min(MAX_PARALLEL_PARTS, session.maxParallelism);
       let verification = verified.current.get(session.id);
       if (!verification || verification.file !== file) {
@@ -279,10 +280,11 @@ export function useUploadQueue(onUploaded: (task: UploadTask, item: Item) => voi
                     if (batch.signal.aborted || receipts.has(number)) return;
                     inFlight.set(number, Math.max(inFlight.get(number) ?? 0, Math.max(0, Math.min(chunk.size, sample.loaded))));
                     progress();
-                  });
+                  }, session.transport);
                 } catch (error) {
                   if (batch.signal.aborted) throw error;
-                  if (!(error instanceof ApiError) || ![0, 408, 425, 429, 500, 502, 503, 504].includes(error.status)) throw error;
+                  if (!(error instanceof ApiError) || !([0, 408, 425, 429, 500, 502, 503, 504].includes(error.status)
+                    || session.transport === "cos-signed" && error.status === 409 && error.code === "part_pending")) throw error;
                   // A lost ACK may already represent durable success. Inspect the
                   // original session and exact byte identity before any replay.
                   const status = await api.uploadStatus(session.id, batch.signal);

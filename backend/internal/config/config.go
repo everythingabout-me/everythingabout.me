@@ -57,6 +57,10 @@ type COS struct {
 	SecretKey string
 	Bucket    string
 	Region    string
+	// Upload signing credentials must allow only UploadPart on the admitted root.
+	// They never fall back to the general mutation credentials or leave the server.
+	UploadSignSecretID  string
+	UploadSignSecretKey string
 }
 
 type SES struct {
@@ -121,10 +125,12 @@ func Load() (*Config, error) {
 		MultipartThreshold: int64(positiveInt("UPLOAD_MULTIPART_THRESHOLD", 5<<30)),
 		UploadPartSize:     int64(positiveInt("UPLOAD_PART_SIZE", 64<<20)),
 		COS: COS{
-			SecretID:  os.Getenv("COS_SECRET_ID"),
-			SecretKey: os.Getenv("COS_SECRET_KEY"),
-			Bucket:    os.Getenv("COS_BUCKET"),
-			Region:    os.Getenv("COS_REGION"),
+			SecretID:            os.Getenv("COS_SECRET_ID"),
+			SecretKey:           os.Getenv("COS_SECRET_KEY"),
+			Bucket:              os.Getenv("COS_BUCKET"),
+			Region:              os.Getenv("COS_REGION"),
+			UploadSignSecretID:  os.Getenv("COS_UPLOAD_SIGN_SECRET_ID"),
+			UploadSignSecretKey: os.Getenv("COS_UPLOAD_SIGN_SECRET_KEY"),
 		},
 		SES: SES{
 			SecretID:         os.Getenv("SES_SECRET_ID"),

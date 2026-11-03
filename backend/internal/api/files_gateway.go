@@ -5,6 +5,7 @@ import (
 	"io"
 	"net/http"
 	"regexp"
+	"strings"
 	"time"
 
 	fc "everythingabout.me/backend/internal/filecontract"
@@ -38,36 +39,18 @@ func (b *readIdleBody) Read(p []byte) (int, error) {
 	return b.ReadCloser.Read(p)
 }
 
-// UploadGatewayHandler exposes byte ingress only. The public reverse proxy routes
-// these same-origin requests here; sessions, commit, status and Operations remain
-// on the application. It reuses the complete Cookie/Bearer/CSRF and owner binding
-// boundary rather than trusting forwarding headers or an unsigned upload handle.
-func (s *Server) UploadGatewayHandler() http.Handler {
-	parts := s.fileWrap(s.handleFilesUploadPart)
-	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if !uploadGatewayPartPath.MatchString(r.URL.Path) {
-			writeFilesProblem(w, r, fc.NewProblem(404, "not_found", "The upload gateway serves numbered part requests only."))
-			return
-		}
-		if r.Method != http.MethodPut {
-			w.Header().Set("Allow", http.MethodPut)
-			writeFilesProblem(w, r, fc.NewProblem(405, "method_not_allowed", "The upload gateway accepts PUT part requests only."))
-			return
-		}
-		parts.ServeHTTP(w, r)
-	})
-	return s.recoverer(s.logger(s.cors(handler)))
-}
-
-// fileIngressHandler rejects misrouted bytes before authentication, storage or
-// body consumption. External mode must never silently fall back to app bandwidth.
+// fileIngressHandler rejects misrouted byte requests without reading their bodies.
+// EdgeOne must route the reserved transfer prefix directly to COS; the app never
+// falls back to receiving signed data or interpreting COS signatures as app auth.
 func (s *Server) fileIngressHandler(next http.Handler) http.Handler {
-	if s.cfg == nil || !s.cfg.ExternalUploadIngress() {
-		return next
-	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodPut && (r.URL.Path == fc.Base+"/content" || uploadGatewayPartPath.MatchString(r.URL.Path)) {
-			writeFilesProblem(w, r, fc.NewProblem(503, "upload_gateway_required", "Create an upload session and send numbered parts through the configured same-origin upload gateway."))
+		transfer := r.URL.Path == fc.Base+"/transfer" || strings.HasPrefix(r.URL.Path, fc.Base+"/transfer/")
+		if transfer {
+			writeFilesProblem(w, r, fc.NewProblem(503, "edgeone_route_required", "The signed transfer route must be forwarded by EdgeOne directly to COS."))
+			return
+		}
+		if s.cfg != nil && s.cfg.EdgeOneUploadIngress() && r.Method == http.MethodPut && (r.URL.Path == fc.Base+"/content" || uploadGatewayPartPath.MatchString(r.URL.Path)) {
+			writeFilesProblem(w, r, fc.NewProblem(503, "edgeone_route_required", "Use the upload session's signed transfer request; application byte ingress is disabled."))
 			return
 		}
 		next.ServeHTTP(w, r)

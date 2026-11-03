@@ -70,6 +70,58 @@ for (const [ordering, maxParallelism, expected] of [["any", 2, 2], ["any", 1, 1]
   });
 }
 
+test("signed sessions retain four-file by four-part concurrency and pass transport on every request", async (t) => {
+  const server = uploadServer();
+  const create = server.api.createUpload;
+  server.api.createUpload = async (...args) => {
+    const session = await create(...args);
+    Object.assign(server.sessions.get(session.id), { transport: "cos-signed", maxParallelism: 4 });
+    return { ...server.sessions.get(session.id) };
+  };
+  const send = server.api.uploadPart;
+  const gate = deferred();
+  let active = 0, peak = 0;
+  const modes = [];
+  server.api.uploadPart = async (...args) => {
+    modes.push(args[5]);
+    active++; peak = Math.max(peak, active);
+    try { await gate.promise; return await send(...args); } finally { active--; }
+  };
+  const harness = await mount(t, server.api);
+  harness.render().enqueue(["a", "b", "c", "d"].map((path) => ({ path, file: new File(["abcdefgh"], path) })), "", () => false);
+  await harness.until(() => active === 16);
+  assert.equal(peak, 16);
+  assert.deepEqual(modes, Array(16).fill("cos-signed"));
+  gate.resolve();
+  await harness.until((queue) => queue.tasks.length === 4 && queue.tasks.every((task) => task.status === "completed"));
+});
+
+test("signed part_pending confirmation retries identical bytes within the original session", async (t) => {
+  const server = uploadServer();
+  const create = server.api.createUpload;
+  server.api.createUpload = async (...args) => {
+    const session = await create(...args);
+    server.sessions.get(session.id).transport = "cos-signed";
+    return { ...server.sessions.get(session.id) };
+  };
+  const send = server.api.uploadPart;
+  const attempts = [];
+  server.api.uploadPart = async (...args) => {
+    attempts.push(args);
+    if (attempts.length === 1) throw new TestApiError("not ready", 409, { code: "part_pending" });
+    return send(...args);
+  };
+  const harness = await mount(t, server.api);
+  harness.render().enqueue([entry("ab")], "", () => false);
+  await harness.until(() => [...harness.timers.values()].some(({ delay }) => delay === 250));
+  await harness.tick(250);
+  await harness.until(complete);
+  assert.equal(attempts.length, 2);
+  assert.equal(attempts[0][2], attempts[1][2]);
+  assert.equal(attempts[1][5], "cos-signed");
+  assert.equal(server.sessions.size, 1);
+});
+
 test("a transient failure checks receipts then retries the same part with bounded backoff", async (t) => {
   const server = uploadServer();
   const send = server.api.uploadPart;
