@@ -207,13 +207,13 @@ func TestCommitFileActionProvenEffects(t *testing.T) {
 		assertActionID(t, pool, root, "missing.txt", id)
 		assertActionID(t, pool, root, "target.txt", "")
 	})
-	t.Run("delete never expands beyond captured source", func(t *testing.T) {
+	t.Run("proven folder deletion clears stale indexed descendants", func(t *testing.T) {
 		root := actionOwner(t, pool)
 		indexActionEntry(t, pool, root, "folder", true)
-		stale := indexActionEntry(t, pool, root, "folder/uncaptured.txt", false)
+		indexActionEntry(t, pool, root, "folder/uncaptured.txt", false)
 		result := runActionCommit(t, pool, actionOperation(root, "delete", "folder", "", actionEffect(0, "delete", "folder", "", storage.Folder)))
 		assertActionID(t, pool, root, "folder", "")
-		assertActionID(t, pool, root, "folder/uncaptured.txt", stale)
+		assertActionID(t, pool, root, "folder/uncaptured.txt", "")
 		if string(result) != "{\"deleted\":true}" {
 			t.Fatalf("delete result %s", result)
 		}
@@ -222,14 +222,14 @@ func TestCommitFileActionProvenEffects(t *testing.T) {
 		root := actionOwner(t, pool)
 		folder := indexActionEntry(t, pool, root, "from", true)
 		child := indexActionEntry(t, pool, root, "from/a.txt", false)
-		stale := indexActionEntry(t, pool, root, "from/not-captured.txt", false)
+		indexActionEntry(t, pool, root, "from/not-captured.txt", false)
 		event := attachActionEvent(t, pool, root, child)
 		effects := []fileops.EntryEffect{actionEffect(0, "mkdir", "", "to", storage.Folder), actionEffect(1, "copy", "from/a.txt", "to/a.txt", storage.File), actionEffect(2, "delete", "from/a.txt", "", storage.File), actionEffect(3, "delete", "from", "", storage.Folder)}
 		result := runActionCommit(t, pool, actionOperation(root, "move", "from", "to", effects...))
 		assertActionID(t, pool, root, "to", folder)
 		assertActionID(t, pool, root, "to/a.txt", child)
 		assertActionID(t, pool, root, "from/a.txt", "")
-		assertActionID(t, pool, root, "from/not-captured.txt", stale)
+		assertActionID(t, pool, root, "from/not-captured.txt", "")
 		var linked string
 		if err := pool.QueryRow(context.Background(), `select node_id::text from event_media where event_id=$1::uuid`, event).Scan(&linked); err != nil || linked != child {
 			t.Fatalf("descendant event lost: %s %v", linked, err)
@@ -240,8 +240,25 @@ func TestCommitFileActionProvenEffects(t *testing.T) {
 		}
 		var folderResult storage.MutationResult
 		json.Unmarshal(effects[0].Result, &folderResult)
-		if want := filerevision.Metadata(fileRootNamespace(root), m, folderResult.Entry.Version, []string{"file:to/a.txt"}); m.Revision != want {
+		if want := filerevision.Metadata(fileRootNamespace(root), m, nil, []string{"file:to/a.txt"}); m.Revision != want {
 			t.Fatalf("folder membership revision %s want %s", m.Revision, want)
+		}
+	})
+	t.Run("new folder publication removes stale destination descendants only", func(t *testing.T) {
+		root := actionOwner(t, pool)
+		other := actionOwner(t, pool)
+		indexActionEntry(t, pool, root, "target%_", true)
+		indexActionEntry(t, pool, root, "target%_/ghost.txt", false)
+		sibling := indexActionEntry(t, pool, root, "targetXX/keep.txt", false)
+		otherID := indexActionEntry(t, pool, other, "target%_/ghost.txt", false)
+		effects := []fileops.EntryEffect{actionEffect(0, "mkdir", "", "target%_", storage.Folder), actionEffect(1, "copy", "source.txt", "target%_/actual.txt", storage.File)}
+		runActionCommit(t, pool, actionOperation(root, "copy", "source", "target%_", effects...))
+		assertActionID(t, pool, root, "target%_/ghost.txt", "")
+		assertActionID(t, pool, root, "targetXX/keep.txt", sibling)
+		assertActionID(t, pool, other, "target%_/ghost.txt", otherID)
+		record, err := fileBrowseMetadata(context.Background(), pool, root.OwnerID, fileRootNamespace(root), "target%_", nil)
+		if err != nil || record == nil || len(record.Membership) != 1 || record.Membership[0] != "file:target%_/actual.txt" {
+			t.Fatalf("new folder membership %+v %v", record, err)
 		}
 	})
 	t.Run("partial move preserves source and records only proven target", func(t *testing.T) {
@@ -334,7 +351,7 @@ func TestCommitStagedFilePublicRevision(t *testing.T) {
 	if metadata.ContentRevision == nil || *metadata.ContentRevision != *filerevision.Content(fileRootNamespace(root), entry) {
 		t.Fatal("durable result omitted selected content revision")
 	}
-	if metadata.Revision != filerevision.Metadata(fileRootNamespace(root), metadata, entry.Version, nil) {
+	if metadata.Revision != filerevision.Metadata(fileRootNamespace(root), metadata, nil, nil) {
 		t.Fatalf("durable revision differs from read contract: %s", raw)
 	}
 	if metadata.MediaType == nil || *metadata.MediaType != "application/octet-stream" {

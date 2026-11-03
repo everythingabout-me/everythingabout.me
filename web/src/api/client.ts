@@ -44,12 +44,15 @@ export class FileApiError extends ApiError {
   }
 }
 
+/** Indexed metadata; browsing never requires a live storage lookup. */
 export interface FileResource {
   path: string;
   parentPath: string;
   name: string;
   kind: "file" | "folder";
+  /** Revision of the indexed metadata and direct folder membership. */
   revision: string;
+  /** Saved content generation; content and replacement requests revalidate native evidence. */
   contentRevision: string | null;
   size: number | null;
   mediaType: string | null;

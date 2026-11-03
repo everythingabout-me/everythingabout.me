@@ -78,6 +78,19 @@ private database keys, permissions, annotations, sessions, operation journals an
 identity in the public API is the native path. Rename/move changes that path; clients update references.
 Internal keys may help index maintenance, but are never exposed as file IDs or required to access files.
 
+**Indexed browsing decision, 2026-11-03:** page metadata, folder listings, search and indexed usage are
+served directly from Postgres. Opening or refreshing a directory must not issue synchronous storage Stat,
+List or Open calls. Storage authority describes where real files live and how mutations are verified; it does
+not require a provider round trip on every page view. SQL applies owner/scope filters and keyset pagination
+before returning a bounded page. Folder metadata revisions use indexed direct-child membership.
+
+Successful application mutations settle the native result and index together through the durable journal.
+Content reads, mutation capture/validation and explicit scans still access the native backend. External edits
+are visible after index synchronization; metadata can temporarily describe a file whose native content has
+changed or disappeared. An unavailable/missing index is reported explicitly, never replaced with an implicit
+storage scan in the page request. Existing reconcile/import is additive and does not prune deleted external
+paths; stale deletion cleanup requires explicit index repair. This does not change direct file portability.
+
 If the database is lost, files remain directly readable. A scan can rebuild paths and basic metadata. It does
 not magically recover account credentials, ACLs, annotations, events, prior app IDs, or ambiguous outside
 renames. Those application features need separate backup. Owner-to-root configuration/credentials must be

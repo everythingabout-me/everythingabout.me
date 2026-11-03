@@ -19,11 +19,48 @@ import (
 	"everythingabout.me/backend/internal/auth"
 	"everythingabout.me/backend/internal/config"
 	"everythingabout.me/backend/internal/nodes"
+	"everythingabout.me/backend/internal/storage"
 	"everythingabout.me/backend/internal/storagebackend"
 	"everythingabout.me/backend/internal/store"
 	"everythingabout.me/backend/internal/treescan"
 	"github.com/jackc/pgx/v5"
 )
+
+// This wrapper makes storage data operations fail while retaining the actual
+// configured binding and descriptor. Indexed browsing must never invoke them.
+type unavailableBrowseFactory struct {
+	backend *storagebackend.Backend
+	calls   int
+}
+
+func (f *unavailableBrowseFactory) Binding(owner string) (storage.Config, error) {
+	return f.backend.Binding(owner)
+}
+func (f *unavailableBrowseFactory) Open(ctx context.Context, owner string) (storage.Driver, error) {
+	driver, err := f.backend.Open(ctx, owner)
+	if err != nil {
+		return nil, err
+	}
+	return &unavailableBrowseDriver{Driver: driver, factory: f}, nil
+}
+
+type unavailableBrowseDriver struct {
+	storage.Driver
+	factory *unavailableBrowseFactory
+}
+
+func (d *unavailableBrowseDriver) Stat(context.Context, storage.Path) (storage.Entry, error) {
+	d.factory.calls++
+	return storage.Entry{}, fmt.Errorf("storage unavailable")
+}
+func (d *unavailableBrowseDriver) List(context.Context, storage.Path, storage.PageRequest) (storage.Page, error) {
+	d.factory.calls++
+	return storage.Page{}, fmt.Errorf("storage unavailable")
+}
+func (d *unavailableBrowseDriver) Open(context.Context, storage.Path, storage.ReadOptions) (storage.Read, error) {
+	d.factory.calls++
+	return storage.Read{}, fmt.Errorf("storage unavailable")
+}
 
 // This opt-in test exercises the actual router, authentication SQL, native owner
 // factory and index. It never loads application configuration or a .env file and
@@ -234,6 +271,25 @@ func TestFilesRuntimePostgresConformance(t *testing.T) {
 		caps := object(request("GET", endpoint("/capabilities", "/Photos"), scoped, nil), 200)
 		if caps["range"] != true || caps["pinnedRead"] != false || caps["write"] != false || caps["strongContentValidators"] != false {
 			t.Fatalf("untruthful local capabilities: %v", caps)
+		}
+	})
+	t.Run("indexed browsing survives unavailable storage", func(t *testing.T) {
+		unavailable := &unavailableBrowseFactory{backend: backend}
+		server.SetStorageFactory(unavailable)
+		defer server.SetStorageFactory(backend)
+		started := time.Now()
+		for _, credential := range []string{"cookie", scoped} {
+			for _, route := range []string{"", "/list", "/search", "/me", "/capabilities"} {
+				object(request("GET", endpoint(route, "/Photos"), credential, nil), 200)
+			}
+		}
+		if unavailable.calls != 0 {
+			t.Fatalf("indexed browsing made %d storage data calls", unavailable.calls)
+		}
+		t.Logf("ten authenticated indexed requests completed in %s with no storage data calls", time.Since(started))
+		problem(request("GET", endpoint("/content", "/Photos/A.txt"), scoped, nil), 500, "internal_error")
+		if unavailable.calls != 1 {
+			t.Fatalf("content did not retain its native storage boundary: %d calls", unavailable.calls)
 		}
 	})
 	t.Run("auth selection permissions and owner scopes", func(t *testing.T) {

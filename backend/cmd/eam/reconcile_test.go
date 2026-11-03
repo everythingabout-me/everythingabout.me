@@ -111,6 +111,7 @@ func TestReconcilePostgresIdentityDryRunAndAtomicity(t *testing.T) {
     unique(owner_id,path));
   create table event_media(event_id uuid primary key,node_id uuid not null references nodes(id) on delete cascade);
   create table fs_jobs(user_id uuid not null,op text not null,status text not null,from_path text not null);
+   create table file_content_generations(owner_id uuid not null,root_namespace text not null,path text not null,native_fingerprint bytea not null,content_revision text not null,primary key(owner_id,root_namespace,path));
   insert into users values ('11111111-1111-1111-1111-111111111111'),('22222222-2222-2222-2222-222222222222');
   insert into nodes(id,owner_id,key,path,parent,name,is_dir,size,mime,etag,storage_class,source_modified_at,meta,created_at,updated_at) values
    ('aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa','11111111-1111-1111-1111-111111111111','drive/11111111-1111-1111-1111-111111111111/ folder /a ',' folder /a ',' folder ','a ',false,3,'text/plain','prior-etag','STANDARD','2020-01-02T03:04:05Z','{"annotation":"keep"}','2019-01-01T00:00:00Z','2020-01-01T00:00:00Z'),

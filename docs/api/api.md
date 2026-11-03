@@ -135,16 +135,27 @@ File metadata JSON:
 }
 ```
 
-P2 can expose an existing native entry before it has an index row. Its unknown `createdAt` is
-`0001-01-01T00:00:00Z`; `updatedAt` falls back to native modification time or the same unknown value.
-`sourceModifiedAt` and checksum remain null when unavailable. This does not invent application history.
+Metadata, folder lists, search and indexed usage are database views. They issue no native Stat/List/Open
+requests and retain the indexed path spelling, attributes and timestamps. Native files without index rows
+appear after an explicit scan/import or successful application mutation. Missing indexed paths return 404;
+an unavailable index returns 503 without a storage fallback. Root metadata is synthetic. Unknown root times
+use `0001-01-01T00:00:00Z`; `sourceModifiedAt` and checksum are null when unavailable.
 
-`revision` changes for direct file/folder metadata/content changes; folder revision also changes for direct child
-membership changes. It is not a recursive subtree version. A move changes returned path/parentPath, so
-metadata revisions must account for that representation change, including ancestor moves when applicable. `contentRevision` identifies the observed file content
-generation, not an anonymous object, and is null on
-folders; `size/mediaType/checksum` are null on folders. A verified checksum carries algorithm and
-value; null means unknown. Content replacement changes both revisions; rename changes only metadata revision.
+External edits may leave metadata stale until index synchronization. Existing reconcile/import adds or updates
+observed entries; it does not prune externally deleted rows. Content requests read actual native bytes and can
+return 404 even while an old index entry is visible. Application mutations settle their verified native effects
+into the index before reporting success. These indexed-read semantics supersede P2's live native observations.
+
+`revision` describes indexed file/folder metadata; it changes when that indexed representation changes.
+Folder revisions also include indexed direct-child membership, not a recursive subtree snapshot. A move changes
+returned path/parentPath and metadata revisions, including descendants of a moved ancestor. Metadata revision
+preconditions compare the indexed view; unsynchronized external changes are not detected by that comparison.
+Mutations separately capture and validate current native versions before applying their finite effects.
+`contentRevision` is the saved, native-evidence-backed content generation and is null when none is recorded or
+on folders; it is not synthesized from index timestamps. Content GET/HEAD and conditional replacements verify
+current native evidence before using it. `size/mediaType/checksum` are null on folders. A verified checksum
+carries algorithm and value; null means unknown. Application content replacement changes both revisions;
+a proven rename preserves the saved content generation while changing metadata revision.
 Copy creates an independent ordinary native file/tree at the destination. A provider-side copy or safe
 filesystem reflink is allowed; an application-only reference or mutable hardlink is not a copy.
 
@@ -160,10 +171,10 @@ All suffixes are below `B`:
 
 | Method | Resource | Behavior |
 |---|---|---|
-| GET | `/me` | Current principal, authorized path scope, usage and reservations |
+| GET | `/me` | Current principal, authorized path scope, indexed usage and reservations |
 | GET | `/capabilities?path=/Photos` | Effective limits/features at an authorized path |
-| GET | `?path=/Photos/a.jpg` | File/folder metadata by path |
-| GET | `/list?path=/Photos&limit=&cursor=` | Immediate folder children |
+| GET | `?path=/Photos/a.jpg` | Indexed file/folder metadata by path; no native lookup |
+| GET | `/list?path=/Photos&limit=&cursor=` | Indexed immediate children with SQL keyset pagination |
 | GET | `/search?q=&path=/Photos&kind=&mediaType=&limit=&cursor=` | Indexed search below a path |
 | GET, HEAD, PUT | `/content?path=/Photos/a.jpg` | File download/headers/create/conditional replace |
 | POST | (base) | Create a folder using `{kind:"folder",path,parents?}` |
@@ -194,7 +205,9 @@ matching on name and resolved visible path; `path` defaults to the authorized ro
 A cursor binds principal/scope, query and sort. Ordinary concurrent writes do not globally invalidate it.
 Interactive keyset listing/search is not a snapshot: concurrent rename/move can cause omissions or repeated
 paths; clients may deduplicate/refresh. Backup/import validation uses a coordinated scan, not this pagination.
-Default page size is 200; maximum 1000. Authorization filters apply before pagination and never leak totals.
+Default page size is 200; maximum 1000. SQL applies owner, subtree, search filters and the keyset before
+returning at most the requested limit plus one row. The API does not scan storage or load the whole indexed
+subtree to paginate. Authorization filters apply before pagination and never leak totals.
 
 Create a folder:
 

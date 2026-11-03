@@ -3,7 +3,6 @@ package nodes
 import (
 	"bytes"
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"sort"
@@ -86,6 +85,33 @@ func CommitFileAction(ctx context.Context, tx pgx.Tx, op fileops.Operation, nati
 		applied = append(applied, proven{effect, result})
 	}
 	sort.Slice(applied, func(i, j int) bool { return applied[i].effect.Number < applied[j].effect.Number })
+	removedFolders := make(map[storage.Path]bool)
+	for source, effect := range deletes {
+		if effect.SourceEntry != nil {
+			removedFolders[source] = effect.SourceEntry.Kind == storage.Folder
+		} else {
+			var folder bool
+			if err := tx.QueryRow(ctx, `select exists(select 1 from nodes where owner_id=$1::uuid and path=$2 and is_dir)`, op.Root.OwnerID, string(source)).Scan(&folder); err != nil {
+				return nil, err
+			}
+			removedFolders[source] = folder
+		}
+	}
+
+	// A newly created native folder was absent before this effect. Retained
+	// descendant index rows at that destination are stale, not copied contents.
+	for _, item := range applied {
+		if item.effect.Action != "mkdir" {
+			continue
+		}
+		pattern := EscapeLike(string(item.effect.Target)) + "/%"
+		if _, err := tx.Exec(ctx, `delete from nodes where owner_id=$1::uuid and path like $2`, op.Root.OwnerID, pattern); err != nil {
+			return nil, err
+		}
+		if _, err := tx.Exec(ctx, `delete from file_content_generations where owner_id=$1::uuid and root_namespace=$2 and path like $3`, op.Root.OwnerID, fileRootNamespace(op.Root), pattern); err != nil {
+			return nil, err
+		}
+	}
 	// A copy/delete move retains an old private ID only when both halves are
 	// proven. A copied destination whose source survives is an independent entry.
 	movedSources := make(map[storage.Path]bool)
@@ -138,6 +164,20 @@ func CommitFileAction(ctx context.Context, tx pgx.Tx, op fileops.Operation, nati
 			return nil, err
 		}
 		if err := saveContentRevision(ctx, tx, op.Root, *item.result.Entry, filerevision.Content(fileRootNamespace(op.Root), *item.result.Entry)); err != nil {
+			return nil, err
+		}
+	}
+	// A proven removed folder cannot contain live native descendants. Drop stale
+	// index-only descendants too, without expanding the captured native effects.
+	for source, folder := range removedFolders {
+		if !folder {
+			continue
+		}
+		pattern := EscapeLike(string(source)) + "/%"
+		if _, err := tx.Exec(ctx, `delete from nodes where owner_id=$1::uuid and path like $2`, op.Root.OwnerID, pattern); err != nil {
+			return nil, err
+		}
+		if _, err := tx.Exec(ctx, `delete from file_content_generations where owner_id=$1::uuid and root_namespace=$2 and (path=$3 or path like $4)`, op.Root.OwnerID, fileRootNamespace(op.Root), string(source), pattern); err != nil {
 			return nil, err
 		}
 	}
@@ -279,41 +319,13 @@ func nativeModified(entry storage.Entry) *time.Time {
 	return &modified
 }
 
-func settledMetadata(ctx context.Context, tx pgx.Tx, root fileops.Root, entry storage.Entry, membership []string) (fc.Metadata, error) {
-	var created, updated time.Time
-	var media *string
-	if err := tx.QueryRow(ctx, `select created_at,updated_at,mime from nodes where owner_id=$1::uuid and path=$2`, root.OwnerID, string(entry.Path)).Scan(&created, &updated, &media); err != nil {
-		return fc.Metadata{}, err
-	}
-	p, err := fc.FromRelative(string(entry.Path))
+func settledMetadata(ctx context.Context, tx pgx.Tx, root fileops.Root, entry storage.Entry, _ []string) (fc.Metadata, error) {
+	record, err := fileBrowseMetadata(ctx, tx, root.OwnerID, fileRootNamespace(root), string(entry.Path), nil)
 	if err != nil {
 		return fc.Metadata{}, err
 	}
-	parent, err := fc.FromRelative(paths.ParentOf(string(entry.Path)))
-	if err != nil {
-		return fc.Metadata{}, err
+	if record == nil {
+		return fc.Metadata{}, fileops.E("invalid_native_result", nil)
 	}
-	m := fc.Metadata{Path: p, ParentPath: parent, Name: paths.NameOf(string(entry.Path)), Kind: string(entry.Kind), SourceModifiedAt: nativeModified(entry), CreatedAt: created.UTC().Truncate(time.Millisecond), UpdatedAt: updated.UTC().Truncate(time.Millisecond)}
-	if entry.Kind == storage.File {
-		size := entry.Size
-		m.Size = &size
-		if entry.MediaType != "" {
-			value := entry.MediaType
-			media = &value
-		}
-		if media == nil || *media == "" {
-			value := "application/octet-stream"
-			media = &value
-		}
-		m.MediaType = media
-		m.ContentRevision, err = lookupContentRevision(ctx, tx, root.OwnerID, fileRootNamespace(root), entry)
-		if err != nil {
-			return fc.Metadata{}, err
-		}
-		if entry.Digest != nil {
-			m.Checksum = &fc.Checksum{Algorithm: entry.Digest.Algorithm, Value: base64.StdEncoding.EncodeToString(entry.Digest.Value)}
-		}
-	}
-	m.Revision = filerevision.Metadata(fileRootNamespace(root), m, entry.Version, membership)
-	return m, nil
+	return IndexedMetadata(fileRootNamespace(root), *record)
 }

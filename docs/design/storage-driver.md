@@ -27,6 +27,11 @@ file operations, native authentication, naming constraints, version evidence and
 must enumerate their content root, including existing files, so indexing and direct migration need no data
 rewrite. They do not own a separate application database or expose provider URLs to clients.
 
+Application page metadata, directory listing, search and indexed usage read Postgres directly. Driver
+Stat/List/Open are used by content, actual mutations and explicit scans, not by interactive browsing.
+A native readable tree remains authoritative and independently usable even though its database view may
+lag external changes. See the [indexed browsing decision](storage.md#3-storage-facts-and-database-responsibilities).
+
 The interfaces below are intended Go declarations. Root bindings can be cheap views over shared pooled
 clients; do not allocate a separate HTTP pool permanently for every user. Configuration generation identifies
 the actual backend/root; credential rotation alone need not change that identity. Use typed options per adapter

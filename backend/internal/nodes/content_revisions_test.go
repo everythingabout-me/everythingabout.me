@@ -128,10 +128,10 @@ func TestFinalFolderObservationAndNoopMetadata(t *testing.T) {
 	if err := json.Unmarshal(raw, &m); err != nil {
 		t.Fatal(err)
 	}
-	if m.SourceModifiedAt == nil || !m.SourceModifiedAt.Equal(final.ModifiedAt) {
+	if m.SourceModifiedAt == nil || !m.SourceModifiedAt.Equal(final.ModifiedAt.Truncate(time.Millisecond)) {
 		t.Fatalf("response used stale mkdir observation: %s", raw)
 	}
-	if m.Revision != filerevision.Metadata(fileRootNamespace(root), m, final.Version, []string{"file:folder/a.txt"}) {
+	if m.Revision != filerevision.Metadata(fileRootNamespace(root), m, nil, []string{"file:folder/a.txt"}) {
 		t.Fatal("final native membership omitted")
 	}
 	// Existing mkdir observes a native folder; no index-only namespace effect is

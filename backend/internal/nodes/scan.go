@@ -203,6 +203,11 @@ func ApplyScan(ctx context.Context, db ScanDB, ownerID string, result *treescan.
 		if err != nil {
 			return ScanApplyReport{}, fmt.Errorf("import %q: %w", p, err)
 		}
+		// A changed imported observation invalidates any saved native generation.
+		// Browsing must not attach the old content revision to external replacements.
+		if _, err := tx.Exec(ctx, `delete from file_content_generations where owner_id=$1::uuid and path=$2`, ownerID, p); err != nil {
+			return ScanApplyReport{}, fmt.Errorf("invalidate scanned content revision %q: %w", p, err)
+		}
 		if inserted {
 			report.Inserted++
 		} else {

@@ -2,12 +2,10 @@ package nodes
 
 import (
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"time"
 
-	fc "everythingabout.me/backend/internal/filecontract"
 	"everythingabout.me/backend/internal/fileops"
 	"everythingabout.me/backend/internal/filerevision"
 	"everythingabout.me/backend/internal/paths"
@@ -43,37 +41,23 @@ func CommitStagedFile(ctx context.Context, tx pgx.Tx, op fileops.Operation, resu
 		v := entry.ModifiedAt.UTC()
 		modified = &v
 	}
-	var created, updated time.Time
-	err := tx.QueryRow(ctx, `insert into nodes(owner_id,key,path,parent,name,is_dir,size,mime,source_modified_at)
+	tag, err := tx.Exec(ctx, `insert into nodes(owner_id,key,path,parent,name,is_dir,size,mime,source_modified_at)
  values($1::uuid,$2,$3,$4,$5,false,$6,nullif($7,''),$8)
  on conflict(owner_id,path) do update set key=excluded.key,parent=excluded.parent,name=excluded.name,
  size=excluded.size,mime=excluded.mime,source_modified_at=coalesce(excluded.source_modified_at,nodes.source_modified_at),updated_at=now()
- where nodes.is_dir=false
- returning created_at,updated_at`, op.Root.OwnerID, paths.KeyFor(p, op.Root.OwnerID), p, parent, paths.NameOf(p), entry.Size, entry.MediaType, modified).Scan(&created, &updated)
+ where nodes.is_dir=false`, op.Root.OwnerID, paths.KeyFor(p, op.Root.OwnerID), p, parent, paths.NameOf(p), entry.Size, entry.MediaType, modified)
 	if err != nil {
 		return nil, fmt.Errorf("settle file index: %w", err)
 	}
-	apiPath, err := fc.FromRelative(p)
-	if err != nil {
-		return nil, err
-	}
-	apiParent, err := fc.FromRelative(parent)
-	if err != nil {
-		return nil, err
-	}
-	media := entry.MediaType
-	if media == "" {
-		media = "application/octet-stream"
-	}
-	size := entry.Size
-	metadata := fc.Metadata{Path: apiPath, ParentPath: apiParent, Name: paths.NameOf(p), Kind: "file", Size: &size, MediaType: &media, SourceModifiedAt: modified, CreatedAt: created.UTC().Truncate(time.Millisecond), UpdatedAt: updated.UTC().Truncate(time.Millisecond), ContentRevision: filerevision.Content(fileRootNamespace(op.Root), *entry)}
-	if entry.Digest != nil {
-		metadata.Checksum = &fc.Checksum{Algorithm: entry.Digest.Algorithm, Value: base64.StdEncoding.EncodeToString(entry.Digest.Value)}
+	if tag.RowsAffected() != 1 {
+		return nil, fileops.E("parent_changed", nil)
 	}
 	if err := saveContentRevision(ctx, tx, op.Root, *entry, filerevision.Content(fileRootNamespace(op.Root), *entry)); err != nil {
 		return nil, err
 	}
-	// This settled response remains durable if the native path later changes.
-	metadata.Revision = filerevision.Metadata(fileRootNamespace(op.Root), metadata, entry.Version, nil)
+	metadata, err := settledMetadata(ctx, tx, op.Root, *entry, nil)
+	if err != nil {
+		return nil, err
+	}
 	return json.Marshal(metadata)
 }

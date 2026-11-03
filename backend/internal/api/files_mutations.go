@@ -432,13 +432,13 @@ func (s *Server) filesActions(r *http.Request, f *fileRequest, native fileops.Na
 		if req.IfRevision == "" {
 			return nil
 		}
-		entry, err := n.Stat(ctx, req.From)
+		// Client metadata revisions describe the indexed view. Native source and
+		// destination versions are captured and fenced separately by Actions.
+		p, err := fc.FromRelative(string(req.From))
 		if err != nil {
 			return err
 		}
-		current := *f
-		current.Driver = n
-		resource, err := s.filesMetadata(ctx, &current, entry, nil)
+		resource, err := s.filesIndexedMetadata(ctx, f, p)
 		if err != nil {
 			return err
 		}

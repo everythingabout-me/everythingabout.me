@@ -36,6 +36,9 @@ folders, original accepted filenames and raw file contents below the user root. 
 ordinary filesystem tools, rclone or provider tools without the database or an Everything export. Postgres
 indexes that tree and adds application metadata. Native directory operations are preferred; S3 folder moves
 may still require per-file copy/delete. Durable journals reconcile backend changes and index updates.
+Page metadata, folder listings, search and indexed usage read Postgres directly, without synchronous COS/storage
+lookups. Content and mutations still access real storage; external edits appear after index synchronization.
+Existing reconcile/import is additive and does not prune externally deleted entries.
 
 | Unified file contract | Interface / status |
 |---|---|
@@ -320,10 +323,10 @@ The table lists the active shared file resources and retained account/Connect en
 
 | Method | Path | Description |
 |---|---|---|
-| GET | `/api/files?path=` | Path-only native file/folder metadata |
-| GET | `/api/files/list?path=&limit=&cursor=` | Shared immediate-child listing |
+| GET | `/api/files?path=` | Path-based indexed metadata; no synchronous storage lookup |
+| GET | `/api/files/list?path=&limit=&cursor=` | Indexed immediate children; owner-scoped SQL keyset pagination |
 | GET | `/api/files/search?q=&path=&kind=&mediaType=` | Authorized indexed search with scoped opaque cursors |
-| GET | `/api/files/me` · `/api/files/capabilities` | Authenticated scope/usage/read limits and cookie CSRF bootstrap |
+| GET | `/api/files/me` · `/api/files/capabilities` | Indexed scope/usage and configured limits; cookie CSRF bootstrap |
 | GET, HEAD | `/api/files/content?path=` | Same-origin bytes and representation headers; single Range support |
 | PUT | `/api/files/content?path=` | Small admitted content write; disabled with `503 edgeone_route_required` in edgeone mode |
 | POST | `/api/files` · `/api/files/move` · `/api/files/copy` | Admitted Local folder creation and finite native move/copy, no target merge |

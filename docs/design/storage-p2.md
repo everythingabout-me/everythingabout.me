@@ -1,5 +1,11 @@
 # P2: unified authenticated file reads
 
+> Indexed browsing update, 2026-11-03: metadata, lists, search, usage and capability path lookups now read
+> Postgres without native Stat/List/Open calls. SQL filters and paginates the index. The original live-native
+> metadata/search guarantees below describe P2 history and are superseded by [the current API](../api/api.md)
+> and [the indexed browsing decision](storage.md#3-storage-facts-and-database-responsibilities). Native content,
+> mutation fencing and explicit scans retain the storage boundary.
+
 P2 exposes the read side of the [file API](../api/api.md) at one `/api/files` base for Cookie and
 Bearer callers. Native bytes stream through the configured application origin on Local, COS and S3.
 This phase adds no native file mutations. It builds on [P0 boundary evidence](storage-p0.md) and

@@ -17,6 +17,8 @@ import (
 	"everythingabout.me/backend/internal/auth"
 	"everythingabout.me/backend/internal/config"
 	fc "everythingabout.me/backend/internal/filecontract"
+	"everythingabout.me/backend/internal/filerevision"
+	"everythingabout.me/backend/internal/nodes"
 	"everythingabout.me/backend/internal/s3storage"
 	"everythingabout.me/backend/internal/storage"
 )
@@ -153,7 +155,35 @@ func TestFilesS3UnifiedHTTPReadConformance(t *testing.T) {
 		t.Fatal(err)
 	}
 	makeHandler := func(owner string) http.Handler {
-		return (&Server{cfg: &config.Config{AppSecret: "stable-test-secret", Storage: config.Storage{Backend: "s3"}}, filesAuth: &boundaryAuth{principal: &auth.Principal{User: &auth.User{ID: owner}}}, trees: filesS3Factory{factory: factory}}).Handler()
+		binding, err := (filesS3Factory{factory: factory}).Binding(owner)
+		if err != nil {
+			t.Fatal(err)
+		}
+		namespace := fmt.Sprintf("%s:%s:%d:%s:%s", binding.OwnerID, binding.ConnectionID, binding.Generation, binding.ContentRoot, binding.SystemRoot)
+		index := &filesReadTestIndex{}
+		if owner == "owner-a" {
+			index.rows = []nodes.Row{
+				filesReadRow(special, false), filesReadRow("Empty", true), filesReadRow("Implicit", true),
+				filesReadRow("Implicit/inside.txt", false), filesReadRow("plain.txt", false),
+				filesReadRow("changed.txt", false), filesReadRow("bad-range.txt", false),
+			}
+			for n := range index.rows {
+				row := &index.rows[n]
+				if row.IsDir {
+					continue
+				}
+				object := provider.objects[binding.ContentRoot+row.Path]
+				row.Size, row.Mime = int64(len(object.body)), &object.mediaType
+			}
+			// A saved publication/scan observation supplies this revision. Browsing
+			// never probes the provider to manufacture or validate native evidence.
+			revision := filerevision.Content(namespace, storage.Entry{Path: storage.Path(special), Kind: storage.File, NativeRef: []byte(binding.ContentRoot + special), Version: []byte("native-version:retained-v1")})
+			index.revisions = map[string]*string{special: revision}
+		} else {
+			index.rows = []nodes.Row{filesReadRow("private.txt", false)}
+			index.rows[0].Size = int64(len("other-owner"))
+		}
+		return (&Server{cfg: &config.Config{AppSecret: "stable-test-secret", Storage: config.Storage{Backend: "s3"}}, filesAuth: &boundaryAuth{principal: &auth.Principal{User: &auth.User{ID: owner}}}, trees: filesS3Factory{factory: factory}, filesIndex: index}).Handler()
 	}
 	handler := makeHandler("owner-a")
 	request := func(method, resource, path string, headers map[string]string) *httptest.ResponseRecorder {
@@ -181,7 +211,7 @@ func TestFilesS3UnifiedHTTPReadConformance(t *testing.T) {
 	}
 	specialMetadata := metadata("/" + special)
 	if specialMetadata.Path != fc.Path("/"+special) || specialMetadata.Name != special || specialMetadata.Size == nil || *specialMetadata.Size != 10 || specialMetadata.ContentRevision == nil {
-		t.Fatalf("exact native metadata lost: %+v", specialMetadata)
+		t.Fatalf("exact indexed metadata lost: %+v", specialMetadata)
 	}
 	tag := strconv.Quote(*specialMetadata.ContentRevision)
 	t.Run("implicit_and_empty_folders", func(t *testing.T) {
@@ -204,6 +234,21 @@ func TestFilesS3UnifiedHTTPReadConformance(t *testing.T) {
 		w = request("GET", "/list", "/Empty", nil)
 		if w.Code != 200 || !strings.Contains(w.Body.String(), `"items":[]`) {
 			t.Fatalf("empty: %d %s", w.Code, w.Body.String())
+		}
+	})
+	t.Run("browsing_never_accesses_provider", func(t *testing.T) {
+		for _, resource := range []string{"/search", "/me", "/capabilities"} {
+			if w := request("GET", resource, "/", nil); w.Code != 200 {
+				t.Fatalf("%s: %d %s", resource, w.Code, w.Body.String())
+			}
+		}
+		if w := request("GET", "", "/private.txt", nil); w.Code != 404 {
+			t.Fatalf("other owner index visible: %d %s", w.Code, w.Body.String())
+		}
+		provider.mu.Lock()
+		defer provider.mu.Unlock()
+		if len(provider.requests) != 0 {
+			t.Fatalf("indexed browsing accessed S3: %v", provider.requests)
 		}
 	})
 	t.Run("version_ranges_conditions_and_head", func(t *testing.T) {
@@ -263,7 +308,7 @@ func TestFilesS3UnifiedHTTPReadConformance(t *testing.T) {
 	})
 	t.Run("actual_get_metadata_selects_version_and_headers", func(t *testing.T) {
 		if metadata("/changed.txt").ContentRevision != nil {
-			t.Fatal("HEAD fixture unexpectedly versioned")
+			t.Fatal("indexed fixture unexpectedly contains a saved content revision")
 		}
 		w := request("GET", "/content", "/changed.txt", nil)
 		if w.Code != 200 || w.Body.String() != "NEWER!" || w.Header().Get("Content-Length") != "6" || w.Header().Get("Content-Type") != "application/octet-stream" || w.Header().Get("ETag") == "" {
