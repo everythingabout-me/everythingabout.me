@@ -66,6 +66,19 @@ try {
     if (!firstPartDurable) await page.waitForTimeout(50);
   }
   assert.equal(firstPartDurable, true, "part one must have a durable receipt before refresh");
+  const second = await context.newPage();
+  const secondUploadRequests = [], secondDialogs = [];
+  second.on("request", (request) => {
+    if (new URL(request.url()).pathname.startsWith("/api/files/uploads")) secondUploadRequests.push(request.url());
+  });
+  second.on("dialog", async (dialog) => { secondDialogs.push(dialog.message()); await dialog.dismiss(); });
+  await second.goto(`${config.url}/files`);
+  await second.locator('input[type="file"]').first().setInputFiles(large);
+  await second.getByText("This file is being uploaded in another tab. Try again after it finishes or closes.", { exact: true }).waitFor();
+  assert.deepEqual(secondUploadRequests, [], "a competing tab cannot allocate, inspect or abort the active upload");
+  assert.deepEqual(secondDialogs, [], "a competing tab reports its conflict inline");
+  assert.equal((await (await context.request.get(`${config.url}/api/files/uploads/${interruptedSession}`)).json()).state, "open");
+  await second.close();
   const createsBeforeNavigation = requests.filter((request) => request.method === "POST" && new URL(request.url).pathname === "/api/files/uploads").length;
   await page.getByTitle("Navigation", { exact: true }).click();
   await page.waitForURL(`${config.url}/files/Navigation`);
@@ -108,16 +121,13 @@ try {
     window.dispatchEvent(event);
     return event.defaultPrevented;
   }), false, "the fresh empty queue has no leave warning");
-  let restartConfirmed = false;
-  page.once("dialog", async (dialog) => {
-    assert.equal(dialog.type(), "confirm");
-    assert.match(dialog.message(), /unfinished upload already exists/);
-    restartConfirmed = true;
-    await dialog.accept();
-  });
+  const restartDialogs = [];
+  const unexpectedRestartDialog = async (dialog) => { restartDialogs.push(dialog.message()); await dialog.dismiss(); };
+  page.on("dialog", unexpectedRestartDialog);
   await page.locator('input[type="file"]').first().setInputFiles(large);
   await waitMetadata("/interrupted.bin");
-  assert.equal(restartConfirmed, true, "explicit selection can replace the abandoned open session");
+  page.off("dialog", unexpectedRestartDialog);
+  assert.deepEqual(restartDialogs, [], "new selection restarts an abandoned upload without any confirmation");
   assert.equal((await (await context.request.get(`${config.url}/api/files/uploads/${interruptedSession}`)).json()).state, "aborted");
   // Safe raster preview stays at this origin and performs no provider image transform.
   const image = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/l9sAAAAASUVORK5CYII=", "base64");
@@ -212,5 +222,5 @@ try {
     assert.equal(/imageMogr2|cos\.[^/]*myqcloud|upload\/sign|upload\/confirm/.test(request.url), false);
   }
   assert.deepEqual(problems, []);
-  console.log(JSON.stringify({ origin, requests: requests.length, checks: ["built SPA", "cookie CSRF upload", "special names", "preview", "download", "folder navigation retains uploads", "leave warning", "refresh discards uploads", "obsolete queue removal", "explicit restart after refresh", "cancel before commit", "partial failure", "exact deletion wait", "scoped Bearer same lifecycle", "same-origin network"] }));
+  console.log(JSON.stringify({ origin, requests: requests.length, checks: ["built SPA", "cookie CSRF upload", "special names", "preview", "download", "folder navigation retains uploads", "leave warning", "refresh discards uploads", "obsolete queue removal", "automatic restart without confirmation", "active tab protection", "cancel before commit", "partial failure", "exact deletion wait", "scoped Bearer same lifecycle", "same-origin network"] }));
 } finally { await browser.close(); }

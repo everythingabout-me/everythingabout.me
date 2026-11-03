@@ -1,11 +1,15 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { conflict, digest, memoryStorage, operation, setup, TestApiError, uploadServer } from "./helpers/uploadHarness.mjs";
+import { conflict, deferred, digest, memoryLocks, memoryStorage, operation, setup, TestApiError, uploadServer } from "./helpers/uploadHarness.mjs";
 
 const entry = () => ({ path: "file", file: new File(["ab"], "file", { type: "application/json" }) });
 const callsOf = (server, type) => server.calls.filter(([kind]) => kind === type);
 const complete = (queue) => queue.tasks[0]?.status === "completed";
-async function mount(t, api, options) { const harness = await setup(api, options); t.after(harness.unmount); return harness; }
+async function mount(t, api, options) {
+  const harness = await setup(api, { confirm: (message) => assert.fail(`unexpected upload prompt: ${message}`), ...options });
+  t.after(harness.unmount);
+  return harness;
+}
 function enqueue(harness) { harness.render().enqueue([entry()], "folder", () => false); }
 
 async function blockedUpload(state = "open") {
@@ -43,20 +47,18 @@ function assertFreshPublication(server, attempts) {
   assert.deepEqual(callsOf(server, "commit"), [["commit", "session-2"]]);
 }
 
-test("fresh mount ignores an old open upload; explicit selection and confirmation abort it before a fresh allocation", async (t) => {
+test("fresh mount ignores an old open upload; explicit selection automatically aborts it before a fresh allocation", async (t) => {
   const { server, blocker, attempts } = await blockedUpload();
   blocker.path = "/folder/file";
   server.receipts.get(blocker.id).set(1, { number: 1, size: 2, sha256: digest("xx") });
-  const prompts = [], storage = memoryStorage();
+  const storage = memoryStorage();
   storage.setItem("eam.uploads.v1:owner-a", JSON.stringify([{ id: "old-task", path: "folder/file", status: "uploading", uploadId: blocker.id, cancelRequested: true }]));
-  const harness = await mount(t, server.api, { storage, confirm: (message) => { prompts.push(message); return true; } });
+  const harness = await mount(t, server.api, { storage });
   assert.deepEqual((await harness.tick()).tasks, []);
   assert.equal(storage.getItem("eam.uploads.v1:owner-a"), null);
   assert.deepEqual(server.calls, [], "mount does not query, cancel or replay discarded uploads");
-  assert.deepEqual(prompts, []);
   enqueue(harness);
   const queue = await harness.until(complete);
-  assert.deepEqual(prompts, ["drive.restartUploadConfirm"]);
   assert.equal(blocker.state, "aborted");
   assert.deepEqual(server.calls.slice(0, 4).map(([kind, id]) => [kind, typeof id === "string" ? id : id.path]), [
     ["blocked-create", "session-1"], ["status", "session-1"], ["abort", "session-1"], ["create", "folder/file"],
@@ -68,35 +70,209 @@ test("fresh mount ignores an old open upload; explicit selection and confirmatio
   assert.equal(queue.hasActiveUploads, false);
 });
 
-test("declining restart fails locally and idle polling never retries, while explicit Retry can request confirmation again", async (t) => {
-  const { server, blocker, attempts } = await blockedUpload();
-  let accepted = false;
-  const prompts = [];
-  const harness = await mount(t, server.api, { confirm: (message) => { prompts.push(message); return accepted; } });
-  enqueue(harness);
-  const failed = await harness.until((queue) => queue.tasks[0]?.status === "failed");
-  const id = failed.tasks[0].id;
-  assert.equal(failed.tasks[0].error, "drive.uploadAlreadyInProgress");
-  assert.ok(failed.tasks[0].file instanceof File);
-  assert.equal(failed.hasActiveUploads, false);
-  assert.equal(harness.listeners.get("beforeunload")?.size ?? 0, 0);
-  assert.equal(blocker.state, "open");
-  assertNoPublication(server);
-  assert.equal(callsOf(server, "abort").length, 0);
-  await harness.tick();
-  assert.equal(attempts.length, 1);
-  assert.deepEqual(prompts, ["drive.restartUploadConfirm"]);
-  accepted = true;
-  failed.retry(id);
-  const queue = await harness.until(complete);
-  assert.equal(queue.tasks[0].id, id);
-  assert.deepEqual(prompts, ["drive.restartUploadConfirm", "drive.restartUploadConfirm"]);
-  assert.deepEqual(callsOf(server, "abort"), [["abort", blocker.id]]);
-  assert.equal(attempts.length, 3, "the explicit retry encounters the retained reservation before allocating again");
-  assert.ok(attempts.every(([, key]) => key === attempts[0][1]));
-  assert.equal(server.sessions.size, 2);
-  assert.deepEqual(callsOf(server, "part").map(([, id]) => id), ["session-2"]);
-  assert.deepEqual(callsOf(server, "commit"), [["commit", "session-2"]]);
+for (const release of ["unmount", "cancel", "complete"]) {
+  test(`another page cannot touch an owned path until ${release}; explicit Retry then claims it automatically`, async (t) => {
+    const server = uploadServer(1);
+    const locks = memoryLocks(), gate = deferred();
+    const create = server.api.createUpload, send = server.api.uploadPart;
+    let firstSignal;
+    server.api.uploadStatus = async (id) => {
+      server.calls.push(["status", id]);
+      return { ...server.sessions.get(id), maxParallelism: 1 };
+    };
+    server.api.createUpload = async (...args) => {
+      const active = [...server.sessions.values()].find((session) => session.path === args[0].path && session.state === "open");
+      if (active && !server.keys.has(args[1])) { server.calls.push(["blocked-create", active.id]); throw conflict(active.id); }
+      return { ...await create(...args), maxParallelism: 1 };
+    };
+    server.api.uploadPart = async (...args) => {
+      if (args[0] === "session-1" && args[1] === 2) { firstSignal = args[3]; await gate.promise; }
+      return send(...args);
+    };
+    const first = await mount(t, server.api, { locks });
+    enqueue(first);
+    const uploading = await first.until(() => Boolean(firstSignal));
+    const original = uploading.tasks[0];
+    const secondCalls = [];
+    const observedAPI = Object.fromEntries(Object.entries(server.api).map(([name, method]) => [name, (...args) => {
+      if (name !== "me") secondCalls.push(name);
+      return method(...args);
+    }]));
+    const second = await mount(t, observedAPI, { locks: first.locks });
+    enqueue(second);
+    const failed = await second.until((queue) => queue.tasks[0]?.status === "failed");
+    const id = failed.tasks[0].id;
+    assert.equal(failed.tasks[0].error, "drive.uploadAlreadyInProgress");
+    assert.ok(failed.tasks[0].file instanceof File);
+    assert.equal(failed.hasActiveUploads, false);
+    assert.equal(second.listeners.get("beforeunload")?.size ?? 0, 0);
+    assert.deepEqual(secondCalls, [], "held ownership blocks capabilities, status, abort and allocation requests");
+    assert.equal(first.render().tasks[0].id, original.id);
+    assert.equal(first.render().tasks[0].file, original.file);
+    assert.equal(firstSignal.aborted, false);
+    assert.equal(server.sessions.get("session-1").state, "open");
+    assert.equal(callsOf(server, "abort").length, 0);
+    await second.tick();
+    assert.deepEqual(secondCalls, [], "idle polling never retries a busy path");
+    if (release === "unmount") first.unmount();
+    else if (release === "cancel") {
+      first.render().cancel(original.id);
+      await first.until((queue) => queue.tasks.length === 0);
+    } else {
+      gate.resolve();
+      await first.until(complete);
+    }
+    await second.tick();
+    assert.deepEqual(secondCalls, [], "ownership release still requires explicit Retry");
+    failed.retry(id);
+    const queue = await second.until(complete);
+    assert.equal(queue.tasks[0].id, id);
+    assert.equal(server.sessions.size, 2);
+    assert.equal(second.completed.length, 1);
+    assert.deepEqual(callsOf(server, "abort"), release === "complete" ? [] : [["abort", "session-1"]]);
+    if (release === "unmount") {
+      assert.deepEqual(secondCalls.slice(0, 5), ["capabilities", "createUpload", "uploadStatus", "abortUpload", "createUpload"]);
+    }
+    gate.resolve();
+    await first.settle();
+    assert.equal(first.completed.length, release === "complete" ? 1 : 0, "late old-page bytes never publish after release");
+  });
+}
+
+test("failed and pending cancellation retain ownership until confirmed removal", async (t) => {
+  const server = uploadServer(), locks = memoryLocks(), cancellation = deferred();
+  const abort = server.api.abortUpload;
+  let attempts = 0;
+  server.api.uploadPart = async () => { throw new TestApiError("part rejected", 400); };
+  server.api.abortUpload = async (...args) => {
+    if (++attempts === 1) { await cancellation.promise; throw new TestApiError("abort unavailable"); }
+    return abort(...args);
+  };
+  const first = await mount(t, server.api, { locks });
+  enqueue(first);
+  const failed = await first.until((queue) => queue.tasks[0]?.status === "failed");
+  const original = failed.tasks[0];
+  const otherServer = uploadServer();
+  const second = await mount(t, otherServer.api, { locks });
+  enqueue(second);
+  const busy = await second.until((queue) => queue.tasks[0]?.status === "failed");
+  const id = busy.tasks[0].id;
+  assert.equal(busy.tasks[0].error, "drive.uploadAlreadyInProgress", "a retryable upload failure still owns its path");
+  failed.cancel(original.id);
+  await first.until((queue) => queue.tasks[0]?.status === "finalizing");
+  busy.retry(id);
+  await second.until((queue) => queue.tasks[0]?.status === "failed");
+  assert.equal(second.render().tasks[0].error, "drive.uploadAlreadyInProgress", "cancelling the initial batch must not release ownership early");
+  assert.deepEqual(otherServer.calls, []);
+  cancellation.resolve();
+  const cancelFailed = await first.until((queue) => queue.tasks[0]?.error === "abort unavailable");
+  assert.equal(cancelFailed.tasks[0].cancelRequested, true);
+  busy.retry(id);
+  await second.until((queue) => queue.tasks[0]?.status === "failed");
+  assert.equal(second.render().tasks[0].error, "drive.uploadAlreadyInProgress", "failed cancellation still owns its path");
+  assert.deepEqual(otherServer.calls, []);
+  cancelFailed.retry(original.id);
+  await first.until((queue) => queue.tasks.length === 0);
+  assert.equal(attempts, 2);
+  busy.retry(id);
+  await second.until(complete);
+  assert.equal(otherServer.sessions.size, 1);
+});
+
+for (const scenario of ["missing", "missing request", "throws", "rejects"]) {
+  test(`${scenario} Web Locks fails inline without API effects and remains explicitly retryable`, async (t) => {
+    const server = uploadServer(), manager = memoryLocks();
+    let attempts = 0, unavailable = true;
+    const locks = scenario === "missing" ? undefined : scenario === "missing request" ? {} : {
+      request(...args) {
+        attempts++;
+        if (!unavailable) return manager.request(...args);
+        if (scenario === "throws") throw new Error("Web Locks denied");
+        return Promise.reject(new Error("Web Locks denied"));
+      },
+    };
+    const calls = [];
+    const api = Object.fromEntries(Object.entries(server.api).map(([name, method]) => [name, (...args) => {
+      if (name !== "me") calls.push(name);
+      return method(...args);
+    }]));
+    const harness = await mount(t, api, { locks });
+    enqueue(harness);
+    const failed = await harness.until((queue) => queue.tasks[0]?.status === "failed");
+    const original = failed.tasks[0];
+    assert.equal(original.error, "drive.uploadCoordinationUnavailable");
+    assert.ok(original.file instanceof File);
+    assert.equal(original.intent, undefined);
+    assert.equal(original.uploadId, undefined);
+    assert.equal(failed.hasActiveUploads, false);
+    assert.equal(harness.listeners.get("beforeunload")?.size ?? 0, 0);
+    assert.deepEqual(calls, [], "unavailable ownership cannot query, allocate, abort or send bytes");
+    await harness.tick();
+    assert.equal(attempts, locks?.request ? 1 : 0, "idle polling never retries acquisition");
+    failed.retry(original.id);
+    const retried = await harness.until((queue) => queue.tasks[0]?.status === "failed");
+    assert.equal(retried.tasks[0].error, "drive.uploadCoordinationUnavailable");
+    assert.equal(retried.tasks[0].id, original.id);
+    assert.equal(retried.tasks[0].file, original.file);
+    assert.deepEqual(calls, []);
+    if (locks?.request) {
+      assert.equal(attempts, 2);
+      unavailable = false;
+      retried.retry(original.id);
+      await harness.until(complete);
+      assert.equal(attempts, 3, "an explicit retry can recover ownership when the browser becomes available");
+      assert.equal(server.sessions.size, 1);
+    }
+  });
+}
+
+test("shared ownership uses the authenticated owner and normalized exact target path", async (t) => {
+  const locks = memoryLocks(), firstServer = uploadServer(), gate = deferred();
+  let sending = false;
+  firstServer.api.uploadPart = async () => { sending = true; return gate.promise; };
+  const first = await mount(t, firstServer.api, { locks });
+  first.render().enqueue([{ ...entry(), path: "cafe\u0301" }], "/folder", () => false);
+  await first.until(() => sending);
+  const secondServer = uploadServer();
+  const second = await mount(t, secondServer.api, { locks });
+  second.render().enqueue([{ ...entry(), path: "caf\u00e9" }], "folder", () => false);
+  const busy = await second.until((queue) => queue.tasks[0]?.status === "failed");
+  assert.equal(busy.tasks[0].error, "drive.uploadAlreadyInProgress");
+  assert.deepEqual(secondServer.calls, []);
+  const otherOwner = await mount(t, { ...secondServer.api, me: async () => ({ id: "owner-b" }) }, { locks });
+  otherOwner.render().enqueue([{ ...entry(), path: "caf\u00e9" }], "folder", () => false);
+  await otherOwner.until(complete);
+  const otherPath = await mount(t, secondServer.api, { locks });
+  otherPath.render().enqueue([{ ...entry(), path: "caf\u00e9-child" }], "folder", () => false);
+  await otherPath.until(complete);
+  assert.equal(secondServer.sessions.size, 2, "other owners and sibling paths claim independently");
+  first.unmount();
+  gate.resolve({ number: 1, size: 2, sha256: digest("ab") });
+  await first.settle();
+});
+
+test("the shared fake lock manager holds callback promises and aborts pending requests", async () => {
+  const locks = memoryLocks(), gate = deferred(), entered = deferred();
+  const held = locks.request("path", { mode: "exclusive", ifAvailable: true }, async (lock) => {
+    assert.equal(lock.name, "path");
+    entered.resolve();
+    await gate.promise;
+    return "released";
+  });
+  await entered.promise;
+  assert.equal(await locks.request("path", { mode: "exclusive", ifAvailable: true }, (lock) => lock), null);
+  const controller = new AbortController();
+  let delivered = false;
+  const pending = locks.request("path", { mode: "exclusive", signal: controller.signal }, () => { delivered = true; });
+  const cancelled = assert.rejects(pending, { name: "AbortError" });
+  controller.abort();
+  await cancelled;
+  assert.equal(delivered, false);
+  assert.equal((await locks.query()).held.length, 1);
+  gate.resolve();
+  assert.equal(await held, "released");
+  assert.equal(await locks.request("path", { mode: "exclusive", ifAvailable: true }, (lock) => lock.name), "path");
+  assert.deepEqual(await locks.query(), { held: [], pending: [] });
 });
 
 for (const [label, changes] of [
@@ -111,13 +287,11 @@ for (const [label, changes] of [
     const { server, blocker, attempts } = await blockedUpload();
     const status = server.api.uploadStatus;
     server.api.uploadStatus = async (...args) => ({ ...await status(...args), ...changes });
-    let prompts = 0;
-    const harness = await mount(t, server.api, { confirm: () => { prompts++; return true; } });
+    const harness = await mount(t, server.api);
     enqueue(harness);
     const queue = await harness.until((queue) => queue.tasks[0]?.status === "waiting");
     assert.equal(queue.tasks[0].waitingFor.operationId, blocker.id);
     assert.equal(queue.hasActiveUploads, true);
-    assert.equal(prompts, 0);
     assert.equal(attempts.length, 1);
     assert.deepEqual(callsOf(server, "status"), [["status", blocker.id]]);
     assert.equal(callsOf(server, "abort").length, 0);
@@ -128,19 +302,17 @@ for (const [label, changes] of [
 test("definitive non-upload blocker status retains exact Operation waiting without confirmation or abort", async (t) => {
   const { server, blocker, attempts } = await blockedUpload();
   server.api.uploadStatus = async (id) => { server.calls.push(["status", id]); throw new TestApiError("not an upload", 404); };
-  let prompts = 0;
-  const harness = await mount(t, server.api, { confirm: () => { prompts++; return true; } });
+  const harness = await mount(t, server.api);
   enqueue(harness);
   const queue = await harness.until((queue) => queue.tasks[0]?.status === "waiting");
   assert.equal(queue.tasks[0].waitingFor.operationId, blocker.id);
   assert.equal(attempts.length, 1);
-  assert.equal(prompts, 0);
   assert.equal(callsOf(server, "abort").length, 0);
   assertNoPublication(server);
 });
 
 for (const error of [new TestApiError("status unavailable", 503), new Error("offline")]) {
-  test(`transient blocker status failure (${error.message}) remains retryable and explicit Retry can confirm a restart`, async (t) => {
+  test(`transient blocker status failure (${error.message}) remains retryable and explicit Retry automatically restarts`, async (t) => {
     const { server, blocker, attempts } = await blockedUpload();
     const status = server.api.uploadStatus;
     let failure = error;
@@ -148,8 +320,7 @@ for (const error of [new TestApiError("status unavailable", 503), new Error("off
       if (failure) { server.calls.push(["status", args[0]]); throw failure; }
       return status(...args);
     };
-    const prompts = [];
-    const harness = await mount(t, server.api, { confirm: (message) => { prompts.push(message); return true; } });
+    const harness = await mount(t, server.api);
     enqueue(harness);
     const failed = await harness.until((queue) => queue.tasks[0]?.status === "failed");
     const id = failed.tasks[0].id, originalFile = failed.tasks[0].file;
@@ -158,7 +329,6 @@ for (const error of [new TestApiError("status unavailable", 503), new Error("off
     assert.ok(originalFile instanceof File);
     assert.equal(failed.hasActiveUploads, false);
     assert.equal(harness.listeners.get("beforeunload")?.size ?? 0, 0);
-    assert.deepEqual(prompts, []);
     assert.equal(callsOf(server, "abort").length, 0);
     assertNoPublication(server);
     await harness.tick();
@@ -168,7 +338,6 @@ for (const error of [new TestApiError("status unavailable", 503), new Error("off
     failed.retry(id);
     const queue = await harness.until(complete);
     assert.equal(queue.tasks[0].id, id);
-    assert.deepEqual(prompts, ["drive.restartUploadConfirm"]);
     assert.deepEqual(callsOf(server, "status"), [["status", blocker.id], ["status", blocker.id]]);
     assert.deepEqual(callsOf(server, "abort"), [["abort", blocker.id]]);
     assert.equal(blocker.state, "aborted");
@@ -188,11 +357,9 @@ for (const terminal of ["aborted", "expired", "failed"]) {
     const { server, blocker, attempts } = await blockedUpload();
     server.api.abortUpload = async (id) => { server.calls.push(["abort", id]); blocker.state = terminal; throw new TestApiError("abort ACK lost"); };
     server.api.getOperation = async (id) => { server.calls.push(["operation", id]); return operation(id, "cancelled", null, "upload_commit"); };
-    let prompts = 0;
-    const harness = await mount(t, server.api, { confirm: () => { prompts++; return true; } });
+    const harness = await mount(t, server.api);
     enqueue(harness);
     await harness.until(complete);
-    assert.equal(prompts, 1);
     assert.deepEqual(callsOf(server, "status"), [["status", blocker.id], ["status", blocker.id]]);
     assert.deepEqual(callsOf(server, "abort"), [["abort", blocker.id]]);
     assert.deepEqual(callsOf(server, "operation"), [["operation", blocker.id]]);
@@ -218,7 +385,7 @@ for (const [label, settled, opState, opId] of [
     server.api.abortUpload = async (id) => { server.calls.push(["abort", id]); aborted = true; throw new TestApiError("abort ACK lost"); };
     server.api.uploadStatus = async (...args) => ({ ...await status(...args), ...(aborted ? settled : {}) });
     server.api.getOperation = async (id) => { server.calls.push(["operation", id]); return operation(opId ?? id, opState, null, "upload_commit"); };
-    const harness = await mount(t, server.api, { confirm: () => true });
+    const harness = await mount(t, server.api);
     enqueue(harness);
     const queue = await harness.until((queue) => queue.tasks[0]?.status === "failed");
     assert.equal(queue.tasks[0].error, "abort ACK lost");
@@ -235,13 +402,11 @@ for (const terminal of ["aborted", "expired", "failed"]) {
     test(`an initially ${terminal} blocker with ${opState} Operation ${opState === "cancelled" ? "permits a fresh allocation" : "keeps exact Operation waiting"}`, async (t) => {
       const { server, blocker, attempts } = await blockedUpload(terminal);
       server.api.getOperation = async (id) => { server.calls.push(["operation", id]); return operation(id, opState, null, "upload_commit"); };
-      let prompts = 0;
-      const harness = await mount(t, server.api, { confirm: () => { prompts++; return true; } });
+      const harness = await mount(t, server.api);
       enqueue(harness);
       const queue = await harness.until(opState === "cancelled" ? complete : (queue) => queue.tasks[0]?.status === "waiting");
       assert.deepEqual(callsOf(server, "operation"), [["operation", blocker.id]]);
       assert.equal(callsOf(server, "abort").length, 0);
-      assert.equal(prompts, 0, "a terminal session is never aborted or presented as open");
       if (opState === "cancelled") assertFreshPublication(server, attempts);
       else {
         assert.equal(attempts.length, 1);
@@ -255,7 +420,7 @@ for (const terminal of ["aborted", "expired", "failed"]) {
 test("an initially terminal blocker cannot use another Operation's cancellation as proof", async (t) => {
   const { server, blocker, attempts } = await blockedUpload("aborted");
   server.api.getOperation = async (id) => { server.calls.push(["operation", id]); return operation("different-operation", "cancelled"); };
-  const harness = await mount(t, server.api, { confirm: () => assert.fail("terminal blocker cannot prompt for abort") });
+  const harness = await mount(t, server.api);
   enqueue(harness);
   const queue = await harness.until((queue) => queue.tasks[0]?.status === "waiting");
   assert.equal(queue.tasks[0].waitingFor.operationId, blocker.id);

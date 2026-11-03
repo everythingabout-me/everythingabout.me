@@ -3,6 +3,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { ApiError, api, type Item, type FileOperation, type FileUploadInput, type FileUploadSession } from "../api/client";
 import { t } from "../i18n";
 import type { UploadEntry } from "./uploadSelection";
+import { claimUploadPath } from "./uploadOwnership";
 import { pendingFileOperation, setUploadOwner, settleFileOperation } from "./uploadPersistence";
 
 const MAX_PARALLEL_UPLOADS = 4;
@@ -68,6 +69,8 @@ async function sha256(blob: Blob): Promise<string> {
 export function useUploadQueue(onUploaded: (task: UploadTask, item: Item) => void): UploadQueue {
   const [tasks, setTasks] = useState<UploadTask[]>([]);
   const tasksRef = useRef<UploadTask[]>([]);
+  const owner = useRef("");
+  const pathClaims = useRef(new Map<string, () => void>());
   const mounted = useRef(true);
   const ready = useRef(false);
   const running = useRef(new Map<string, Runtime>());
@@ -82,6 +85,11 @@ export function useUploadQueue(onUploaded: (task: UploadTask, item: Item) => voi
     if (!mounted.current) return;
     const next = mutate(tasksRef.current);
     tasksRef.current = next;
+    for (const [id, release] of pathClaims.current) {
+      if (!next.some((task) => task.id === id && task.status !== "completed")) {
+        release(); pathClaims.current.delete(id);
+      }
+    }
     setTasks(next);
   }, []);
   const patch = useCallback((id: string, changes: Partial<UploadTask>) => {
@@ -142,6 +150,20 @@ export function useUploadQueue(onUploaded: (task: UploadTask, item: Item) => voi
         else { if (result.kind !== "folder") throw new Error("A file occupies the destination folder."); complete(task, result); }
         return;
       }
+      if (!pathClaims.current.has(id)) {
+        let release: (() => void) | null;
+        const claimController = new AbortController();
+        const abortClaim = () => claimController.abort();
+        signal.addEventListener("abort", abortClaim, { once: true });
+        try { release = await claimUploadPath(owner.current, task.path, claimController.signal); }
+        catch (error) {
+          if (signal.aborted) return;
+          throw new Error(t("drive.uploadCoordinationUnavailable"), { cause: error });
+        } finally { signal.removeEventListener("abort", abortClaim); }
+        if (signal.aborted) { release?.(); return; }
+        if (!release) throw new Error(t("drive.uploadAlreadyInProgress"));
+        pathClaims.current.set(id, release);
+      }
       let session: FileUploadSession;
       if (task.uploadId) {
         session = await api.uploadStatus(task.uploadId, signal);
@@ -177,7 +199,6 @@ export function useUploadQueue(onUploaded: (task: UploadTask, item: Item) => voi
             if (signal.aborted) return;
             if (blocking?.id === error.operationId && relative(blocking.path) === task.path) {
               if (blocking.state === "open") {
-                if (!window.confirm(t("drive.restartUploadConfirm", { name: task.name }))) throw new Error(t("drive.uploadAlreadyInProgress"));
                 try { await api.abortUpload(blocking.id, signal); }
                 catch (abortError) {
                   // A lost abort ACK must be reconciled before a fresh allocation.
@@ -459,6 +480,7 @@ export function useUploadQueue(onUploaded: (task: UploadTask, item: Item) => voi
     const controller = new AbortController();
     void api.me().then((user) => {
       if (!mounted.current || !user) return;
+      owner.current = user.id;
       setUploadOwner(user.id);
       try { localStorage.removeItem(`eam.uploads.v1:${user.id}`); }
       catch { /* Obsolete records are never read, even when storage is unavailable. */ }
@@ -507,6 +529,8 @@ export function useUploadQueue(onUploaded: (task: UploadTask, item: Item) => voi
       deadlines.current.clear();
       for (const runtime of running.current.values()) runtime.controller.abort();
       running.current.clear();
+      for (const release of pathClaims.current.values()) release();
+      pathClaims.current.clear();
     };
   }, [applyOperation, patch, update]);
   const hasActiveUploads = tasks.some((task) => ["queued", "waiting", "uploading", "finalizing"].includes(task.status));

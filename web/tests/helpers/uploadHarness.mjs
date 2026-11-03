@@ -5,6 +5,7 @@ import { transformWithOxc } from "vite";
 
 const queueSource = await readFile(new URL("../../src/pages/useUploadQueue.ts", import.meta.url), "utf8");
 const persistenceSource = await readFile(new URL("../../src/pages/uploadPersistence.ts", import.meta.url), "utf8");
+const ownershipSource = await readFile(new URL("../../src/pages/uploadOwnership.ts", import.meta.url), "utf8");
 const moduleURL = (code) => `data:text/javascript;base64,${Buffer.from(code).toString("base64")}`;
 let identity = 0;
 export class TestApiError extends Error {
@@ -21,6 +22,47 @@ export function memoryStorage() {
     getItem: (key) => values.get(key) ?? null,
     setItem: (key, value) => values.set(key, String(value)),
     removeItem: (key) => values.delete(key),
+  };
+}
+/** One same-origin Web Locks manager; share it between harnesses to model pages. */
+export function memoryLocks() {
+  const held = new Map(), pending = [];
+  const drain = () => {
+    for (let i = 0; i < pending.length;) {
+      const request = pending[i];
+      if (held.has(request.name) && !request.options.ifAvailable) { i++; continue; }
+      pending.splice(i, 1);
+      request.options.signal?.removeEventListener("abort", request.abort);
+      const lock = held.has(request.name) ? null : { name: request.name, mode: "exclusive" };
+      if (lock) held.set(request.name, lock);
+      Promise.resolve().then(() => request.callback(lock)).then(
+        (value) => { if (lock) held.delete(request.name); request.resolve(value); drain(); },
+        (error) => { if (lock) held.delete(request.name); request.reject(error); drain(); },
+      );
+    }
+  };
+  return {
+    request(name, options, callback) {
+      assert.equal(options.mode, "exclusive", "the fake supports exclusive Web Locks");
+      if (options.ifAvailable && options.signal) return Promise.reject(new DOMException("signal and ifAvailable cannot be used together", "NotSupportedError"));
+      return new Promise((resolve, reject) => {
+        const request = { name, options, callback, resolve, reject };
+        request.abort = () => {
+          const at = pending.indexOf(request);
+          if (at < 0) return;
+          pending.splice(at, 1);
+          reject(options.signal.reason ?? new DOMException("Lock request aborted", "AbortError"));
+          queueMicrotask(drain);
+        };
+        if (options.signal?.aborted) { reject(options.signal.reason ?? new DOMException("Lock request aborted", "AbortError")); return; }
+        pending.push(request);
+        options.signal?.addEventListener("abort", request.abort, { once: true });
+        queueMicrotask(drain);
+      });
+    },
+    async query() {
+      return { held: [...held.values()], pending: pending.map(({ name }) => ({ name, mode: "exclusive" })) };
+    },
   };
 }
 export const digest = (bytes) => createHash("sha256").update(bytes).digest("hex");
@@ -81,7 +123,10 @@ export function uploadServer(partSize = 2) {
   return { api, calls, sessions, keys, receipts };
 }
 
-export async function setup(overrides = {}, { storage = memoryStorage(), owner = "owner-a", confirm = () => true } = {}) {
+export async function setup(overrides = {}, options = {}) {
+  const { storage = memoryStorage(), owner = "owner-a", confirm = () => true } = options;
+  const locks = Object.hasOwn(options, "locks") ? options.locks : memoryLocks();
+  const navigator = { locks };
   const slots = [], effects = [], timers = new Map(), completed = [], listeners = new Map();
   let timerId = 0, cursor = 0, mounted = true;
   const window = {
@@ -106,7 +151,7 @@ export async function setup(overrides = {}, { storage = memoryStorage(), owner =
   const schedule = (callback, delay, repeat) => { assert.ok([250, 500, 2000, 15000].includes(delay), `unexpected timer ${delay}`); timers.set(++timerId, { callback, delay, repeat }); return timerId; };
   const runtime = {
     api: { me: async () => ({ id: owner }), ...overrides }, ApiError: TestApiError,
-    localStorage: storage, crypto: webcrypto, window,
+    localStorage: storage, crypto: webcrypto, window, navigator,
     setTimeout: (fn, delay) => schedule(fn, delay, false), clearTimeout: (id) => timers.delete(id),
     setInterval: (fn, delay) => schedule(fn, delay, true), clearInterval: (id) => timers.delete(id),
     useRef: (value) => slots[cursor++] ??= { current: value },
@@ -132,11 +177,15 @@ export async function setup(overrides = {}, { storage = memoryStorage(), owner =
   const persistenceCode = (await transformWithOxc(`const { localStorage } = globalThis.__uploadHarness;\n${persistenceSource}\n// harness ${unique}`, "uploadPersistence.ts")).code;
   const persistenceURL = moduleURL(persistenceCode);
   const persistence = await import(persistenceURL);
+  const ownershipCode = (await transformWithOxc(`const { navigator } = globalThis.__uploadHarness;\n${ownershipSource}\n// harness ${unique}`, "uploadOwnership.ts")).code;
+  const ownershipURL = moduleURL(ownershipCode);
+  const ownership = await import(ownershipURL);
   const source = queueSource
     .replace(/import \{ useCallback, useEffect, useRef, useState \} from "react";/, "const { useCallback, useEffect, useRef, useState, setTimeout, clearTimeout, setInterval, clearInterval, localStorage, crypto, window } = globalThis.__uploadHarness;")
     .replace(/import \{ ApiError, api,[^\n]+from "\.\.\/api\/client";/, "const { ApiError, api } = globalThis.__uploadHarness;")
     .replace('import { t } from "../i18n";', 'const t = (key) => key;')
-    .replace('from "./uploadPersistence"', `from "${persistenceURL}"`);
+    .replace('from "./uploadPersistence"', `from "${persistenceURL}"`)
+    .replace('from "./uploadOwnership"', `from "${ownershipURL}"`);
   const { code } = await transformWithOxc(`${source}\n// harness ${unique}`, "useUploadQueue.ts");
   const { useUploadQueue } = await import(moduleURL(code));
   const render = () => {
@@ -166,5 +215,5 @@ export async function setup(overrides = {}, { storage = memoryStorage(), owner =
     for (const slot of slots) slot?.cleanup?.();
   };
   render();
-  return { render, settle, until, tick, timers, storage, completed, persistence, listeners, dispatchBeforeUnload, unmount };
+  return { render, settle, until, tick, timers, storage, locks, ownership, completed, persistence, listeners, dispatchBeforeUnload, unmount };
 }

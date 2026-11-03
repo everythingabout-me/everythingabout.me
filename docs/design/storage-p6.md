@@ -57,16 +57,28 @@ retained only within the current page. Only authoritative failed/aborted/expired
 to allocate a fresh key; a transport error, missing result or unknown effect does not. State callbacks and
 polling are fenced after unmount, and request deadlines/abort controllers are cleared.
 
-An open server session may still guard its target after the browser queue is discarded. Only when the user
-explicitly selects a new upload and creation returns `operation_in_progress` does the browser inspect the exact
-blocking upload, verifying its session/Operation identity and target path. For an `open` session, browser
-confirmation offers to discard the unfinished upload and start again. Acceptance aborts that exact session;
-declining leaves the new task failed and retryable. The browser never silently aborts another tab's session,
-and this flow does not abort `committing` or `outcome_unknown` work. Retrying allocation after an authoritative
+Before the first upload allocation, each browser task must acquire an ephemeral exclusive Web Lock scoped to
+its owner and normalized target path. Hold it while the retained File/task is alive, including failed retryable
+tasks, and release it on completion, confirmed cancellation or Files page unmount. Document destruction releases it
+through the browser; no heartbeat or persisted upload queue is involved. A new task that cannot acquire the
+lock fails inline and remains retryable: "This file is being uploaded in another tab. Try again after it finishes or closes."
+There is no popup, and the task never aborts the lock holder's session. If Web Locks are unavailable or ownership
+acquisition fails, fail inline and retryably without allocation or automatic abort; there is no unlocked fallback.
+
+An open server session may still guard its target after the prior browser document closes or refreshes. Once
+the new selection acquires ownership, a create response of `operation_in_progress` triggers inspection of only
+the exact blocking upload, verifying its session/Operation identity and normalized target path. An `open`
+session is automatically aborted and allocation retried without a restart confirmation. Never automatically
+abort `committing`, `outcome_unknown` or `committed` sessions. Retrying allocation after an authoritative
 `aborted`, `expired` or `failed` session additionally requires its exact Operation to be `cancelled`, proving
 the guard settled; a failed Operation or unknown cleanup outcome is not sufficient. An unavailable session
 status leaves the new task failed and retryable, rather than waiting indefinitely on an unclassified blocker.
 Only a definitive non-upload identity falls back to generic Operation waiting.
+
+Web Locks coordinate cooperating tabs in the same browser at the same origin. They are not server authority
+and do not prove inactivity of external API clients, other origins or other devices. Existing server guards,
+abort rules, exact identities and lost-ACK recovery remain authoritative; no API fields or backend changes are
+required for this browser coordination.
 
 Deletion and other admission blockers carry an exact operationId. Independently of upload queue state, the
 browser may persist owner-scoped pending delete identities in localStorage. Within the current page it keeps
@@ -98,7 +110,12 @@ lost create/part/commit ACKs, idempotency, immutable receipt/hash verification, 
 folder merge/dependencies, exact deletion waits, timeout/unmount, partial failures, terminal retry and
 cancellation races. Lifecycle checks must prove queue preservation during folder navigation, an empty queue
 after reload without failed-task restoration or File reselection, current-owner legacy upload-record removal
-without execution, and independent pending-delete identity retention. Verify native beforeunload registration
+without execution, and independent pending-delete identity retention. Ownership checks must cover acquisition
+before allocation, retention through retryable failures, release on completion/cancellation/unmount/document
+destruction, same-owner/path tab conflicts without a popup or holder abort, and inline retryable failure when
+ownership is unavailable or acquisition fails. Verify automatic exact-open-session recovery after refresh/close
+without restart confirmation, terminal-session/Operation proof, lost abort ACK recovery, and no automatic abort
+of `committing`, `outcome_unknown` or `committed` work. Verify native beforeunload registration
 for queued/waiting/uploading/finalizing tasks and removal when none remain; browser warning display is subject
 to browser policy. Path checks cover absolute resources and literal encoded-looking names. Build the production
 SPA as part of validation.

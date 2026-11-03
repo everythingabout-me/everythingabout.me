@@ -344,7 +344,7 @@ advertise transport `embedded` or `cos-signed`; they never let clients choose an
 Current geometry is 8 MiB parts, `ordering:any`, at most four parallel parts per file and 10000 parts.
 Session lists use opaque UUID keysets; receipt pages use acknowledgement keysets and a fixed `watermark`.
 Commit returns a stable Operation until index/result settlement. Same-path sessions are rejected while an
-older guard is active; no session is silently cancelled. Admitted native COS/S3 uploads support up to 80000 MiB
+older guard is active; the server does not cancel it on create. Admitted native COS/S3 uploads support up to 80000 MiB
 subject to budgets, independently of the small content-PUT policy. Native multipart completion is implemented.
 EdgeOne signed transport is COS-only and requires additional exact-endpoint signature/MD5/listing evidence.
 Whole-file checksum input remains unsupported. Embedded parts optionally accept Content-Digest; signed parts
@@ -370,7 +370,7 @@ with contentRevision. Bind owner, normalized native path, internal target/parent
 size, metadata and native condition. Recheck the path and parent before the final native effect; moving or
 recreating a parent/target invalidates the admission (`412 target_changed`). A session does not follow a
 renamed file. Internal target generations/tombstones prevent absent/create/delete/absent races; those values
-are not public file IDs. New sessions never silently cancel earlier sessions.
+are not public file IDs. Creating a new session never cancels an earlier session as a server-side effect.
 
 Example response (numbers are illustrative, not universal defaults):
 
@@ -423,14 +423,23 @@ Operations: open sessions retain their normal expiry/cleanup, and accepted work 
 recovery contract. Clients retaining session identity and source bytes can use resumable API recovery across
 reconnects/restarts; this is distinct from the browser's page-memory queue.
 
-An old open session can continue guarding its exact target after browser queue loss. When the user explicitly
-selects a new upload and creation returns `operation_in_progress`, the browser inspects only the identified
-blocking session, validating the session/Operation identity and target path. If it is `open`, browser confirmation
-offers to discard the unfinished upload and start again. Acceptance aborts that exact session before retrying
-allocation; declining leaves the new task failed and retryable. This flow never silently aborts another tab's
-session and never aborts `committing` or `outcome_unknown` work. For this blocked-create recovery, an
-authoritative `aborted`, `expired` or `failed` session allows a new allocation only when its exact Operation is
-`cancelled` and the guard has settled; a failed Operation or unknown cleanup outcome does not authorize retry.
+Browser tasks acquire ephemeral ownership for the owner and normalized target path before the first upload
+allocation, using the [Web Locks lifecycle and scope](../design/storage-p6.md#resources-uploads-and-recovery).
+A conflicting tab produces a retryable inline error, "This file is being uploaded in another tab. Try again after
+it finishes.", without a popup or aborting the holder's session. Unavailable or failed ownership also fails inline
+and retryably; the browser must not proceed unlocked or automatically abort a session without ownership.
+
+An old open session can continue guarding its exact target after browser queue loss. After ownership is
+acquired, a new selection whose creation returns `operation_in_progress` inspects only the identified blocking
+session, validating the session/Operation identity and normalized target path. If it is `open`, the browser
+automatically aborts that exact session and retries allocation without a restart confirmation. This flow never
+automatically aborts `committing`, `outcome_unknown` or `committed` work. An authoritative `aborted`, `expired`
+or `failed` session allows a new allocation only when its exact Operation is `cancelled` and the guard has
+settled; a failed Operation or unknown cleanup outcome does not authorize retry. Unavailable session status
+leaves the new task failed and retryable; definitive non-upload blockers keep their existing Operation waits.
+This coordination applies only to cooperating same-origin tabs in one browser; it neither supplies server
+authority nor proves inactivity of external API clients, other origins or devices. Server admission/abort
+semantics and API fields are unchanged.
 
 For admitted native COS/S3 multipart sessions, each acknowledged service part already resides in unpublished
 provider multipart state. Bounded per-part buffering verifies exact length/hash and binds immutable identity;

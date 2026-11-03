@@ -203,6 +203,14 @@ owner-scoped pending delete identities may remain stored independently. Durable 
 recovery and already accepted Operations are unchanged. Clients retaining session identity and source bytes
 can use the resumable API across reconnects/restarts; the browser does not restore its queue after reload.
 
+Before allocation, browser tasks acquire an ephemeral Web Lock per owner and normalized target path, retained
+through retryable failures until completion, cancellation or page unmount. Browser destruction releases it.
+A new selection can automatically replace an abandoned `open` session without another confirmation once it
+owns the lock; an actual tab conflict fails inline. Missing/failed ownership never permits an unlocked abort.
+This coordinates cooperating same-origin tabs in one browser, not external clients, origins or devices, and
+supplies no server authority. Exact session/Operation checks and publication guards remain authoritative;
+see [P6 ownership and recovery](storage-p6.md#resources-uploads-and-recovery) for the full lifecycle.
+
 Readable final paths can cost an extra publish copy on S3 or require per-file copies for a folder move. These
 are accepted costs when unavoidable; never optimize them by quietly replacing the native tree with anonymous
 objects. Benchmark staging-to-final copy, request overhead, gateway bandwidth, retry bytes and directory moves
