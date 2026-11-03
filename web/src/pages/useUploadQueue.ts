@@ -290,7 +290,10 @@ export function useUploadQueue(onUploaded: (task: UploadTask, item: Item) => voi
       let received = [...receipts.values()].reduce((sum, receipt) => sum + receipt.size, 0);
       patch(id, { loaded: received });
       const missing: number[] = [];
-      for (let number = 1; number <= session.partCount && missing.length < parallelism; number++) {
+      // A sliding window of `parallelism` workers drains the missing parts so one slow
+      // part never idles the other connections. The turn only ends early (after one
+      // window's worth of parts) when another file is queued and needs a slot.
+      for (let number = 1; number <= session.partCount && (session.ordering !== "ascending" || missing.length < 1); number++) {
         if (!receipts.has(number)) missing.push(number);
       }
       if (session.ordering === "ascending" && missing.length && session.nextPart !== missing[0]) throw new Error("The next upload part changed.");
@@ -315,7 +318,8 @@ export function useUploadQueue(onUploaded: (task: UploadTask, item: Item) => voi
         });
         let failure: unknown;
         try {
-          await Promise.all(missing.map(async (number) => {
+          const pending = [...missing];
+          const uploadOne = async (number: number) => {
             const chunk = chunkFor(number);
             try {
               for (let attempt = 0; attempt < PART_UPLOAD_ATTEMPTS; attempt++) {
@@ -355,6 +359,15 @@ export function useUploadQueue(onUploaded: (task: UploadTask, item: Item) => voi
             } catch (error) {
               if (failure === undefined) failure = error;
               batch.abort();
+            }
+          };
+          let started = 0;
+          const othersWaiting = () => tasksRef.current.some((task) => task.id !== id && task.status === "queued" && !task.cancelRequested);
+          const take = () => started >= parallelism && othersWaiting() ? undefined : pending.shift();
+          await Promise.all(Array.from({ length: Math.min(parallelism, pending.length) }, async () => {
+            for (let number = take(); number !== undefined && !batch.signal.aborted; number = take()) {
+              started++;
+              await uploadOne(number);
             }
           }));
         } finally { signal.removeEventListener("abort", abortBatch); }
