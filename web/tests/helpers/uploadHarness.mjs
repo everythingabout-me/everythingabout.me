@@ -47,7 +47,11 @@ export function uploadServer(partSize = 2) {
       sessions.set(id, session); keys.set(key, id); receipts.set(id, new Map());
       return { ...session };
     },
-    uploadStatus: async (id) => { calls.push(["status", id]); assert.ok(sessions.has(id), "query an allocated session"); return { ...sessions.get(id) }; },
+    uploadStatus: async (id) => {
+      calls.push(["status", id]);
+      if (!sessions.has(id)) throw new TestApiError("upload not found", 404, { code: "not_found" });
+      return { ...sessions.get(id) };
+    },
     uploadParts: async (id, cursor) => { calls.push(["receipts", id, cursor]); return { items: [...receipts.get(id).values()], watermark: receipts.get(id).size, nextCursor: null }; },
     uploadPart: async (id, number, blob, signal, progress) => {
       calls.push(["part", id, number, blob]);
@@ -78,13 +82,31 @@ export function uploadServer(partSize = 2) {
 }
 
 export async function setup(overrides = {}, { storage = memoryStorage(), owner = "owner-a", confirm = () => true } = {}) {
-  const slots = [], effects = [], timers = new Map(), completed = [];
+  const slots = [], effects = [], timers = new Map(), completed = [], listeners = new Map();
   let timerId = 0, cursor = 0, mounted = true;
+  const window = {
+    confirm,
+    addEventListener(type, listener) {
+      if (!listeners.has(type)) listeners.set(type, new Set());
+      listeners.get(type).add(listener);
+    },
+    removeEventListener(type, listener) {
+      const registered = listeners.get(type);
+      registered?.delete(listener);
+      if (registered?.size === 0) listeners.delete(type);
+    },
+  };
+  const dispatchBeforeUnload = () => {
+    const event = { type: "beforeunload", cancelable: true, defaultPrevented: false, returnValue: undefined,
+      preventDefault() { this.defaultPrevented = true; } };
+    for (const listener of [...(listeners.get(event.type) ?? [])]) listener.call(window, event);
+    return event;
+  };
   const same = (a, b) => a && b && a.length === b.length && a.every((value, i) => Object.is(value, b[i]));
   const schedule = (callback, delay, repeat) => { assert.ok([250, 500, 2000, 15000].includes(delay), `unexpected timer ${delay}`); timers.set(++timerId, { callback, delay, repeat }); return timerId; };
   const runtime = {
     api: { me: async () => ({ id: owner }), ...overrides }, ApiError: TestApiError,
-    localStorage: storage, crypto: webcrypto, window: { confirm },
+    localStorage: storage, crypto: webcrypto, window,
     setTimeout: (fn, delay) => schedule(fn, delay, false), clearTimeout: (id) => timers.delete(id),
     setInterval: (fn, delay) => schedule(fn, delay, true), clearInterval: (id) => timers.delete(id),
     useRef: (value) => slots[cursor++] ??= { current: value },
@@ -139,9 +161,10 @@ export async function setup(overrides = {}, { storage = memoryStorage(), owner =
     return settle();
   };
   const unmount = () => {
+    if (!mounted) return;
     mounted = false;
     for (const slot of slots) slot?.cleanup?.();
   };
   render();
-  return { render, settle, until, tick, timers, storage, completed, persistence, unmount };
+  return { render, settle, until, tick, timers, storage, completed, persistence, listeners, dispatchBeforeUnload, unmount };
 }

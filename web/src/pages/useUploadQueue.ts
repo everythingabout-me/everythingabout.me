@@ -1,4 +1,4 @@
-/** Durable session identities survive reload; browser File handles require reselection. */
+/** Upload tasks and File references live only in the current page. */
 import { useCallback, useEffect, useRef, useState } from "react";
 import { ApiError, api, type Item, type FileOperation, type FileUploadInput, type FileUploadSession } from "../api/client";
 import { t } from "../i18n";
@@ -45,6 +45,7 @@ export interface UploadTask {
 }
 export interface UploadQueue {
   tasks: UploadTask[];
+  hasActiveUploads: boolean;
   enqueue(entries: UploadEntry[], dir: string, exists: (path: string) => boolean): void;
   cancel(id: string): void;
   retry(id: string): void;
@@ -67,7 +68,6 @@ async function sha256(blob: Blob): Promise<string> {
 export function useUploadQueue(onUploaded: (task: UploadTask, item: Item) => void): UploadQueue {
   const [tasks, setTasks] = useState<UploadTask[]>([]);
   const tasksRef = useRef<UploadTask[]>([]);
-  const ownerRef = useRef<string | undefined>(undefined);
   const mounted = useRef(true);
   const ready = useRef(false);
   const running = useRef(new Map<string, Runtime>());
@@ -78,19 +78,12 @@ export function useUploadQueue(onUploaded: (task: UploadTask, item: Item) => voi
   const pollBusy = useRef(false);
   const deadlines = useRef(new Set<ReturnType<typeof setTimeout>>());
   finishRef.current = onUploaded;
-  const persist = useCallback((next: UploadTask[]) => {
-    if (!ownerRef.current) return;
-    try {
-      localStorage.setItem(`eam.uploads.v1:${ownerRef.current}`, JSON.stringify(next.filter((task) => task.status !== "completed").map(({ file: _file, ...task }) => task)));
-    } catch { /* A failed persistence write does not change the server session. */ }
-  }, []);
   const update = useCallback((mutate: (current: UploadTask[]) => UploadTask[]) => {
     if (!mounted.current) return;
     const next = mutate(tasksRef.current);
     tasksRef.current = next;
-    persist(next);
     setTasks(next);
-  }, [persist]);
+  }, []);
   const patch = useCallback((id: string, changes: Partial<UploadTask>) => {
     update((current) => current.map((task) => task.id === id ? { ...task, ...changes } : task));
   }, [update]);
@@ -155,7 +148,7 @@ export function useUploadQueue(onUploaded: (task: UploadTask, item: Item) => voi
       } else {
         let intent = task.intent;
         if (!intent) {
-          if (!task.file) { patch(id, { status: "failed", error: t("drive.reselectUpload"), speed: 0 }); return; }
+          if (!task.file) { patch(id, { status: "failed", error: t("drive.uploadFileUnavailable"), speed: 0 }); return; }
           let condition: FileUploadInput["condition"] = { mode: "create" };
           if (task.overwrite) {
             const old = await api.metadata(task.path);
@@ -168,12 +161,44 @@ export function useUploadQueue(onUploaded: (task: UploadTask, item: Item) => voi
           if (signal.aborted) return;
           intent = { path: task.path, size: task.size, mediaType: task.file?.type || "application/octet-stream", condition,
             ...(capabilities.sourceModifiedAt && task.modifiedAt !== undefined ? { sourceModifiedAt: new Date(task.modifiedAt).toISOString() } : {}) };
-          // Persist exact public intent/key before allocation, including a lost create ACK.
+          // Retain the exact intent/key in memory before allocation, including a lost create ACK.
           patch(id, { intent });
         }
         try { session = await api.createUpload(intent, task.createKey, signal); }
         catch (error) {
           if (error instanceof ApiError && [400, 401, 403, 409, 413, 422, 507].includes(error.status)) patch(id, { allocationRejected: true });
+          if (error instanceof ApiError && error.code === "operation_in_progress" && error.operationId) {
+            let blocking: FileUploadSession | undefined;
+            try { blocking = await api.uploadStatus(error.operationId, signal); }
+            catch (statusError) {
+              // Only a definitive non-upload identity belongs in generic Operation waiting.
+              if (!(statusError instanceof ApiError) || statusError.status !== 404) throw statusError;
+            }
+            if (signal.aborted) return;
+            if (blocking?.id === error.operationId && relative(blocking.path) === task.path) {
+              if (blocking.state === "open") {
+                if (!window.confirm(t("drive.restartUploadConfirm", { name: task.name }))) throw new Error(t("drive.uploadAlreadyInProgress"));
+                try { await api.abortUpload(blocking.id, signal); }
+                catch (abortError) {
+                  // A lost abort ACK must be reconciled before a fresh allocation.
+                  const settled = await api.uploadStatus(blocking.id, signal);
+                  if (settled.id !== blocking.id || relative(settled.path) !== task.path || !["aborted", "expired", "failed"].includes(settled.state)) throw abortError;
+                  const op = await api.getOperation(blocking.id, signal);
+                  if (op.id !== blocking.id || op.state !== "cancelled") throw abortError;
+                }
+                if (!signal.aborted) patch(id, { status: "queued", allocationRejected: false });
+                return;
+              }
+              if (["aborted", "expired", "failed"].includes(blocking.state)) {
+                const op = await api.getOperation(blocking.id, signal);
+                if (signal.aborted) return;
+                if (op.id === blocking.id && op.state === "cancelled") {
+                  patch(id, { status: "queued", allocationRejected: false });
+                  return;
+                }
+              }
+            }
+          }
           if (error instanceof ApiError && error.status === 409 && error.code === "name_conflict" && !task.overwrite) {
             const old = await api.metadata(task.path);
             if (old.kind === "file" && window.confirm(t("drive.overwriteConfirm", { name: task.name }))) {
@@ -199,7 +224,7 @@ export function useUploadQueue(onUploaded: (task: UploadTask, item: Item) => voi
         }
         throw new Error(`Upload ${session.state}; select the file again to start a new session.`);
       }
-      if (!task.file) { patch(id, { status: "failed", error: t("drive.reselectUpload"), speed: 0 }); return; }
+      if (!task.file) { patch(id, { status: "failed", error: t("drive.uploadFileUnavailable"), speed: 0 }); return; }
       if (task.file.size !== session.size) throw new Error("The selected file has a different size.");
       const file = task.file;
       if (!Number.isSafeInteger(session.partSize) || session.partSize < 1 || !Number.isSafeInteger(session.partCount)
@@ -434,18 +459,10 @@ export function useUploadQueue(onUploaded: (task: UploadTask, item: Item) => voi
     const controller = new AbortController();
     void api.me().then((user) => {
       if (!mounted.current || !user) return;
-      ownerRef.current = user.id;
       setUploadOwner(user.id);
-      let saved: UploadTask[] = [];
-      try {
-        const raw: unknown = JSON.parse(localStorage.getItem(`eam.uploads.v1:${user.id}`) ?? "[]");
-        if (Array.isArray(raw)) saved = raw.filter((item) => item && typeof item.id === "string" && typeof item.path === "string" && typeof item.createKey === "string" && typeof item.size === "number").slice(0, 1000).map((task) => ({ ...task, file: null, speed: 0,
-          status: task.waitingFor ? "waiting" : task.allocationRejected && !task.uploadId ? "failed" : "queued" }));
-      } catch { /* A corrupt local record grants no upload authority. */ }
-      const existing = new Set(tasksRef.current.map((task) => task.id));
-      update((current) => [...saved.filter((task) => !existing.has(task.id)), ...current]);
+      try { localStorage.removeItem(`eam.uploads.v1:${user.id}`); }
+      catch { /* Obsolete records are never read, even when storage is unavailable. */ }
       ready.current = true;
-      for (const task of tasksRef.current.filter((entry) => entry.cancelRequested)) cancel(task.id);
       pumpRef.current();
     }).catch(() => { /* Authentication failures keep queued bytes unsent. */ });
     const timer = setInterval(() => {
@@ -492,5 +509,15 @@ export function useUploadQueue(onUploaded: (task: UploadTask, item: Item) => voi
       running.current.clear();
     };
   }, [applyOperation, patch, update]);
-  return { tasks, enqueue, cancel, retry };
+  const hasActiveUploads = tasks.some((task) => ["queued", "waiting", "uploading", "finalizing"].includes(task.status));
+  useEffect(() => {
+    if (!hasActiveUploads) return;
+    const beforeUnload = (event: BeforeUnloadEvent) => {
+      event.preventDefault();
+      event.returnValue = "";
+    };
+    window.addEventListener("beforeunload", beforeUnload);
+    return () => window.removeEventListener("beforeunload", beforeUnload);
+  }, [hasActiveUploads]);
+  return { tasks, hasActiveUploads, enqueue, cancel, retry };
 }

@@ -67,9 +67,10 @@ P6 client/media/prompt cutover and P7 release/restore/performance acceptance rem
 
 ## P6 implementation status
 
-P6 switches Web resources, namespace actions, persistent P5 upload recovery, all media bytes and generated
-Save/Connect instructions to the shared file API. Legacy file routes return 410; client provider SDKs are
-removed. See [client behavior and browser acceptance](storage-p6.md) and the separate
+P6 switches Web resources, namespace actions, P5 uploads with same-page recovery, all media bytes and generated
+Save/Connect instructions to the shared file API. Browser tasks remain in memory for the current Files page;
+backend sessions and Operations retain durable recovery independently. Legacy file routes return 410; client
+provider SDKs are removed. See [client behavior and browser acceptance](storage-p6.md) and the separate
 [code-cutover versus authority-drain runbook](storage-p6-backend.md). Built-SPA Chromium acceptance uses
 real Cookie/scoped Bearer, disposable Postgres and admitted Local roots. P7 release/restore/performance,
 real COS/S3 probes, production baselines and actual old authority drain remain unverified gates.
@@ -101,7 +102,7 @@ real COS/S3 probes, production baselines and actual old authority drain remain u
 | Upload boundary | [Web sign](../../backend/internal/api/files.go#L161) returns COS configuration/STS; [public upload](../../backend/internal/api/api_upload.go#L164) signs final-path URLs | Replace with authenticated same-origin ingress; receiving bytes must not give clients independent write authority to final paths |
 | Lifecycle persistence | [Upload schema](../../sql/006_upload_sessions.sql#L7) stores metadata/timestamps and [multipart ID](../../sql/009_upload_multipart.sql#L3); [complete](../../backend/internal/api/api_upload.go#L253) returns 409 on repeats and writes native storage before index/result | Add durable receipts, principal/root binding, immutable intent, result/idempotency records, native checkpoints and explicit unknown outcomes |
 | Operations | [Jobs](../../backend/internal/jobs/jobs.go#L81) fail active work on startup, retry by rescanning, and [move](../../backend/internal/jobs/jobs.go#L310) copy/deletes each file immediately | Replace unsafe recovery with per-entry manifests/checkpoints, path guards and operation-specific reconciliation |
-| Web/media clients | [Client](../../web/src/api/client.ts#L21) expects internal IDs/envelope and [upload credentials](../../web/src/api/client.ts#L190); [queue](../../web/src/pages/useUploadQueue.ts#L243) uses COS SDK | Migrate DTOs and file calls, persist session recovery and remove SDK; previews/event media must also use same-origin paths |
+| Web/media clients | [Client](../../web/src/api/client.ts#L21) expects internal IDs/envelope and [upload credentials](../../web/src/api/client.ts#L190); [queue](../../web/src/pages/useUploadQueue.ts#L243) uses COS SDK | Migrate DTOs and file calls, retain session recovery within the current Files page and remove SDK; previews/event media must also use same-origin paths |
 | Existing scans | [Reconcile](../../backend/cmd/eam/reconcile.go#L40) supports dry-run, native listing and inventory, but is COS-specific | Generalize safe index-only import/scan; fix name handling and derived folders before relying on recovery |
 | Local config coupling | [Save-link MAC seed](../../backend/internal/auth/session.go#L26) depends on COS key or DB URL; [SES defaults](../../backend/internal/config/config.go#L120) borrow COS keys | Add a stable application secret and independent mail configuration; backend change must not accidentally alter credential identity |
 
@@ -265,8 +266,15 @@ fit both native and ingress/count limits before admission; small requests retain
 
 Move browser file metadata/list/search/mkdir/move/copy/delete and upload queue to the same endpoints external
 clients use. Replace Item's exposed ID/envelope assumptions with path metadata/Problem parsing; preserve path
-router URLs, progress, cancellation and bounded fairness. Persist upload session identity across reload;
-reselection of a local File may still be required by browser permissions. Remove cos-js-sdk-v5 and upload grants.
+router URLs, progress, cancellation and bounded fairness. Keep the browser queue only in memory for the current
+Files page/document, preserving it during folder navigation and discarding it after refresh/close without failed
+task restoration or File reselection. Register the browser-native beforeunload warning while queued, waiting,
+uploading or finalizing tasks remain; remove it when none remain and do not rely on unload-time abort API calls.
+Retain same-page session/create-key recovery, idempotency, receipt/hash verification and cancellation. Remove
+only the current owner's legacy `eam.uploads.v1:<owner>` localStorage record without executing it. Pending delete
+operation identities may remain owner-scoped in localStorage independently of the queue. Durable backend
+sessions, recovery/expiry and accepted Operations continue unchanged; clients retaining session identity and
+source bytes can use the resumable API across reconnects/restarts. Remove cos-js-sdk-v5 and legacy upload grants.
 
 Serve preview/download/audio/video/image URLs through content paths, and event/timeline thumbnails through
 authorized same-origin endpoints (or supported raw/placeholder behavior until transforms ship). Derived private
@@ -281,7 +289,10 @@ and existing data still need explicit handling. Do not keep a permanent second b
 
 **Gate:** browser network traffic, including previews and thumbnails, stays on the configured origin and new
 route family; curl/Bearer and browser/cookie do the same operations. No exposed file IDs/provider secrets/URLs
-or storage SDK in client code, and generated instructions invoke actual new endpoints.
+or storage SDK in client code, and generated instructions invoke actual new endpoints. Browser acceptance
+also proves folder-navigation queue retention, native beforeunload registration for active tasks, an empty
+queue after reload without failed-task restoration/reselection, current-owner legacy upload-record removal
+without execution, and unchanged same-page retry/cancellation plus independent delete identity tracking.
 
 ### P7 — Release acceptance, then performance expansion
 

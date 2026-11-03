@@ -193,7 +193,15 @@ settles the index/result; it is not merely a database update or another full-byt
 The browser schedules four files concurrently and up to four numbered parts per file, respecting each session's
 maxParallelism and ordering. This permits at most sixteen simultaneous browser part requests. Yield between
 bounded batches so selected small files can progress. Transient retries query durable receipts before replaying
-an uncertain part; acknowledged content is immutable and refresh/reselection verifies hashes before reuse.
+an uncertain part; acknowledged content is immutable and receipt hashes are verified against the retained File
+before reuse. The browser queue exists only in memory for the current Files page/document and survives folder
+navigation. Refresh/close discards it without restoring failed tasks or requesting File reselection. Register the
+browser-native beforeunload warning while queued, waiting, uploading or finalizing tasks remain; do not rely on
+unload-time abort requests. Same-page retry, idempotency and cancellation retain their exact session/Operation
+identities. Remove the current owner's old `eam.uploads.v1:<owner>` localStorage record without executing it;
+owner-scoped pending delete identities may remain stored independently. Durable server sessions, expiry,
+recovery and already accepted Operations are unchanged. Clients retaining session identity and source bytes
+can use the resumable API across reconnects/restarts; the browser does not restore its queue after reload.
 
 Readable final paths can cost an extra publish copy on S3 or require per-file copies for a folder move. These
 are accepted costs when unavoidable; never optimize them by quietly replacing the native tree with anonymous

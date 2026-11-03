@@ -120,10 +120,18 @@ and persists Local bytes or native COS/S3 parts before acknowledging the receipt
 owner/root/configuration bound in Postgres (migration025); embedded byte handling has a 60-second read-idle
 limit, not a total upload timeout. The application's admitted publication metadata/locks remain durable.
 
-The browser retains four-by-four scheduling, combined progress, bounded retries and exact session/create-key
-recovery. It verifies receipt hashes against a reselected File before skipping bytes. Signed retries always
+The browser retains four-by-four scheduling, combined progress, bounded same-page retries and exact
+session/create-key recovery. Before skipping bytes it verifies receipt hashes against the File retained in the
+current page. The upload queue exists only in memory for the current Files page/document: folder navigation
+preserves it, while refresh/close discards it without failed-task restoration or File reselection. A browser-native
+beforeunload warning is registered while queued, waiting, uploading or finalizing tasks remain; cleanup does not
+rely on unload-time abort API calls. Remove the current owner's legacy `eam.uploads.v1:<owner>` localStorage
+record without executing it; pending delete identities may remain owner-scoped in localStorage independently.
+Durable backend session recovery/expiry and accepted Operations continue unchanged. Clients retaining sessions
+and source bytes can use the resumable API independently of the browser queue lifetime. Signed retries always
 reconcile provider state through confirm before retransmission; an unknown confirm grants no durable ACK.
-Cancellation aborts browser requests and the exact server session/Operation, never a committed readable file.
+Same-page cancellation aborts browser requests and the exact server session/Operation, never a committed
+readable file.
 
 Issued signed requests cannot be revoked merely by logout, application cancellation or expiry of the session
 cookie. They authorize only the bound part of the old unpublished native upload. Future grants/confirm/commit

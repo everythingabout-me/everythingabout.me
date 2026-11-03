@@ -38,41 +38,87 @@ try {
   const raw = await context.request.get(`${config.url}/api/files/content?${new URLSearchParams({ path: "/hello +?#%.txt" })}`);
   assert.equal(await raw.text(), "browser upload\n");
   assert.equal(raw.headers()["x-content-type-options"], "nosniff");
-  // One acknowledged part survives page destruction. Resume requires a local File reselection.
+  // Folder navigation keeps the in-memory queue; refresh discards it without replaying a session.
+  const navigationCsrf = (await (await context.request.get(`${config.url}/api/files/me`)).json()).csrfToken;
+  const navigationFolder = await context.request.post(`${config.url}/api/files`, {
+    headers: { Origin: origin, "X-CSRF-Token": navigationCsrf }, data: { kind: "folder", path: "/Navigation" },
+  });
+  assert.ok([200, 201].includes(navigationFolder.status()));
   await page.goto(`${config.url}/files`);
   let release;
   const held = new Promise((resolve) => { release = resolve; });
   let intercepted = false;
-  let resumeSession;
+  let interruptedSession;
   await page.route("**/api/files/uploads/*/parts/2", async (route) => {
     intercepted = true;
-    resumeSession = new URL(route.request().url()).pathname.split("/")[4];
+    interruptedSession = new URL(route.request().url()).pathname.split("/")[4];
     await held; await route.abort().catch(() => {});
   });
-  const large = { name: "resume.bin", mimeType: "application/octet-stream", buffer: Buffer.alloc(9 * 1024 * 1024, 65) };
+  const large = { name: "interrupted.bin", mimeType: "application/octet-stream", buffer: Buffer.alloc(9 * 1024 * 1024, 65) };
   await page.locator('input[type="file"]').first().setInputFiles(large);
-  await page.waitForFunction(() => Object.keys(localStorage).some((key) => key.startsWith("eam.uploads.v1:") && localStorage.getItem(key).includes("resume.bin")));
   for (let i = 0; i < 200 && !intercepted; i++) await page.waitForTimeout(50);
   assert.equal(intercepted, true, "the second parallel part was reached");
-  // Parallel dispatch does not imply that part one has been acknowledged yet.
-  // Refresh only after the authoritative receipt is durable, with part two held.
   let firstPartDurable = false;
   for (let i = 0; i < 200 && !firstPartDurable; i++) {
-    const response = await context.request.get(`${config.url}/api/files/uploads/${resumeSession}/parts`);
+    const response = await context.request.get(`${config.url}/api/files/uploads/${interruptedSession}/parts`);
     assert.equal(response.status(), 200);
     firstPartDurable = (await response.json()).items.some((part) => part.number === 1);
     if (!firstPartDurable) await page.waitForTimeout(50);
   }
   assert.equal(firstPartDurable, true, "part one must have a durable receipt before refresh");
-  release();
+  const createsBeforeNavigation = requests.filter((request) => request.method === "POST" && new URL(request.url).pathname === "/api/files/uploads").length;
+  await page.getByTitle("Navigation", { exact: true }).click();
+  await page.waitForURL(`${config.url}/files/Navigation`);
+  await page.getByRole("link", { name: "All files", exact: true }).click();
+  await page.getByRole("button", { name: "Cancel upload of interrupted.bin", exact: true }).waitFor();
+  assert.equal(requests.filter((request) => request.method === "POST" && new URL(request.url).pathname === "/api/files/uploads").length, createsBeforeNavigation);
+  const leavePrompt = page.waitForEvent("dialog").then(async (dialog) => {
+    const text = dialog.message();
+    await dialog.dismiss();
+    return text;
+  });
+  await page.getByRole("link", { name: "Home", exact: true }).click();
+  assert.match(await leavePrompt, /Uploads are not finished/);
+  await page.getByRole("button", { name: "Cancel upload of interrupted.bin", exact: true }).waitFor();
+  assert.equal(await page.evaluate(() => {
+    const event = new Event("beforeunload", { cancelable: true });
+    window.dispatchEvent(event);
+    return event.defaultPrevented;
+  }), true, "an active upload requests the browser's native leave warning");
+  const obsoleteKey = await page.evaluate(async () => {
+    const { data } = await (await fetch("/api/auth/me")).json();
+    const key = `eam.uploads.v1:${data.user.id}`;
+    localStorage.setItem(key, JSON.stringify([{ id: "old-task", path: "interrupted.bin", size: 1, createKey: "old-key" }]));
+    return key;
+  });
+  const uploadRequestsBeforeReload = requests.filter((request) => new URL(request.url).pathname.startsWith("/api/files/uploads"));
+  page.once("dialog", async (dialog) => { assert.equal(dialog.type(), "beforeunload"); await dialog.accept(); });
   await page.reload();
+  release();
   await page.unroute("**/api/files/uploads/*/parts/2");
-  await page.getByText(/Select this file again/i).waitFor();
-  const before = requests.filter((request) => /\/parts\/1$/.test(new URL(request.url).pathname)).length;
+  await page.locator('input[type="file"]').first().waitFor({ state: "attached" });
+  await page.waitForFunction((key) => localStorage.getItem(key) === null, obsoleteKey);
+  assert.equal(await page.getByRole("button", { name: "Cancel upload of interrupted.bin", exact: true }).count(), 0);
+  assert.equal(await page.getByText(/Select this file again/i).count(), 0);
+  assert.deepEqual(requests.filter((request) => new URL(request.url).pathname.startsWith("/api/files/uploads")), uploadRequestsBeforeReload, "refresh must not query, retry or cancel discarded upload tasks");
+  assert.equal((await metadata("/interrupted.bin")).status(), 404);
+  assert.equal((await (await context.request.get(`${config.url}/api/files/uploads/${interruptedSession}`)).json()).state, "open", "page dismissal does not cancel server sessions through unload requests");
+  assert.equal(await page.evaluate(() => {
+    const event = new Event("beforeunload", { cancelable: true });
+    window.dispatchEvent(event);
+    return event.defaultPrevented;
+  }), false, "the fresh empty queue has no leave warning");
+  let restartConfirmed = false;
+  page.once("dialog", async (dialog) => {
+    assert.equal(dialog.type(), "confirm");
+    assert.match(dialog.message(), /unfinished upload already exists/);
+    restartConfirmed = true;
+    await dialog.accept();
+  });
   await page.locator('input[type="file"]').first().setInputFiles(large);
-  await waitMetadata("/resume.bin");
-  const after = requests.filter((request) => /\/parts\/1$/.test(new URL(request.url).pathname)).length;
-  assert.equal(after, before, "refresh resume must query receipts and skip acknowledged part one");
+  await waitMetadata("/interrupted.bin");
+  assert.equal(restartConfirmed, true, "explicit selection can replace the abandoned open session");
+  assert.equal((await (await context.request.get(`${config.url}/api/files/uploads/${interruptedSession}`)).json()).state, "aborted");
   // Safe raster preview stays at this origin and performs no provider image transform.
   const image = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/l9sAAAAASUVORK5CYII=", "base64");
   await page.locator('input[type="file"]').first().setInputFiles({ name: "pixel.png", mimeType: "image/png", buffer: image });
@@ -166,5 +212,5 @@ try {
     assert.equal(/imageMogr2|cos\.[^/]*myqcloud|upload\/sign|upload\/confirm/.test(request.url), false);
   }
   assert.deepEqual(problems, []);
-  console.log(JSON.stringify({ origin, requests: requests.length, checks: ["built SPA", "cookie CSRF upload", "special names", "preview", "download", "refresh receipt recovery", "reselect skip confirmed part", "cancel before commit", "partial failure", "exact deletion wait", "scoped Bearer same lifecycle", "same-origin network"] }));
+  console.log(JSON.stringify({ origin, requests: requests.length, checks: ["built SPA", "cookie CSRF upload", "special names", "preview", "download", "folder navigation retains uploads", "leave warning", "refresh discards uploads", "obsolete queue removal", "explicit restart after refresh", "cancel before commit", "partial failure", "exact deletion wait", "scoped Bearer same lifecycle", "same-origin network"] }));
 } finally { await browser.close(); }

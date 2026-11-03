@@ -17,8 +17,13 @@ Self-host:  client --session + part PUT--> embedded application receiver --> Loc
 
 Native COS/S3 parts are durable before acknowledgement. Commit seals metadata and completes native publication,
 then settles the index/result; it does not assemble and reupload the entire file. Local uses its embedded durable
-staging. Unknown native effects remain guarded. Browser session identities survive refresh; local File reselection
-may be required to resume acknowledged chunks. Four files and up to four parts per file advance concurrently.
+staging. Unknown native effects remain guarded. The browser queue lives only in memory for the current Files
+page/document: folder navigation preserves it, while refresh/close discards it without failed-task restoration or
+File reselection. A browser-native beforeunload warning is registered while queued, waiting, uploading or
+finalizing tasks remain.
+Durable server sessions and accepted Operations continue under their existing recovery/expiry rules. Clients
+that retain session identity and source bytes can use the resumable API independently of this browser behavior.
+Four files and up to four parts per file advance concurrently.
 See [native uploads and receiver deployment](docs/design/native-upload-deployment.md) for the exact boundaries.
 Object connections may explicitly admit `createOnly` uploads without enabling bucket versioning or excluding
 external writers. This mode only creates absent file keys; replacement, folder creation, move, copy and deletion
@@ -168,7 +173,7 @@ The key sits directly on the path (`drive/<userID>/Photos/2024/a.jpg`), which me
   so nothing downloads on first paint and a single chunk (~191KB gzip) is fetched when you open one, with the per-format renderer loading on top of that; formats without a preview still offer a download
 - Drag / multi-select upload: placeholder rows appear immediately, with a queue, progress, and speed, cancelable, retryable on failure; `/` focuses search
 - Folder uploads: drag folders or choose **Upload → Upload folder** to retain the selected root and nested paths. The list shows only immediate children throughout upload; each folder summarizes selected descendant file counts, confirmed files, bytes and percentage. Pending folders are navigable, completed rows lose their progress bars, and folder actions cancel/retry the remaining descendants. Dragged folders also preserve empty directories; the browser folder picker only exposes directories containing files. Existing directories merge, while replacing files requires confirmation.
-- Refreshing preserves owner-scoped P5 session IDs, idempotency keys, target intent and Operation waits. Select the original File again when the browser cannot retain its handle; acknowledged parts are hash-verified and skipped. Cancellation reconciles the same session/Operation before a newer mutation can receive bytes. Apply all forward migrations, including `024_file_uploads.sql`, before starting the new binary. See [P6 client acceptance](docs/design/storage-p6.md) and the separate [authority drain](docs/design/storage-p6-backend.md).
+- The upload queue and selected Files remain in memory during folder navigation within the current Files page/document. Refresh/close discards the queue; reopening starts empty, without restored failed tasks or File reselection. A browser-native beforeunload warning is registered while queued, waiting, uploading or finalizing tasks remain. Same-page retries retain idempotency keys and verify receipt hashes; cancellation reconciles the same session/Operation. No unload-time abort API is required. The current user's old `eam.uploads.v1:<owner>` localStorage record is removed without executing it; owner-scoped pending delete identities remain independent. Durable backend recovery/expiry and accepted Operations continue unchanged. Apply all forward migrations, including `024_file_uploads.sql`, before starting the new binary. See [P6 client acceptance](docs/design/storage-p6.md) and the separate [authority drain](docs/design/storage-p6-backend.md).
 - Search matches both the filename and the full path, and each result shows its directory on the right
 - New directories use an inline input, and deletion has a confirmation dialog (it is permanent)
 - One shared top bar on every signed-in page: brand, `Home` / `Files` navigation with the current page highlighted, the account chip, and the file page's search and upload actions

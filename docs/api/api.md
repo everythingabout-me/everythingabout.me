@@ -14,8 +14,10 @@
 > There is no requirement to preserve old clients or provide compatibility adapters. The retired protocols
 > are documented separately in [legacy-api.md](legacy-api.md). Account login, Connect and event authoring
 > remain separate APIs. P6 switches Web metadata, namespace mutations, resumable uploads and all media bytes
-> to this contract. Session identities and exact Operation waits survive refresh; local File reselection may
-> be required. `/api/fs/*` and root legacy file routes return 410 and issue no new native authority.
+> to this contract. The browser upload queue lives only in memory for the current Files page/document, surviving
+> folder navigation but discarded after refresh/close. It restores no failed tasks and requests no File reselection.
+> Durable server sessions and accepted Operations retain their recovery/expiry behavior independently.
+> `/api/fs/*` and root legacy file routes return 410 and issue no new native authority.
 > Read [P6 client acceptance](../design/storage-p6.md) and [authority-drain runbook](../design/storage-p6-backend.md)
 > before deployment. Route removal does not revoke previously issued PUT/STS/multipart authority.
 > Architecture: [storage.md](../design/storage.md). Driver contract: [storage-driver.md](../design/storage-driver.md).
@@ -394,7 +396,8 @@ Example response (numbers are illustrative, not universal defaults):
 The service selects a fixed partSize for the session. Part numbers start at 1; offset is `(number-1)*partSize`;
 all but the final part have exactly partSize bytes. `partCount=ceil(size/partSize)`; a zero-byte session has
 zero parts and can commit immediately. GET session returns compact authoritative counters, not an unbounded
-part array. GET uploads lists accessible sessions for reconnect/reload recovery with normal pagination.
+part array. GET uploads lists accessible sessions with normal pagination for clients retaining session/source
+state or performing authorized recovery. This API capability does not restore the browser upload queue after reload.
 
 `ordering` is `any` or `ascending`. In ascending mode `maxParallelism=1`, `nextPart` identifies the next new
 part; replay of earlier acknowledged parts remains allowed. An out-of-order new part returns
@@ -405,7 +408,29 @@ parallelism when its quotas and benchmarks justify the cost. `maxParallelism` is
 The browser advances at most four files concurrently, with up to four part requests per file (sixteen byte
 requests overall), capped by session.maxParallelism and ordering. It yields between bounded batches for
 fairness. Transient part failures have bounded backoff; before replaying an uncertain request, query the original
-session and verify its durable part receipt. Acknowledged parts are skipped, including after refresh/reselection.
+session and verify its durable part receipt against the retained File's part hash before skipping bytes or
+replaying. The browser queue lives only in memory for the current Files page/document and survives folder
+navigation. Refresh/close discards it; the next page starts empty, without restoring failed tasks, session waits
+or File reselection. Same-page retry, idempotency, receipt verification and cancellation retain the exact
+session/Operation identity. Register the browser-native beforeunload warning while queued, waiting, uploading
+or finalizing tasks remain, and remove it when none remain. Warning display is subject to browser policy;
+server cleanup does not rely on unload-time abort API calls.
+
+The browser removes the current owner's old `eam.uploads.v1:<owner>` localStorage record without restoring or
+executing it. Pending delete Operation identities may still be stored in owner-scoped localStorage independently
+of upload queue state. Discarding browser tasks does not abort or fail durable server sessions or accepted
+Operations: open sessions retain their normal expiry/cleanup, and accepted work continues under the existing
+recovery contract. Clients retaining session identity and source bytes can use resumable API recovery across
+reconnects/restarts; this is distinct from the browser's page-memory queue.
+
+An old open session can continue guarding its exact target after browser queue loss. When the user explicitly
+selects a new upload and creation returns `operation_in_progress`, the browser inspects only the identified
+blocking session, validating the session/Operation identity and target path. If it is `open`, browser confirmation
+offers to discard the unfinished upload and start again. Acceptance aborts that exact session before retrying
+allocation; declining leaves the new task failed and retryable. This flow never silently aborts another tab's
+session and never aborts `committing` or `outcome_unknown` work. For this blocked-create recovery, an
+authoritative `aborted`, `expired` or `failed` session allows a new allocation only when its exact Operation is
+`cancelled` and the guard has settled; a failed Operation or unknown cleanup outcome does not authorize retry.
 
 For admitted native COS/S3 multipart sessions, each acknowledged service part already resides in unpublished
 provider multipart state. Bounded per-part buffering verifies exact length/hash and binds immutable identity;

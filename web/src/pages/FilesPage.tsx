@@ -9,7 +9,7 @@ import {
   useRef,
   useState,
 } from "react";
-import { Link, useLoaderData, useLocation, useNavigate } from "react-router";
+import { Link, useBlocker, useLoaderData, useLocation, useNavigate } from "react-router";
 import { ApiError, api, filePath, isFileOperation, type AuthUser, type Crumb, type Item, type FileOperation } from "../api/client";
 import { AppHeader } from "../components/AppHeader";
 import {
@@ -613,10 +613,19 @@ export function FilesPage() {
 
   const {
     tasks: uploads,
+    hasActiveUploads,
     enqueue,
     cancel: cancelUpload,
     retry: retryUpload,
   } = useUploadQueue(handleUploaded);
+
+  const uploadBlocker = useBlocker(({ nextLocation }) =>
+    hasActiveUploads && !/^\/files(?:\/|$)/.test(nextLocation.pathname));
+  useEffect(() => {
+    if (uploadBlocker.state !== "blocked") return;
+    if (window.confirm(t("drive.leaveUploadsConfirm"))) uploadBlocker.proceed();
+    else uploadBlocker.reset();
+  }, [uploadBlocker]);
 
   const unfinishedUploadCount = uploads.filter((task) => task.status !== "completed").length;
 

@@ -22,15 +22,26 @@ confirmed bytes and current per-part progress without double-counting. Folder se
 folders; existing folders merge, and file overwrite uses a confirmed observed contentRevision. Folder rows
 aggregate descendant progress/failure/cancellation. Failed siblings do not block unrelated queue roots.
 
-The queue persists owner-scoped task IDs, session IDs, original idempotency keys, accepted create intent and
-Operation waits in localStorage before allocation/effects. It stores no provider credentials, URLs or File bytes.
-A lost create ACK replays the same key; a lost part ACK queries receipts; a lost commit ACK queries the original
-session/Operation. Committing and outcome_unknown never trigger a new publication. Refresh recovery may ask the
-user to select the original File. Every acknowledged receipt is compared with that selected File's part hash
-before skipping it. A different same-size File cannot mix into the saved upload. Verification is cached only
-for the same File object and receipt identity, then released on completion/cancellation. A queued task with no
-original File and no previously captured intent waits for reselection rather than inventing MIME metadata.
-Local roots advertise sourceModifiedAt support; browser timestamps are sent only when explicitly supported.
+The browser queue exists only in memory for the current Files page/document. Folder navigation preserves
+selected File objects, task/session IDs, original idempotency keys, accepted create intent and Operation waits
+within that page. Refreshing or closing the document discards the queue; the next page starts empty, without
+restoring failed tasks or asking for File reselection. The queue does not persist upload tasks in localStorage.
+On initialization, remove the current owner's legacy `eam.uploads.v1:<owner>` record without restoring or
+executing its contents; leave other owners' records untouched.
+
+Register the browser-native `beforeunload` warning while queued, waiting, uploading or finalizing tasks remain,
+and remove it when no such tasks remain. Leaving Files for another application route requires confirmation;
+navigation within Files keeps the queue and does not prompt. It is a best-effort browser warning, not a cleanup guarantee; do not
+rely on an unload-time abort API. Open server sessions retain their normal expiry/cleanup, durable backend
+recovery remains active, and already accepted server Operations continue independently of the browser queue.
+
+Within the same page, a lost create ACK replays the same key; a lost part ACK queries receipts; a lost commit
+ACK queries the original session/Operation. Committing and outcome_unknown never trigger a new publication.
+Every acknowledged receipt is compared with the retained File's part hash before skipping it. Verification is
+cached only for the same File object and receipt identity, then released on completion/cancellation. Only
+clients that retain session identity and source bytes use the API's resumable recovery across reconnects or
+process restarts; that capability does not imply browser queue restoration after reload. Local roots advertise
+sourceModifiedAt support; browser timestamps are sent only when explicitly supported.
 
 Official sessions declare cos-signed transport: the shared client lazily computes per-part SHA-256/MD5,
 authorizes an exact short-lived request, confirms any earlier native result, sends bytes through the same-origin
@@ -41,15 +52,28 @@ COS-verified MD5, not server-computed SHA-256. Embedded transport retains its ex
 
 Cancellation aborts the current byte request, then reconciles/aborts the exact server session. Lost allocation
 ACKs are recovered before cancellation. Committing work uses Operation cancellation. Already-committed races
-retrieve and report the saved result; they cannot hide or delete published content. Cancellation identity
-survives refresh. Only authoritative failed/aborted/expired results allow an explicit retry to allocate a fresh
-key; a transport error, missing result or unknown effect does not. State callbacks and polling are fenced after
-unmount, and request deadlines/abort controllers are cleared.
+retrieve and report the saved result; they cannot hide or delete published content. Cancellation identity is
+retained only within the current page. Only authoritative failed/aborted/expired results allow an explicit retry
+to allocate a fresh key; a transport error, missing result or unknown effect does not. State callbacks and
+polling are fenced after unmount, and request deadlines/abort controllers are cleared.
 
-Deletion and other admission blockers carry an exact operationId. The browser persists pending delete identities
-and keeps selected Files waiting before any new bytes at those paths. Queued/running/unknown/failed/cancelled,
-wrong identity and unreachable status never mean success. Only that Operation's succeeded result permits retry;
-new admission may identify a further blocker. Failed/cancelled/unknown cleanup remains visible after refresh.
+An open server session may still guard its target after the browser queue is discarded. Only when the user
+explicitly selects a new upload and creation returns `operation_in_progress` does the browser inspect the exact
+blocking upload, verifying its session/Operation identity and target path. For an `open` session, browser
+confirmation offers to discard the unfinished upload and start again. Acceptance aborts that exact session;
+declining leaves the new task failed and retryable. The browser never silently aborts another tab's session,
+and this flow does not abort `committing` or `outcome_unknown` work. Retrying allocation after an authoritative
+`aborted`, `expired` or `failed` session additionally requires its exact Operation to be `cancelled`, proving
+the guard settled; a failed Operation or unknown cleanup outcome is not sufficient. An unavailable session
+status leaves the new task failed and retryable, rather than waiting indefinitely on an unclassified blocker.
+Only a definitive non-upload identity falls back to generic Operation waiting.
+
+Deletion and other admission blockers carry an exact operationId. Independently of upload queue state, the
+browser may persist owner-scoped pending delete identities in localStorage. Within the current page it keeps
+selected Files waiting before any new bytes at those paths. Queued/running/unknown/failed/cancelled, wrong
+identity and unreachable status never mean success. Only that Operation's succeeded result permits retry;
+new admission may identify a further blocker. Retained delete identities remain available after refresh for
+status reconciliation, without restoring the upload tasks or their selected Files.
 
 ## Media and retired protocols
 
@@ -69,18 +93,24 @@ routes alone does not establish stale-writer fencing.
 
 ## Validation
 
-All 132 Web tests pass after the signed-transport extension. Web tests exercise the actual transformed queue/client/persistence source, not an independently implemented
-model. They cover lost create/part/commit ACKs, immutable receipt verification, refresh/reselection, owner
-isolation, bounded fairness, folder merge/dependencies, exact deletion waits, timeout/unmount, partial failures,
-terminal retry and cancellation races. Path tests cover absolute resources and literal encoded-looking names.
-The production SPA build passes; heavy optional preview dependency chunk warnings remain build warnings.
+Web validation must exercise the actual transformed queue/client source. Required coverage includes same-page
+lost create/part/commit ACKs, idempotency, immutable receipt/hash verification, owner isolation, bounded fairness,
+folder merge/dependencies, exact deletion waits, timeout/unmount, partial failures, terminal retry and
+cancellation races. Lifecycle checks must prove queue preservation during folder navigation, an empty queue
+after reload without failed-task restoration or File reselection, current-owner legacy upload-record removal
+without execution, and independent pending-delete identity retention. Verify native beforeunload registration
+for queued/waiting/uploading/finalizing tasks and removal when none remain; browser warning display is subject
+to browser policy. Path checks cover absolute resources and literal encoded-looking names. Build the production
+SPA as part of validation.
 
-The opt-in browser test starts a real HTTP service using the built SPA, random disposable PostgreSQL database,
-explicit admitted Local roots and genuine Cookie/scoped Bearer credentials. Chromium uses the actual file
-picker and network. It covers special filenames, publication/result settlement, preview/download, refresh
-between acknowledged parts, reselection without resending confirmed bytes, pre-commit cancellation, partial
-failure isolation, exact deletion waits, scoped Bearer isolation and same-origin traffic. Browser
-fixtures deliberately interrupt requests; no production bucket, real user root, .env or credentials are read.
+The opt-in browser test harness starts a real HTTP service using the built SPA, random disposable PostgreSQL
+database, explicit admitted Local roots and genuine Cookie/scoped Bearer credentials. Chromium uses the actual
+file picker and network. Browser acceptance must cover special filenames, publication/result settlement,
+preview/download, folder navigation with an active queue, unload protection, an empty queue after a confirmed
+refresh, pre-commit cancellation, partial failure isolation, exact deletion waits, scoped Bearer isolation and
+same-origin traffic. Retain backend receipt/restart/recovery checks separately from browser queue lifetime.
+Browser fixtures deliberately interrupt requests; no production bucket, real user root, .env or credentials
+are read.
 
 ```bash
 make test

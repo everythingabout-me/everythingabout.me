@@ -7,6 +7,13 @@ const allComplete = (queue) => queue.tasks.length > 0 && queue.tasks.every((task
 async function mount(t, api, options) { const harness = await setup(api, options); t.after(harness.unmount); return harness; }
 function enqueue(harness, entries, dir = "") { harness.render().enqueue(entries, dir, () => false); }
 const callsOf = (server, type) => server.calls.filter(([kind]) => kind === type);
+function assertGuard(harness, active) {
+  assert.equal(harness.render().hasActiveUploads, active);
+  assert.equal(harness.listeners.get("beforeunload")?.size ?? 0, active ? 1 : 0, "register exactly one native guard only while active");
+  const event = harness.dispatchBeforeUnload();
+  assert.equal(event.defaultPrevented, active);
+  assert.equal(event.returnValue, active ? "" : undefined, "the guard sets the legacy beforeunload returnValue");
+}
 
 for (const lostAck of ["create", "part", "commit"]) {
   test(`lost ${lostAck} ACK recovers the original identity without duplicate bytes or allocation`, async (t) => {
@@ -24,9 +31,10 @@ for (const lostAck of ["create", "part", "commit"]) {
     let queue = await harness.until(lostAck === "part" ? allComplete : (queue) => queue.tasks[0]?.status === "failed");
     const id = queue.tasks[0].id;
     if (lostAck !== "part") {
-      const before = JSON.parse(harness.storage.getItem("eam.uploads.v1:owner-a"))[0];
-      assert.ok(before.intent, "intent persists before sending create");
-      assert.equal(before.file, undefined, "never serialize browser File handles");
+      const before = queue.tasks[0];
+      assert.ok(before.intent, "intent remains in memory after a lost allocation or commit ACK");
+      assert.ok(before.file instanceof File, "the original File remains available for same-page Retry");
+      assert.equal(harness.storage.getItem("eam.uploads.v1:owner-a"), null, "upload drafts are never persisted");
       queue.retry(id);
       queue = await harness.until(allComplete);
     }
@@ -42,95 +50,142 @@ for (const lostAck of ["create", "part", "commit"]) {
       assert.equal(creates[0][2], creates[1][2]);
       assert.deepEqual(creates[0][1], creates[1][1]);
     } else assert.ok(callsOf(server, "status").some(([, id]) => id === "session-1"));
-    assert.deepEqual(JSON.parse(harness.storage.getItem("eam.uploads.v1:owner-a")), []);
+    assert.equal(harness.storage.getItem("eam.uploads.v1:owner-a"), null);
   });
 }
 
-test("known rejected allocation stays failed on reload, cancels locally and retries only on explicit action", async (t) => {
+test("known rejected allocation stays failed across renders and retries only on explicit same-page action", async (t) => {
   const server = uploadServer();
-  const storage = memoryStorage();
   const attempts = [];
   server.api.createUpload = async (intent, key) => {
     attempts.push([structuredClone(intent), key]);
     throw new TestApiError("quota exceeded", 507, { code: "quota_exceeded" });
   };
-  const first = await mount(t, server.api, { storage });
-  enqueue(first, [entry("file", "ab")]);
-  const failed = await first.until((queue) => queue.tasks[0]?.status === "failed");
-  const id = failed.tasks[0].id;
-  assert.equal(failed.tasks[0].uploadId, undefined);
-  const saved = storage.getItem("eam.uploads.v1:owner-a");
-  first.unmount();
-
-  const reloaded = await mount(t, server.api, { storage });
-  let queue = await reloaded.until((queue) => queue.tasks[0]?.status === "failed");
-  await reloaded.tick();
-  assert.equal(attempts.length, 1, "reload must not allocate after an explicit server rejection");
+  const harness = await mount(t, server.api);
+  const selected = entry("file", "ab");
+  enqueue(harness, [selected]);
+  let queue = await harness.until((queue) => queue.tasks[0]?.status === "failed");
+  const id = queue.tasks[0].id;
+  assert.equal(queue.tasks[0].uploadId, undefined);
+  assert.equal(queue.tasks[0].file, selected.file);
+  await harness.tick();
+  queue = harness.render();
+  assert.equal(attempts.length, 1, "renders and polling must not retry an explicit server rejection");
   assert.equal(queue.tasks[0].id, id);
   assert.equal(queue.tasks[0].error, "quota exceeded");
-  queue.cancel(id);
-  await reloaded.until((queue) => queue.tasks.length === 0);
-  assert.equal(attempts.length, 1, "Cancel must not replay a known rejected create");
-  assert.equal(callsOf(server, "abort").length, 0);
-  reloaded.unmount();
-
-  // Restore the same rejected draft to exercise Retry independently of Cancel.
-  storage.setItem("eam.uploads.v1:owner-a", saved);
-  const retrying = await mount(t, server.api, { storage });
-  queue = await retrying.until((queue) => queue.tasks[0]?.status === "failed");
+  assertGuard(harness, false);
   queue.retry(id);
-  await retrying.until((queue) => queue.tasks[0]?.status === "failed" && attempts.length === 2);
-  assert.equal(attempts[0][1], attempts[1][1], "explicit Retry may replay the rejected allocation key");
+  queue = await harness.until((queue) => queue.tasks[0]?.status === "failed" && attempts.length === 2);
+  assert.equal(attempts[0][1], attempts[1][1], "explicit Retry replays the same rejected allocation key");
   assert.deepEqual(attempts[0][0], attempts[1][0]);
+  queue.cancel(id);
+  await harness.until((queue) => queue.tasks.length === 0);
+  assert.equal(attempts.length, 2, "Cancel must not replay a known rejected create");
+  assert.equal(callsOf(server, "abort").length, 0);
   assert.equal(server.sessions.size, 0);
   assert.equal(callsOf(server, "part").length, 0);
+  assert.equal(harness.storage.getItem("eam.uploads.v1:owner-a"), null);
+  assertGuard(harness, false);
 });
 
-test("reload requires reselection, verifies stored receipt hashes and sends only missing numbered parts", async (t) => {
+test("same-page reselection verifies receipt hashes and sends only missing numbered parts", async (t) => {
   const server = uploadServer();
   const send = server.api.uploadPart;
   const create = server.api.createUpload;
   server.api.createUpload = async (...args) => ({ ...await create(...args), maxParallelism: 1 });
-  server.api.uploadPart = async (...args) => { await send(...args); throw new TestApiError("ACK unavailable", 400); };
-  const storage = memoryStorage();
-  const first = await mount(t, server.api, { storage });
-  enqueue(first, [entry("folder/file", "abcd")]);
-  const initial = await first.until((queue) => queue.tasks[0]?.status === "failed");
-  const id = initial.tasks[0].id;
-  first.unmount();
-  server.api.uploadPart = send;
-  const reloaded = await mount(t, server.api, { storage });
-  let queue = await reloaded.until((queue) => queue.tasks[0]?.status === "failed");
-  assert.equal(queue.tasks[0].file, null);
+  let loseAck = true;
+  server.api.uploadPart = async (...args) => {
+    const receipt = await send(...args);
+    if (loseAck) throw new TestApiError("ACK unavailable", 400);
+    return receipt;
+  };
+  const harness = await mount(t, server.api);
+  const original = entry("folder/file", "abcd");
+  enqueue(harness, [original]);
+  let queue = await harness.until((queue) => queue.tasks[0]?.status === "failed");
+  const id = queue.tasks[0].id;
+  assert.equal(queue.tasks[0].file, original.file, "failure retains the selected File in this page");
   assert.equal(queue.tasks[0].uploadId, "session-1");
-  assert.equal(queue.tasks[0].error, "drive.reselectUpload");
+  assert.equal(queue.tasks[0].error, "ACK unavailable");
   assert.equal(callsOf(server, "part").length, 1);
-  enqueue(reloaded, [entry("folder/file", "axcd")]);
-  queue = await reloaded.until((queue) => queue.tasks[0]?.status === "failed");
+  assertGuard(harness, false);
+  loseAck = false;
+  enqueue(harness, [entry("folder/file", "axcd")]);
+  queue = await harness.until((queue) => queue.tasks[0]?.status === "failed");
   assert.equal(queue.tasks[0].error, "drive.reselectedFileChanged");
   assert.equal(callsOf(server, "part").length, 1, "same size with changed bytes cannot resume");
-  // Correcting a rejected selection should keep the original session without another reload.
-  enqueue(reloaded, [entry("folder/file", "abcd")]);
-  queue = await reloaded.until(allComplete, "correct original must replace the rejected File selection");
+  assert.equal(callsOf(server, "commit").length, 0, "receipt mismatch cannot publish");
+  enqueue(harness, [entry("folder/file", "abcd")]);
+  queue = await harness.until(allComplete, "the original must replace the rejected File selection on the same page");
   assert.equal(queue.tasks[0].id, id);
+  assert.equal(queue.tasks[0].file, null);
   assert.deepEqual(callsOf(server, "part").map(([, id, number]) => [id, number]), [["session-1", 1], ["session-1", 2]]);
+  assert.equal(callsOf(server, "commit").length, 1);
   assert.equal(server.sessions.size, 1);
+  assertGuard(harness, false);
 });
 
-test("persisted sessions and pending deletes are scoped to the authenticated owner", async (t) => {
+test("pending deletes remain persisted and scoped to the authenticated owner", async (t) => {
   const server = uploadServer();
-  server.api.createUpload = async () => { throw new TestApiError("offline"); };
   const storage = memoryStorage();
   const first = await mount(t, server.api, { storage });
-  enqueue(first, [entry("private")]);
-  await first.until((queue) => queue.tasks[0]?.status === "failed");
+  await first.settle();
   first.persistence.trackFileOperation(operation("private-delete"), "private");
+  const saved = storage.getItem("eam.pending-file-operations.v1:owner-a");
+  assert.deepEqual(JSON.parse(saved), [{ id: "private-delete", path: "/private" }]);
   first.unmount();
   const other = await mount(t, { ...server.api, me: async () => ({ id: "owner-b" }) }, { storage, owner: "owner-b" });
   assert.deepEqual((await other.settle()).tasks, []);
   assert.deepEqual(other.persistence.pendingFileOperations(), []);
-  assert.ok(storage.getItem("eam.uploads.v1:owner-a"));
+  assert.equal(other.persistence.pendingFileOperation("private/file"), undefined);
+  assert.equal(storage.getItem("eam.pending-file-operations.v1:owner-a"), saved);
+  other.persistence.trackFileOperation(operation("other-delete"), "other");
+  other.unmount();
+  const originalOwner = await mount(t, server.api, { storage });
+  await originalOwner.settle();
+  assert.deepEqual(originalOwner.persistence.pendingFileOperations(), [{ id: "private-delete", path: "/private" }]);
+  assert.equal(originalOwner.persistence.pendingFileOperation("private/file").id, "private-delete");
+  assert.equal(originalOwner.persistence.pendingFileOperation("other/file"), undefined);
 });
+
+for (const status of ["queued", "waiting", "uploading", "finalizing", "failed", "completed", "cancelled"]) {
+  test(`fresh mount discards obsolete ${status} records without replaying actions and preserves other owner data`, async (t) => {
+    const server = uploadServer();
+    const storage = memoryStorage();
+    const saved = JSON.stringify([{ id: "obsolete-task", createKey: "old-key", path: "file", name: "file", dir: "", isDir: false,
+      size: 2, status, loaded: 2, speed: 0, uploaded: true, uploadId: "old-session", operationId: "old-commit",
+      intent: { path: "file", size: 2, condition: { mode: "create" } }, cancelRequested: status === "cancelled",
+      waitingFor: { operationId: "old-delete", path: "file", state: "running" } }]);
+    const pending = JSON.stringify([{ id: "pending-delete", path: "/folder" }]);
+    storage.setItem("eam.uploads.v1:owner-a", saved);
+    storage.setItem("eam.uploads.v1:owner-b", saved);
+    storage.setItem("eam.pending-file-operations.v1:owner-a", pending);
+    storage.setItem("eam.pending-file-operations.v1:owner-b", pending);
+    const reads = [], writes = [], actions = [];
+    const observedStorage = {
+      ...storage,
+      getItem: (key) => { reads.push(key); return storage.getItem(key); },
+      setItem: (key, value) => { writes.push(key); storage.setItem(key, value); },
+    };
+    const api = Object.fromEntries(Object.entries(server.api).map(([name, method]) => [name, name === "me" ? method : (...args) => {
+      actions.push(name); return method(...args);
+    }]));
+    const harness = await mount(t, api, { storage: observedStorage });
+    assert.deepEqual(harness.render().tasks, []);
+    assert.deepEqual((await harness.tick()).tasks, []);
+    assertGuard(harness, false);
+    assert.equal(storage.getItem("eam.uploads.v1:owner-a"), null);
+    assert.equal(storage.getItem("eam.uploads.v1:owner-b"), saved);
+    assert.equal(storage.getItem("eam.pending-file-operations.v1:owner-a"), pending);
+    assert.equal(storage.getItem("eam.pending-file-operations.v1:owner-b"), pending);
+    assert.deepEqual(harness.persistence.pendingFileOperations(), [{ id: "pending-delete", path: "/folder" }]);
+    assert.ok(reads.every((key) => !key.startsWith("eam.uploads.v1:")), "obsolete upload records are never read");
+    assert.deepEqual(writes, [], "mount does not replace old records with an empty upload draft");
+    assert.deepEqual(actions, [], "old uploads, cancellation requests and operations cannot replay any API action");
+    assert.deepEqual(server.calls, []);
+    assert.deepEqual(harness.completed, []);
+  });
+}
 
 test("receipt pagination must have one watermark and validate every resumed part before sending bytes", async (t) => {
   for (const scenario of ["changed watermark", "duplicate receipt", "wrong hash", "wrong size"]) {
@@ -233,6 +288,7 @@ test("failed, cancelled, unknown, unavailable and wrong delete identities never 
     const queue = await harness.tick();
     assert.equal(queue.tasks[0].status, "waiting");
     assert.equal(queue.tasks[0].speed, 0);
+    assertGuard(harness, true);
     assert.equal(callsOf(server, "create").length, 1);
     assert.equal(callsOf(server, "part").length, 0);
   }
@@ -293,16 +349,25 @@ test("async mkdir completion is polled by its original Operation and never reall
 
 test("cancel before commit aborts the session and a late part ACK cannot publish", async (t) => {
   const server = uploadServer();
-  const gate = deferred();
+  const gate = deferred(), cancellation = deferred();
+  const abort = server.api.abortUpload;
   let signal;
   server.api.uploadPart = async (id, number, blob, receivedSignal) => { server.calls.push(["part", id, number]); signal = receivedSignal; await gate.promise; return { number, size: blob.size, sha256: digest("ab") }; };
+  server.api.abortUpload = async (...args) => { await cancellation.promise; return abort(...args); };
   const harness = await mount(t, server.api);
   enqueue(harness, [entry("file", "ab")]);
   await harness.until(() => Boolean(signal));
+  assertGuard(harness, true);
   harness.render().cancel(harness.render().tasks[0].id);
-  await harness.settle();
+  const cancelling = await harness.settle();
   assert.equal(signal.aborted, true);
+  assert.equal(cancelling.tasks[0].status, "finalizing");
+  assert.equal(cancelling.tasks[0].cancelRequested, true);
+  assertGuard(harness, true);
+  cancellation.resolve();
+  await harness.until((queue) => queue.tasks.length === 0);
   assert.equal(callsOf(server, "abort").length, 1);
+  assertGuard(harness, false);
   gate.resolve();
   await harness.settle();
   assert.equal(callsOf(server, "commit").length, 0);
@@ -324,9 +389,11 @@ test("cancel after publication follows commit Operation and reports late success
   queue = await harness.settle();
   assert.equal(queue.tasks[0].cancelRequested, true);
   assert.equal(queue.tasks[0].status, "finalizing");
+  assertGuard(harness, true);
   assert.deepEqual(callsOf(server, "cancelOperation"), [["cancelOperation", "publish-1"]]);
   await harness.tick();
   assert.deepEqual(harness.render().tasks, []);
+  assertGuard(harness, false);
   assert.equal(harness.completed.length, 1);
   assert.equal(harness.completed[0].item.path, "/file");
 });
@@ -404,29 +471,32 @@ test("unmount suppresses a late commit ACK and its completion callback", async (
   assert.equal(harness.completed.length, 0);
 });
 
-test("reload of a committing session follows its original Operation without file reselection", async (t) => {
+test("same-page retry of a committing session follows its original Operation without resending bytes", async (t) => {
   const server = uploadServer();
   server.api.commitUpload = async (id) => {
     server.calls.push(["commit", id]);
     server.sessions.get(id).state = "committing";
     throw new TestApiError("commit ACK lost");
   };
-  const storage = memoryStorage();
-  const first = await mount(t, server.api, { storage });
-  enqueue(first, [entry("file", "ab")]);
-  await first.until((queue) => queue.tasks[0]?.status === "failed");
-  first.unmount();
   server.api.getOperation = async (id) => { server.calls.push(["operation", id]); return operation(id, "succeeded", item("file"), "upload_commit"); };
-  const reloaded = await mount(t, server.api, { storage });
-  let queue = await reloaded.until((queue) => queue.tasks[0]?.status === "finalizing");
-  assert.equal(queue.tasks[0].file, null);
+  const harness = await mount(t, server.api);
+  enqueue(harness, [entry("file", "ab")]);
+  let queue = await harness.until((queue) => queue.tasks[0]?.status === "failed");
+  const id = queue.tasks[0].id;
+  assertGuard(harness, false);
+  queue.retry(id);
+  queue = await harness.until((queue) => queue.tasks[0]?.status === "finalizing");
+  assert.ok(queue.tasks[0].file instanceof File);
   assert.equal(queue.tasks[0].operationId, "commit-session-1");
-  await reloaded.tick();
-  queue = await reloaded.until(allComplete);
+  assertGuard(harness, true);
+  await harness.tick();
+  queue = await harness.until(allComplete);
+  assert.equal(queue.tasks[0].id, id);
   assert.equal(queue.tasks[0].file, null);
   assert.equal(callsOf(server, "part").length, 1);
   assert.equal(callsOf(server, "commit").length, 1);
   assert.deepEqual(callsOf(server, "operation"), [["operation", "commit-session-1"]]);
+  assertGuard(harness, false);
 });
 
 test("manual retry of a waiting file must first resolve its exact delete Operation", async (t) => {
@@ -481,17 +551,19 @@ test("authentication resolution gates all queued bytes and a different-size rese
   enqueue(harness, [entry("file", "ab")]);
   await harness.settle();
   assert.equal(callsOf(server, "create").length, 0);
+  assert.equal(harness.render().tasks[0].status, "queued");
+  assertGuard(harness, true);
   user.resolve({ id: "owner-a" });
-  await harness.until((queue) => queue.tasks[0]?.status === "failed");
-  harness.unmount();
-  const reload = await mount(t, server.api, { storage: harness.storage });
-  await reload.until((queue) => queue.tasks[0]?.status === "failed");
+  const failed = await harness.until((queue) => queue.tasks[0]?.status === "failed");
+  const originalFile = failed.tasks[0].file;
   const creates = callsOf(server, "create").length;
-  enqueue(reload, [entry("file", "longer")]);
-  await reload.settle();
-  assert.equal(reload.render().tasks[0].error, "drive.reselectedFileChanged");
+  enqueue(harness, [entry("file", "longer")]);
+  const queue = await harness.settle();
+  assert.equal(queue.tasks[0].error, "drive.reselectedFileChanged");
+  assert.equal(queue.tasks[0].file, originalFile, "wrong-size selection leaves the original File available");
   assert.equal(callsOf(server, "create").length, creates);
   assert.equal(callsOf(server, "part").length, 0);
+  assertGuard(harness, false);
 });
 
 test("failed authentication leaves queued Files local and cannot restore another owner", async (t) => {
@@ -508,27 +580,51 @@ test("failed authentication leaves queued Files local and cannot restore another
 });
 
 for (const phase of ["open", "committing"]) {
-  test(`reload resumes a persisted cancellation for a session in ${phase} state without resending bytes`, async (t) => {
+  test(`same-page failed cancellation of a ${phase} session retries only on explicit action without resending bytes`, async (t) => {
     const server = uploadServer();
-    const storage = memoryStorage();
-    const session = await server.api.createUpload({ path: "file", size: 2, mediaType: "application/json", condition: { mode: "create" } }, "saved-key");
-    server.sessions.get(session.id).state = phase;
-    const task = { id: "persisted-task", createKey: "saved-key", path: "file", name: "file", dir: "", isDir: false, size: 2, overwrite: false, status: "failed", loaded: 2, speed: 0, uploaded: phase === "committing", uploadId: session.id, cancelRequested: true,
-      ...(phase === "committing" ? { operationId: session.operationId } : {}) };
-    storage.setItem("eam.uploads.v1:owner-a", JSON.stringify([task]));
-    if (phase === "committing") {
-      server.api.abortUpload = async (id) => { server.calls.push(["abort", id]); throw new TestApiError("publication active", 409, { code: "commit_in_progress" }); };
-      server.api.cancelOperation = async (id) => { server.calls.push(["cancelOperation", id]); return operation(id, "cancelled", null, "upload_commit"); };
+    const abort = server.api.abortUpload;
+    let attempts = 0;
+    if (phase === "open") {
+      server.api.uploadPart = async (id, number) => { server.calls.push(["part", id, number]); throw new TestApiError("rejected", 400); };
+      server.api.abortUpload = async (id) => {
+        if (++attempts === 1) { server.calls.push(["abort", id]); throw new TestApiError("offline"); }
+        return abort(id);
+      };
+    } else {
+      server.api.commitUpload = async (id) => {
+        server.calls.push(["commit", id]); server.sessions.get(id).state = "committing";
+        return operation("commit-session-1", "running", null, "upload_commit");
+      };
+      server.api.cancelOperation = async (id) => {
+        server.calls.push(["cancelOperation", id]);
+        if (++attempts === 1) throw new TestApiError("offline");
+        return operation(id, "cancelled", null, "upload_commit");
+      };
     }
-    const harness = await mount(t, server.api, { storage });
-    await harness.until((queue) => queue.tasks.length === 0 && callsOf(server, "abort").length > 0, "persisted cancellation must resume automatically");
-    assert.deepEqual(callsOf(server, "abort"), [["abort", session.id]]);
-    assert.equal(callsOf(server, "part").length, 0);
-    assert.equal(callsOf(server, "commit").length, 0);
+    const harness = await mount(t, server.api);
+    enqueue(harness, [entry("file", "ab")]);
+    let queue = await harness.until((queue) => phase === "open" ? queue.tasks[0]?.status === "failed" : Boolean(queue.tasks[0]?.operationId));
+    const id = queue.tasks[0].id;
+    const parts = callsOf(server, "part").length;
+    const commits = callsOf(server, "commit").length;
+    queue.cancel(id);
+    queue = await harness.until((queue) => queue.tasks[0]?.status === "failed" && queue.tasks[0].cancelRequested);
+    assert.equal(queue.tasks[0].error, "offline");
+    assertGuard(harness, false);
+    await harness.tick();
+    assert.equal(attempts, 1, "render and polling do not silently retry a failed cancellation");
+    harness.render().retry(id);
+    await harness.until((queue) => queue.tasks.length === 0);
+    assert.equal(attempts, 2);
+    assert.deepEqual(callsOf(server, "abort"), [["abort", "session-1"], ["abort", "session-1"]]);
+    assert.equal(callsOf(server, "create").length, 1);
+    assert.equal(callsOf(server, "part").length, parts);
+    assert.equal(callsOf(server, "commit").length, commits);
     assert.equal(server.sessions.size, 1);
     assert.equal(harness.completed.length, 0);
-    if (phase === "committing") assert.deepEqual(callsOf(server, "cancelOperation"), [["cancelOperation", session.operationId]]);
-    assert.deepEqual(JSON.parse(storage.getItem("eam.uploads.v1:owner-a")), []);
+    if (phase === "committing") assert.deepEqual(callsOf(server, "cancelOperation"), [["cancelOperation", "commit-session-1"], ["cancelOperation", "commit-session-1"]]);
+    assert.equal(harness.storage.getItem("eam.uploads.v1:owner-a"), null);
+    assertGuard(harness, false);
   });
 }
 
@@ -654,18 +750,29 @@ for (const supported of [false, true]) {
   });
 }
 
-test("reload of an unstarted queued file waits for reselection before binding media metadata", async (t) => {
+test("same-page renders and selections in different directories retain independent queued Files", async (t) => {
   const server = uploadServer();
-  const storage = memoryStorage();
-  storage.setItem("eam.uploads.v1:owner-a", JSON.stringify([{ id: "unstarted", createKey: "unstarted-key", path: "file", name: "file", dir: "", isDir: false, size: 2, modifiedAt: 1443268800000, overwrite: false, status: "queued", loaded: 0, speed: 0, uploaded: false }]));
-  const harness = await mount(t, server.api, { storage });
-  await harness.until((queue) => queue.tasks[0]?.status === "failed");
-  assert.equal(harness.render().tasks[0].error, "drive.reselectUpload");
-  assert.equal(callsOf(server, "create").length, 0, "an unstarted upload cannot bind guessed File metadata");
-  enqueue(harness, [entry("file", "ab")]);
-  await harness.until(allComplete);
-  assert.equal(callsOf(server, "create")[0][1].mediaType, "application/json");
-  assert.equal(harness.render().tasks[0].id, "unstarted");
+  const user = deferred();
+  server.api.me = async () => user.promise;
+  const harness = await mount(t, server.api);
+  const first = entry("file", "ab"), second = entry("file", "cd");
+  enqueue(harness, [first], "Health");
+  const original = harness.render().tasks[0];
+  enqueue(harness, [second], "Notes");
+  let queue = await harness.settle();
+  assert.deepEqual(queue.tasks.map(({ path, status }) => [path, status]), [["Health/file", "queued"], ["Notes/file", "queued"]]);
+  assert.equal(queue.tasks[0].id, original.id);
+  assert.equal(queue.tasks[0].file, first.file);
+  assert.equal(queue.tasks[1].file, second.file);
+  assert.notEqual(queue.tasks[0].id, queue.tasks[1].id);
+  assertGuard(harness, true);
+  assert.deepEqual(server.calls, []);
+  assert.equal(harness.storage.getItem("eam.uploads.v1:owner-a"), null);
+  user.resolve({ id: "owner-a" });
+  queue = await harness.until(allComplete);
+  assert.deepEqual(callsOf(server, "create").map(([, intent]) => [intent.path, intent.mediaType]), [["Health/file", "application/json"], ["Notes/file", "application/json"]]);
+  assert.deepEqual(queue.tasks.map((task) => task.file), [null, null]);
+  assertGuard(harness, false);
 });
 
 test("explicit retry uses the original terminal commit Operation to allocate a fresh session safely", async (t) => {
@@ -689,6 +796,81 @@ test("explicit retry uses the original terminal commit Operation to allocate a f
   assert.ok(callsOf(server, "operation").some(([, id]) => id === "commit-session-1"));
   assert.deepEqual(callsOf(server, "part").map(([, id]) => id), ["session-1", "session-2"]);
   assert.notEqual(callsOf(server, "create")[0][2], callsOf(server, "create")[1][2]);
+});
+
+test("native unload guard follows queued, waiting, uploading and finalizing lifecycle until completion", async (t) => {
+  const server = uploadServer();
+  const user = deferred(), parts = deferred(), publication = deferred();
+  const create = server.api.createUpload, send = server.api.uploadPart, commit = server.api.commitUpload;
+  let deletionDone = false, signal;
+  server.api.me = async () => user.promise;
+  server.api.createUpload = async (...args) => { if (!deletionDone) throw conflict(); return create(...args); };
+  server.api.getOperation = async (id) => operation(id, deletionDone ? "succeeded" : "running");
+  server.api.uploadPart = async (...args) => { signal = args[3]; await parts.promise; return send(...args); };
+  server.api.commitUpload = async (...args) => { await publication.promise; return commit(...args); };
+  const harness = await mount(t, server.api);
+  assertGuard(harness, false);
+  const selected = entry("file", "ab");
+  enqueue(harness, [selected]);
+  assert.equal(harness.render().tasks[0].status, "queued");
+  assertGuard(harness, true);
+  const listener = [...harness.listeners.get("beforeunload")][0];
+  user.resolve({ id: "owner-a" });
+  let queue = await harness.until((queue) => queue.tasks[0]?.status === "waiting");
+  const id = queue.tasks[0].id;
+  assertGuard(harness, true);
+  assert.equal(queue.tasks[0].file, selected.file);
+  deletionDone = true;
+  await harness.tick();
+  queue = await harness.until((queue) => queue.tasks[0]?.status === "uploading" && Boolean(signal));
+  assertGuard(harness, true);
+  assert.equal(signal.aborted, false);
+  parts.resolve();
+  queue = await harness.until((queue) => queue.tasks[0]?.status === "finalizing");
+  assert.equal(queue.tasks[0].id, id);
+  assertGuard(harness, true);
+  assert.equal([...harness.listeners.get("beforeunload")][0], listener, "active transitions keep one existing handler");
+  publication.resolve();
+  queue = await harness.until(allComplete);
+  assert.equal(queue.tasks[0].file, null);
+  assertGuard(harness, false);
+  assert.equal(harness.completed.length, 1);
+  assert.equal(harness.storage.getItem("eam.uploads.v1:owner-a"), null);
+});
+
+test("reload aborts the old data request and starts empty without status, allocation or cancellation replay", async (t) => {
+  const server = uploadServer();
+  const storage = memoryStorage(), gate = deferred();
+  const send = server.api.uploadPart;
+  let signal;
+  server.api.uploadPart = async (...args) => { signal = args[3]; await gate.promise; return send(...args); };
+  const first = await mount(t, server.api, { storage });
+  enqueue(first, [entry("file", "ab")]);
+  const uploading = await first.until((queue) => queue.tasks[0]?.status === "uploading" && Boolean(signal));
+  assertGuard(first, true);
+  const { file, ...legacy } = uploading.tasks[0];
+  storage.setItem("eam.uploads.v1:owner-a", JSON.stringify([{ ...legacy, cancelRequested: true }]));
+  const callsBeforeReload = [...server.calls];
+  first.unmount();
+  assert.equal(signal.aborted, true, "page teardown aborts the request carrying file bytes");
+  assert.equal(first.listeners.size, 0, "page teardown removes the unload guard");
+  assert.equal(first.timers.size, 0);
+  const reloaded = await mount(t, server.api, { storage });
+  assert.deepEqual(reloaded.render().tasks, []);
+  assert.deepEqual((await reloaded.tick()).tasks, []);
+  assert.equal(storage.getItem("eam.uploads.v1:owner-a"), null);
+  assertGuard(reloaded, false);
+  assert.deepEqual(server.calls, callsBeforeReload, "reload never replays old status, create, abort or cancel requests");
+  gate.resolve();
+  await first.settle();
+  assert.deepEqual((await reloaded.tick()).tasks, []);
+  assert.equal(callsOf(server, "create").length, 1);
+  assert.equal(callsOf(server, "status").length, 0);
+  assert.equal(callsOf(server, "abort").length, 0);
+  assert.equal(callsOf(server, "cancelOperation").length, 0);
+  assert.equal(callsOf(server, "commit").length, 0, "late acknowledgement from the old request cannot publish");
+  assert.equal(first.completed.length, 0);
+  assert.equal(reloaded.completed.length, 0);
 });
 
 test("hung delete checks time out and allow other exact Operations to progress", async (t) => {
