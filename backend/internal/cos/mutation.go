@@ -5,7 +5,6 @@ import (
 	"errors"
 	"io"
 	"net/http"
-	"net/url"
 	"strconv"
 	"strings"
 	"sync"
@@ -58,11 +57,13 @@ func (b *mutationBackend) Head(ctx context.Context, key string) (objectmutation.
 	}
 	return mutationObject(key, response.Header)
 }
-func (b *mutationBackend) Open(ctx context.Context, key, version string) (io.ReadCloser, error) {
-	if version == "" || version == "null" {
+func (b *mutationBackend) Open(ctx context.Context, key, etag string) (io.ReadCloser, error) {
+	if etag == "" || strings.ContainsAny(etag, "\r\n\x00") {
 		return nil, storage.NewError("unsupported", storage.Path(key), nil)
 	}
-	response, err := b.client.Object.Get(ctx, key, nil, url.QueryEscape(version))
+	headers := make(http.Header)
+	headers.Set("If-Match", etag)
+	response, err := b.client.Object.Get(ctx, key, &sdk.ObjectGetOptions{XOptionHeader: &headers})
 	if err != nil {
 		return nil, mutationReadError(ctx, key, err, true)
 	}
@@ -70,7 +71,7 @@ func (b *mutationBackend) Open(ctx context.Context, key, version string) (io.Rea
 		return nil, storage.NewError("invalid_backend_response", storage.Path(key), nil)
 	}
 	object, err := mutationObject(key, response.Header)
-	if err != nil || response.StatusCode != 200 || object.VersionID != version || response.Header.Get("Content-Range") != "" {
+	if err != nil || response.StatusCode != 200 || object.ETag != etag || response.Header.Get("Content-Range") != "" {
 		response.Body.Close()
 		return nil, storage.NewError("changed", storage.Path(key), err)
 	}

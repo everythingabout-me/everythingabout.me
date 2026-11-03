@@ -59,18 +59,18 @@ func (b *mutationBackend) Head(ctx context.Context, key string) (objectmutation.
 	}
 	return objectmutation.Object{Key: key, Size: *out.ContentLength, VersionID: aws.ToString(out.VersionId), ETag: aws.ToString(out.ETag), MediaType: aws.ToString(out.ContentType), ModifiedAt: aws.ToTime(out.LastModified), Metadata: cloneMutationMetadata(out.Metadata)}, nil
 }
-func (b *mutationBackend) Open(ctx context.Context, key, version string) (io.ReadCloser, error) {
-	if version == "" || version == "null" {
+func (b *mutationBackend) Open(ctx context.Context, key, etag string) (io.ReadCloser, error) {
+	if etag == "" {
 		return nil, storage.NewError("unsupported", storage.Path(key), nil)
 	}
 	work, cancel := context.WithTimeout(ctx, 60*time.Second)
-	out, err := b.client.GetObject(work, &s3.GetObjectInput{Bucket: aws.String(b.bucket), Key: aws.String(key), VersionId: aws.String(version)})
+	out, err := b.client.GetObject(work, &s3.GetObjectInput{Bucket: aws.String(b.bucket), Key: aws.String(key), IfMatch: aws.String(etag)})
 	if err != nil {
 		mapped := mutationReadError(work, key, err, true)
 		cancel()
 		return nil, mapped
 	}
-	if out.Body == nil || out.ContentLength == nil || *out.ContentLength < 0 || aws.ToString(out.VersionId) != version || out.ContentRange != nil {
+	if out.Body == nil || out.ContentLength == nil || *out.ContentLength < 0 || aws.ToString(out.ETag) != etag || out.ContentRange != nil {
 		if out.Body != nil {
 			out.Body.Close()
 		}

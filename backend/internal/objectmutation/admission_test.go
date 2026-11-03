@@ -9,17 +9,15 @@ import (
 )
 
 func validAdmissionFixture() Admission {
-	return Admission{ConnectionID: "fixture", Endpoint: "https://objects.example", Bucket: "bucket", Region: "region", CheckedAt: time.Now().UTC(), ProbeReference: "isolated-positive-negative-probes", AtomicPublish: true, VersionedReads: true, ConditionalCreate: true, CurrentKeyDelete: true, CoordinatedExclusiveWriter: true, SingleGateway: true, LegacyWritersDrained: true}
+	return Admission{ConnectionID: "fixture", Endpoint: "https://objects.example", Bucket: "bucket", Region: "region", CheckedAt: time.Now().UTC(), ProbeReference: "isolated-positive-negative-probes", AtomicPublish: true, ConditionalCreate: true, SingleGateway: true}
 }
-func TestCreateOnlyAdmissionDoesNotRequireExclusiveOrVersionedCapabilities(t *testing.T) {
+func TestAdmissionExplicitConnectionAndCapabilityEvidence(t *testing.T) {
 	a := validAdmissionFixture()
-	a.CreateOnly = true
-	a.VersionedReads = false
-	a.CurrentKeyDelete = false
-	a.CoordinatedExclusiveWriter = false
-	a.LegacyWritersDrained = false
 	if err := ValidateAdmission(a); err != nil {
-		t.Fatalf("safe create-only evidence was rejected: %v", err)
+		t.Fatal(err)
+	}
+	if !a.Matches("fixture", "https://objects.example", "bucket", "region") || a.Matches("other", "https://objects.example", "bucket", "region") {
+		t.Fatal("connection evidence was not exact")
 	}
 	for _, field := range []string{"AtomicPublish", "ConditionalCreate", "SingleGateway"} {
 		b := a
@@ -30,42 +28,6 @@ func TestCreateOnlyAdmissionDoesNotRequireExclusiveOrVersionedCapabilities(t *te
 			b.ConditionalCreate = false
 		case "SingleGateway":
 			b.SingleGateway = false
-		}
-		if ValidateAdmission(b) == nil {
-			t.Fatalf("create-only admission omitted required %s evidence", field)
-		}
-	}
-	a.CreateOnly = false
-	if ValidateAdmission(a) == nil {
-		t.Fatal("create-only evidence admitted broader native mutations")
-	}
-}
-
-func TestAdmissionExplicitConnectionAndCapabilityEvidence(t *testing.T) {
-	a := validAdmissionFixture()
-	if err := ValidateAdmission(a); err != nil {
-		t.Fatal(err)
-	}
-	if !a.Matches("fixture", "https://objects.example", "bucket", "region") || a.Matches("other", "https://objects.example", "bucket", "region") {
-		t.Fatal("connection evidence was not exact")
-	}
-	for _, field := range []string{"AtomicPublish", "VersionedReads", "ConditionalCreate", "CurrentKeyDelete", "CoordinatedExclusiveWriter", "SingleGateway", "LegacyWritersDrained"} {
-		b := a
-		switch field {
-		case "AtomicPublish":
-			b.AtomicPublish = false
-		case "VersionedReads":
-			b.VersionedReads = false
-		case "ConditionalCreate":
-			b.ConditionalCreate = false
-		case "CurrentKeyDelete":
-			b.CurrentKeyDelete = false
-		case "CoordinatedExclusiveWriter":
-			b.CoordinatedExclusiveWriter = false
-		case "SingleGateway":
-			b.SingleGateway = false
-		case "LegacyWritersDrained":
-			b.LegacyWritersDrained = false
 		}
 		if ValidateAdmission(b) == nil {
 			t.Fatalf("missing %s was admitted", field)

@@ -225,6 +225,10 @@ func (p *objectAPIProvider) serve(t *testing.T, w http.ResponseWriter, r *http.R
 			w.WriteHeader(404)
 			return
 		}
+		if match := r.Header.Get("If-Match"); match != "" && match != selected.ETag {
+			w.WriteHeader(412)
+			return
+		}
 		body := selected.Body
 		status := 200
 		w.Header().Set("ETag", selected.ETag)
@@ -269,8 +273,7 @@ type objectsAPIFixture struct {
 	roots    [2]fileops.Root
 }
 
-func newObjectsAPIFixture(t *testing.T, createOnlyMode ...bool) *objectsAPIFixture {
-	createOnly := len(createOnlyMode) > 0 && createOnlyMode[0]
+func newObjectsAPIFixture(t *testing.T) *objectsAPIFixture {
 	t.Helper()
 	address := os.Getenv("EAM_TEST_DATABASE_URL")
 	if address == "" {
@@ -327,15 +330,9 @@ func newObjectsAPIFixture(t *testing.T, createOnlyMode ...bool) *objectsAPIFixtu
 		}
 	}
 	provider := newObjectAPIProvider()
-	provider.unversioned = createOnly
 	native := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { provider.serve(t, w, r) }))
 	t.Cleanup(native.Close)
-	proof := objectmutation.Admission{ConnectionID: "default", Endpoint: native.URL, Bucket: "bucket", Region: "test-region", CheckedAt: time.Now().UTC(), ProbeReference: "isolated stateful S3 SDK fixture, not live cloud evidence", AtomicPublish: true, VersionedReads: true, ConditionalCreate: true, CurrentKeyDelete: true, CoordinatedExclusiveWriter: true, SingleGateway: true, LegacyWritersDrained: true, MultipartUploads: true}
-	if createOnly {
-		proof.CreateOnly = true
-		proof.VersionedReads, proof.CurrentKeyDelete = false, false
-		proof.CoordinatedExclusiveWriter, proof.LegacyWritersDrained = false, false
-	}
+	proof := objectmutation.Admission{ConnectionID: "default", Endpoint: native.URL, Bucket: "bucket", Region: "test-region", CheckedAt: time.Now().UTC(), ProbeReference: "isolated stateful S3 SDK fixture, not live cloud evidence", AtomicPublish: true, ConditionalCreate: true, SingleGateway: true, MultipartUploads: true}
 	proofPath := filepath.Join(t.TempDir(), "admission.json")
 	encoded, _ := json.Marshal(proof)
 	if err = os.WriteFile(proofPath, encoded, 0600); err != nil {
@@ -364,9 +361,9 @@ func newObjectsAPIFixture(t *testing.T, createOnlyMode ...bool) *objectsAPIFixtu
 			t.Fatal("configured S3 SDK tree omitted object mutation driver")
 		}
 		binding := native.StorageBinding()
-		f.roots[i] = fileops.Root{OwnerID: binding.OwnerID, ConnectionID: binding.ConnectionID, Generation: binding.Generation, ContentRoot: binding.ContentRoot, SystemRoot: binding.SystemRoot, CaseSensitive: native.StorageNameRules().CaseSensitive, RetainsVersions: !createOnly, CreateOnly: createOnly}
+		f.roots[i] = fileops.Root{OwnerID: binding.OwnerID, ConnectionID: binding.ConnectionID, Generation: binding.Generation, ContentRoot: binding.ContentRoot, SystemRoot: binding.SystemRoot, CaseSensitive: native.StorageNameRules().CaseSensitive, RetainsVersions: native.Describe().RetainsVersions}
 		driver.Close()
-		if e = journal.Initialize(ctx, f.roots[i], fileops.Baseline{LogicalLimit: 1 << 20, PhysicalLimit: 4 << 20, NativeComplete: true, IndexCompared: true, LegacyWritersDrained: !createOnly, Evidence: json.RawMessage(`{"fixture":"fresh isolated owner prefixes, zero current and retained bytes"}`)}); e != nil {
+		if e = journal.Initialize(ctx, f.roots[i], fileops.Baseline{LogicalLimit: 1 << 20, PhysicalLimit: 4 << 20, NativeComplete: true, IndexCompared: true, LegacyWritersDrained: true, Evidence: json.RawMessage(`{"fixture":"fresh isolated owner prefixes, zero current and retained bytes"}`)}); e != nil {
 			t.Fatal(e)
 		}
 		f.tokens[i], _, e = authentication.CreateToken(ctx, auth.NewTokenInput{UserID: f.owners[i], Name: "objects API", Kind: auth.KindApp, CanRead: true, CanWrite: true})

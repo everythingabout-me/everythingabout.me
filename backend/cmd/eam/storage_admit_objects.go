@@ -9,9 +9,9 @@ import (
 	"everythingabout.me/backend/internal/config"
 )
 
-func validateAdmissionQuiescence(quiesced, createOnly bool) error {
-	if !quiesced && !createOnly {
-		return fmt.Errorf("storage-admit requires --writers-quiesced unless the object admission explicitly enables create-only publication")
+func validateAdmissionQuiescence(quiesced bool) error {
+	if !quiesced {
+		return fmt.Errorf("storage-admit requires --writers-quiesced")
 	}
 	return nil
 }

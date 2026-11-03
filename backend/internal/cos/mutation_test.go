@@ -55,8 +55,8 @@ func TestMutationNativeWireAndVersionSelection(t *testing.T) {
 			w.WriteHeader(200)
 		case "GET":
 			gets.Add(1)
-			if r.URL.Query().Get("versionId") != "version+%?old" {
-				t.Errorf("wrong native version: %s", r.URL.RawQuery)
+			if r.URL.Query().Has("versionId") || r.Header.Get("If-Match") != `"opaque-native-tag"` {
+				t.Errorf("current read lost ETag condition: %s %q", r.URL.RawQuery, r.Header.Get("If-Match"))
 			}
 			w.Header().Set("Content-Length", "4")
 			io.WriteString(w, "data")
@@ -90,7 +90,7 @@ func TestMutationNativeWireAndVersionSelection(t *testing.T) {
 	if head.Key != key || head.Size != 4 || head.ETag != `"opaque-native-tag"` || head.Metadata["eam-intent"] != "nonce" || head.ModifiedAt.IsZero() {
 		t.Fatalf("bad HEAD %+v", head)
 	}
-	body, err := b.Open(ctx, key, head.VersionID)
+	body, err := b.Open(ctx, key, head.ETag)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -114,7 +114,7 @@ func TestMutationNativeWireAndVersionSelection(t *testing.T) {
 		t.Fatal("native operation repeated")
 	}
 }
-func TestMutationPutCreateOnlyNotModifiedIsPreconditionFailure(t *testing.T) {
+func TestMutationPutConditionalNotModifiedIsPreconditionFailure(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
 		status int
@@ -227,7 +227,10 @@ func TestMutationPinnedTruncationConditionsAndCancellation(t *testing.T) {
 		calls.Add(1)
 		switch r.Method {
 		case "GET":
-			w.Header().Set("X-Cos-Version-Id", "retained")
+			if r.Header.Get("If-Match") != `"retained"` {
+				t.Error("read condition lost")
+			}
+			w.Header().Set("ETag", `"retained"`)
 			w.Header().Set("Content-Length", "8")
 			io.WriteString(w, "tiny")
 		case "PUT":
@@ -240,7 +243,7 @@ func TestMutationPinnedTruncationConditionsAndCancellation(t *testing.T) {
 			w.WriteHeader(404)
 		}
 	}))
-	body, err := b.Open(context.Background(), "a", "retained")
+	body, err := b.Open(context.Background(), "a", `"retained"`)
 	if err != nil {
 		t.Fatal(err)
 	}

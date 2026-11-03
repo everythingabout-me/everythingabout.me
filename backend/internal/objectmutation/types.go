@@ -14,22 +14,15 @@ import (
 // file must describe positive/negative isolated probes for this exact connection.
 // Capability assertions apply only to the selected publication strategy.
 type Admission struct {
-	// CreateOnly admits native no-overwrite publication on an unversioned bucket.
-	// It grants no replace/delete authority or exclusion of external writers.
-	CreateOnly                 bool      `json:"createOnly,omitempty"`
-	ConnectionID               string    `json:"connectionId"`
-	Endpoint                   string    `json:"endpoint"`
-	Bucket                     string    `json:"bucket"`
-	Region                     string    `json:"region"`
-	CheckedAt                  time.Time `json:"checkedAt"`
-	ProbeReference             string    `json:"probeReference"`
-	AtomicPublish              bool      `json:"atomicPublish"`
-	VersionedReads             bool      `json:"versionedReads"`
-	ConditionalCreate          bool      `json:"conditionalCreate"`
-	CurrentKeyDelete           bool      `json:"currentKeyDelete"`
-	CoordinatedExclusiveWriter bool      `json:"coordinatedExclusiveWriter"`
-	SingleGateway              bool      `json:"singleGateway"`
-	LegacyWritersDrained       bool      `json:"legacyWritersDrained"`
+	ConnectionID      string    `json:"connectionId"`
+	Endpoint          string    `json:"endpoint"`
+	Bucket            string    `json:"bucket"`
+	Region            string    `json:"region"`
+	CheckedAt         time.Time `json:"checkedAt"`
+	ProbeReference    string    `json:"probeReference"`
+	AtomicPublish     bool      `json:"atomicPublish"`
+	ConditionalCreate bool      `json:"conditionalCreate"`
+	SingleGateway     bool      `json:"singleGateway"`
 	// MultipartUploads additionally attests native part persistence and conditional
 	// create on Complete for this exact provider endpoint. Existing PUT evidence
 	// alone never enables numbered native uploads.
@@ -93,7 +86,7 @@ type NativePart struct {
 
 type Backend interface {
 	Head(context.Context, string) (Object, error)
-	Open(context.Context, string, string) (io.ReadCloser, error) // exact retained native version
+	Open(context.Context, string, string) (io.ReadCloser, error) // key, required current ETag (If-Match)
 	Put(context.Context, Put) (Object, error)
 	Delete(context.Context, string, string) (Object, error) // key, expected ETag; unversioned current-key deletion
 }

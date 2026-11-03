@@ -211,20 +211,17 @@ AtomicCreate/AtomicReplace describe tested single-file native visibility, not ar
 NativeConditionalMutation describes real backend-enforced version/absence checks, not Stat then write.
 Conditions that cannot be implemented with native support or a declared coordinated-exclusive writer model
 return unsupported before an unsafe effect. Conflicting external writes are outside an application lock;
-do not claim they are fenced. An atomic no-replace primitive is needed to guarantee create-only against them.
+do not claim they are fenced. An atomic no-replace primitive is needed to guarantee absence against them.
 A native MOVE that is atomic only within a filesystem must not be advertised as atomic across volumes.
 
-An explicit object `CreateOnly` strategy may advertise `AtomicCreate=true` using proven native absence
-conditions without requiring bucket versioning or exclusive external writers. It sets `AtomicReplace=false`
-and `PinnedRead=false`, returns nil native `Version` evidence, and exposes no strong content validator.
-Replacement, mkdir, move, copy and removal are unsupported before effects; only absent file publication and
-its temporary upload cleanup are enabled. Existing prefix folders may be parents without retained marker
-identities; path checks do not freeze them against external changes. The full versioned mutation strategy
-keeps its stronger parent/source evidence requirements. Both strategies preserve unknown final-effect guards.
-Create-only baseline/accounting uses the initial matched native/index observation plus application journal
-changes and reservations. Explicit scans reflect external metadata changes in the index, without updating
-budget counters. Separate reviewed budget resynchronization is not implemented; exact global quota enforcement
-across external writers is not claimed.
+The object mutation driver derives `Version` from the current object's ETag and sends every conditional
+effect with native `If-Match` / `If-None-Match` where the provider enforces them (COS ignores `If-Match`
+on PUT, so replacement re-checks the ETag under the gateway lock just before publishing). It advertises
+`AtomicCreate=true` and `AtomicReplace=true` without requiring bucket versioning. It sets `PinnedRead=false` and
+`RetainsVersions=false`. Prefix folders without a marker object have nil `Version`; they may be parents
+but cannot be conditionally removed. Baseline/accounting uses the initial matched native/index observation
+plus application journal changes and reservations; exact global quota enforcement across external writers
+is not claimed.
 
 NativeMover/Copier optimize a known supported operation. Capability failure before effects can fall back to
 journaled copy/verify/delete. Failure after possible effects must be reconciled first. A move cannot become a

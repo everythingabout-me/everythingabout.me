@@ -57,12 +57,11 @@ func validateWriterRoot(root Root, writer storage.StagedWriter) error {
 	if !ok {
 		return E("unbound_writer", nil)
 	}
-	retains, createOnly := false, false
+	retains := false
 	if described, ok := writer.(interface{ Describe() storage.Descriptor }); ok {
-		desc := described.Describe()
-		retains, createOnly = desc.RetainsVersions, desc.CreateOnly
+		retains = described.Describe().RetainsVersions
 	}
-	if retains != root.RetainsVersions || createOnly != root.CreateOnly {
+	if retains != root.RetainsVersions {
 		return E("root_conflict", nil)
 	}
 	return validateNativeBinding(root, bound.StorageBinding(), bound.StorageNameRules())

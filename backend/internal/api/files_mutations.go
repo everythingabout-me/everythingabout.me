@@ -92,7 +92,7 @@ func (s *Server) fileMutationContext(ctx context.Context, f *fileRequest) (fileo
 		return nil, fileops.Root{}, fileops.Actor{}, fc.NewProblem(422, "unsupported_option", "This root does not support safe native file mutations.")
 	}
 	binding := native.StorageBinding()
-	root := fileops.Root{OwnerID: binding.OwnerID, ConnectionID: binding.ConnectionID, Generation: binding.Generation, ContentRoot: binding.ContentRoot, SystemRoot: binding.SystemRoot, CaseSensitive: native.StorageNameRules().CaseSensitive, RetainsVersions: native.Describe().RetainsVersions, CreateOnly: native.Describe().CreateOnly}
+	root := fileops.Root{OwnerID: binding.OwnerID, ConnectionID: binding.ConnectionID, Generation: binding.Generation, ContentRoot: binding.ContentRoot, SystemRoot: binding.SystemRoot, CaseSensitive: native.StorageNameRules().CaseSensitive, RetainsVersions: native.Describe().RetainsVersions}
 	actor := fileops.Actor{ID: filePrincipalID(f.Principal), Scope: storage.Path(f.Scope.Relative()), CanRead: f.Principal.Token == nil || f.Principal.Token.CanRead, CanWrite: f.Principal.Token == nil || f.Principal.Token.CanWrite, ManageOwner: f.Principal.Token == nil}
 	// This internal readiness query does not disclose owner-wide usage to a token.
 	_, err := s.filesJournal.Usage(ctx, root, fileops.Actor{ID: "owner:" + root.OwnerID, CanRead: true, CanWrite: true, ManageOwner: true})
@@ -547,9 +547,6 @@ func (s *Server) handleFilesDelete(w http.ResponseWriter, r *http.Request, f *fi
 	return s.filesAction(w, r, f, fileops.ActionRequest{Kind: "delete", From: storage.Path(p.Relative()), Recursive: recursive, IfRevision: r.Header.Get("If-Revision")})
 }
 func (s *Server) filesAction(w http.ResponseWriter, r *http.Request, f *fileRequest, request fileops.ActionRequest) error {
-	if f.Driver.Describe().CreateOnly {
-		return fc.NewProblem(422, "unsupported_option", "This storage connection supports new files only.")
-	}
 	native, root, actor, err := s.fileMutationContext(r.Context(), f)
 	if err != nil {
 		return err

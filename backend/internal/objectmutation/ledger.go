@@ -371,9 +371,6 @@ func cloneEffect(in storage.EffectIntent) *storage.EffectIntent {
 }
 
 func (d *Driver) Mkdir(ctx context.Context, in storage.Mutation, cp storage.Checkpoint) (storage.MutationResult, error) {
-	if d.options.Admission.CreateOnly {
-		return storage.MutationResult{}, &storage.NoFinalEffect{Cause: fail("unsupported", in.Path)}
-	}
 	if in.Path == "" || !in.Conditions.Absent || len(in.Conditions.ExpectedVersion) > 0 {
 		return storage.MutationResult{}, fail("unsupported", in.Path)
 	}
@@ -424,13 +421,10 @@ func (d *Driver) Move(context.Context, storage.MoveRequest, storage.Checkpoint) 
 	return storage.MutationResult{}, &storage.NoFinalEffect{Cause: fail("unsupported", "")}
 }
 func (d *Driver) Copy(ctx context.Context, in storage.MoveRequest, cp storage.Checkpoint) (storage.MutationResult, error) {
-	if d.options.Admission.CreateOnly {
-		return storage.MutationResult{}, &storage.NoFinalEffect{Cause: fail("unsupported", in.Target)}
-	}
 	if in.Source == "" || in.Target == "" || in.Source == in.Target || storage.ValidatePath(in.Source) != nil || !in.TargetConditions.Absent || len(in.TargetConditions.ExpectedVersion) > 0 {
 		return storage.MutationResult{}, fail("unsupported", in.Target)
 	}
-	version, err := parseVersion(in.SourceVersion)
+	etag, err := parseVersion(in.SourceVersion)
 	if err != nil {
 		return storage.MutationResult{}, err
 	}
@@ -480,7 +474,7 @@ func (d *Driver) Copy(ctx context.Context, in storage.MoveRequest, cp storage.Ch
 			return storage.MutationResult{}, err
 		}
 		r = &ledger{Kind: "copy", ID: in.ID, Intent: intent, Effect: &effect, Phase: "new"}
-		body, err := d.backend.Open(ctx, d.key(in.Source, storage.File), version)
+		body, err := d.backend.Open(ctx, d.key(in.Source, storage.File), etag)
 		if err != nil {
 			return storage.MutationResult{}, err
 		}
@@ -502,11 +496,11 @@ func (d *Driver) Copy(ctx context.Context, in storage.MoveRequest, cp storage.Ch
 	return result, err
 }
 func (d *Driver) Remove(ctx context.Context, in storage.Mutation, cp storage.Checkpoint) (storage.MutationResult, error) {
-	if d.options.Admission.CreateOnly {
-		return storage.MutationResult{}, &storage.NoFinalEffect{Cause: fail("unsupported", in.Path)}
-	}
 	if in.Path == "" || storage.ValidatePath(in.Path) != nil || in.Conditions.Absent {
 		return storage.MutationResult{}, fail("unsupported", in.Path)
+	}
+	if len(in.Conditions.ExpectedVersion) == 0 {
+		return d.removeImplicitFolder(ctx, in)
 	}
 	if _, err := parseVersion(in.Conditions.ExpectedVersion); err != nil {
 		return storage.MutationResult{}, err
@@ -557,7 +551,7 @@ func (d *Driver) Remove(ctx context.Context, in storage.Mutation, cp storage.Che
 	if err != nil {
 		return storage.MutationResult{}, err
 	}
-	if !bytes.Equal(nativeVersion(obj.VersionID), in.Conditions.ExpectedVersion) || obj.ETag == "" {
+	if !bytes.Equal(nativeVersion(obj.ETag), in.Conditions.ExpectedVersion) {
 		return storage.MutationResult{}, fail("changed", in.Path)
 	}
 	r.ExpectedETag = obj.ETag
@@ -677,4 +671,32 @@ func (d *Driver) InspectEffect(ctx context.Context, in storage.EffectIntent, evi
 	default:
 		return storage.Inspection{State: storage.OutcomeUnknown}, nil
 	}
+}
+
+// removeImplicitFolder settles deletion of a prefix folder that has no marker
+// object. It issues no native request: the prefix vanished with its last child.
+// A marker or child that appeared since capture is reported as a change.
+func (d *Driver) removeImplicitFolder(ctx context.Context, in storage.Mutation) (storage.MutationResult, error) {
+	ctx, done, err := d.operation(ctx)
+	if err != nil {
+		return storage.MutationResult{}, err
+	}
+	defer done()
+	if _, err = d.backend.Head(ctx, d.key(in.Path, storage.Folder)); err == nil {
+		return storage.MutationResult{}, &storage.NoFinalEffect{Cause: fail("changed", in.Path)}
+	} else if !storage.IsCode(err, "not_found") {
+		return storage.MutationResult{}, err
+	}
+	evidence, _ := json.Marshal(map[string]string{"binding": d.namespace, "kind": "implicit-folder-delete", "id": in.ID, "path": string(in.Path)})
+	page, err := d.tree.List(ctx, in.Path, storage.PageRequest{Limit: 1})
+	if storage.IsCode(err, "not_found") {
+		return storage.MutationResult{Evidence: evidence}, nil
+	}
+	if err != nil {
+		return storage.MutationResult{}, err
+	}
+	if len(page.Entries) > 0 || page.NextCursor != "" {
+		return storage.MutationResult{}, &storage.NoFinalEffect{Cause: fail("not_empty", in.Path)}
+	}
+	return storage.MutationResult{Evidence: evidence}, nil
 }

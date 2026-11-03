@@ -37,15 +37,15 @@ func (b *Backend) ValidateObjectBaseline(ctx context.Context, ownerID string, en
 		}
 		obj, err := b.objectBackend.Head(ctx, key)
 		if err != nil {
-			// The complete native scan already established this prefix folder.
-			// Create-only publication does not require a retained marker identity.
-			if b.CreateOnly() && e.Kind == storage.Folder && storage.IsCode(err, "not_found") {
+			// The complete native scan already established this prefix folder; it
+			// needs no marker object.
+			if e.Kind == storage.Folder && storage.IsCode(err, "not_found") {
 				continue
 			}
 			return err
 		}
-		invalidVersion := obj.VersionID == "" || obj.VersionID == "null" || strings.ContainsAny(obj.VersionID, "\r\n\x00")
-		if obj.Key != key || !b.CreateOnly() && invalidVersion || obj.Size != e.Size || e.Kind == storage.Folder && obj.Size != 0 {
+		invalidETag := obj.ETag == "" || strings.ContainsAny(obj.ETag, "\r\n\x00")
+		if obj.Key != key || invalidETag || obj.Size != e.Size || e.Kind == storage.Folder && obj.Size != 0 {
 			return storage.NewError("unsupported", e.Path, nil)
 		}
 	}

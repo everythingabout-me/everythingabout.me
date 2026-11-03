@@ -82,7 +82,7 @@ func TestMutationMultipartNativeWireAndConditionalComplete(t *testing.T) {
 	}
 }
 
-func TestMutationMultipartCreateOnlyNotModifiedIsPreconditionFailure(t *testing.T) {
+func TestMutationMultipartConditionalNotModifiedIsPreconditionFailure(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
 		status int

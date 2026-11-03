@@ -7,14 +7,12 @@ import (
 	"everythingabout.me/backend/internal/config"
 )
 
-func TestAdmissionQuiescenceOnlyOptionalForCreateOnly(t *testing.T) {
-	for _, tc := range []struct {
-		quiesced, createOnly, valid bool
-	}{{false, false, false}, {true, false, true}, {false, true, true}, {true, true, true}} {
-		err := validateAdmissionQuiescence(tc.quiesced, tc.createOnly)
-		if (err == nil) != tc.valid {
-			t.Fatalf("unexpected quiescence validation for %+v: %v", tc, err)
-		}
+func TestAdmissionQuiescenceRequired(t *testing.T) {
+	if validateAdmissionQuiescence(false) == nil {
+		t.Fatal("unquiesced admission accepted")
+	}
+	if err := validateAdmissionQuiescence(true); err != nil {
+		t.Fatalf("quiesced admission rejected: %v", err)
 	}
 }
 

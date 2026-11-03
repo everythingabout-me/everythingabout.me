@@ -204,7 +204,9 @@ func parentPath(p storage.Path) storage.Path {
 	return ""
 }
 func requireVersion(e storage.Entry) error {
-	if storage.ValidatePath(e.Path) != nil || len(e.Version) == 0 || e.Size < 0 || e.Size > 9007199254740991 || e.Kind != storage.File && e.Kind != storage.Folder || e.Kind == storage.Folder && e.Size != 0 {
+	// Prefix folders without a native marker have no revision; they exist only
+	// through their children and are never the subject of a conditional effect.
+	if storage.ValidatePath(e.Path) != nil || len(e.Version) == 0 && e.Kind != storage.Folder || e.Size < 0 || e.Size > 9007199254740991 || e.Kind != storage.File && e.Kind != storage.Folder || e.Kind == storage.Folder && e.Size != 0 {
 		return E("unsupported", nil)
 	}
 	return nil
@@ -219,6 +221,12 @@ func cloneActionEntry(e storage.Entry) storage.Entry {
 		e.Digest = &digest
 	}
 	return e
+}
+
+// implicitFolderGone reports that a captured marker-less prefix folder vanished
+// because its children were removed; that is the expected outcome, not a change.
+func implicitFolderGone(captured storage.Entry, err error) bool {
+	return captured.Kind == storage.Folder && len(captured.Version) == 0 && storage.IsCode(err, "not_found")
 }
 func sameNative(a, b storage.Entry) bool {
 	return a.Path == b.Path && a.Kind == b.Kind && a.Size == b.Size && bytes.Equal(a.Version, b.Version) && bytes.Equal(a.NativeRef, b.NativeRef)
@@ -629,6 +637,9 @@ func executeAction(ctx context.Context, native NativeActions, intent storage.Eff
 func validateActionStep(ctx context.Context, native NativeActions, req ActionRequest, b actionBinding, op Operation, entry EntryEffect) error {
 	for _, old := range b.Anchors {
 		current, err := observe(ctx, native, old.Path)
+		if entry.Action == "delete" && implicitFolderGone(old, err) {
+			continue
+		}
 		if err != nil || !sameNative(old, current) {
 			return E("target_changed", err)
 		}
@@ -666,11 +677,17 @@ func validateActionStep(ctx context.Context, native NativeActions, req ActionReq
 				continue
 			}
 			current, err := observe(ctx, native, ancestor.Path)
+			if implicitFolderGone(ancestor, err) {
+				continue
+			}
 			if err != nil || !sameNative(ancestor, current) {
 				return E("target_changed", err)
 			}
 		}
 		current, err := observe(ctx, native, entry.Source)
+		if entry.SourceEntry != nil && entry.Action == "delete" && implicitFolderGone(*entry.SourceEntry, err) {
+			return nil
+		}
 		if err != nil || entry.SourceEntry == nil || !sameNative(*entry.SourceEntry, current) || !bytes.Equal(current.Version, entry.SourceVersion) {
 			return E("target_changed", err)
 		}

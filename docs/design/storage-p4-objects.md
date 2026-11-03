@@ -11,12 +11,12 @@ report is required before the new adapter can be constructed. Local P4 behavior 
 
 ## Required evidence and configuration
 
-Use an isolated root for positive and negative native probes first. Both strategies require exact-connection
-atomic complete-object publication, native absence conditions and single-attempt response evidence. The full
-mutation strategy additionally requires retained native version reads, current-key delete semantics and a
-coordinated exclusive writer model. The restricted `createOnly` strategy accepts external writers and does
-not require bucket versioning. Do not infer capabilities from S3 compatibility, accepted headers, ETags,
-size/mtime, or a passing mocked test.
+Use an isolated root for positive and negative native probes first. There is one strategy. It requires
+exact-connection atomic complete-object publication, native absence conditions (`If-None-Match: *`),
+native ETag conditions (`If-Match`) on GET/DELETE and single-attempt response evidence. Live COS
+probing (2026-11-03) showed GET and DELETE return 412 on an ETag mismatch, but **PUT ignores `If-Match`**. **Bucket
+versioning is neither required nor consulted**: every revision token is the current object's ETag.
+Do not infer capabilities from S3 compatibility, accepted headers, size/mtime, or a passing mocked test.
 
 ```dotenv
 FILE_COORDINATED_WRITES=true
@@ -31,8 +31,7 @@ uses its own private hashed namespace. **Only one gateway or processes sharing t
 spool/lock namespace may serve that connection.** Identical path strings on different machines are not
 shared fencing. A DB lease cannot fence provider requests; do not run this mode as an uncoordinated fleet.
 
-The strict JSON report selects one strategy. For restricted embedded uploads, use actual connection values
-and measured probe references:
+The strict JSON report uses actual connection values and measured probe references:
 
 ```json
 {
@@ -41,78 +40,40 @@ and measured probe references:
   "bucket": "verified-bucket-1234567890",
   "region": "ap-guangzhou",
   "checkedAt": "2026-11-03T00:00:00Z",
-  "probeReference": "/secure/release-evidence/create-only-probes.json",
-  "createOnly": true,
+  "probeReference": "/secure/release-evidence/provider-probes.json",
   "atomicPublish": true,
   "conditionalCreate": true,
   "singleGateway": true,
   "multipartUploads": true,
-  "versionedReads": false,
-  "currentKeyDelete": false,
-  "coordinatedExclusiveWriter": false,
-  "legacyWritersDrained": false,
   "signedMultipartParts": false
 }
 ```
 
 `multipartUploads` requires evidence for native unpublished parts and absence enforcement on Complete,
-independent of ordinary PUT evidence. No bucket setting or existing object rewrite is required. This mode
-only creates absent file keys: replacement, mkdir, move, copy and delete are rejected. Existing unversioned
-files and implicit prefix folders remain usable; parents carry paths, not invented version tokens. Reads
-have no retained-version pinning, strong content ETags or `contentRevision`; `sourceModifiedAt` is unsupported.
-Native conditions prevent application overwrite at publication, without preventing later external edits.
+independent of ordinary PUT evidence. No bucket setting or existing object rewrite is required. Upload,
+replacement, mkdir, move, copy and delete are all available. Implicit prefix folders (no marker object) are
+real native folders: they carry no revision, children may be created below them, and they disappear with
+their last child. Reads are validated against the current ETag but never pinned to a retained version, so
+`pinnedRead` is false and `sourceModifiedAt` is unsupported.
 
-Initialize a create-only root after importing and comparing the current observed native/index tree:
-
-```bash
-cd backend
-go run ./cmd/eam storage-admit --owner-id 00000000-0000-0000-0000-000000000001 \
-  --evidence /secure/baseline-proof.json --physical-bytes 123456789 --dry-run
-# Review, then repeat without --dry-run before serving writes.
-```
-
-Do not add `--writers-quiesced` unless it is independently true; create-only admission does not require it.
-The binding's spool must still be empty before and after verification. Initial comparison is a matched
-observation, not a globally consistent snapshot. The JSON proof still needs `retainedVersionInventory` and
-the explicit physical total must cover current objects plus any history that actually exists. External tools
-may continue writing; synchronize their metadata changes into the index. Budgets retain the initial compared
-baseline plus application journal changes; reconcile does not update budget counters. External additions or
-deletions need a separately reviewed budget resynchronization, which is not implemented. Limits therefore do
-not claim exact total native usage across external writers.
-
-For the full versioned mutation strategy, omit `createOnly` or set it false and establish every capability
-assertion below. This strategy retains its exclusive-writer and retained-version requirements:
-
-```json
-{
-  "connectionId": "default",
-  "endpoint": "https://objects.example",
-  "bucket": "dedicated-and-verified-bucket",
-  "region": "us-east-1",
-  "checkedAt": "2026-11-02T00:00:00Z",
-  "probeReference": "/secure/release-evidence/provider-positive-negative-probes.json",
-  "atomicPublish": true,
-  "versionedReads": true,
-  "conditionalCreate": true,
-  "currentKeyDelete": true,
-  "coordinatedExclusiveWriter": true,
-  "singleGateway": true,
-  "legacyWritersDrained": true
-}
-```
+What ETag revisions do not give: a read may observe a concurrent replacement (detected by size/ETag checks
+and reported as `changed`, never silently mixed). Copy and delete are fenced natively by `If-Match`.
+Replacement re-checks the current ETag under the gateway's per-intent lock immediately before one PUT; because
+COS does not enforce `If-Match` on PUT, an external tool writing the same key inside that short window can be
+overwritten. Application writers cannot race it (single gateway), so this only matters for external tools.
 
 The report is trusted deployment evidence, not a request to automatically claim those capabilities.
 When admitted COS object writes are enabled, legacy grant/native-action routes are gated before handlers,
 legacy browser upload/job/index/timeline writer services are not started, and the legacy storage bridge is
 read-only. This stops the same gateway from issuing new effects that bypass the durable guards. In full
 mutation mode, previously issued grants and already accepted remote requests still require independent
-drain/quiescence evidence. Create-only mode relies on native absence conditions and does not assert a drain.
+drain/quiescence evidence.
 Startup matches connection ID, endpoint, bucket and region exactly; COS endpoint is its configured
 `https://<bucket>.cos.<region>.myqcloud.com`. Root configuration/generation and owner remain bound in
 the actual driver identity. Secret rotation is separate from root identity. The file is bounded to 1 MiB,
 unknown fields and extra JSON values are rejected. Never store secrets in the report or commit it.
 
-For the full mutation strategy, after draining all legacy/native writers and importing the current native
+After draining all legacy/native writers and importing the current native
 index, initialize each owner:
 
 ```bash
@@ -124,10 +85,9 @@ go run ./cmd/eam storage-admit --owner-id 00000000-0000-0000-0000-000000000001 \
 ```
 
 Object baseline evidence must contain a nonempty `retainedVersionInventory` reference. The explicit
-physical byte amount must include retained object versions/history and be at least current logical bytes;
-listing only current keys cannot compute it. Native/index comparison checks exact current names, kinds,
-size and parents. In full mutation mode, read-only HEAD checks require actual non-null native version IDs and
-explicit versioned zero-byte folder markers; implicit-prefix-only folders are not admitted mutation anchors.
+physical byte amount must include any retained object history and be at least current logical bytes.
+Native/index comparison checks exact current names, kinds, size and parents. Read-only HEAD checks require
+an ETag on every file and folder marker; prefix-only folders are accepted without a marker.
 The exact binding's spool must be empty before and after verification. Dry-run sends only provider reads,
 creates no spool state and writes no budget. Existing budgets are not reset. Local admission still measures
 its physical bytes and rejects this object-only override.
@@ -152,7 +112,7 @@ response can prove Applied automatically. A timeout, connection loss, truncated 
 process death after dispatch, or uncertain response remains `outcome_unknown` across restart. **HEAD showing
 the desired file or absence does not prove old requests terminal.** No polling, lease expiry, elapsed timeout,
 matching checksum or current object version releases that guard. A definite completed HTTP 412 is a
-precondition rejection. COS HTTP 304 is also a precondition rejection for create-only PUT or multipart
+precondition rejection. COS HTTP 304 is also a precondition rejection for absence-conditioned PUT or multipart
 Complete requests that sent `If-None-Match: *`; a 304 for replacement or deletion remains unknown.
 Other errors do not become a safe rollback by guesswork.
 
@@ -162,8 +122,7 @@ older state to retry/discard. Permanent unknown effects require explicit operato
 resolution; this release does not automatically resolve them from object inspection. Preserve spool and
 journal backups together. Do not delete a spool/lock directory to unblock a path.
 
-For full-mode confirmed success, read-only metadata refresh is tied to the acknowledged native version.
-Create-only mode records no version or strong content validator; later reads observe the current native path.
+For confirmed success, read-only metadata refresh is tied to the acknowledged ETag.
 Refresh cannot attribute an earlier ambiguous write. Public checksum is null when HEAD/read metadata cannot prove a
 verified digest, even though ingress replay still uses the durable server hash. This keeps the settled
 resource and later native-authoritative GET consistent without trusting arbitrary user metadata or ETags.
@@ -172,37 +131,32 @@ Last-Modified, and the adapter does not silently pretend that it did.
 
 ## Namespace and version restrictions
 
-In full mutation mode, files and explicit standard folder markers need non-null retained VersionId evidence.
-Native version IDs
-stay private; the wrapper provides the P4 bound native tree and verifies exact-version content reads.
-Folder marker versions are stable identity anchors as children change. The root is the configured owner
-binding, never an unversioned arbitrary provider prefix inferred to belong to a new owner.
+Files and explicit standard folder markers are identified by their current ETag. ETags stay private
+inside revision tokens; the wrapper provides the P4 bound native tree and verifies `If-Match` content reads.
+The root is the configured owner binding, never an arbitrary provider prefix inferred to belong to a new owner.
 
-Mkdir creates a real zero-byte marker. Copy reads the captured retained source version into verified gateway
+Mkdir creates a real zero-byte marker. Copy reads the captured source ETag (`If-Match`) into verified gateway
 staging and writes an independent ordinary target object; it is bounded by the admitted single-publication
 limit. Folder copy/move use saved finite manifests. Native Move optimization is unsupported; the service
 copies/verifies all captured targets before captured unchanged source removals. Existing implicit folders
 are never silently assigned marker identities or created as a side effect of metadata admission.
 
-Delete changes the **current key** and may create a native delete marker. It does not delete a captured
-historical VersionId and call that path deletion, which could reveal older bytes. Empty-folder removal checks
+Delete removes the **current key** with `If-Match` on the captured ETag. If the bucket happens to have
+versioning enabled the provider keeps history on its own; the application never relies on it. Empty-folder removal checks
 captured marker identity and immediate children. All remote mutation uncertainty uses the same permanent
 guard rules. Discard removes only exact recorded gateway staging files, never authoritative provider keys
 or their history. Unknown allocations are retained for reviewed reconciliation.
 
 ## Physical budgets and remaining gates
 
-Full mutation roots persist `RetainsVersions=true` in their immutable budget identity. Create-only roots
-persist `CreateOnly=true` and `RetainsVersions=false`; this describes the admitted strategy, not proof that
-the provider has no historical bytes. Their baseline still includes any actual retained history. For full roots,
-a new version is charged in
-full even when it replaces an old logical file; current-key deletion releases logical size but not retained
-physical history. Copy/delete move ends at zero net logical growth while target copies add physical bytes.
-Gateway spool plus final version reserve two times admitted new bytes. Known partial charges consume only
+Object roots persist `RetainsVersions=false` in their immutable budget identity: replacement and deletion
+credit the old logical and physical size. Provider-side history (if the operator enabled versioning) is
+outside application accounting. Copy/delete move ends at zero net logical growth.
+Gateway spool plus final object reserve two times admitted new bytes. Known partial charges consume only
 their proven portion; unknown liability remains reserved, and terminal spool cleanup releases staging only.
 The adapter never invents provider-history garbage collection or releases bytes because an index row vanished.
 
-SDK fixtures cover actual S3/COS authentication, exact key encoding, conditions/metadata, retained-version
+SDK fixtures cover actual S3/COS authentication, exact key encoding, conditions/metadata, If-Match
 reads, one-attempt error/timeout behavior and refused redirects. Engine tests cover durable dispatch, response
 loss, late calls, permanent unknown guards, missing/restored evidence, terminal response recovery, cancellation
 and temporary-only cleanup. Real S3 SDK HTTP + disposable Postgres tests exercise the unified API, retained

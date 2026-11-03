@@ -235,12 +235,6 @@ func (b *Backend) Open(ctx context.Context, ownerID string) (storage.Driver, err
 	return driver, nil
 }
 
-// CreateOnly reports the explicitly admitted object publication mode. Read-only
-// object backends and Local backends do not acquire this capability implicitly.
-func (b *Backend) CreateOnly() bool {
-	return b.objectBackend != nil && b.cfg.Storage.CoordinatedWrites && b.objectOptions.Admission.CreateOnly
-}
-
 // Legacy provides only reads for new backends. It never adds presigning/STS or
 // unsafe native mutation emulation to satisfy the old interface.
 func (b *Backend) Legacy() storage.Storage { return b.legacy }

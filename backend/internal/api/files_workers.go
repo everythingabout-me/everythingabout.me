@@ -71,7 +71,7 @@ func (s *Server) runFileOperation(ctx context.Context, op fileops.Operation) err
 		return fileops.E("unsupported", nil)
 	}
 	binding := native.StorageBinding()
-	if binding.OwnerID != op.Root.OwnerID || binding.ConnectionID != op.Root.ConnectionID || binding.Generation != op.Root.Generation || binding.ContentRoot != op.Root.ContentRoot || binding.SystemRoot != op.Root.SystemRoot || native.StorageNameRules().CaseSensitive != op.Root.CaseSensitive || native.Describe().RetainsVersions != op.Root.RetainsVersions || native.Describe().CreateOnly != op.Root.CreateOnly {
+	if binding.OwnerID != op.Root.OwnerID || binding.ConnectionID != op.Root.ConnectionID || binding.Generation != op.Root.Generation || binding.ContentRoot != op.Root.ContentRoot || binding.SystemRoot != op.Root.SystemRoot || native.StorageNameRules().CaseSensitive != op.Root.CaseSensitive || native.Describe().RetainsVersions != op.Root.RetainsVersions {
 		return fileops.E("root_conflict", nil)
 	}
 	// The journal captured provenance permits system recovery of effects while

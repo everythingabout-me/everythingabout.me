@@ -86,8 +86,7 @@ func runStorageAdmit(args []string) error {
 		}
 		defer objectValidation.Close()
 	}
-	createOnly := objectValidation != nil && objectValidation.CreateOnly()
-	if err = validateAdmissionQuiescence(*quiesced, createOnly); err != nil {
+	if err = validateAdmissionQuiescence(*quiesced); err != nil {
 		return err
 	}
 	binding, err := backend.Binding(*owner)
@@ -122,7 +121,7 @@ func runStorageAdmit(args []string) error {
 		return err
 	}
 	defer driver.Close()
-	root := fileops.Root{OwnerID: binding.OwnerID, ConnectionID: binding.ConnectionID, Generation: binding.Generation, ContentRoot: binding.ContentRoot, SystemRoot: binding.SystemRoot, CaseSensitive: driver.Describe().Names.CaseSensitive, RetainsVersions: objects && !createOnly, CreateOnly: createOnly}
+	root := fileops.Root{OwnerID: binding.OwnerID, ConnectionID: binding.ConnectionID, Generation: binding.Generation, ContentRoot: binding.ContentRoot, SystemRoot: binding.SystemRoot, CaseSensitive: driver.Describe().Names.CaseSensitive, RetainsVersions: driver.Describe().RetainsVersions}
 	var storedBinding []byte
 	var usage fileops.Usage
 	err = tx.QueryRow(ctx, `select root_binding,logical_bytes,logical_reserved,physical_bytes,physical_reserved,logical_limit,physical_limit from file_budgets where owner_id=$1::uuid`, *owner).Scan(&storedBinding, &usage.LogicalBytes, &usage.LogicalReserved, &usage.PhysicalBytes, &usage.PhysicalReserved, &usage.LogicalLimit, &usage.PhysicalLimit)

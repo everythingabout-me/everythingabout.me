@@ -297,7 +297,7 @@ func TestEdgeOneForwardedCOSPostgresSignedUploadLifecycle(t *testing.T) {
 	if e != nil {
 		t.Fatal(e)
 	}
-	factory := &edgeOneCOSFactory{tree: tree, native: native, options: objectmutation.Options{SpoolRoot: t.TempDir(), MaxPublishBytes: 32 << 20, Admission: objectmutation.Admission{ConnectionID: "edgeone-sdk-fixture", Endpoint: origin.URL, Bucket: "fixture-123456", Region: "ap-test", CheckedAt: time.Now(), ProbeReference: "isolated real COS SDK and HTTP forwarder fixture, not live provider evidence", AtomicPublish: true, VersionedReads: true, ConditionalCreate: true, CurrentKeyDelete: true, CoordinatedExclusiveWriter: true, SingleGateway: true, LegacyWritersDrained: true, MultipartUploads: true, SignedMultipartParts: true}}}
+	factory := &edgeOneCOSFactory{tree: tree, native: native, options: objectmutation.Options{SpoolRoot: t.TempDir(), MaxPublishBytes: 32 << 20, Admission: objectmutation.Admission{ConnectionID: "edgeone-sdk-fixture", Endpoint: origin.URL, Bucket: "fixture-123456", Region: "ap-test", CheckedAt: time.Now(), ProbeReference: "isolated real COS SDK and HTTP forwarder fixture, not live provider evidence", AtomicPublish: true, ConditionalCreate: true, SingleGateway: true, MultipartUploads: true, SignedMultipartParts: true}}}
 	cfg := &config.Config{AppSecret: "edgeone-independent-api-secret", FileUploadIngress: "edgeone", SessionTTLDays: 1, Storage: config.Storage{Backend: "cos", CoordinatedWrites: true}}
 	authentication := auth.New(db, cfg)
 	var owner string

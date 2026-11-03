@@ -107,12 +107,13 @@ func (d *Driver) Describe() storage.Descriptor {
 	desc := d.tree.Describe()
 	desc.MaxFileBytes = d.options.MaxPublishBytes
 	desc.AtomicCreate = true
-	desc.CreateOnly = d.options.Admission.CreateOnly
-	desc.AtomicReplace = !desc.CreateOnly
-	desc.PinnedRead = !desc.CreateOnly
+	desc.AtomicReplace = true
+	// Revisions are current-object ETags, so a read is validated, never pinned,
+	// and the bucket's versioning setting is irrelevant to correctness.
+	desc.PinnedRead = false
 	desc.NativeConditionalMutation = false
 	desc.NativeTreeMove = false
-	desc.RetainsVersions = !desc.CreateOnly
+	desc.RetainsVersions = false
 	desc.Names = d.StorageNameRules()
 	return desc
 }
@@ -138,31 +139,32 @@ func (d *Driver) key(p storage.Path, kind storage.Kind) string {
 	}
 	return key
 }
-func nativeVersion(id string) []byte {
-	if id == "" || id == "null" || strings.ContainsAny(id, "\r\n\x00") {
+
+// nativeVersion derives the revision token from the current object's ETag.
+// Every conditional native request (If-Match / If-None-Match) uses the ETag, so
+// bucket versioning is neither required nor consulted.
+func nativeVersion(etag string) []byte {
+	if etag == "" || len(etag) > 1024 || strings.ContainsAny(etag, "\r\n\x00") {
 		return nil
 	}
-	return []byte("native-version:" + id)
+	return []byte("native-etag:" + etag)
 }
 func parseVersion(value []byte) (string, error) {
-	if len(value) > 4096 || !bytes.HasPrefix(value, []byte("native-version:")) {
+	if len(value) > 4096 || !bytes.HasPrefix(value, []byte("native-etag:")) {
 		return "", fail("unsupported", "")
 	}
-	s := string(bytes.TrimPrefix(value, []byte("native-version:")))
+	s := string(bytes.TrimPrefix(value, []byte("native-etag:")))
 	if len(nativeVersion(s)) == 0 {
 		return "", fail("unsupported", "")
 	}
 	return s, nil
 }
 func (d *Driver) objectEntry(p storage.Path, kind storage.Kind, obj Object) (storage.Entry, error) {
-	if obj.Key != d.key(p, kind) || obj.Size < 0 || !d.options.Admission.CreateOnly && len(nativeVersion(obj.VersionID)) == 0 || kind == storage.Folder && obj.Size != 0 {
+	if obj.Key != d.key(p, kind) || obj.Size < 0 || len(nativeVersion(obj.ETag)) == 0 || kind == storage.Folder && obj.Size != 0 {
 		return storage.Entry{}, fail("unsupported", p)
 	}
 	modified := obj.ModifiedAt
-	e := storage.Entry{Path: p, Kind: kind, NativeRef: []byte(obj.Key), Version: nativeVersion(obj.VersionID), Size: obj.Size, ModifiedAt: modified, MediaType: obj.MediaType}
-	if d.options.Admission.CreateOnly {
-		e.Version = nil
-	}
+	e := storage.Entry{Path: p, Kind: kind, NativeRef: []byte(obj.Key), Version: nativeVersion(obj.ETag), Size: obj.Size, ModifiedAt: modified, MediaType: obj.MediaType}
 	if kind == storage.Folder {
 		e.Size = 0
 		e.MediaType = ""
@@ -194,23 +196,30 @@ func (d *Driver) Stat(ctx context.Context, p storage.Path) (storage.Entry, error
 	if e.Path != p {
 		return storage.Entry{}, fail("invalid_backend_response", p)
 	}
-	if d.options.Admission.CreateOnly {
-		return e, nil
-	}
 	if p == "" {
 		return d.rootEntry(e), nil
 	}
 	if e.Kind != storage.File && e.Kind != storage.Folder {
 		return storage.Entry{}, fail("invalid_backend_response", p)
 	}
-	obj, err := d.backend.Head(ctx, d.key(p, e.Kind))
+	return d.observe(ctx, e)
+}
+
+// observe attaches the current native revision. A prefix folder without a marker
+// object is a real native folder; it has no revision and cannot be conditionally
+// deleted, but children can still be created below it.
+func (d *Driver) observe(ctx context.Context, e storage.Entry) (storage.Entry, error) {
+	obj, err := d.backend.Head(ctx, d.key(e.Path, e.Kind))
 	if storage.IsCode(err, "not_found") && e.Kind == storage.Folder {
-		return storage.Entry{}, fail("unsupported", p)
+		e.Version = nil
+		e.Size = 0
+		e.MediaType = ""
+		return e, nil
 	}
 	if err != nil {
 		return storage.Entry{}, err
 	}
-	return d.objectEntry(p, e.Kind, obj)
+	return d.objectEntry(e.Path, e.Kind, obj)
 }
 func (d *Driver) List(ctx context.Context, p storage.Path, req storage.PageRequest) (storage.Page, error) {
 	ctx, done, err := d.operation(ctx)
@@ -222,9 +231,6 @@ func (d *Driver) List(ctx context.Context, p storage.Path, req storage.PageReque
 	if err != nil {
 		return storage.Page{}, err
 	}
-	if d.options.Admission.CreateOnly {
-		return page, nil
-	}
 	out := storage.Page{NextCursor: page.NextCursor, Entries: make([]storage.Entry, 0, len(page.Entries))}
 	for _, e := range page.Entries {
 		if storage.ValidatePath(e.Path) != nil || e.Path == "" || parentPath(e.Path) != p {
@@ -233,14 +239,7 @@ func (d *Driver) List(ctx context.Context, p storage.Path, req storage.PageReque
 		if e.Kind != storage.File && e.Kind != storage.Folder {
 			return storage.Page{}, fail("invalid_backend_response", e.Path)
 		}
-		obj, err := d.backend.Head(ctx, d.key(e.Path, e.Kind))
-		if storage.IsCode(err, "not_found") && e.Kind == storage.Folder {
-			return storage.Page{}, fail("unsupported", e.Path)
-		}
-		if err != nil {
-			return storage.Page{}, err
-		}
-		observed, err := d.objectEntry(e.Path, e.Kind, obj)
+		observed, err := d.observe(ctx, e)
 		if err != nil {
 			return storage.Page{}, err
 		}
@@ -253,26 +252,39 @@ func (d *Driver) Open(ctx context.Context, p storage.Path, options storage.ReadO
 	if err != nil {
 		return storage.Read{}, err
 	}
-	read, err := d.tree.Open(ctx, p, options)
+	if err = storage.ValidatePath(p); err != nil || p == "" {
+		done()
+		return storage.Read{}, fail("not_file", p)
+	}
+	obj, err := d.backend.Head(ctx, d.key(p, storage.File))
 	if err != nil {
 		done()
 		return storage.Read{}, err
 	}
-	if read.Body == nil || read.Entry.Path != p || read.Entry.Kind != storage.File || !d.options.Admission.CreateOnly && len(read.Entry.Version) == 0 || len(options.Version) > 0 && !bytes.Equal(options.Version, read.Entry.Version) {
+	current, err := d.objectEntry(p, storage.File, obj)
+	if err != nil {
+		done()
+		return storage.Read{}, err
+	}
+	if len(options.Version) > 0 && !bytes.Equal(options.Version, current.Version) {
+		done()
+		return storage.Read{}, fail("changed", p)
+	}
+	treeOptions := options
+	treeOptions.Version = nil
+	read, err := d.tree.Open(ctx, p, treeOptions)
+	if err != nil {
+		done()
+		return storage.Read{}, err
+	}
+	if read.Body == nil || read.Entry.Path != p || read.Entry.Kind != storage.File || read.Entry.Size != current.Size {
 		if read.Body != nil {
 			read.Body.Close()
 		}
 		done()
 		return storage.Read{}, fail("changed", p)
 	}
-	if !d.options.Admission.CreateOnly {
-		_, err = parseVersion(read.Entry.Version)
-	}
-	if err != nil {
-		read.Body.Close()
-		done()
-		return storage.Read{}, err
-	}
+	read.Entry.Version = current.Version
 	read.Body = &operationBody{ReadCloser: read.Body, done: done}
 	return read, nil
 }
@@ -321,7 +333,7 @@ func (d *Driver) validateIntent(in storage.WriteIntent) error {
 	if err := validateRecoveryIntent(in); err != nil {
 		return err
 	}
-	if in.SourceModifiedAt != nil || d.options.Admission.CreateOnly && !in.Conditions.Absent {
+	if in.SourceModifiedAt != nil {
 		return fail("unsupported", in.Target)
 	}
 	if len(d.binding.ContentRoot)+len(in.Target) > 1024 {
@@ -516,7 +528,7 @@ func (d *Driver) checkTarget(ctx context.Context, r *ledger) error {
 	if err != nil {
 		return err
 	}
-	if !bytes.Equal(nativeVersion(obj.VersionID), r.Intent.Conditions.ExpectedVersion) || obj.ETag == "" {
+	if !bytes.Equal(nativeVersion(obj.ETag), r.Intent.Conditions.ExpectedVersion) {
 		return fail("changed", r.Intent.Target)
 	}
 	r.ExpectedETag = obj.ETag
@@ -524,9 +536,6 @@ func (d *Driver) checkTarget(ctx context.Context, r *ledger) error {
 }
 func (d *Driver) Publish(ctx context.Context, staged storage.Staged, cp storage.Checkpoint) (storage.MutationResult, error) {
 	in := staged.Intent
-	if d.options.Admission.CreateOnly && !in.Conditions.Absent {
-		return storage.MutationResult{}, fail("unsupported", in.Target)
-	}
 	if err := validateRecoveryIntent(in); err != nil {
 		return storage.MutationResult{}, err
 	}
@@ -665,12 +674,6 @@ func (d *Driver) publishLocked(ctx context.Context, r *ledger, cp storage.Checkp
 func (d *Driver) refreshApplied(ctx context.Context, r *ledger) error {
 	if r.MetadataReady || r.Result == nil || r.Result.Entry == nil {
 		return nil
-	}
-	if d.options.Admission.CreateOnly {
-		// The sole successful publish response proves this operation applied. A later
-		// HEAD may describe an external replacement and cannot refine that receipt.
-		r.MetadataReady = true
-		return d.save(r)
 	}
 	expected := r.Result.Entry
 	obj, err := d.backend.Head(ctx, string(expected.NativeRef))

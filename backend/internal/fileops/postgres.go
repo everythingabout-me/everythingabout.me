@@ -100,7 +100,7 @@ func (p *Postgres) Initialize(ctx context.Context, root Root, base Baseline) err
 	if err := validateRoot(root); err != nil {
 		return err
 	}
-	if !base.NativeComplete || !base.IndexCompared || (!root.CreateOnly && !base.LegacyWritersDrained) || !nonemptyEvidence(base.Evidence) || base.LogicalBytes < 0 || base.PhysicalBytes < 0 || base.LogicalLimit < 0 || base.PhysicalLimit < 0 {
+	if !base.NativeComplete || !base.IndexCompared || !base.LegacyWritersDrained || !nonemptyEvidence(base.Evidence) || base.LogicalBytes < 0 || base.PhysicalBytes < 0 || base.LogicalLimit < 0 || base.PhysicalLimit < 0 {
 		return E("baseline_required", nil)
 	}
 	var err error

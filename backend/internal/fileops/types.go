@@ -20,7 +20,6 @@ type Root struct {
 	SystemRoot      string
 	CaseSensitive   bool
 	RetainsVersions bool // native delete/replace retains previous object generations
-	CreateOnly      bool `json:",omitempty"` // native absence-fenced creates; usage is an indexed observation
 }
 type Actor struct {
 	ID          string // stable creator principal, e.g. owner:<UUID> or token:<private-token-id>

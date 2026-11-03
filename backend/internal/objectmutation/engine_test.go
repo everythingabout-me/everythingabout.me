@@ -52,10 +52,16 @@ func (b *fakeBackend) Head(ctx context.Context, key string) (Object, error) {
 	}
 	return o, nil
 }
-func (b *fakeBackend) Open(ctx context.Context, key, version string) (io.ReadCloser, error) {
+
+// Open reads the current object only when its ETag still matches (If-Match).
+func (b *fakeBackend) Open(ctx context.Context, key, etag string) (io.ReadCloser, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	data, ok := b.versions[key][version]
+	o, ok := b.current[key]
+	if !ok || etag == "" || o.ETag != etag {
+		return nil, fail("changed", "")
+	}
+	data, ok := b.versions[key][o.VersionID]
 	if !ok {
 		return nil, fail("changed", "")
 	}
@@ -221,7 +227,7 @@ func fixture(t *testing.T) (*Driver, *fakeBackend, storage.Config, Options) {
 	t.Helper()
 	b := newFake()
 	cfg := storage.Config{OwnerID: "owner", ConnectionID: "fixture", Generation: 1, ContentRoot: "drive/owner/", SystemRoot: "system/owner/"}
-	options := Options{SpoolRoot: t.TempDir(), MaxPublishBytes: 1024, Admission: Admission{ConnectionID: cfg.ConnectionID, Endpoint: "https://fixture.invalid", Bucket: "bucket", Region: "region", CheckedAt: time.Now().UTC(), ProbeReference: "isolated-positive-negative-test", AtomicPublish: true, VersionedReads: true, ConditionalCreate: true, CurrentKeyDelete: true, CoordinatedExclusiveWriter: true, SingleGateway: true, LegacyWritersDrained: true}}
+	options := Options{SpoolRoot: t.TempDir(), MaxPublishBytes: 1024, Admission: Admission{ConnectionID: cfg.ConnectionID, Endpoint: "https://fixture.invalid", Bucket: "bucket", Region: "region", CheckedAt: time.Now().UTC(), ProbeReference: "isolated-positive-negative-test", AtomicPublish: true, ConditionalCreate: true, SingleGateway: true}}
 	d, err := New(&fakeTree{backend: b, root: cfg.ContentRoot}, cfg, b, options)
 	if err != nil {
 		t.Fatal(err)
@@ -278,7 +284,7 @@ func TestObjectPublicationDurabilityReplayAndDirectExit(t *testing.T) {
 	if err != nil || again.Entry.Path != in.Target || b.puts != 1 {
 		t.Fatalf("duplicate publication=%+v %v count%d", again, err, b.puts)
 	}
-	body, err := b.Open(ctx, cfg.ContentRoot+string(in.Target), strings.TrimPrefix(string(result.Entry.Version), "native-version:"))
+	body, err := b.Open(ctx, cfg.ContentRoot+string(in.Target), strings.TrimPrefix(string(result.Entry.Version), "native-etag:"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -468,7 +474,7 @@ func TestObjectCopyFoldersAndCapturedCurrentDelete(t *testing.T) {
 	if _, err = d.Remove(ctx, storage.Mutation{ID: "delete", Path: "source", Conditions: storage.Conditions{ExpectedVersion: source.Entry.Version}}, cpOK); err != nil {
 		t.Fatal(err)
 	}
-	body, err := b.Open(ctx, string(copied.Entry.NativeRef), strings.TrimPrefix(string(copied.Entry.Version), "native-version:"))
+	body, err := b.Open(ctx, string(copied.Entry.NativeRef), strings.TrimPrefix(string(copied.Entry.Version), "native-etag:"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -488,11 +494,13 @@ func TestObjectCopyFoldersAndCapturedCurrentDelete(t *testing.T) {
 		t.Fatal(err)
 	}
 	implicit := createIntent("implicit", "Implicit/child", "x")
-	b.current["drive/owner/Implicit/child"] = Object{Key: "drive/owner/Implicit/child", VersionID: "external", Size: 1}
-	_, err = d.Stat(ctx, "Implicit")
-	requireCode(t, err, "unsupported")
+	b.current["drive/owner/Implicit/child"] = Object{Key: "drive/owner/Implicit/child", ETag: "external", Size: 1}
+	prefix, err := d.Stat(ctx, "Implicit")
+	if err != nil || prefix.Kind != storage.Folder || prefix.Version != nil {
+		t.Fatalf("implicit prefix folder=%+v %v", prefix, err)
+	}
 	_, err = d.Stage(ctx, implicit, strings.NewReader("x"), cpOK)
-	requireCode(t, err, "unsupported")
+	requireCode(t, err, "precondition_failed")
 	inspection, err := d.InspectEffect(ctx, storage.EffectIntent{ID: "copy", Action: "copy", Source: "source", Target: "copy", SourceVersion: source.Entry.Version, Conditions: storage.Conditions{Absent: true}}, copied.Evidence)
 	if err != nil || inspection.State != storage.Applied {
 		t.Fatalf("copy recovery=%+v %v", inspection, err)
@@ -501,16 +509,16 @@ func TestObjectCopyFoldersAndCapturedCurrentDelete(t *testing.T) {
 func TestObjectAdmissionAndSpoolSymlinkFailClosed(t *testing.T) {
 	d, b, cfg, opts := fixture(t)
 	_ = d
-	opts.Admission.LegacyWritersDrained = false
+	opts.Admission.SingleGateway = false
 	if _, err := New(&fakeTree{backend: b, root: cfg.ContentRoot}, cfg, b, opts); err == nil {
 		t.Fatal("unadmitted native writer enabled")
 	}
-	opts.Admission.LegacyWritersDrained = true
-	opts.Admission.CurrentKeyDelete = false
+	opts.Admission.SingleGateway = true
+	opts.Admission.ConditionalCreate = false
 	if _, err := New(&fakeTree{backend: b, root: cfg.ContentRoot}, cfg, b, opts); err == nil {
-		t.Fatal("unverified deletion admitted")
+		t.Fatal("unverified conditional create admitted")
 	}
-	opts.Admission.CurrentKeyDelete = true
+	opts.Admission.ConditionalCreate = true
 	in := createIntent("symlink", "target", "secret")
 	attempt := "00000000000000000000000000000001"
 	r := &ledger{Kind: "write", ID: in.ID, Intent: in, Attempt: attempt, Phase: "ready", Digest: &storage.Digest{Algorithm: "sha-256", Value: make([]byte, 32)}}
@@ -607,7 +615,7 @@ func TestObjectLateCheckpointTargetInsertionNeverOverwrites(t *testing.T) {
 		t.Fatal("late occupied target overwritten")
 	}
 	obj, _ := b.Head(ctx, "drive/owner/target")
-	body, _ := b.Open(ctx, obj.Key, obj.VersionID)
+	body, _ := b.Open(ctx, obj.Key, obj.ETag)
 	data, _ := io.ReadAll(body)
 	body.Close()
 	if string(data) != "old" {

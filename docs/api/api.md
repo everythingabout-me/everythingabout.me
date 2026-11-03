@@ -152,8 +152,8 @@ into the index before reporting success. These indexed-read semantics supersede 
 Folder revisions also include indexed direct-child membership, not a recursive subtree snapshot. A move changes
 returned path/parentPath and metadata revisions, including descendants of a moved ancestor. Metadata revision
 preconditions compare the indexed view; unsynchronized external changes are not detected by that comparison.
-Mutations separately enforce their admitted native conditions before applying finite effects. Full mutations
-capture native versions; restricted `createOnly` writes enforce native absence without a fabricated version.
+Mutations separately enforce their admitted native conditions before applying finite effects. Object roots
+capture the current ETag as the native revision and enforce it with native conditional requests.
 `contentRevision` is the saved, native-evidence-backed content generation and is null when none is recorded or
 on folders; it is not synthesized from index timestamps. Content GET/HEAD and conditional replacements verify
 current native evidence before using it. `size/mediaType/checksum` are null on folders. A verified checksum
@@ -601,27 +601,16 @@ outcome handling define the actual guarantee. Retention is explicit; retrying a 
 ## 9. Capabilities and failures
 
 Capabilities is authenticated and path-scoped (default visible root), returning effective `read/write`,
-`createOnly`, `range`, `thumbnails`, supported checksums, maximum file/single-PUT/part sizes, pagination limits, session
+`range`, `thumbnails`, supported checksums, maximum file/single-PUT/part sizes, pagination limits, session
 expiry/retention policy, `sourceModifiedAt` support, and quota/reservation information appropriate to the caller. Numbers are authoritative
 for admission but may change before a later request; new sessions bind their accepted limits. Upload responses
 provide their exact chunk layout. Never expose provider names or assume every backend has the same limits.
 
-`createOnly` is a boolean describing the root's restricted write strategy. When true, `write:true` permits
-new file content only, through content PUT or create-mode upload sessions, using native atomic absence
-conditions at publication. It does not permit replacement, folder creation, move, copy or path deletion;
-those options return `422 unsupported_option`. Upload abort still cleans up only temporary state. Existing
-prefix folders may be destination parents without a retained marker version; this does not promise their
-identity or existence is frozen against external tools. `contentRevision` is null, content responses omit
-strong ETags, and `pinnedRead`, `strongContentValidators` and `sourceModifiedAt` are false. No index revision,
-ETag or timestamp is promoted into a native version. `createOnly:false` alone does not grant any write;
-clients must also check `write`, `uploads` and the other effective capabilities.
-
-External tools may continue changing a create-only root. Native absence conditions protect an occupied target
-from application overwrite at publication; they do not prevent later external replacement or deletion. Scans
-synchronize the observed index metadata. Budget counters retain the initial compared baseline plus application
-journal changes; reconcile does not update them. External additions/deletions need separate reviewed budget
-resynchronization, which is not implemented. Admission limits therefore do not enforce an exact global quota
-across external writers.
+Object roots use current ETags as native revisions: `pinnedRead`, `strongContentValidators` and
+`sourceModifiedAt` are false, while upload, replacement, folder creation, move, copy and deletion are
+available whenever `write` is true. External tools may continue changing the root; native conditions reject
+an application effect whose captured ETag or absence no longer holds. Scans synchronize the observed index
+metadata; budget counters retain the initial compared baseline plus application journal changes.
 
 | Status | Representative code |
 |---|---|

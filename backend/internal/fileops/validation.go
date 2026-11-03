@@ -19,7 +19,7 @@ import (
 
 func validateRoot(r Root) error {
 	var id pgtype.UUID
-	if id.Scan(r.OwnerID) != nil || !id.Valid || r.ConnectionID == "" || r.Generation < 1 || r.ContentRoot == "" || r.SystemRoot == "" || r.ContentRoot == r.SystemRoot || r.CreateOnly && r.RetainsVersions {
+	if id.Scan(r.OwnerID) != nil || !id.Valid || r.ConnectionID == "" || r.Generation < 1 || r.ContentRoot == "" || r.SystemRoot == "" || r.ContentRoot == r.SystemRoot {
 		return E("invalid_request", nil)
 	}
 	for _, s := range []string{r.OwnerID, r.ConnectionID, r.ContentRoot, r.SystemRoot} {
@@ -132,9 +132,6 @@ func validateBegin(req BeginRequest) (BeginRequest, string, int64, error) {
 	default:
 		return fail()
 	}
-	if req.Root.CreateOnly && (req.Kind != "upload_commit" || len(req.Manifest) != 0 || req.Reservation.OldBytes != 0) {
-		return req, "", 0, E("unsupported", nil)
-	}
 	if len(req.Guards) == 0 || strings.ContainsRune(req.Actor.ID, 0) || strings.ContainsRune(req.IdempotencyKey, 0) || len(req.IdempotencyKey) > 1024 {
 		return fail()
 	}
@@ -194,9 +191,6 @@ func validateBegin(req BeginRequest) (BeginRequest, string, int64, error) {
 		var w storage.WriteIntent
 		if json.Unmarshal(req.Intent, &w) != nil || w.ID != "" || w.Size != q.NewBytes || w.Size < 0 || w.Target == "" || storage.ValidatePath(w.Target) != nil || !covered(req.Root, req.Guards, w.Target) || w.Conditions.Absent == (len(w.Conditions.ExpectedVersion) > 0) {
 			return fail()
-		}
-		if req.Root.CreateOnly && !w.Conditions.Absent {
-			return req, "", 0, E("unsupported", nil)
 		}
 		if req.Root.RetainsVersions {
 			physical, err := PhysicalReservation(req.Root, q.NewBytes)

@@ -95,12 +95,10 @@ func TestObjectReplacementRetainsHistoryAndIndependentCurrentGeneration(t *testi
 	if bytes.Equal(first.Entry.Version, second.Entry.Version) {
 		t.Fatal("replacement generation did not change")
 	}
-	historical, err := b.Open(ctx, string(first.Entry.NativeRef), strings.TrimPrefix(string(first.Entry.Version), "native-version:"))
-	if err != nil {
-		t.Fatal(err)
+	if _, err = b.Open(ctx, string(first.Entry.NativeRef), strings.TrimPrefix(string(first.Entry.Version), "native-etag:")); !storage.IsCode(err, "changed") {
+		t.Fatalf("replaced generation remained readable by its old ETag: %v", err)
 	}
-	historical.Close()
-	if !d.Describe().RetainsVersions || d.Describe().NativeConditionalMutation {
+	if d.Describe().RetainsVersions || d.Describe().NativeConditionalMutation {
 		t.Fatal("incorrect retained physical/native CAS capabilities")
 	}
 }
