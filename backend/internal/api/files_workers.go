@@ -84,6 +84,9 @@ func (s *Server) runFileOperation(ctx context.Context, op fileops.Operation) err
 		if err := s.auth.AuthorizeFileOperation(ctx, op); err != nil {
 			return err
 		}
+		if err := s.filesCheckIdentityBindings(ctx, op); err != nil {
+			return err
+		}
 		if op.Kind == "upload_commit" {
 			var intent storage.WriteIntent
 			if json.Unmarshal(op.Intent, &intent) != nil {

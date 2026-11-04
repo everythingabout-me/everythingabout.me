@@ -239,7 +239,7 @@ func (p *Postgres) beginTx(ctx context.Context, tx pgx.Tx, req BeginRequest, fin
 			return err
 		}
 		retention := max(req.RetainFor, 24*time.Hour)
-		op = Operation{ID: newID(), Root: req.Root, PrincipalID: req.Actor.ID, Kind: req.Kind, State: Queued, Phase: Admitted, Intent: req.Intent, Fingerprint: fingerprint, Guards: req.Guards, CreatedAt: now, RetainUntil: now.Add(retention), Reservation: req.Reservation}
+		op = Operation{Attribution: req.Actor, ID: newID(), Root: req.Root, PrincipalID: req.Actor.ID, Kind: req.Kind, State: Queued, Phase: Admitted, Intent: req.Intent, Fingerprint: fingerprint, Guards: req.Guards, CreatedAt: now, RetainUntil: now.Add(retention), Reservation: req.Reservation}
 		for _, e := range req.Manifest {
 			op.Entries = append(op.Entries, EntryEffect{ManifestEntry: e, State: "pending"})
 		}

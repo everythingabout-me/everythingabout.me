@@ -854,7 +854,7 @@ export function FilesPage() {
         .forEach((task) => cancelUpload(task.id));
       setDeleteTarget(null);
       if (filePath(listingRef.current.path) === target.path) {
-        navigate(filesHref(target.parentPath), { replace: true });
+        navigate(filesHref(target.parentPath ?? "/"), { replace: true });
       }
     } catch (error) {
       if (error instanceof ApiError && error.operationId) {

@@ -235,12 +235,15 @@ func (s *Server) handleAPIMe(w http.ResponseWriter, r *http.Request) error {
 	var token any
 	if p.Token != nil {
 		token = map[string]any{
-			"name":      p.Token.Name,
-			"prefix":    p.Token.Prefix,
-			"read":      p.Token.CanRead,
-			"write":     p.Token.CanWrite,
-			"events":    p.Token.CanEvents,
-			"expiresAt": p.Token.ExpiresAt,
+			"name":          p.Token.Name,
+			"prefix":        p.Token.Prefix,
+			"read":          p.Token.CanRead,
+			"write":         p.Token.CanWrite,
+			"events":        p.Token.CanEvents,
+			"changes":       p.Token.CanChanges,
+			"subscribe":     p.Token.CanSubscribe,
+			"policyVersion": p.Token.PolicyVersion,
+			"expiresAt":     p.Token.ExpiresAt,
 		}
 	}
 

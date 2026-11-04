@@ -25,14 +25,18 @@ import (
 	"everythingabout.me/backend/internal/auth"
 	"everythingabout.me/backend/internal/config"
 	"everythingabout.me/backend/internal/fileops"
+	"everythingabout.me/backend/internal/nodes"
 	"everythingabout.me/backend/internal/objectmutation"
+	"everythingabout.me/backend/internal/storage"
 	"everythingabout.me/backend/internal/storagebackend"
 	"everythingabout.me/backend/internal/store"
+	"everythingabout.me/backend/internal/treescan"
 	"github.com/jackc/pgx/v5"
 )
 
-// This provider fixture models retained object generations and current-key delete
-// markers. It is intentionally not a live provider capability or quiescence proof.
+// This provider fixture can retain history independently of application accounting.
+// Its mutation contract uses current ETags and current-key deletion, without requiring
+// bucket versioning. It is not live provider capability or quiescence evidence.
 type objectAPIVersion struct {
 	ID        string
 	Body      []byte
@@ -42,24 +46,25 @@ type objectAPIVersion struct {
 	Deleted   bool
 }
 type objectAPIProvider struct {
-	mu                sync.Mutex
-	versions          map[string][]objectAPIVersion
-	puts              map[string]int
-	deletes           map[string]int
-	lostReplyKey      string
-	invalidVersionKey string
-	sequence          int
-	unversioned       bool
-	versionReads      map[string]int
-	multipart         map[string]*objectAPIMultipart
-	partRequests      int
-	completeRequests  map[string]int
-	partEntered       chan int
-	partRelease       chan struct{}
+	mu               sync.Mutex
+	versions         map[string][]objectAPIVersion
+	puts             map[string]int
+	deletes          map[string]int
+	lostReplyKey     string
+	invalidETagKey   string
+	sequence         int
+	unversioned      bool
+	versionReads     map[string]int
+	etagReads        map[string]int
+	multipart        map[string]*objectAPIMultipart
+	partRequests     int
+	completeRequests map[string]int
+	partEntered      chan int
+	partRelease      chan struct{}
 }
 
 func newObjectAPIProvider() *objectAPIProvider {
-	return &objectAPIProvider{versions: map[string][]objectAPIVersion{}, puts: map[string]int{}, deletes: map[string]int{}, versionReads: map[string]int{}}
+	return &objectAPIProvider{versions: map[string][]objectAPIVersion{}, puts: map[string]int{}, deletes: map[string]int{}, versionReads: map[string]int{}, etagReads: map[string]int{}}
 }
 func (p *objectAPIProvider) current(key string) (objectAPIVersion, bool) {
 	v := p.versions[key]
@@ -157,7 +162,9 @@ func (p *objectAPIProvider) serve(t *testing.T, w http.ResponseWriter, r *http.R
 			w.WriteHeader(400)
 			return
 		}
-		if r.Header.Get("If-None-Match") == "*" && exists || r.Header.Get("If-Match") != "" && (!exists || r.Header.Get("If-Match") != current.ETag) {
+		// COS admission does not promise PUT If-Match enforcement. Replacement
+		// must reject a stale ETag before dispatching this sole native request.
+		if r.Header.Get("If-None-Match") == "*" && exists {
 			w.WriteHeader(412)
 			io.WriteString(w, `<Error><Code>PreconditionFailed</Code></Error>`)
 			return
@@ -186,12 +193,17 @@ func (p *objectAPIProvider) serve(t *testing.T, w http.ResponseWriter, r *http.R
 		}
 		w.Header().Set("ETag", result.ETag)
 		w.Header().Set("X-Amz-Version-Id", result.ID)
-		if key == p.invalidVersionKey {
-			w.Header().Set("X-Amz-Version-Id", "null")
+		if key == p.invalidETagKey {
+			w.Header().Del("ETag")
 		}
 		w.WriteHeader(200)
 	case "DELETE":
 		p.deletes[key]++
+		if r.Header.Get("If-Match") == "" {
+			t.Error("current-key deletion omitted its captured ETag condition")
+			w.WriteHeader(400)
+			return
+		}
 		if r.URL.Query().Has("versionId") {
 			t.Error("current-key deletion attempted to delete a retained version")
 			w.WriteHeader(400)
@@ -225,9 +237,14 @@ func (p *objectAPIProvider) serve(t *testing.T, w http.ResponseWriter, r *http.R
 			w.WriteHeader(404)
 			return
 		}
-		if match := r.Header.Get("If-Match"); match != "" && match != selected.ETag {
-			w.WriteHeader(412)
-			return
+		if match := r.Header.Get("If-Match"); match != "" {
+			if r.Method == "GET" {
+				p.etagReads[key+"?"+match]++
+			}
+			if match != selected.ETag {
+				w.WriteHeader(412)
+				return
+			}
 		}
 		body := selected.Body
 		status := 200
@@ -445,7 +462,7 @@ func (f *objectsAPIFixture) usage(t *testing.T, owner int, logical, physical int
 func TestFilesObjectsPostgresS3MutationConformance(t *testing.T) {
 	f := newObjectsAPIFixture(t)
 	const special = "/ a+%2F?#中文.bin "
-	t.Run("versioned_put_replace_and_physical_history", func(t *testing.T) {
+	t.Run("etag_replace_credits_current_bytes_despite_optional_history", func(t *testing.T) {
 		zero := objectsAPIJSON(t, f.request(t, "PUT", "/content", "/zero", nil, nil), 201)
 		if zero["size"] != float64(0) {
 			t.Fatal(zero)
@@ -480,11 +497,15 @@ func TestFilesObjectsPostgresS3MutationConformance(t *testing.T) {
 			t.Fatal("cookie and Bearer object reads diverged")
 		}
 		tag := got.Header().Get("ETag")
-		f.provider.mu.Lock()
-		versionReads := f.provider.versionReads[nativeKey+"?"+old.ID]
-		f.provider.mu.Unlock()
-		if versionReads == 0 {
-			t.Fatal("versioned API bytes did not select the native retained version ID")
+		driver, err := f.backend.Open(f.ctx, f.owners[0])
+		if err != nil {
+			t.Fatal(err)
+		}
+		entry, err := driver.Stat(f.ctx, storage.Path(strings.TrimPrefix(special, "/")))
+		description := driver.Describe()
+		driver.Close()
+		if err != nil || !bytes.Equal(entry.Version, []byte("native-etag:"+old.ETag)) || description.RetainsVersions || description.PinnedRead {
+			t.Fatalf("object revision must use the current ETag without retained-version guarantees: entry=%+v description=%+v error=%v", entry, description, err)
 		}
 		if tag == "" || tag != strconv.Quote(created["contentRevision"].(string)) {
 			t.Fatalf("actual strong content validator differs from metadata: %q %v", tag, created)
@@ -493,7 +514,7 @@ func TestFilesObjectsPostgresS3MutationConformance(t *testing.T) {
 		if updated["contentRevision"] == created["contentRevision"] {
 			t.Fatal("replacement retained old generation")
 		}
-		f.usage(t, 0, 6, 10)
+		f.usage(t, 0, 6, 6)
 		f.provider.mu.Lock()
 		history := append([]objectAPIVersion(nil), f.provider.versions[nativeKey]...)
 		f.provider.mu.Unlock()
@@ -502,15 +523,29 @@ func TestFilesObjectsPostgresS3MutationConformance(t *testing.T) {
 		}
 		stale := f.request(t, "PUT", "/content", special, []byte("stale"), http.Header{"If-Match": {tag}})
 		objectsAPIJSON(t, stale, 412)
-		f.usage(t, 0, 6, 10)
+		f.provider.mu.Lock()
+		puts := f.provider.puts[nativeKey]
+		f.provider.mu.Unlock()
+		if puts != 2 {
+			t.Fatalf("stale ETag reached a provider that does not enforce PUT If-Match: %d native PUTs", puts)
+		}
+		f.usage(t, 0, 6, 6)
 	})
 	t.Run("native_marker_copy_move_and_current_key_delete", func(t *testing.T) {
 		objectsAPIJSON(t, f.request(t, "POST", "", "", []byte(`{"kind":"folder","path":"/Folder/Empty","parents":true}`), nil), 201)
 		objectsAPIJSON(t, f.request(t, "PUT", "/content", "/Folder/file", []byte("abcdef"), nil), 201)
-		f.usage(t, 0, 12, 16)
+		f.usage(t, 0, 12, 12)
 		source := f.metadata(t, "/Folder")
 		objectsAPIJSON(t, f.request(t, "POST", "/copy", "", []byte(fmt.Sprintf(`{"from":"/Folder","to":"/Copy","ifSourceRevision":%q}`, source["revision"])), nil), 201)
-		f.usage(t, 0, 18, 22)
+		f.usage(t, 0, 18, 18)
+		f.provider.mu.Lock()
+		sourceKey := "drive/" + f.owners[0] + "/Folder/file"
+		nativeSource, _ := f.provider.current(sourceKey)
+		conditionalReads := f.provider.etagReads[sourceKey+"?"+nativeSource.ETag]
+		f.provider.mu.Unlock()
+		if conditionalReads == 0 {
+			t.Fatal("copy did not read its source with native If-Match")
+		}
 		before := f.metadata(t, "/Copy/file")
 		original := f.metadata(t, "/Folder/file")
 		if before["contentRevision"] == original["contentRevision"] {
@@ -518,7 +553,7 @@ func TestFilesObjectsPostgresS3MutationConformance(t *testing.T) {
 		}
 		folder := f.metadata(t, "/Copy")
 		objectsAPIJSON(t, f.request(t, "POST", "/move", "", []byte(fmt.Sprintf(`{"from":"/Copy","to":"/Moved","ifRevision":%q}`, folder["revision"])), nil), 200)
-		f.usage(t, 0, 18, 28)
+		f.usage(t, 0, 18, 18)
 		after := f.metadata(t, "/Moved/file")
 		if after["contentRevision"] != before["contentRevision"] {
 			t.Fatal("copy/delete move lost content generation")
@@ -530,7 +565,7 @@ func TestFilesObjectsPostgresS3MutationConformance(t *testing.T) {
 		if deleted.Code != 204 {
 			t.Fatalf("delete HTTP%d %s", deleted.Code, deleted.Body.String())
 		}
-		f.usage(t, 0, 12, 28)
+		f.usage(t, 0, 12, 12)
 		missing := f.request(t, "GET", "/content", "/Moved/file", nil, nil)
 		objectsAPIJSON(t, missing, 404)
 		key := "drive/" + f.owners[0] + "/Moved/file"
@@ -545,7 +580,7 @@ func TestFilesObjectsPostgresS3MutationConformance(t *testing.T) {
 			t.Fatal("deleted/current-key recreation reused an old content generation")
 		}
 		objectsAPIJSON(t, f.request(t, "PUT", "/content", "/Moved/file", []byte("stale"), http.Header{"If-Match": {strconv.Quote(after["contentRevision"].(string))}}), 412)
-		f.usage(t, 0, 17, 33)
+		f.usage(t, 0, 17, 17)
 		body := f.request(t, "GET", "/content", "/Moved/file", nil, nil)
 		if body.Code != 200 || body.Body.String() != "again" {
 			t.Fatalf("recreated current key wrong %d %s", body.Code, body.Body.String())
@@ -554,18 +589,42 @@ func TestFilesObjectsPostgresS3MutationConformance(t *testing.T) {
 		f.usage(t, 1, 5, 5)
 		objectsAPIJSON(t, f.request(t, "GET", "/content", "/private", nil, nil), 404)
 	})
-	t.Run("implicit_prefix_mutation_is_not_silently_admitted", func(t *testing.T) {
+	t.Run("imported_implicit_prefix_accepts_children_without_a_marker", func(t *testing.T) {
 		key := "drive/" + f.owners[0] + "/Implicit/file"
 		f.provider.mu.Lock()
-		f.provider.record(key, []byte("external"), "text/plain", map[string]string{}, false)
-		before := len(f.provider.versions)
+		f.provider.record(key, nil, "text/plain", map[string]string{}, false)
 		f.provider.mu.Unlock()
-		rejected := f.request(t, "PUT", "/content", "/Implicit/new", []byte("not-published"), nil)
-		objectsAPIJSON(t, rejected, 422)
+		// Explicitly import the external zero-byte child and its implicit parent.
+		// This leaves the established byte baseline unchanged.
+		scan, err := treescan.Inventory(f.ctx, strings.NewReader("key,size,lastmodifieddate\n"+key+",0,2020-01-02T03:04:05Z\n"), "drive/"+f.owners[0]+"/", treescan.Options{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err = nodes.ApplyScan(f.ctx, f.db.Pool(), f.owners[0], scan, nodes.ScanApplyOptions{}); err != nil {
+			t.Fatal(err)
+		}
+		driver, err := f.backend.Open(f.ctx, f.owners[0])
+		if err != nil {
+			t.Fatal(err)
+		}
+		parent, err := driver.Stat(f.ctx, "Implicit")
+		driver.Close()
+		if err != nil || parent.Kind != storage.Folder || len(parent.Version) != 0 {
+			t.Fatalf("implicit parent must exist without a native validator: %+v %v", parent, err)
+		}
+		created := objectsAPIJSON(t, f.request(t, "PUT", "/content", "/Implicit/new", []byte("published"), nil), 201)
+		if created["path"] != "/Implicit/new" || created["parentId"] == nil {
+			t.Fatal("implicit parent identity was not preserved", created)
+		}
+		body := f.request(t, "GET", "/content", "/Implicit/new", nil, nil)
+		if body.Code != 200 || body.Body.String() != "published" {
+			t.Fatalf("implicit child contents HTTP%d %q", body.Code, body.Body.String())
+		}
 		f.provider.mu.Lock()
 		defer f.provider.mu.Unlock()
-		if len(f.provider.versions) != before || f.provider.puts["drive/"+f.owners[0]+"/Implicit/new"] != 0 {
-			t.Fatal("unsupported implicit folder acquired a native effect")
+		_, marker := f.provider.current("drive/" + f.owners[0] + "/Implicit/")
+		if marker || f.provider.puts["drive/"+f.owners[0]+"/Implicit/"] != 0 || f.provider.puts["drive/"+f.owners[0]+"/Implicit/new"] != 1 {
+			t.Fatal("implicit parent acquired a synthetic native marker or child publication repeated")
 		}
 	})
 }
@@ -582,7 +641,7 @@ func (b *objectAPIGatedBody) Read(data []byte) (int, error) {
 	return b.reader.Read(data)
 }
 
-func TestFilesObjectsParentMarkerRecreationInvalidatesIngress(t *testing.T) {
+func TestFilesObjectsParentMarkerETagChangeInvalidatesIngress(t *testing.T) {
 	f := newObjectsAPIFixture(t)
 	objectsAPIJSON(t, f.request(t, "POST", "", "", []byte(`{"kind":"folder","path":"/Parent"}`), nil), 201)
 	body := &objectAPIGatedBody{reader: bytes.NewReader([]byte("body")), entered: make(chan struct{}), release: make(chan struct{})}
@@ -615,12 +674,14 @@ func TestFilesObjectsParentMarkerRecreationInvalidatesIngress(t *testing.T) {
 	parentKey := "drive/" + f.owners[0] + "/Parent/"
 	f.provider.mu.Lock()
 	old, _ := f.provider.current(parentKey)
-	f.provider.record(parentKey, nil, "", nil, true)
-	f.provider.record(parentKey, nil, "application/x-directory", map[string]string{"eam-intent": "external-new-parent"}, false)
-	current, _ := f.provider.current(parentKey)
+	current := old
+	// A new VersionID alone is not a current-ETag change. Keep the optional
+	// version ID fixed and change only the validator captured during admission.
+	current.ETag = `"external-marker-etag"`
+	f.provider.versions[parentKey] = append(f.provider.versions[parentKey], current)
 	f.provider.mu.Unlock()
-	if old.ID == current.ID {
-		t.Fatal("fixture did not recreate the marker generation")
+	if old.ETag == current.ETag || old.ID != current.ID {
+		t.Fatal("fixture did not isolate a parent ETag change")
 	}
 	release()
 	var response *httptest.ResponseRecorder
@@ -641,13 +702,42 @@ func TestFilesObjectsParentMarkerRecreationInvalidatesIngress(t *testing.T) {
 	f.usage(t, 0, 0, 0)
 }
 
-func TestFilesObjectsInvalidNativeVersionRemainsUnknown(t *testing.T) {
+func TestFilesObjectsUnversionedETagReplacement(t *testing.T) {
 	f := newObjectsAPIFixture(t)
-	key := "drive/" + f.owners[0] + "/invalid-version"
 	f.provider.mu.Lock()
-	f.provider.invalidVersionKey = key
+	f.provider.unversioned = true
 	f.provider.mu.Unlock()
-	response := f.request(t, "PUT", "/content", "/invalid-version", []byte("native"), nil)
+	created := objectsAPIJSON(t, f.request(t, "PUT", "/content", "/plain", []byte("old"), nil), 201)
+	original := f.request(t, "GET", "/content", "/plain", nil, nil)
+	if original.Code != 200 || original.Body.String() != "old" || original.Header().Get("ETag") == "" {
+		t.Fatalf("unversioned ETag read HTTP%d %q headers=%v", original.Code, original.Body.String(), original.Header())
+	}
+	updated := objectsAPIJSON(t, f.request(t, "PUT", "/content", "/plain", []byte("newer"), http.Header{"If-Match": {original.Header().Get("ETag")}}), 200)
+	if updated["id"] != created["id"] || updated["contentRevision"] == created["contentRevision"] {
+		t.Fatal("unversioned replacement lost identity or retained the old revision", created, updated)
+	}
+	objectsAPIJSON(t, f.request(t, "PUT", "/content", "/plain", []byte("stale"), http.Header{"If-Match": {original.Header().Get("ETag")}}), 412)
+	current := f.request(t, "GET", "/content", "/plain", nil, nil)
+	if current.Code != 200 || current.Body.String() != "newer" || current.Header().Get("ETag") == original.Header().Get("ETag") {
+		t.Fatalf("replacement bytes/validator HTTP%d %q headers=%v", current.Code, current.Body.String(), current.Header())
+	}
+	f.usage(t, 0, 5, 5)
+	key := "drive/" + f.owners[0] + "/plain"
+	f.provider.mu.Lock()
+	defer f.provider.mu.Unlock()
+	object, exists := f.provider.current(key)
+	if !exists || object.ID != "" || len(f.provider.versions[key]) != 1 || f.provider.puts[key] != 2 || len(f.provider.versionReads) != 0 {
+		t.Fatal("unversioned fixture required history or dispatched a stale replacement")
+	}
+}
+
+func TestFilesObjectsMissingPublicationETagRemainsUnknown(t *testing.T) {
+	f := newObjectsAPIFixture(t)
+	key := "drive/" + f.owners[0] + "/missing-etag"
+	f.provider.mu.Lock()
+	f.provider.invalidETagKey = key
+	f.provider.mu.Unlock()
+	response := f.request(t, "PUT", "/content", "/missing-etag", []byte("native"), nil)
 	failure := objectsAPIJSON(t, response, 503)
 	id, ok := failure["operationId"].(string)
 	if !ok || id == "" {
@@ -655,7 +745,7 @@ func TestFilesObjectsInvalidNativeVersionRemainsUnknown(t *testing.T) {
 	}
 	state := objectsAPIJSON(t, f.request(t, "GET", "/operations/"+id, "", nil, nil), 200)
 	if state["state"] != "outcome_unknown" {
-		t.Fatal("invalid version acknowledgement became definite completion", state)
+		t.Fatal("missing ETag acknowledgement became definite completion", state)
 	}
 	f.provider.mu.Lock()
 	current, exists := f.provider.current(key)

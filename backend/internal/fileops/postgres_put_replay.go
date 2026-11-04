@@ -42,7 +42,8 @@ func (p *Postgres) ReplayWrite(ctx context.Context, root Root, actor Actor, key 
 		if json.Unmarshal(op.Intent, &original) != nil {
 			return E("invalid_intent", nil)
 		}
-		equal := original.Target == intent.Target && original.Size == intent.Size && original.MediaType == intent.MediaType && original.ClientCondition == intent.ClientCondition
+		original, intent = clientWriteIdentity(original), clientWriteIdentity(intent)
+		equal := original.Target == intent.Target && original.Size == intent.Size && original.MediaType == intent.MediaType && original.ClientCondition == intent.ClientCondition && original.Selection == intent.Selection && original.EntryID == intent.EntryID && original.ParentID == intent.ParentID
 		a, _ := json.Marshal(original.SourceModifiedAt)
 		b, _ := json.Marshal(intent.SourceModifiedAt)
 		equal = equal && bytes.Equal(a, b)

@@ -370,7 +370,10 @@ func TestFilesReadMetadataUsesIndexWhileStorageUnavailable(t *testing.T) {
 		t.Fatalf("metadata query binding=%+v", index)
 	}
 	w := filesReadCall(t, s, f, s.handleFilesMetadata, url.Values{"path": {"/" + name}}.Encode())
-	for _, secret := range []string{"private-database-id", "secret-provider", `"ok"`, `"data"`, `"fileId"`, `"key"`, `"etag"`} {
+	if got.ID != row.ID {
+		t.Fatalf("metadata identity=%q want %q", got.ID, row.ID)
+	}
+	for _, secret := range []string{"secret-provider", `"ok"`, `"data"`, `"fileId"`, `"key"`, `"etag"`} {
 		if strings.Contains(w.Body.String(), secret) {
 			t.Errorf("metadata exposes %q", secret)
 		}
@@ -580,7 +583,7 @@ func TestFilesReadSyntheticRootAndEmptyList(t *testing.T) {
 	s, f, d, _ := filesReadFixture()
 	d.unavailable = true
 	root := filesReadMetadata(t, s, f, "/")
-	if root.Path != "/" || root.ParentPath != "/" || root.Name != "" || root.Kind != "folder" || root.ContentRevision != nil {
+	if root.Path != "/" || root.ParentPath != "" || root.Name != "" || root.Kind != "folder" || root.ContentRevision != nil {
 		t.Fatalf("synthetic root=%+v", root)
 	}
 	w := filesReadCall(t, s, f, s.handleFilesList, "path=%2F")

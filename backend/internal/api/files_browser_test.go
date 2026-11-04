@@ -22,7 +22,13 @@ func TestFilesBrowserAcceptance(t *testing.T) {
 	}
 	f := newFileWorkerFixture(t)
 	root, _ := f.owner(t)
-	if _, err := f.db.Pool().Exec(f.ctx, `update file_budgets set logical_limit=$2,physical_limit=$3 where owner_id=$1`, root.OwnerID, int64(128<<20), int64(512<<20)); err != nil {
+	// The interrupted upload uses one full advertised part plus one byte. Local
+	// chunks coexist with an assembled stage and every concurrent receive slot.
+	// Automatic restart allocates before the abandoned session's asynchronous
+	// cleanup, so budget both sessions plus the files retained by later checks.
+	logicalLimit := 4 * filesUploadPartSize
+	physicalLimit := 2*logicalLimit + 2*int64(filesUploadParallelism)*filesUploadPartSize
+	if _, err := f.db.Pool().Exec(f.ctx, `update file_budgets set logical_limit=$2,physical_limit=$3 where owner_id=$1`, root.OwnerID, logicalLimit, physicalLimit); err != nil {
 		t.Fatal(err)
 	}
 	cookie, _, err := f.auth.CreateSession(f.ctx, root.OwnerID, "disposable browser acceptance", "")

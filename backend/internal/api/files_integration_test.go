@@ -253,11 +253,19 @@ func TestFilesRuntimePostgresConformance(t *testing.T) {
 			}
 			a := object(request("GET", target, "cookie", nil), 200)
 			b := object(request("GET", target, bearer, nil), 200)
+			if route == "/capabilities" {
+				ownerChanges := a["changeTracking"].(map[string]any)
+				tokenChanges := b["changeTracking"].(map[string]any)
+				if ownerChanges["read"] != true || ownerChanges["subscribe"] != true || tokenChanges["read"] != false || tokenChanges["subscribe"] != false {
+					t.Fatalf("implicit thirdparty change grant: %v %v", ownerChanges, tokenChanges)
+				}
+				ownerChanges["read"], ownerChanges["subscribe"] = false, false
+			}
 			if !reflect.DeepEqual(a, b) {
 				t.Fatalf("cookie/Bearer resources diverge: %s\n%v\n%v", route, a, b)
 			}
 			wire, _ := json.Marshal(a)
-			for _, private := range []string{"\"ok\":", "\"data\":", "\"id\":", "\"fileId\":", "\"parentId\":", "tmpSecret", "provider", "drive/"} {
+			for _, private := range []string{"\"ok\":", "\"data\":", "\"fileId\":", "tmpSecret", "provider", "drive/"} {
 				if strings.Contains(string(wire), private) {
 					t.Fatalf("private representation leaked: %s", wire)
 				}

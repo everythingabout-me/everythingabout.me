@@ -10,6 +10,7 @@ async function client() {
   return import(`data:text/javascript;base64,${Buffer.from(`${code}\n// instance ${++moduleNumber}`).toString("base64")}`);
 }
 const resource = (path, kind = "file") => ({
+  id: `entry:${path}`, parentId: path === "/" ? null : `entry:${path.slice(0, path.lastIndexOf("/")) || "/"}`,
   path, parentPath: path.slice(0, path.lastIndexOf("/")) || "/", name: path.split("/").pop(),
   kind, revision: "nr_1", contentRevision: kind === "file" ? "cr_1" : null,
   size: kind === "file" ? 3 : null, mediaType: kind === "file" ? "text/plain" : null,
@@ -38,7 +39,7 @@ test("file paths and byte URLs preserve accepted names and encode query values o
   assert.equal(new URL(api.downloadHref(name), "https://drive.example").searchParams.get("disposition"), "attachment");
 });
 
-test("navigation composes root metadata and every page without file IDs or envelopes", async (t) => {
+test("path navigation composes metadata and every page without an ID lookup or envelopes", async (t) => {
   const { api } = await client();
   const calls = [];
   mockFetch(t, async (input) => {

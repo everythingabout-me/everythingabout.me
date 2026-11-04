@@ -1,11 +1,15 @@
 # Storage and the unified file API
 
-> Native file portability is a mandatory, user-confirmed requirement, 2026-10-30. Implementation pending.
+> Native file portability is a mandatory, user-confirmed requirement, 2026-10-30. P0–P6 foundations exist.
+> Stable ID/direct ID-or-path selection, canonical identity, eligible Local native tree moves and first-phase
+> [change tracking/audit/SSE](file-changes.md) are implemented in the shared branch, 2026-11-04; final integrated
+> verification passed on disposable Postgres/client/built-SPA Chrome fixtures; targeted race checks
+> passed. See [identity](file-identity.md) and the [current plan](storage-implementation-plan.md).
 >
 > **User decision: native files must retain complete folder structure, filenames, and original bytes.**
 > Leaving Everything must not require its database, a manifest interpreter, or a proprietary export tool.
 > This supersedes the anonymous immutable-content layout in the earlier draft. Contracts:
-> [file API](../api/api.md), [storage driver](storage-driver.md). Existing runtime behavior remains in
+> [file API](../api/api.md), [storage driver](storage-driver.md). Retired protocol behavior remains in
 > [legacy-api.md](../api/legacy-api.md); [the source audit](storage-implementation-review.md) is historical.
 
 ## 1. Two layers, one public origin
@@ -15,12 +19,16 @@ coordination. The current delivery targets official COS and self-hosted Local/CO
 optional. Clients use one API origin and no provider SDK, signing secret or broad STS credentials. The official
 EdgeOne upload mode is an explicit exception to the previous prohibition on client-visible provider parameters:
 clients receive a short-lived signed part request under the same origin, containing the required native upload
-parameters but no key material. Public file identity remains the native path.
+parameters but no key material. Public identity is a stable service UUID; its current native location is
+also directly selectable by path.
 
 All clients use `/api/files`: Web, iOS, Android, CLI and third parties. There is no browser-only file API.
 Explicit Bearer authentication takes precedence; invalid Authorization never falls back to cookies. Without
 Authorization, the session cookie may authenticate, with CSRF validation on mutations. Authorization/file
-services are shared. Files/folders are addressed only by paths; database/provider IDs remain private.
+services are shared. Existing files/folders accept exactly one ID or path at the same endpoint; path callers
+need no preliminary ID lookup. Metadata includes id/parentId and path/parentPath with concealed parents
+redacted. Native/provider locators remain private; a service ID is never authorization. Destinations use
+`{path}` or `{parent:{id}|{path},name}`. The [API](../api/api.md) lists retained current path shortcuts.
 There is no version path segment. Hosted origin is `https://everythingabout.me`; self-hosted origin
 is the user's domain or LAN endpoint. The official service uses `FILE_UPLOAD_INGRESS=edgeone`: the application
 checks the user, target and quota, then signs an exact COS UploadPart request. The browser sends that request
@@ -74,9 +82,12 @@ collision reporting/conversion by the chosen transfer tool, never silent applica
 ## 3. Storage facts and database responsibilities
 
 Storage is the authority for actual paths, names, existence and bytes. Postgres holds a searchable index,
-private database keys, permissions, annotations, sessions, operation journals and audit/events. File/folder
-identity in the public API is the native path. Rename/move changes that path; clients update references.
-Internal keys may help index maintenance, but are never exposed as file IDs or required to access files.
+stable service IDs, parent/name links, permissions, annotations, sessions, operation journals and audit/events.
+Each file/folder and the bound root has a persisted service ID. Root mappings live in `file_identity_roots`;
+existing node UUIDs are reused when their lifecycle is valid. Rename/move preserves IDs and descendant IDs;
+service content replacement preserves ID. Copy allocates fresh IDs for the whole destination tree; deletion
+retires IDs and recreation allocates fresh ones. Public IDs remain distinct from native locators, revisions
+and workflow IDs. Direct path selection remains a first-class operation.
 
 **Indexed browsing decision, 2026-11-03:** page metadata, folder listings, search and indexed usage are
 served directly from Postgres. Opening or refreshing a directory must not issue synchronous storage Stat,
@@ -95,9 +106,20 @@ changed or disappeared. An unavailable/missing index is reported explicitly, nev
 storage scan in the page request. Existing reconcile/import is additive and does not prune deleted external
 paths; stale deletion cleanup requires explicit index repair. This does not change direct file portability.
 
+Files/folders share a unique native sibling namespace under each owner/root/parent, using the connection
+comparison rules and original accepted display names. Different IDs cannot make duplicate equivalent native
+siblings valid. ID resolution checks owner/current native-aware path scope; moving outside scope removes
+access and never retargets a path grant. Migration 027 makes parent/name identity canonical, resolves current
+paths through the file_entries ancestry view and retains nullable legacy path/key caches. Versioned NFC/full
+Unicode case-fold comparison agrees between Go and Postgres. Eligible Local atomic folder moves update one
+root linkage/native effect without mandatory descendant identity rewrites; a destination prefix that grows
+in bytes or depth falls back to finite preflight. Dynamic ancestry/search can cost O(candidates × depth), and
+cache maintenance or flat object copy/delete moves can scale with subtree size.
+
 If the database is lost, files remain directly readable. A scan can rebuild paths and basic metadata. It does
 not magically recover account credentials, ACLs, annotations, events, prior app IDs, or ambiguous outside
-renames. Those application features need separate backup. Owner-to-root configuration/credentials must be
+renames. Those application features need separate backup. Stable-ID continuity requires backing up the
+identity/root mapping; rebuilding without it yields new IDs. Owner-to-root configuration/credentials must be
 recoverable independently; never infer ownership by exposing all provider data to a new account.
 
 Reconcile/import must index an existing readable tree without rewriting all file bytes. Native IDs can help
@@ -107,9 +129,11 @@ coordinate external writes with active application mutations according to the ad
 lock does not lock rclone, Finder or another cloud client.
 
 **Object writes:** object connections use one mutation strategy whose revision tokens are current-object
-ETags enforced with native `If-Match` / `If-None-Match`. Bucket versioning is neither required nor consulted.
-Upload, replacement, mkdir, move, copy and delete are available; implicit prefix folders are valid parents
-without fabricated identities, and reads are validated but not version-pinned. Durable publication evidence
+ETags with operation-specific native `If-Match` / `If-None-Match` where enforced. COS ignores PUT If-Match;
+admitted replacement uses gateway coordination and an immediate ETag recheck, without fencing arbitrary
+external writers. Bucket versioning is neither required nor consulted. Upload, replacement, mkdir, move, copy
+and delete are available; implicit prefix folders are valid parents without fabricated native version evidence,
+and reads are validated but not version-pinned. Indexed folders still have real service IDs. Durable publication evidence
 and unknown-outcome guards apply to every effect. Initial native/index comparison is a matched observation;
 budget counters retain that baseline plus application journal changes and reservations. Synchronization updates
 external metadata in the index but does not update budgets. A separate reviewed budget resynchronization is
@@ -125,10 +149,10 @@ must preflight collisions and report unsupported names instead of overwriting or
 | Action | Native result and performance implications |
 |---|---|
 | Create folder | Real folder or standard empty-folder marker plus index entry |
-| Rename/move | Native rename/move where supported; S3 directory moves require per-key copy/delete |
-| Copy | Destination contains its own normal file/tree; reflink/provider-side copy preferred |
-| Delete | Remove actual files/folders; database detachment alone does not finish deletion |
-| Replace | New bytes become the ordinary file at the same readable path |
+| Rename/move | Native effect with stable entry/descendant IDs; S3 directory moves require per-key copy/delete |
+| Copy | Independent ordinary destination tree with fresh IDs; reflink/provider-side copy preferred |
+| Delete | Remove actual files/folders and retire IDs; database detachment alone is insufficient |
+| Replace | New bytes become the ordinary file at the same readable path while retaining its ID |
 
 A folder move cannot be promised as one atomic transaction on every backend. Multi-file copy/move/delete
 can be partial after failure and must expose durable progress and affected paths. Checkpoint each safe step;
@@ -149,7 +173,9 @@ in an external filesystem/storage system; Postgres and provider operations canno
 Use a durable operation journal and recovery workflow:
 
 1. Bind user/root/config generation, target path/identity, expected version and target generation; reserve
-   logical quota and serialize conflicting file/folder operations.
+   logical quota and serialize conflicting file/folder operations. Capture selected file/parent ID and ancestor
+   namespace state; a moved/recreated target or ancestor invalidates admitted work, including ID-selected uploads.
+   New ID requests after a completed move may select its current authorized location.
 2. Receive bytes into isolated temporary state or an unpublished native upload. Confirm resumable progress
    only after bytes and receipt survive restart. Failed uploads must not be treated as current files.
 3. Verify exact size/integrity and current authorization/conditions. Journal the final native publication
@@ -198,7 +224,8 @@ native size/ETag before a provenance-labeled receipt. Session/native-part metada
 extra receiver machine. Commit verifies coverage and current conditions, completes native multipart once and
 settles the index/result; it is not merely a database update or another full-byte transfer.
 
-The browser keeps up to eight files with open sessions and sends their numbered parts through one global pool
+The browser runs up to eight queue tasks; failed tasks can retain open sessions, so eight is not a hard cap
+on server sessions. Running tasks send numbered parts through one global pool
 of sixteen part requests with no extra per-file cap, respecting each session's maxParallelism and ordering. A
 freed slot immediately goes to the earliest-started file's next part, so files finish in order and one slow part
 never idles a connection. Transient retries query durable receipts before replaying
@@ -230,7 +257,47 @@ Private CDN delivery requires authorization and revision-safe internal caching; 
 cache. Ordinary CDN service does not automatically accelerate large uploads. All optimization stays behind
 the configured origin. Active same-origin content still needs safe MIME/disposition and preview isolation.
 
-## 7. Acceptance and implementation
+## 7. Changes, snapshots and audit
+
+Confirmed native effects settle index/result, durable owner-scoped change facts, recursive markers and effect
+audit together. Short owner-head locking gives commit-safe ordered progress; effect receipts deduplicate
+recovery. No provider I/O occurs under the head lock. Metadata may expose lastChangedAt/changeToken;
+namespace markers propagate subtree movement without rewriting every descendant, while sibling edits do not
+advance unrelated file markers. Concealed aggregate coverage omits markers. This observes indexed state,
+not historical bytes or instant external-writer state.
+
+Immutable repeatable-read snapshots capture indexed metadata and the committed head. Current construction is
+synchronous: at most 100,000 entries/64 MiB, 25-second request window, 24-hour lifetime and ten active resources
+per principal. Oversize/timeouts fail explicitly with 503; there is no asynchronous snapshot Operation.
+Pull uses policy-bound private cursors and projected retained endpoints. Owner sessions have access; ordinary
+tokens need explicit changes/read, plus subscribe for durable subscriptions/SSE. Old tokens and save links
+receive neither new right implicitly. Monotonic policy generations prevent old cursors reviving after policy
+expansion and restoration.
+
+SSE subscriptions persist matching state and coalesced notification IDs, with seven-day renewable leases.
+Wakeups only announce availability; independent pull cursors provide recovery. Streams are bounded to 25
+seconds and recheck grants during polling. Webhooks and outbound delivery are deferred. GET /api/audit is a
+separate owner-cookie collection with captured actor/policy and request/effect outcomes, distinct from timeline
+cards and the older account activity log. Third-party read admission fails closed if durable audit cannot be
+recorded; incomplete completion telemetry is explicit and never proof of client delivery.
+
+Rows have a 90-day change expiry and an explicit file-changes-prune CLI that removes only an expired
+contiguous feed prefix while retaining effect receipts. No automatic retention scheduler is wired. Audit
+history currently remains indefinitely; no 365-day deletion policy is implemented. Additive scan/import records external creations/updates, not outside deletions or guessed
+rename continuity; unchanged scans emit no facts. Audit export/automatic retention, external deletion repair,
+native watcher health and external-writer budget resynchronization remain separate work. Full contracts and
+observation limits are in [file changes](file-changes.md) and the [API](../api/api.md).
+
+Migration 032 durably binds the change stream to the current configured root namespace on first use. Root
+mismatches reject access instead of silently rebinding. Producers take shared root protection before index
+locks and the short ordering head afterward; repeatable-read consumers take session root protection before
+their MVCC snapshot. Reset takes exclusive root protection. After database restore/mapping rebuild or every
+rebind, including A → B → A, stop writers, settle accepted work and explicitly run file-changes-reset with
+--writers-quiesced. It refuses pending guards/nonterminal Operations, rotates epoch, sets floor=head, expires
+baselines/subscriptions and clears markers while preserving positions, receipts, IDs, audit and native bytes.
+A same-namespace restore still requires reset. See the [root runbook](file-changes.md#durable-root-binding-and-restorerebind-procedure).
+
+## 8. Acceptance and implementation
 
 The [implementation plan](storage-implementation-plan.md) maps this contract to verified source gaps,
 dependency-ordered phases and release gates. It does not change runtime behavior.
@@ -247,5 +314,5 @@ Before replacing the current implementation:
 - Keep application metadata backup/restore distinct from ordinary file portability.
 
 The earlier source audit remains useful for COS implementation defects; its recommendations are historical
-and must be interpreted against this native-tree decision. This revision changes design documents only;
-no runtime data is moved.
+and must be interpreted against the current native-tree, identity and first-phase change implementation.
+R0–R5 passed integrated disposable tests; live deployment gates remain separate. This documentation does not move runtime data.

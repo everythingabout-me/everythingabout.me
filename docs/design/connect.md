@@ -26,8 +26,20 @@ under Active tokens so they can be revoked, but it does not mint them.
 A **skill** can use an app's prompt; an **agent session** can use the same one. There is no separate token form
 on the page any more.
 
-`kind` (`app` / `token`) is a **label**, not a permission: `prefix` + `read` / `write` / `events` remain the
-security boundary. A client may create either kind with either lifetime the server allows; the lists are a way
+`kind` (`app` / `token`) is a **label**, not a permission: `prefix` + `read` / `write` / `events` / `changes` /
+`subscribe` remain the security boundary. `changes` requires `read`; `subscribe` requires both `changes` and
+`read`. These are explicit grants: existing tokens, save links, and newly minted apps do not receive either
+new permission automatically. The Connect configuration has separate File changes and Live file changes
+checkboxes, with dependency errors instead of automatic permission expansion. Scope and lifetime edits
+send the complete policy, including both grants.
+
+Token resources include `policyVersion`, a monotonic generation starting at 1. A changed prefix, permission,
+or expiry advances it; revocation also advances it. An identical policy save or a display-name change does
+not. Returning to an earlier policy still has a newer generation, so a cursor issued before a policy change
+cannot become usable again. The QR remains credential-only; clients read current permissions from `/me`
+and the live `/s/` instructions.
+
+A client may create either kind with either lifetime the server allows; the lists are a way
 to read the page, not an authorization rule.
 
 **An app is a slot, not a form.** Clicking `Add app` mints it with the defaults — whole drive, all three

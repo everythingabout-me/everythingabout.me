@@ -46,7 +46,7 @@ func (s *Service) beginUploadSnapshot(ctx context.Context, ownerID, path string,
 	}()
 	// Use a consistent order and include every existing ancestor and target.
 	lockedPaths := append(paths.AncestorsOf(path), path)
-	rows, err := tx.Query(ctx, `select path from nodes where owner_id=$1::uuid and path=any($2::text[]) order by path for update`, ownerID, lockedPaths)
+	rows, err := tx.Query(ctx, `select path from file_entries where owner_id=$1::uuid and path=any($2::text[]) order by path for update`, ownerID, lockedPaths)
 	if err != nil {
 		return nil, err
 	}
@@ -61,7 +61,7 @@ func (s *Service) beginUploadSnapshot(ctx context.Context, ownerID, path string,
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
-	existing, err := scanNode(tx.QueryRow(ctx, `select `+nodeColumns+` from nodes where owner_id=$1::uuid and path=$2`, ownerID, path))
+	existing, err := scanNode(tx.QueryRow(ctx, `select `+nodeColumns+` from file_entries where owner_id=$1::uuid and path=$2`, ownerID, path))
 	if err != nil {
 		return nil, err
 	}
@@ -87,13 +87,24 @@ func ensureUploadParents(ctx context.Context, tx pgx.Tx, ownerID, path string) (
 	changed := false
 	for _, dir := range paths.AncestorsOf(path) {
 		tag, err := tx.Exec(ctx, `insert into nodes(owner_id,key,path,parent,name,is_dir)
-			values($1::uuid,$2,$3,$4,$5,true) on conflict(owner_id,path) do nothing`,
+			values($1::uuid,$2,$3,$4,$5,true) on conflict(owner_id,parent_id,comparison_name) do nothing`,
 			ownerID, paths.DirKeyFor(dir, ownerID), dir, paths.ParentOf(dir), paths.NameOf(dir))
 		if err != nil {
 			return false, err
 		}
 		changed = changed || tag.RowsAffected() > 0
 	}
+	// An unchanged native file may retain its row while its old folder index
+	// rows were removed. Reattach only a dangling link; a moved entry with a
+	// valid parent must never follow its stale advisory path cache.
+	tag, err := tx.Exec(ctx, `update nodes set parent_id=file_tree_resolve($1::uuid,$3)
+ where owner_id=$1::uuid and path=$2
+ and not exists(select 1 from nodes parent_node where parent_node.owner_id=$1::uuid and parent_node.id=nodes.parent_id)
+ and not exists(select 1 from file_identity_roots root where root.owner_id=$1::uuid and root.id=nodes.parent_id)`, ownerID, path, paths.ParentOf(path))
+	if err != nil {
+		return false, err
+	}
+	changed = changed || tag.RowsAffected() > 0
 	return changed, nil
 }
 
@@ -135,8 +146,8 @@ func (s *Service) ObserveUpload(ctx context.Context, ownerID, path string, isDir
 	}
 	_, err = tx.Exec(ctx, `insert into nodes(owner_id,key,path,parent,name,is_dir,size,mime,etag,storage_class,source_modified_at)
 		values($1::uuid,$2,$3,$4,$5,$6,$7,$8,nullif($9,''),nullif($10,''),$11)
-		on conflict(owner_id,path) do update set
-		  key=excluded.key, size=excluded.size, mime=excluded.mime, etag=excluded.etag,
+		on conflict(owner_id,parent_id,comparison_name) do update set
+		  path=excluded.path, parent=excluded.parent, name=excluded.name, key=excluded.key, size=excluded.size, mime=excluded.mime, etag=excluded.etag,
 		  storage_class=excluded.storage_class, source_modified_at=excluded.source_modified_at,
 		  meta=nodes.meta - 'sha256' - 'mime', updated_at=now()`,
 		ownerID, snapshot.key, path, paths.ParentOf(path), paths.NameOf(path), isDir, info.Size, media, info.ETag, info.StorageClass, sourceModified)
@@ -179,8 +190,8 @@ func (s *Service) ConfirmUpload(ctx context.Context, input UpsertInput) (*Row, e
 	}
 	node, err := scanNode(tx.QueryRow(ctx, `insert into nodes(owner_id,key,path,parent,name,is_dir,size,mime,etag,storage_class,source_modified_at,meta)
 		values($1::uuid,$2,$3,$4,$5,false,$6,$7,nullif($8,''),nullif($9,''),$10,$11::jsonb)
-		on conflict(owner_id,path) do update set
-		  key=excluded.key, size=excluded.size, mime=excluded.mime, etag=excluded.etag,
+		on conflict(owner_id,parent_id,comparison_name) do update set
+		  path=excluded.path, parent=excluded.parent, name=excluded.name, key=excluded.key, size=excluded.size, mime=excluded.mime, etag=excluded.etag,
 		  storage_class=excluded.storage_class, source_modified_at=excluded.source_modified_at,
 		  meta=(case when nodes.size=excluded.size and nodes.etag is not distinct from excluded.etag
 		    then nodes.meta else nodes.meta - 'sha256' - 'mime' end) || excluded.meta,

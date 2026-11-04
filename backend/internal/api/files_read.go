@@ -42,6 +42,8 @@ type FileReadIndex interface {
 }
 
 type filesReadQuery struct {
+	SelectorID                       string
+	ResolvedID                       string
 	Path                             fc.Path
 	Limit                            int
 	Cursor, Keyword, Kind, MediaType string
@@ -137,20 +139,23 @@ func (s *Server) filesIndexedMetadata(ctx context.Context, f *fileRequest, p fc.
 	if err := f.RequireRead(metadata.Path); err != nil {
 		return fc.Metadata{}, err
 	}
-	if metadata.Path != p {
+	if !filesEqualPath(f, metadata.Path, p) {
 		return fc.Metadata{}, fc.NewProblem(404, "not_found", "The indexed path was not found.")
 	}
-	return metadata, nil
+	return filesRedactParent(f, metadata), nil
 }
 
 func (s *Server) handleFilesMetadata(w http.ResponseWriter, r *http.Request, f *fileRequest) error {
-	q, err := parseFilesReadQuery(r, f.Scope, true)
+	q, err := s.filesReadSelectorQuery(r, f, true)
 	if err != nil {
 		return err
 	}
 	metadata, err := s.filesIndexedMetadata(r.Context(), f, q.Path)
 	if err != nil {
 		return err
+	}
+	if q.SelectorID != "" && metadata.ID != q.SelectorID {
+		return fc.NewProblem(404, "not_found", "The selected file changed location.")
 	}
 	return writeFilesJSON(w, 200, metadata)
 }
@@ -176,14 +181,20 @@ func (s *Server) filesBrowsePage(w http.ResponseWriter, r *http.Request, f *file
 	if err != nil {
 		return err
 	}
+	if previous != nil && previous.BindingID != "" && previous.BindingID != q.ResolvedID {
+		return fc.NewProblem(409, "cursor_stale", "The selected folder changed after pagination began.")
+	}
 	parent, err := s.filesIndexedMetadata(r.Context(), f, q.Path)
 	if err != nil {
 		return err
 	}
+	if q.SelectorID != "" && parent.ID != q.SelectorID {
+		return fc.NewProblem(404, "not_found", "The selected folder changed location.")
+	}
 	if route == "list" && parent.Kind != "folder" {
 		return fc.NewProblem(409, "not_a_folder", "The selected path is not a folder.")
 	}
-	query := nodes.FileBrowseQuery{Path: q.Path.Relative(), List: route == "list", Limit: q.Limit + 1, After: previous, HiddenRoots: filesHiddenRoots(f)}
+	query := nodes.FileBrowseQuery{ExpectedID: parent.ID, Path: q.Path.Relative(), List: route == "list", Limit: q.Limit + 1, After: previous, HiddenRoots: filesHiddenRoots(f)}
 	if route == "search" {
 		query.Keyword, query.Kind, query.MediaType = q.Keyword, q.Kind, q.MediaType
 	}
@@ -204,10 +215,10 @@ func (s *Server) filesBrowsePage(w http.ResponseWriter, r *http.Request, f *file
 		if err := f.RequireRead(metadata.Path); err != nil {
 			return err
 		}
-		if !fc.WithinScope(q.Path, metadata.Path, filesPathKey(f)) || (route == "list" && (metadata.ParentPath != q.Path || metadata.Path == q.Path)) {
+		if !fc.WithinScope(q.Path, metadata.Path, filesPathKey(f)) || (route == "list" && (!filesEqualPath(f, metadata.ParentPath, q.Path) || filesEqualPath(f, metadata.Path, q.Path))) {
 			return fc.NewProblem(500, "internal_error", "The index returned a path outside the requested directory.")
 		}
-		items = append(items, metadata)
+		items = append(items, filesRedactParent(f, metadata))
 	}
 	var next *string
 	if hasMore {
@@ -216,7 +227,7 @@ func (s *Server) filesBrowsePage(w http.ResponseWriter, r *http.Request, f *file
 		if last.Kind == "folder" {
 			kind = 0
 		}
-		key := filesSortKey{Kind: kind, Name: norm.NFC.String(last.Name), Path: norm.NFC.String(last.Path.Relative())}
+		key := filesSortKey{BindingID: q.ResolvedID, Kind: kind, Name: norm.NFC.String(last.Name), Path: norm.NFC.String(last.Path.Relative())}
 		cursor, err := s.filesEncodeCursor(key, binding)
 		if err != nil {
 			return err
@@ -227,7 +238,7 @@ func (s *Server) filesBrowsePage(w http.ResponseWriter, r *http.Request, f *file
 }
 
 func (s *Server) handleFilesList(w http.ResponseWriter, r *http.Request, f *fileRequest) error {
-	q, err := parseFilesReadQuery(r, f.Scope, true)
+	q, err := s.filesReadSelectorQuery(r, f, true)
 	if err != nil {
 		return err
 	}
@@ -235,7 +246,7 @@ func (s *Server) handleFilesList(w http.ResponseWriter, r *http.Request, f *file
 }
 
 func (s *Server) handleFilesSearch(w http.ResponseWriter, r *http.Request, f *fileRequest) error {
-	q, err := parseFilesReadQuery(r, f.Scope, false)
+	q, err := s.filesReadSelectorQuery(r, f, false)
 	if err != nil {
 		return err
 	}
@@ -263,6 +274,8 @@ func (s *Server) handleFilesMe(w http.ResponseWriter, r *http.Request, f *fileRe
 	}
 	quota, reservations := filesUsageFields(accounting, f.Scope == "/")
 	result := map[string]any{"principal": map[string]any{"kind": kind}, "scope": map[string]any{"path": f.Scope}, "read": true, "write": ready, "usage": map[string]any{"bytes": bytes, "files": files, "indexed": true}, "quota": quota, "reservations": reservations}
+	result["changes"] = f.Principal.Token == nil || f.Principal.Token.CanChanges
+	result["subscribe"] = f.Principal.Token == nil || (f.Principal.Token.CanChanges && f.Principal.Token.CanSubscribe)
 	if f.CSRFToken != "" {
 		result["csrfToken"] = f.CSRFToken
 	}
@@ -270,13 +283,16 @@ func (s *Server) handleFilesMe(w http.ResponseWriter, r *http.Request, f *fileRe
 }
 
 func (s *Server) handleFilesCapabilities(w http.ResponseWriter, r *http.Request, f *fileRequest) error {
-	q, err := parseFilesReadQuery(r, f.Scope, false)
+	q, err := s.filesReadSelectorQuery(r, f, false)
 	if err != nil {
 		return err
 	}
 	metadata, err := s.filesIndexedMetadata(r.Context(), f, q.Path)
 	if err != nil {
 		return err
+	}
+	if q.SelectorID != "" && metadata.ID != q.SelectorID {
+		return fc.NewProblem(404, "not_found", "The selected file changed location.")
 	}
 	actual := metadata.Path
 	d := f.Driver.Describe()
@@ -333,7 +349,9 @@ func (s *Server) handleFilesCapabilities(w http.ResponseWriter, r *http.Request,
 	}
 	quota, reservations := filesUsageFields(usage, f.Scope == "/" && actual == "/")
 	return writeFilesJSON(w, 200, map[string]any{
-		"path": actual, "read": true, "write": ready, "range": d.RangeRead, "pinnedRead": d.PinnedRead, "strongContentValidators": d.PinnedRead,
+		"identity":       map[string]any{"id": true, "path": true, "uniquePaths": true},
+		"changeTracking": map[string]any{"available": true, "read": f.Principal.Token == nil || f.Principal.Token.CanChanges, "subscribe": f.Principal.Token == nil || (f.Principal.Token.CanChanges && f.Principal.Token.CanSubscribe), "delivery": []string{"sse"}, "retentionSeconds": int64(90 * 24 * 60 * 60), "subscriptionLifetimeSeconds": int64(7 * 24 * 60 * 60), "snapshotLifetimeSeconds": int64(24 * 60 * 60), "snapshotMaxEntries": 100000, "snapshotMaxBytes": int64(64 << 20), "observation": "indexed", "externalChanges": "explicit-reconcile"},
+		"path":           actual, "read": true, "write": ready, "range": d.RangeRead, "pinnedRead": d.PinnedRead, "strongContentValidators": d.PinnedRead,
 		"thumbnails": false, "uploads": uploadsReady, "uploadTransport": transport, "checksums": checksums, "sourceModifiedAt": ready && s.cfg.BackendName() == "local",
 		"maxFileBytes": maxFile, "maxSinglePutBytes": singlePut, "maxPartBytes": partBytes,
 		"pagination":           map[string]any{"defaultLimit": filesDefaultLimit, "maxLimit": filesMaxLimit},
@@ -346,7 +364,11 @@ func (s *Server) handleFilesCapabilities(w http.ResponseWriter, r *http.Request,
 // query binding. They expose no principal/root references and survive process
 // restart with AppSecret. Neither timestamps nor global mutation counters occur.
 func (s *Server) filesCursorBinding(f *fileRequest, q filesReadQuery, route string) []byte {
-	payload, _ := json.Marshal(struct{ Namespace, Principal, Scope, Route, Path, Keyword, Kind, MediaType, Sort string }{f.Namespace, filePrincipalID(f.Principal), string(f.Scope), route, string(q.Path), q.Keyword, q.Kind, q.MediaType, filesSort})
+	boundPath := string(q.Path)
+	if q.SelectorID != "" {
+		boundPath = ""
+	}
+	payload, _ := json.Marshal(struct{ Namespace, Principal, Scope, Route, Path, Keyword, Kind, MediaType, Sort, SelectorID string }{f.Namespace, filePrincipalID(f.Principal), string(f.Scope), route, boundPath, q.Keyword, q.Kind, q.MediaType, filesSort, q.SelectorID})
 	h := sha256.Sum256(payload)
 	return h[:]
 }

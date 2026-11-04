@@ -4,8 +4,12 @@ Working notes for AI agents and new teammates in this repo. The full story is in
 [README.md](README.md); the API design is in [docs/api/api.md](docs/api/api.md) and the event model in
 [docs/design/events.md](docs/design/events.md). The accepted storage/API architecture is in
 [docs/design/storage.md](docs/design/storage.md); read it and [the driver contract](docs/design/storage-driver.md)
-before changing file transfers or storage drivers. The clean-slate [file API](docs/api/api.md) supersedes old
-route/envelope/path-identity assumptions for replacement work; the running COS API is documented in
+before changing file transfers or storage drivers. The accepted [stable identity contract](docs/design/file-identity.md)
+implements IDs, canonical parent/name paths and direct ID-or-path selection. First-phase
+[changes/audit/snapshots/SSE](docs/design/file-changes.md) is implemented too. Disposable integration/browser
+tests passed; targeted race checks passed. Evidence is recorded in the [implementation plan](docs/design/storage-implementation-plan.md).
+The clean-slate [file API](docs/api/api.md) supersedes old
+route/envelope/path-identity assumptions for replacement work; the retired COS protocol is documented in
 [docs/api/legacy-api.md](docs/api/legacy-api.md). New contracts have no legacy-client compatibility requirement.
 The runtime conventions below describe existing code unless the new specifications explicitly replace them.
 This file only covers what you must know before touching anything, and does not repeat the README.
@@ -53,7 +57,8 @@ Common commands:
 |---|---|
 | `backend/cmd/eam/` | Single entrypoint: `server` / `migrate` / `doctor` / `reconcile` / `claim` / `token` |
 | `backend/internal/api/` | Routes and handlers: web `/api/*`, the public API, `/events` |
-| `backend/internal/nodes/` | Reads and writes the `nodes` file index; metadata only, never bytes |
+| `backend/internal/nodes/` | Canonical parent/name index, dynamic current paths and transactional identity/change settlement; never bytes |
+| `backend/internal/filechanges/` | Commit-safe owner change facts, recursive markers, projection and durable file audit |
 | `backend/internal/storage/` | Object storage interface; implementation in `internal/cos/` (Tencent Cloud) |
 | `backend/internal/timeline/` + `events/` | The stream: analyze → group → score → narrate, stored as `events` |
 | `backend/internal/auth/` `emailcode/` `mail/` | Verification codes, passwords, sessions, API tokens, SES |
@@ -83,12 +88,40 @@ Common commands:
   user dimension.
 - Dependencies are wired in `api.New`; define an interface first for a new service (see `storage.Storage`,
   `timeline.Analyzer`) and never construct clients inside a handler.
-- **Deletion is permanent** (there is no trash); deleting a directory requires an explicit `?recursive=1`, and
+- **Deletion is permanent** (there is no trash); deleting a nonempty directory requires explicit `?recursive=true`, and
   code must never recurse "helpfully" on the user's behalf.
-- Existing runtime routes separate cookie `/api/fs/*` from Bearer public routes; preserve that behavior until
-  implementation is migrated. The replacement file API is one `/api/files` path-based contract for every
-  client, with no public file IDs or `/api/web/files` mount. Explicit Authorization selects Bearer without
-  fallback; absent Authorization may use the session cookie with CSRF protection on every mutation.
+- File clients share `/api/files`; legacy cookie `/api/fs/*` and root public file routes return 410.
+  The accepted file API is one `/api/files` contract for every client,
+  accepting a stable service UUID or direct path at the same endpoint, with no `/api/web/files` mount.
+  EntrySelector JSON is `{id}|{path}`; query selection is exactly one nonempty id or path. Creation destinations
+  use `{path}` or `{parent:{id}|{path},name}`. Current path shortcuts are explicitly retained in the API docs.
+  Metadata returns id/parentId alongside path/parentPath, redacting concealed parents. Root ID is persisted.
+  Move/content replacement retain IDs; copy/recreation allocate fresh IDs. IDs never bypass owner/path scope.
+  Explicit Authorization selects Bearer without fallback; absent Authorization may use the session cookie
+  with CSRF protection on every mutation.
+- Canonical identity is owner/root/parent/name/comparisonName; legacy path/key columns are nullable derived
+  caches. Use file_entries/current ancestry, never stale cached paths as identity or authorization. Comparison
+  versions nfc-sensitive-v1/nfc-fold-v1 must agree between Go and Postgres; full Unicode folding is not lower().
+  Eligible Local non-growing folder moves use one root native effect; growing/deeper targets and flat object
+  moves retain finite manifests. Dynamic ancestry/search is not universally O(1).
+- Change facts, recursive/namespace markers and confirmed effect audit settle with index/results. No native
+  I/O or new index locks after acquiring the short owner-head lock. Retain effect receipts across feed pruning.
+  lastChangedAt/changeToken are optional observed-index markers, not native validators or cursors.
+- Incremental clients use immutable change-snapshots plus changes cursors, not ordinary list pagination.
+  Snapshots are synchronous and bounded (100k entries/64 MiB/25 seconds/24 hours); no async snapshot Operation.
+  Tokens need explicit changes+read, and subscribe additionally for SSE; old tokens/save links gain neither.
+  PolicyVersion advances on actual policy edits/revoke, never name-only edits. SSE wakeups do not acknowledge
+  consumer progress. Webhooks are deferred. GET /api/audit requires owner cookie, not app permissions.
+  Default change-row expiry is 90 days; file-changes-prune removes only expired contiguous feed rows and
+  retains dedup receipts. No automatic scheduler is wired; file audit currently remains indefinitely.
+- Migration 032 binds the change stream's root namespace on first use only. Reject later mismatches, never
+  auto-rebind. After DB restore/mapping rebuild or each rebind (including A → B → A), stop writers/settle work
+  and use file-changes-reset --owner-id UUID --writers-quiesced [--dry-run]. Pending guards/nonterminal
+  Operations block reset. It rotates epoch/floor=head, expires snapshots/subscriptions and clears markers;
+  it never changes file IDs/native bytes or drops effect receipts. Same-namespace restore still needs reset.
+  Producers call BindRoot with shared root protection before index locks, then the short head after index/quota.
+  Repeatable-read consumers protect the root at session level BEFORE beginning their MVCC snapshot; reset
+  takes exclusive root protection. Database checks do not replace actual native-writer quiescence.
 - Long operations (move / copy) always use `Prefer: respond-async` and return `202 + Location`; do not invent a
   second "task" concept.
 - Rate limiting is in-process memory (`internal/ratelimit`), so multiple instances each keep their own count;
@@ -105,7 +138,8 @@ Common commands:
   - guard destructive DDL or put it in a separate transitional step (see `sql/010_drop_soft_delete.sql`);
   - keep data backfills in the same file and make them idempotent.
 - `nodes` is an index, not a copy: **never write file bytes into the database**; the `path` / `key` mapping
-  lives only in `internal/nodes` and `internal/paths`.
+  lives in `internal/nodes` and `internal/paths`. Parent/name links are canonical; current paths resolve
+  through file_entries and legacy path/parent/key columns may be null/stale derived caches.
 - `source_modified_at` on older rows is only complete after `reconcile` has run; until it is filled, the
   timeline falls back to `updated_at`.
 
@@ -114,9 +148,9 @@ Common commands:
 - Pure SPA, no SSR. Routing is a React Router data router (`router.tsx`); page data comes from `loader`, and
   logged-out requests `throw redirect("/login")`.
 - Every request goes through `src/api/client.ts` (the single exit), which unwraps the envelope and raises
-  `ApiError`; do not call `fetch` directly in a page. Existing browser-to-COS uploads after STS
-  (`cos-js-sdk-v5`, loaded on demand) are a legacy exception pending the same-origin migration; new
-  integrations keep storage SDKs/credentials server-side and use the configured API origin.
+  `ApiError`; do not call `fetch` directly in a page. File calls use plain resources/Problem Details.
+  Browser storage SDKs/STS are retired; integrations use the configured API origin and keep SDKs/credentials
+  server-side. Official signed COS UploadPart requests are the narrow transport exception documented below.
 - Styling: global tokens live in `src/styles/globals.css` (warm paper feel + blue accent + automatic
   light/dark via `prefers-color-scheme`); page layouts use `*.module.css`. **No Tailwind, no CSS-in-JS.**
 - i18n: the locale is chosen once at module load from the browser language (zh / en), with no switcher. New
@@ -223,8 +257,8 @@ git -C <main worktree> push origin main          # when a remote exists
 - **Never** `push --force` to `main`, and never `reset --hard` / `clean -fd` the main working tree.
 - With a remote, if the push is rejected (someone pushed first): `git -C <main worktree> pull --rebase origin
   main` → re-run `make test` → push again; if that still loops, stop and report.
-- The repo currently has no remote: do the local merge only, and end the final message with "committed
-  locally, not pushed". Once an origin exists, follow the fetch/push steps above.
+- With an origin configured, follow the fetch/rebase/push steps above. Only a repository without a remote
+  uses a local merge alone and ends with "committed locally, not pushed".
 
 ### 4. Clean up
 
@@ -272,9 +306,9 @@ Variants: `Committed locally main@abc1234, not pushed` / `Not committed (tests f
 - Delete or rewrite an existing migration; only append.
 - Change the 5173 port or the `/api` proxy in `web/vite.config.ts` — COS CORS and the development flow depend
   on it.
-- Change current runtime auth routing accidentally before its migration. For the replacement path-based
+- Change current runtime auth routing accidentally before its migration. For the replacement ID-or-path
   `/api/files` contract, use the explicit Bearer-or-cookie selection and CSRF rules in `docs/api/api.md`;
-  do not add a browser-specific file API or public file-ID routes.
+  do not add a browser-specific file API or a separate ID-only route family.
 
 ## Known traps (already hit)
 
@@ -285,8 +319,9 @@ Variants: `Committed locally main@abc1234, not pushed` / `Not committed (tests f
   filenames containing `+` return 403).
 - macOS filenames are NFD; without normalization you get "two files with the same name". `paths.Normalize`
   converts to NFC.
-- Renaming or moving a directory copies objects one by one on the server, which is very slow at TB scale; for
-  big directories use coscli first, then `reconcile`.
+- Flat object directory moves copy/verify/delete entries and can be slow at TB scale. Eligible Local native
+  folder moves relink one root; growing/deeper destinations use finite fallback. Outside tool moves followed
+  by additive reconcile do not automatically preserve public IDs or prune old rows.
 - Changing the email address requires two verification codes, for **both the current and the new address**;
   a session alone cannot do it.
 - The timeline does not refresh immediately after a move / copy: wait for the sweeper or call

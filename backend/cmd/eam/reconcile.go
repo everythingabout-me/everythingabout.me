@@ -11,6 +11,7 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 
 	"everythingabout.me/backend/internal/config"
+	"everythingabout.me/backend/internal/fileops"
 	"everythingabout.me/backend/internal/nodes"
 	"everythingabout.me/backend/internal/paths"
 	"everythingabout.me/backend/internal/storagebackend"
@@ -80,6 +81,12 @@ func runReconcile(args []string) error {
 		return err
 	}
 	defer driver.Close()
+	binding, err := backend.Binding(ownerID)
+	if err != nil {
+		return err
+	}
+	descriptor := driver.Describe()
+	changeRoot := fileops.Root{OwnerID: binding.OwnerID, ConnectionID: binding.ConnectionID, Generation: binding.Generation, ContentRoot: binding.ContentRoot, SystemRoot: binding.SystemRoot, CaseSensitive: descriptor.Names.CaseSensitive, RetainsVersions: descriptor.RetainsVersions}
 	// Keep deletion admission excluded through enumeration and import. A result
 	// captured before an accepted deletion cannot be applied after it completes.
 	scanConn, unlock, err := nodes.LockScanNamespace(ctx, db.Pool(), ownerID)
@@ -103,10 +110,6 @@ func runReconcile(args []string) error {
 		// use logical drive keys; neither becomes a raw private database key.
 		prefix := paths.OwnerPrefix(ownerID)
 		if cfg.BackendName() != "local" {
-			binding, err := backend.Binding(ownerID)
-			if err != nil {
-				return err
-			}
 			prefix = binding.ContentRoot
 		}
 		input, err := os.Open(*inventory)
@@ -127,7 +130,7 @@ func runReconcile(args []string) error {
 			return err
 		}
 	}
-	report, err := nodes.ApplyScan(ctx, scanConn, ownerID, result, nodes.ScanApplyOptions{DryRun: *dryRun})
+	report, err := nodes.ApplyScan(ctx, scanConn, ownerID, result, nodes.ScanApplyOptions{DryRun: *dryRun, ChangeRoot: &changeRoot})
 	if err != nil {
 		return err
 	}

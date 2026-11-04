@@ -374,7 +374,7 @@ func TestServicePostgresLocalCoordinator(t *testing.T) {
 		if err = json.Unmarshal(result.Result, &wire); err != nil {
 			t.Fatal(err)
 		}
-		if wire["path"] != "/"+string(target) || wire["id"] != nil || wire["key"] != nil || wire["revision"] == "" {
+		if wire["path"] != "/"+string(target) || wire["id"] == nil || wire["id"] == "" || wire["key"] != nil || wire["revision"] == "" {
 			t.Fatalf("invalid public settlement result: %s", result.Result)
 		}
 		guards, indexed := f.counts(t, op.ID)

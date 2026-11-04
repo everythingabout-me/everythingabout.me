@@ -240,8 +240,16 @@ func TestCommitFileActionProvenEffects(t *testing.T) {
 		}
 		var folderResult storage.MutationResult
 		json.Unmarshal(effects[0].Result, &folderResult)
-		if want := filerevision.Metadata(fileRootNamespace(root), m, nil, []string{"file:to/a.txt"}); m.Revision != want {
-			t.Fatalf("folder membership revision %s want %s", m.Revision, want)
+		record, err := fileBrowseMetadata(context.Background(), pool, root.OwnerID, fileRootNamespace(root), "to", nil)
+		if err != nil || record == nil {
+			t.Fatalf("folder membership %+v %v", record, err)
+		}
+		expected, err := IndexedMetadata(fileRootNamespace(root), *record)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if m.Revision != expected.Revision || m.ChangeToken != expected.ChangeToken {
+			t.Fatalf("folder metadata differs from browse: response=%s expected=%+v", result, expected)
 		}
 	})
 	t.Run("new folder publication removes stale destination descendants only", func(t *testing.T) {
@@ -257,7 +265,7 @@ func TestCommitFileActionProvenEffects(t *testing.T) {
 		assertActionID(t, pool, root, "targetXX/keep.txt", sibling)
 		assertActionID(t, pool, other, "target%_/ghost.txt", otherID)
 		record, err := fileBrowseMetadata(context.Background(), pool, root.OwnerID, fileRootNamespace(root), "target%_", nil)
-		if err != nil || record == nil || len(record.Membership) != 1 || record.Membership[0] != "file:target%_/actual.txt" {
+		if err != nil || record == nil || len(record.Membership) != 1 || record.Membership[0] != "membership:1" {
 			t.Fatalf("new folder membership %+v %v", record, err)
 		}
 	})

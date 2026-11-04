@@ -127,7 +127,7 @@ func captureStorageBaseline(ctx context.Context, cfg *config.Config, owner strin
 	if !found {
 		return a, fmt.Errorf("baseline owner not found")
 	}
-	rows, err := tx.Query(ctx, `select id::text,key,path,is_dir,size,etag,to_jsonb(nodes) from nodes where owner_id=$1::uuid order by key`, owner)
+	rows, err := tx.Query(ctx, `select id::text,key,path,is_dir,size,etag,to_jsonb(entry) from file_entries entry where owner_id=$1::uuid order by key`, owner)
 	if err != nil {
 		return a, err
 	}

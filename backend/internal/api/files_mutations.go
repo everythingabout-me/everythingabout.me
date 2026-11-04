@@ -12,10 +12,12 @@ import (
 	"io"
 	"mime"
 	"net/http"
+	"net/url"
 	"path"
 	"strings"
 	"time"
 
+	"everythingabout.me/backend/internal/filechanges"
 	fc "everythingabout.me/backend/internal/filecontract"
 	"everythingabout.me/backend/internal/fileops"
 	"everythingabout.me/backend/internal/nodes"
@@ -94,6 +96,17 @@ func (s *Server) fileMutationContext(ctx context.Context, f *fileRequest) (fileo
 	binding := native.StorageBinding()
 	root := fileops.Root{OwnerID: binding.OwnerID, ConnectionID: binding.ConnectionID, Generation: binding.Generation, ContentRoot: binding.ContentRoot, SystemRoot: binding.SystemRoot, CaseSensitive: native.StorageNameRules().CaseSensitive, RetainsVersions: native.Describe().RetainsVersions}
 	actor := fileops.Actor{ID: filePrincipalID(f.Principal), Scope: storage.Path(f.Scope.Relative()), CanRead: f.Principal.Token == nil || f.Principal.Token.CanRead, CanWrite: f.Principal.Token == nil || f.Principal.Token.CanWrite, ManageOwner: f.Principal.Token == nil}
+	if attribution, requestID, ok := filechanges.ActorFromContext(ctx); ok {
+		actor.Label = attribution.Label
+		actor.Kind = attribution.Kind
+		actor.RequestID = requestID
+		actor.CanChanges = attribution.CanChanges
+		actor.CanSubscribe = attribution.CanSubscribe
+		actor.CanEvents = attribution.CanEvents
+		if f.Principal.Token != nil {
+			actor.PolicyVersion = f.Principal.Token.PolicyVersion
+		}
+	}
 	// This internal readiness query does not disclose owner-wide usage to a token.
 	_, err := s.filesJournal.Usage(ctx, root, fileops.Actor{ID: "owner:" + root.OwnerID, CanRead: true, CanWrite: true, ManageOwner: true})
 	if err != nil {
@@ -144,6 +157,9 @@ func (s *Server) filesMutationAuthorize(r *http.Request, f *fileRequest, native 
 				return e
 			}
 		}
+		if err = s.filesCheckIdentityBindings(ctx, op); err != nil {
+			return err
+		}
 		if op.Kind == "upload_commit" && !op.Terminal() {
 			var intent storage.WriteIntent
 			if json.Unmarshal(op.Intent, &intent) != nil {
@@ -168,9 +184,32 @@ func strictFilesJSON(r *http.Request, out any) error {
 	if len(data) > 1<<20 {
 		return fc.NewProblem(413, "request_too_large", "The JSON request exceeds the supported size.")
 	}
+	if err := filesUniqueJSONValue(json.NewDecoder(bytes.NewReader(data))); err != nil {
+		var problem *fc.Problem
+		if errors.As(err, &problem) {
+			return err
+		}
+		return fc.NewProblem(400, "invalid_request", "JSON object fields must occur once.")
+	}
+	// A null alias must not disguise a mixed destination/target/path request.
+	switch out.(type) {
+	case *filesMkdirRequest, *filesCreateUploadRequest:
+		var fields map[string]json.RawMessage
+		if json.Unmarshal(data, &fields) == nil {
+			for _, key := range []string{"path", "destination", "target"} {
+				if value, present := fields[key]; present && bytes.Equal(bytes.TrimSpace(value), []byte("null")) {
+					return filesSelectorError()
+				}
+			}
+		}
+	}
 	d := json.NewDecoder(bytes.NewReader(data))
 	d.DisallowUnknownFields()
 	if err := d.Decode(out); err != nil {
+		var problem *fc.Problem
+		if errors.As(err, &problem) {
+			return err
+		}
 		return fc.NewProblem(400, "invalid_request", "The JSON request is invalid.")
 	}
 	var extra any
@@ -179,6 +218,76 @@ func strictFilesJSON(r *http.Request, out any) error {
 	}
 	return nil
 }
+
+// Duplicate keys can otherwise replace a selected identity or alias silently.
+func filesUniqueJSONValue(d *json.Decoder) error {
+	token, err := d.Token()
+	if err != nil {
+		return err
+	}
+	delimiter, ok := token.(json.Delim)
+	if !ok {
+		return nil
+	}
+	switch delimiter {
+	case '{':
+		seen := make(map[string]bool)
+		for d.More() {
+			token, err = d.Token()
+			if err != nil {
+				return err
+			}
+			key, ok := token.(string)
+			if !ok || seen[key] {
+				return errors.New("duplicate JSON field")
+			}
+			seen[key] = true
+			if err = filesUniqueJSONValue(d); err != nil {
+				return err
+			}
+		}
+	case '[':
+		for d.More() {
+			if err = filesUniqueJSONValue(d); err != nil {
+				return err
+			}
+		}
+	default:
+		return errors.New("invalid JSON delimiter")
+	}
+	_, err = d.Token()
+	return err
+}
+
+func filesSelectorSelection(selector fc.EntrySelector) string {
+	if selector.IsID() {
+		return "id"
+	}
+	return "path"
+}
+func filesDestinationSelection(destination fc.Destination) string {
+	if destination.Parent == nil {
+		return "path"
+	}
+	if destination.Parent.IsID() {
+		return "parentId"
+	}
+	return "parentPath"
+}
+
+// Bind the indexed identity after resolution and reject a concurrent retarget
+// between those observations. The saved binding is rechecked before native I/O.
+func (s *Server) filesBindMutationSelection(ctx context.Context, f *fileRequest, p fc.Path, mode, selectedID string) (string, string, error) {
+	entryID, parentID, err := s.filesSelectionBinding(ctx, f, p, mode)
+	if err != nil {
+		return "", "", err
+	}
+	if selectedID != "" && (mode == "id" && entryID != selectedID || mode == "parentId" && parentID != selectedID) {
+		return "", "", fc.NewProblem(412, "target_changed", "The selected identity changed before admission.")
+	}
+	return entryID, parentID, nil
+}
+
 func filesDigest(value string) (*storage.Digest, error) {
 	if value == "" {
 		return nil, nil
@@ -201,18 +310,53 @@ func filesPutClientCondition(c fc.PutCondition) string {
 	}
 	return "create:default"
 }
+func filesPutClientTarget(r *http.Request) (storage.WriteIntent, []filesReplaySelection, error) {
+	q, err := url.ParseQuery(r.URL.RawQuery)
+	if err != nil {
+		return storage.WriteIntent{}, nil, fc.NewProblem(400, "invalid_request", "The query encoding is invalid.")
+	}
+	for _, values := range q {
+		if len(values) != 1 {
+			return storage.WriteIntent{}, nil, filesSelectorError()
+		}
+	}
+	if q.Has("parentId") || q.Has("parentPath") || q.Has("name") {
+		if q.Has("parentId") == q.Has("parentPath") || !q.Has("name") || q.Has("id") || q.Has("path") || r.Header.Get("If-Match") != "" {
+			return storage.WriteIntent{}, nil, filesSelectorError()
+		}
+		parent := fc.EntrySelector{ID: q.Get("parentId"), Path: fc.Path(q.Get("parentPath"))}
+		destination := fc.Destination{Parent: &parent, Name: q.Get("name")}
+		if err = destination.Validate(); err != nil {
+			return storage.WriteIntent{}, nil, err
+		}
+		target, parentID := filesClientDestination(destination)
+		return storage.WriteIntent{Target: target, ParentID: parentID, Selection: filesDestinationSelection(destination)}, []filesReplaySelection{{selector: parent, write: true}}, nil
+	}
+	selector, err := fc.ParseSelectorQuery(r.URL.RawQuery, false)
+	if err != nil {
+		return storage.WriteIntent{}, nil, err
+	}
+	if selector.IsID() && r.Header.Get("If-Match") == "" {
+		return storage.WriteIntent{}, nil, fc.NewProblem(428, "precondition_required", "Replacing a file by ID requires If-Match.")
+	}
+	if selector.Path == "/" {
+		return storage.WriteIntent{}, nil, fc.NewProblem(400, "invalid_path", "The root cannot contain file content.")
+	}
+	return storage.WriteIntent{Target: storage.Path(selector.Path.Relative()), EntryID: selector.ID, Selection: filesSelectorSelection(selector)}, []filesReplaySelection{{selector: selector, write: true}}, nil
+}
+
 func (s *Server) handleFilesPut(w http.ResponseWriter, r *http.Request, f *fileRequest) error {
 	if !s.cfg.Storage.CoordinatedWrites {
 		return fc.NewProblem(501, "not_implemented", "Native file writes are not enabled.")
 	}
-	p, err := fc.ParseQueryPath(r.URL.RawQuery)
+	intent, replaySelection, err := filesPutClientTarget(r)
 	if err != nil {
 		return err
 	}
-	if p == "/" {
-		return fc.NewProblem(400, "invalid_path", "The root cannot contain file content.")
+	if err = f.RequireWrite(f.Scope); err != nil {
+		return err
 	}
-	if err = f.RequireWrite(p); err != nil {
+	if err = s.filesAuthorizeReplaySelection(r.Context(), f, replaySelection); err != nil {
 		return err
 	}
 	if r.ContentLength < 0 {
@@ -262,7 +406,7 @@ func (s *Server) handleFilesPut(w http.ResponseWriter, r *http.Request, f *fileR
 	if max := native.Describe().MaxFileBytes; max > 0 && r.ContentLength > max {
 		return fc.NewProblem(413, "request_too_large", "The content exceeds the admitted publication limit.")
 	}
-	intent := storage.WriteIntent{Target: storage.Path(p.Relative()), Size: r.ContentLength, MediaType: media, SourceModifiedAt: modified, Digest: digest, ClientCondition: filesPutClientCondition(condition)}
+	intent.Size, intent.MediaType, intent.SourceModifiedAt, intent.Digest, intent.ClientCondition = r.ContentLength, media, modified, digest, filesPutClientCondition(condition)
 	key := r.Header.Get("Idempotency-Key")
 	if len(key) > 1024 || strings.ContainsAny(key, "\r\n\x00") {
 		return fc.NewProblem(400, "invalid_request", "Idempotency-Key is invalid.")
@@ -282,16 +426,38 @@ func (s *Server) handleFilesPut(w http.ResponseWriter, r *http.Request, f *fileR
 		if !found {
 			return false, nil
 		}
+		if e = s.filesAuthorizeReplaySelection(r.Context(), f, replaySelection); e != nil {
+			return true, e
+		}
 		if e = filesValidatePutReplay(r.Context(), r.Body, intent, old.Stage); e != nil {
 			return true, filesMutationProblem(e)
 		}
 		saved, e := service.Write(r.Context(), root, actor, old.ID, native, nil)
 		s.filesCleanupTerminal(r.Context(), service, native, root, actor, saved)
-		return true, s.filesPutResponse(w, r, saved, e, condition.Mode == fc.PutReplace)
+		return true, s.filesPutResponse(w, r, saved, e, condition.Mode == fc.PutReplace, f)
 	}
 	if found, e := replayWrite(); found {
 		return e
 	}
+	p, err := s.filesResolvePutQuery(r.Context(), f, r)
+	if err != nil {
+		return err
+	}
+	if err = f.RequireWrite(p); err != nil {
+		return err
+	}
+	selectedID := intent.EntryID
+	if intent.Selection == "parentId" {
+		selectedID = intent.ParentID
+	}
+	entryID, parentID, err := s.filesBindMutationSelection(r.Context(), f, p, intent.Selection, selectedID)
+	if err != nil {
+		return err
+	}
+	if condition.Mode == fc.PutCreate {
+		entryID = ""
+	}
+	intent.Target, intent.EntryID, intent.ParentID = storage.Path(p.Relative()), entryID, parentID
 	parentName := path.Dir(p.Relative())
 	if parentName == "." {
 		parentName = ""
@@ -368,7 +534,7 @@ func (s *Server) handleFilesPut(w http.ResponseWriter, r *http.Request, f *fileR
 	}
 	saved, err := service.Write(r.Context(), root, actor, op.ID, native, r.Body)
 	s.filesCleanupTerminal(r.Context(), service, native, root, actor, saved)
-	return s.filesPutResponse(w, r, saved, err, condition.Mode == fc.PutReplace)
+	return s.filesPutResponse(w, r, saved, err, condition.Mode == fc.PutReplace, f)
 }
 func (s *Server) filesCleanupTerminal(ctx context.Context, service *fileops.Service, native fileops.NativeActions, root fileops.Root, actor fileops.Actor, op fileops.Operation) {
 	if !op.Terminal() || op.ID == "" {
@@ -403,7 +569,10 @@ func filesValidatePutReplay(ctx context.Context, body io.Reader, intent storage.
 	return nil
 }
 
-func (s *Server) filesPutResponse(w http.ResponseWriter, r *http.Request, op fileops.Operation, err error, replaced bool) error {
+func (s *Server) filesPutResponse(w http.ResponseWriter, r *http.Request, op fileops.Operation, err error, replaced bool, scopes ...*fileRequest) error {
+	if len(scopes) > 0 {
+		op.Result = filesScopedResult(op.Result, scopes[0])
+	}
 	if op.ID != "" {
 		w.Header().Set("Location", "/api/files/operations/"+op.ID)
 	}
@@ -441,6 +610,13 @@ func randomFilesKey() string {
 }
 func (s *Server) filesActions(r *http.Request, f *fileRequest, native fileops.NativeActions) (*fileops.Actions, error) {
 	return fileops.NewActions(s.filesJournal, fileops.ActionsOptions{Authorize: s.filesMutationAuthorize(r, f, native), Commit: nodes.CommitFileAction, Validate: func(ctx context.Context, n fileops.NativeActions, req fileops.ActionRequest) error {
+		encoded, err := json.Marshal(req)
+		if err != nil {
+			return err
+		}
+		if err = s.filesCheckIdentityBindings(ctx, fileops.Operation{Root: req.Root, Kind: req.Kind, Intent: encoded}); err != nil {
+			return err
+		}
 		if req.IfRevision == "" {
 			return nil
 		}
@@ -457,48 +633,209 @@ func (s *Server) filesActions(r *http.Request, f *fileRequest, native fileops.Na
 		return fc.CheckRevision(req.IfRevision, resource.Revision)
 	}})
 }
+
+type filesMkdirRequest struct {
+	Kind        string          `json:"kind"`
+	Destination *fc.Destination `json:"destination"`
+	Path        *string         `json:"path"`
+	Parents     bool            `json:"parents"`
+}
+
+func filesCreateDestination(destination *fc.Destination, legacyPath *string) (fc.Destination, error) {
+	if (destination == nil) == (legacyPath == nil) {
+		return fc.Destination{}, filesSelectorError()
+	}
+	if destination != nil {
+		return *destination, destination.Validate()
+	}
+	p, err := fc.ParsePath(*legacyPath)
+	if err != nil {
+		return fc.Destination{}, err
+	}
+	return fc.Destination{Path: p}, nil
+}
+
+// These paths describe client selectors only. An ID-selected location is resolved
+// after replay, so a lost response can still be recovered after a move or delete.
+func filesClientDestination(d fc.Destination) (storage.Path, string) {
+	if d.Parent == nil {
+		return storage.Path(d.Path.Relative()), ""
+	}
+	if d.Parent.IsID() {
+		return storage.Path(d.Name), d.Parent.ID
+	}
+	return storage.Path(strings.TrimPrefix(path.Join(string(d.Parent.Path), d.Name), "/")), ""
+}
+
+type filesReplaySelection struct {
+	selector    fc.EntrySelector
+	read, write bool
+}
+
+func (s *Server) filesAuthorizeReplaySelection(ctx context.Context, f *fileRequest, selected []filesReplaySelection) error {
+	for _, selection := range selected {
+		if selection.selector.IsID() {
+			index, ok := s.filesIndex.(FileIdentityIndex)
+			if !ok {
+				return fc.NewProblem(503, "temporarily_unavailable", "File identity lookup is unavailable.")
+			}
+			_, found, err := index.FileResolveID(ctx, f.Principal.User.ID, selection.selector.ID)
+			if err != nil {
+				return err
+			}
+			// A retired ID has no current entry to disclose. Only a matched, scoped
+			// journal record can reach here; pending operations still validate bindings.
+			if !found {
+				continue
+			}
+		}
+		p, err := s.filesResolveSelector(ctx, f, selection.selector)
+		if err != nil {
+			return err
+		}
+		if selection.read {
+			if err = f.RequireRead(p); err != nil {
+				return err
+			}
+		}
+		if selection.write {
+			if err = f.RequireWrite(p); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func (s *Server) filesReplayActionRequest(w http.ResponseWriter, r *http.Request, f *fileRequest, request fileops.ActionRequest, selected ...filesReplaySelection) (bool, error) {
+	key := r.Header.Get("Idempotency-Key")
+	if key == "" {
+		return false, nil
+	}
+	if len(key) > 1024 || strings.ContainsAny(key, "\r\n\x00") {
+		return true, fc.NewProblem(400, "invalid_request", "Idempotency-Key is invalid.")
+	}
+	if err := f.RequireWrite(f.Scope); err != nil {
+		return true, err
+	}
+	if request.Kind == "move" || request.Kind == "copy" {
+		if err := f.RequireRead(f.Scope); err != nil {
+			return true, err
+		}
+	}
+	if err := s.filesAuthorizeReplaySelection(r.Context(), f, selected); err != nil {
+		return true, err
+	}
+	_, root, actor, err := s.fileMutationContext(r.Context(), f)
+	if err != nil {
+		return true, err
+	}
+	request.Root, request.Actor, request.IdempotencyKey = root, actor, key
+	op, found, err := s.filesJournal.ReplayAction(r.Context(), request)
+	if err != nil {
+		return true, filesMutationProblem(err)
+	}
+	if !found {
+		return false, nil
+	}
+	if err = s.filesAuthorizeReplaySelection(r.Context(), f, selected); err != nil {
+		return true, err
+	}
+	var original fileops.ActionRequest
+	if json.Unmarshal(op.Intent, &original) != nil {
+		return true, fileops.E("invalid_intent", nil)
+	}
+	// Reuse the saved admission paths. Prepare authorizes the original guards and
+	// persistent identities before running any pending native effect.
+	return true, s.filesAction(w, r, f, original)
+}
+
 func (s *Server) handleFilesMkdir(w http.ResponseWriter, r *http.Request, f *fileRequest) error {
 	if !s.cfg.Storage.CoordinatedWrites {
 		return fc.NewProblem(501, "not_implemented", "Native file writes are not enabled.")
 	}
-	var request struct {
-		Kind    string `json:"kind"`
-		Path    string `json:"path"`
-		Parents bool   `json:"parents"`
-	}
+	var request filesMkdirRequest
 	if err := strictFilesJSON(r, &request); err != nil {
 		return err
 	}
 	if request.Kind != "folder" {
 		return fc.NewProblem(400, "invalid_request", "Folder creation requires kind folder.")
 	}
-	p, err := fc.ParsePath(request.Path)
+	destination, err := filesCreateDestination(request.Destination, request.Path)
+	if err != nil {
+		return err
+	}
+	if request.Parents && destination.Parent != nil {
+		return fc.NewProblem(400, "invalid_request", "Creating parents requires a full-path destination.")
+	}
+	clientTo, clientParent := filesClientDestination(destination)
+	parentSelector := fc.EntrySelector{Path: destination.Path}
+	if destination.Parent != nil {
+		parentSelector = *destination.Parent
+	}
+	if replayed, e := s.filesReplayActionRequest(w, r, f, fileops.ActionRequest{Kind: "mkdir", To: clientTo, ParentID: clientParent, Parents: request.Parents, Selection: "path:" + filesDestinationSelection(destination)}, filesReplaySelection{selector: parentSelector, write: true}); replayed {
+		return e
+	}
+	p, err := s.filesResolveDestination(r.Context(), f, destination)
 	if err != nil {
 		return err
 	}
 	if err = f.RequireWrite(p); err != nil {
 		return err
 	}
-	return s.filesAction(w, r, f, fileops.ActionRequest{Kind: "mkdir", To: storage.Path(p.Relative()), Parents: request.Parents})
+	mode := filesDestinationSelection(destination)
+	selectedID := ""
+	if destination.Parent != nil {
+		selectedID = destination.Parent.ID
+	}
+	_, parentID, err := s.filesBindMutationSelection(r.Context(), f, p, mode, selectedID)
+	if err != nil {
+		return err
+	}
+	return s.filesAction(w, r, f, fileops.ActionRequest{Kind: "mkdir", To: storage.Path(p.Relative()), Parents: request.Parents, ParentID: parentID, Selection: "path:" + mode})
 }
+
+type filesMoveCopyRequest struct {
+	From             fc.EntrySelector `json:"from"`
+	To               fc.Destination   `json:"to"`
+	IfRevision       string           `json:"ifRevision"`
+	IfSourceRevision string           `json:"ifSourceRevision"`
+}
+
 func (s *Server) filesMoveCopy(w http.ResponseWriter, r *http.Request, f *fileRequest, kind string) error {
 	if !s.cfg.Storage.CoordinatedWrites {
 		return fc.NewProblem(501, "not_implemented", "Native file writes are not enabled.")
 	}
-	var request struct {
-		From             string `json:"from"`
-		To               string `json:"to"`
-		IfRevision       string `json:"ifRevision"`
-		IfSourceRevision string `json:"ifSourceRevision"`
-	}
+	var request filesMoveCopyRequest
 	if err := strictFilesJSON(r, &request); err != nil {
 		return err
 	}
-	from, err := fc.ParsePath(request.From)
+	if err := request.From.Validate(); err != nil {
+		return err
+	}
+	if err := request.To.Validate(); err != nil {
+		return err
+	}
+	revision := request.IfRevision
+	if kind == "copy" {
+		revision = request.IfSourceRevision
+	}
+	if revision == "" {
+		return fc.NewProblem(428, "precondition_required", "The source metadata revision is required.")
+	}
+	clientTo, clientParent := filesClientDestination(request.To)
+	destinationSelector := fc.EntrySelector{Path: request.To.Path}
+	if request.To.Parent != nil {
+		destinationSelector = *request.To.Parent
+	}
+	if replayed, e := s.filesReplayActionRequest(w, r, f, fileops.ActionRequest{Kind: kind, From: storage.Path(request.From.Path.Relative()), To: clientTo, EntryID: request.From.ID, ParentID: clientParent, IfRevision: revision, Selection: filesSelectorSelection(request.From) + ":" + filesDestinationSelection(request.To)}, filesReplaySelection{selector: request.From, read: true, write: kind == "move"}, filesReplaySelection{selector: destinationSelector, write: true}); replayed {
+		return e
+	}
+	from, err := s.filesResolveSelector(r.Context(), f, request.From)
 	if err != nil {
 		return err
 	}
-	to, err := fc.ParsePath(request.To)
+	to, err := s.filesResolveDestination(r.Context(), f, request.To)
 	if err != nil {
 		return err
 	}
@@ -511,14 +848,21 @@ func (s *Server) filesMoveCopy(w http.ResponseWriter, r *http.Request, f *fileRe
 	if err = f.RequireWrite(to); err != nil {
 		return err
 	}
-	revision := request.IfRevision
-	if kind == "copy" {
-		revision = request.IfSourceRevision
+
+	sourceMode, destinationMode := filesSelectorSelection(request.From), filesDestinationSelection(request.To)
+	entryID, _, err := s.filesBindMutationSelection(r.Context(), f, from, sourceMode, request.From.ID)
+	if err != nil {
+		return err
 	}
-	if revision == "" {
-		return fc.NewProblem(428, "precondition_required", "The source metadata revision is required.")
+	selectedParentID := ""
+	if request.To.Parent != nil {
+		selectedParentID = request.To.Parent.ID
 	}
-	return s.filesAction(w, r, f, fileops.ActionRequest{Kind: kind, From: storage.Path(from.Relative()), To: storage.Path(to.Relative()), IfRevision: revision})
+	_, parentID, err := s.filesBindMutationSelection(r.Context(), f, to, destinationMode, selectedParentID)
+	if err != nil {
+		return err
+	}
+	return s.filesAction(w, r, f, fileops.ActionRequest{Kind: kind, From: storage.Path(from.Relative()), To: storage.Path(to.Relative()), IfRevision: revision, EntryID: entryID, ParentID: parentID, Selection: sourceMode + ":" + destinationMode})
 }
 func (s *Server) handleFilesMove(w http.ResponseWriter, r *http.Request, f *fileRequest) error {
 	return s.filesMoveCopy(w, r, f, "move")
@@ -530,11 +874,8 @@ func (s *Server) handleFilesDelete(w http.ResponseWriter, r *http.Request, f *fi
 	if !s.cfg.Storage.CoordinatedWrites {
 		return fc.NewProblem(501, "not_implemented", "Native file writes are not enabled.")
 	}
-	p, err := fc.ParseQueryPath(r.URL.RawQuery)
+	selector, err := fc.ParseSelectorQuery(r.URL.RawQuery, false)
 	if err != nil {
-		return err
-	}
-	if err = f.RequireWrite(p); err != nil {
 		return err
 	}
 	recursive := false
@@ -544,7 +885,22 @@ func (s *Server) handleFilesDelete(w http.ResponseWriter, r *http.Request, f *fi
 		}
 		recursive = values[0] == "true"
 	}
-	return s.filesAction(w, r, f, fileops.ActionRequest{Kind: "delete", From: storage.Path(p.Relative()), Recursive: recursive, IfRevision: r.Header.Get("If-Revision")})
+	mode := filesSelectorSelection(selector)
+	if replayed, e := s.filesReplayActionRequest(w, r, f, fileops.ActionRequest{Kind: "delete", From: storage.Path(selector.Path.Relative()), EntryID: selector.ID, Selection: mode, Recursive: recursive, IfRevision: r.Header.Get("If-Revision")}, filesReplaySelection{selector: selector, write: true}); replayed {
+		return e
+	}
+	p, err := s.filesResolveQuery(r.Context(), f, r.URL.RawQuery, false)
+	if err != nil {
+		return err
+	}
+	if err = f.RequireWrite(p); err != nil {
+		return err
+	}
+	entryID, parentID, err := s.filesBindMutationSelection(r.Context(), f, p, mode, r.URL.Query().Get("id"))
+	if err != nil {
+		return err
+	}
+	return s.filesAction(w, r, f, fileops.ActionRequest{Kind: "delete", From: storage.Path(p.Relative()), Recursive: recursive, IfRevision: r.Header.Get("If-Revision"), EntryID: entryID, ParentID: parentID, Selection: mode})
 }
 func (s *Server) filesAction(w http.ResponseWriter, r *http.Request, f *fileRequest, request fileops.ActionRequest) error {
 	native, root, actor, err := s.fileMutationContext(r.Context(), f)
@@ -569,7 +925,7 @@ func (s *Server) filesAction(w http.ResponseWriter, r *http.Request, f *fileRequ
 		if err = s.startFilesAction(r, f, op); err != nil && !errors.Is(err, errFilesWorkerBusy) {
 			return filesMutationProblem(err)
 		}
-		return writeFilesOperation(w, op, 202)
+		return writeFilesOperation(w, op, 202, f)
 	}
 	if !op.Terminal() {
 		op, err = actions.Run(r.Context(), root, actor, op.ID, native)
@@ -581,7 +937,7 @@ func (s *Server) filesAction(w http.ResponseWriter, r *http.Request, f *fileRequ
 		return filesMutationProblem(err)
 	}
 	if !op.Terminal() {
-		return writeFilesOperation(w, op, 202)
+		return writeFilesOperation(w, op, 202, f)
 	}
 	if op.State != fileops.Succeeded {
 		return filesOperationFailure(op)
@@ -598,7 +954,7 @@ func (s *Server) filesAction(w http.ResponseWriter, r *http.Request, f *fileRequ
 		status = 200
 	}
 	_ = replay
-	return writeFilesJSON(w, status, json.RawMessage(op.Result))
+	return writeFilesJSON(w, status, filesScopedResult(op.Result, f))
 }
 func (s *Server) filesPutRecovery(r *http.Request, f *fileRequest, native fileops.NativeActions) (*fileops.Service, error) {
 	return fileops.NewService(s.filesJournal, fileops.ServiceOptions{Authorize: s.filesMutationAuthorize(r, f, native), Commit: nodes.CommitStagedFile, PhysicalDelta: func(op fileops.Operation, _ storage.MutationResult) (int64, error) {

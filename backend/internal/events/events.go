@@ -357,7 +357,7 @@ func (s *Service) attachMedia(ctx context.Context, userID string, list []Event) 
 	rows, err := s.db.Pool().Query(ctx,
 		`select em.event_id::text, em.idx, n.path, coalesce(n.name, ''), coalesce(n.mime, '')
 		   from event_media em
-		   join nodes n on n.id = em.node_id
+		   join file_entries n on n.id = em.node_id
 		  where em.event_id = any($1::uuid[]) and n.owner_id = $2::uuid
 		  order by em.event_id, em.idx`, ids, userID)
 	if err != nil {

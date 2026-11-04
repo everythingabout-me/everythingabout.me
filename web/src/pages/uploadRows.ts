@@ -52,7 +52,7 @@ export function buildUploadRows(items: Item[], tasks: UploadTask[], directory: s
   const rows = new Map<string, UploadRowEntry>();
   const groups = new Map<string, UploadTask[]>();
   for (const item of items) {
-    if (normalize(item.parentPath) !== dir) continue;
+    if (item.parentPath === null || normalize(item.parentPath) !== dir) continue;
     const path = normalize(item.path);
     rows.set(path, { path, name: item.name, isDir: item.kind === "folder", item });
   }

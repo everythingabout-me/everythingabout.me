@@ -1,10 +1,44 @@
 package auth
 
 import (
+	"context"
 	"strings"
 	"testing"
 	"time"
 )
+
+func TestTokenPermissionDependencies(t *testing.T) {
+	for mask := 0; mask < 32; mask++ {
+		read, write, events := mask&1 != 0, mask&2 != 0, mask&4 != 0
+		changes, subscribe := mask&8 != 0, mask&16 != 0
+		valid := (read || write || events) && (!changes || read) && (!subscribe || (changes && read))
+		err := validateTokenPermissions(read, write, events, changes, subscribe)
+		if (err == nil) != valid {
+			t.Errorf("permissions %05b validation = %v, valid=%v", mask, err, valid)
+		}
+	}
+	service := &Service{}
+	for _, tc := range []struct {
+		name                     string
+		read, changes, subscribe bool
+		message                  string
+	}{
+		{"changes without read", false, true, false, "changes permission requires read permission"},
+		{"subscribe without changes", true, false, true, "subscribe permission requires changes and read permissions"},
+		{"subscribe without read", false, false, true, "subscribe permission requires changes and read permissions"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, _, err := service.CreateToken(context.Background(), NewTokenInput{CanWrite: true, CanRead: tc.read, CanChanges: tc.changes, CanSubscribe: tc.subscribe})
+			if err == nil || err.Error() != tc.message {
+				t.Fatalf("create validation: %v, want %q", err, tc.message)
+			}
+			_, err = service.UpdateToken(context.Background(), "", "", UpdateTokenInput{CanWrite: true, CanRead: tc.read, CanChanges: tc.changes, CanSubscribe: tc.subscribe})
+			if err == nil || err.Error() != tc.message {
+				t.Fatalf("update validation: %v, want %q", err, tc.message)
+			}
+		})
+	}
+}
 
 func TestParseToken(t *testing.T) {
 	id := "7f3a9c2b1d4e"

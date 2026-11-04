@@ -22,11 +22,18 @@ type Root struct {
 	RetainsVersions bool // native delete/replace retains previous object generations
 }
 type Actor struct {
-	ID          string // stable creator principal, e.g. owner:<UUID> or token:<private-token-id>
-	Scope       storage.Path
-	CanRead     bool
-	CanWrite    bool
-	ManageOwner bool // explicit first-party owner recovery; not implicit shared-owner token access
+	Label         string `json:",omitempty"`
+	Kind          string `json:",omitempty"`
+	PolicyVersion int64  `json:",omitempty"`
+	CanChanges    bool   `json:",omitempty"`
+	CanSubscribe  bool   `json:",omitempty"`
+	CanEvents     bool   `json:",omitempty"`
+	RequestID     string `json:",omitempty"`
+	ID            string // stable creator principal, e.g. owner:<UUID> or token:<private-token-id>
+	Scope         storage.Path
+	CanRead       bool
+	CanWrite      bool
+	ManageOwner   bool // explicit first-party owner recovery; not implicit shared-owner token access
 }
 type Guard struct {
 	Path    storage.Path
@@ -96,6 +103,7 @@ type EntryEffect struct {
 	Result     json.RawMessage
 }
 type Operation struct {
+	Attribution        Actor `json:",omitempty"`
 	ID                 string
 	Root               Root
 	PrincipalID        string

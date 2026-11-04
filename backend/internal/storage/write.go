@@ -24,6 +24,9 @@ type MutationResult struct {
 type Checkpoint func(context.Context, []byte) error
 
 type WriteIntent struct {
+	EntryID          string `json:",omitempty"`
+	ParentID         string `json:",omitempty"`
+	Selection        string `json:",omitempty"`
 	ID               string
 	Target           Path
 	Conditions       Conditions

@@ -60,6 +60,8 @@ function accessLabel(connection: Connection): string {
   if (connection.events && (connection.read || connection.write)) {
     label = `${label} + ${t("connect.events")}`;
   }
+  if (connection.changes) label = `${label} + ${t("connect.changes")}`;
+  if (connection.subscribe) label = `${label} + ${t("connect.subscribe")}`;
   return label;
 }
 
@@ -138,6 +140,8 @@ export function ConnectPage() {
         read: true,
         write: true,
         events: true,
+        changes: false,
+        subscribe: false,
         expiresIn: 0,
       });
       setTokens((current) => [result.token, ...current]);
@@ -301,6 +305,8 @@ function AppHandoff({
     read?: boolean;
     write?: boolean;
     events?: boolean;
+    changes?: boolean;
+    subscribe?: boolean;
     lifetime?: number;
   }) {
     if (savingRef.current) return;
@@ -308,7 +314,17 @@ function AppHandoff({
     const read = next.read ?? token.read;
     const write = next.write ?? token.write;
     const events = next.events ?? token.events;
+    const changes = next.changes ?? token.changes;
+    const subscribe = next.subscribe ?? token.subscribe;
     const life = next.lifetime ?? lifetime;
+    if (changes && !read) {
+      setConfigError(t("connect.changesNeedRead"));
+      return;
+    }
+    if (subscribe && (!changes || !read)) {
+      setConfigError(t("connect.subscribeNeedsChanges"));
+      return;
+    }
     if (!read && !write && !events) {
       setConfigError(t("connect.needPermission"));
       return;
@@ -318,6 +334,8 @@ function AppHandoff({
       read === token.read &&
       write === token.write &&
       events === token.events &&
+      changes === token.changes &&
+      subscribe === token.subscribe &&
       life === lifetime
     ) {
       return;
@@ -327,13 +345,13 @@ function AppHandoff({
     const previous = token;
     const previousLifetime = lifetime;
     const expiresAt = life === 0 ? null : new Date(Date.now() + life * 1000).toISOString();
-    setToken({ ...token, prefix, read, write, events, expiresAt });
+    setToken({ ...token, prefix, read, write, events, changes, subscribe, expiresAt });
     setLifetime(life);
     savingRef.current = true;
     setSaving(true);
     setConfigError(null);
     try {
-      const saved = await api.updateConnection(token.id, { prefix, read, write, events, expiresIn: life });
+      const saved = await api.updateConnection(token.id, { prefix, read, write, events, changes, subscribe, expiresIn: life });
       setToken(saved.token);
       onUpdated(saved.token);
     } catch (caught) {
@@ -400,6 +418,16 @@ function AppHandoff({
                   label={t("connect.events")}
                   checked={token.events}
                   onChange={() => void configure({ events: !token.events })}
+                />
+                <CheckBox
+                  label={t("connect.changes")}
+                  checked={token.changes}
+                  onChange={() => void configure({ changes: !token.changes })}
+                />
+                <CheckBox
+                  label={t("connect.subscribe")}
+                  checked={token.subscribe}
+                  onChange={() => void configure({ subscribe: !token.subscribe })}
                 />
               </div>
             </div>

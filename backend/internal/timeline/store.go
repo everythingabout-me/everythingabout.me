@@ -47,7 +47,7 @@ func (s *Service) recentFiles(ctx context.Context, userID string, limit int) ([]
 		        coalesce(n.mime, ''),
 		        coalesce(n.source_modified_at, n.updated_at, now()),
 		        n.updated_at, n.created_at, coalesce(n.etag, '')
-		   from nodes n
+		   from file_entries n
 		   left join timeline_assets a on a.user_id = n.owner_id and a.node_id = n.id
 		  where n.owner_id = $1::uuid
 		    and n.is_dir = false
@@ -76,7 +76,7 @@ func (s *Service) backfillFiles(
 		        coalesce(n.mime, ''),
 		        coalesce(n.source_modified_at, n.updated_at, now()),
 		        n.updated_at, n.created_at, coalesce(n.etag, '')
-		   from nodes n
+		   from file_entries n
 		  where n.owner_id = $1::uuid
 		    and n.is_dir = false
 		    and n.id > coalesce(nullif($2::text, '')::uuid,
@@ -313,7 +313,7 @@ func (s *Service) monthAssets(
 		`select a.node_id::text, n.path, n.name, n.parent, n.size, a.media_type,
 		        a.event_time, a.local_date, a.quality, a.is_narrative, a.is_ambient, a.is_screenshot
 		   from timeline_assets a
-		   join nodes n on n.id = a.node_id
+		   join file_entries n on n.id = a.node_id and n.owner_id = a.user_id
 		  where a.user_id = $1::uuid
 		    and a.local_date >= $2 and a.local_date < $3
 		  order by a.event_time`, userID, start, end)

@@ -20,6 +20,13 @@ try {
   });
   await page.goto(`${config.url}/files`);
   await page.locator('input[type="file"]').first().waitFor({ state: "attached" });
+  const capabilityResponse = await context.request.get(`${config.url}/api/files/capabilities`);
+  assert.equal(capabilityResponse.status(), 200);
+  const capabilities = await capabilityResponse.json();
+  assert.equal(capabilities.uploads, true);
+  assert.ok(Number.isSafeInteger(capabilities.maxPartBytes) && capabilities.maxPartBytes > 0);
+  assert.ok(capabilities.maxUploadParallelism >= 2, "the interruption scenario requires concurrent parts");
+  const uploadPartBytes = capabilities.maxPartBytes;
   // Normal upload uses a real File input, real CSRF/bootstrap and P5 bytes.
   await page.locator('input[type="file"]').first().setInputFiles({ name: "hello +?#%.txt", mimeType: "text/plain", buffer: Buffer.from("browser upload\n") });
   const metadata = async (path) => context.request.get(`${config.url}/api/files?${new URLSearchParams({ path })}`);
@@ -54,10 +61,14 @@ try {
     interruptedSession = new URL(route.request().url()).pathname.split("/")[4];
     await held; await route.abort().catch(() => {});
   });
-  const large = { name: "interrupted.bin", mimeType: "application/octet-stream", buffer: Buffer.alloc(9 * 1024 * 1024, 65) };
+  const large = { name: "interrupted.bin", mimeType: "application/octet-stream", buffer: Buffer.alloc(uploadPartBytes + 1, 65) };
   await page.locator('input[type="file"]').first().setInputFiles(large);
   for (let i = 0; i < 200 && !intercepted; i++) await page.waitForTimeout(50);
   assert.equal(intercepted, true, "the second parallel part was reached");
+  const interrupted = await (await context.request.get(`${config.url}/api/files/uploads/${interruptedSession}`)).json();
+  assert.equal(interrupted.partSize, uploadPartBytes);
+  assert.equal(interrupted.partCount, 2);
+  assert.ok(interrupted.maxParallelism >= 2);
   let firstPartDurable = false;
   for (let i = 0; i < 200 && !firstPartDurable; i++) {
     const response = await context.request.get(`${config.url}/api/files/uploads/${interruptedSession}/parts`);

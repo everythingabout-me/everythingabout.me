@@ -22,7 +22,7 @@ import (
 func runToken(args []string) error {
 	if len(args) == 0 {
 		return fmt.Errorf(`usage:
-  eam token create --email email --name name [--prefix path] [--write=false] [--events] [--expires 720h]
+  eam token create --email email --name name [--prefix path] [--write=false] [--events] [--changes] [--subscribe] [--expires 720h]
   eam token list   --email email
   eam token revoke --email email --id token-id`)
 	}
@@ -46,6 +46,8 @@ func runTokenCreate(args []string) error {
 	canRead := flags.Bool("read", true, "allow reads")
 	canWrite := flags.Bool("write", true, "allow file writes")
 	canEvents := flags.Bool("events", false, "allow writing timeline events")
+	canChanges := flags.Bool("changes", false, "allow reading file change history (requires read)")
+	canSubscribe := flags.Bool("subscribe", false, "allow file change subscriptions (requires changes and read)")
 	expires := flags.Duration("expires", 0, "lifetime, e.g. 720h (never expires by default)")
 	if err := flags.Parse(args); err != nil {
 		return err
@@ -75,13 +77,15 @@ func runTokenCreate(args []string) error {
 	}
 
 	plain, token, err := svc.CreateToken(context.Background(), auth.NewTokenInput{
-		UserID:    user.ID,
-		Name:      *name,
-		Prefix:    *prefix,
-		CanRead:   *canRead,
-		CanWrite:  *canWrite,
-		CanEvents: *canEvents,
-		Expiry:    expiry,
+		UserID:       user.ID,
+		Name:         *name,
+		Prefix:       *prefix,
+		CanRead:      *canRead,
+		CanWrite:     *canWrite,
+		CanEvents:    *canEvents,
+		CanChanges:   *canChanges,
+		CanSubscribe: *canSubscribe,
+		Expiry:       expiry,
 	})
 	if err != nil {
 		return err
@@ -94,7 +98,7 @@ func runTokenCreate(args []string) error {
 	} else {
 		fmt.Printf("  prefix: %s\n", token.Prefix)
 	}
-	fmt.Printf("  access: %s\n", permissionText(token.CanRead, token.CanWrite, token.CanEvents))
+	fmt.Printf("  access: %s\n", permissionText(token.CanRead, token.CanWrite, token.CanEvents, token.CanChanges, token.CanSubscribe))
 	if token.ExpiresAt == nil {
 		fmt.Printf("  expiry: never\n")
 	} else {
@@ -157,7 +161,7 @@ func runTokenList(args []string) error {
 			status = "revoked"
 		}
 		fmt.Fprintf(writer, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
-			token.ID, token.Name, prefix, permissionText(token.CanRead, token.CanWrite, token.CanEvents),
+			token.ID, token.Name, prefix, permissionText(token.CanRead, token.CanWrite, token.CanEvents, token.CanChanges, token.CanSubscribe),
 			status, lastUsed, expiresAt)
 	}
 	return writer.Flush()
@@ -206,7 +210,7 @@ func openAuthService() (*store.DB, *auth.Service, error) {
 	return db, auth.New(db, cfg), nil
 }
 
-func permissionText(read, write, events bool) string {
+func permissionText(read, write, events, changes, subscribe bool) string {
 	var parts []string
 	if read {
 		parts = append(parts, "read")
@@ -216,6 +220,12 @@ func permissionText(read, write, events bool) string {
 	}
 	if events {
 		parts = append(parts, "events")
+	}
+	if changes {
+		parts = append(parts, "changes")
+	}
+	if subscribe {
+		parts = append(parts, "subscribe")
 	}
 	if len(parts) == 0 {
 		return "none"

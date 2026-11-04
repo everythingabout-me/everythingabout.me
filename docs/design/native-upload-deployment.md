@@ -21,7 +21,7 @@ seals the manifest and performs native completion once, followed by index/result
 or uploads another whole-file body. It is a native publication operation, not just a database update.
 
 Both transports share one global pool of sixteen browser part requests (up to eight files; one file may use all sixteen),
-32 MiB parts and at most 10000 parts (80000 MiB before budgets or lower storage limits). Small single-content PUT
+32 MiB parts and at most 10000 parts (320000 MiB before budgets or lower storage limits). Small single-content PUT
 has its separate default 32 MiB/object maximum 5 GiB policy and is disabled in edgeone mode. Zero-byte sessions
 have no parts and use the existing guarded zero-byte publication at commit.
 
@@ -115,8 +115,11 @@ The edge-function 1 MB limit does not apply because no edge function is used.
 
 ## Embedded reception and recovery
 
-`FILE_UPLOAD_INGRESS=embedded` remains the self-hosted default. The app receives each part, computes SHA-256,
-and persists Local bytes or native COS/S3 parts before acknowledging the receipt. Native metadata remains
+`FILE_UPLOAD_INGRESS=embedded` remains the self-hosted default. Native COS/S3 part bodies stream directly from
+the request to the provider while the application hashes the same bytes; the receiver does not retain an entire
+32 MiB part in memory. Provider failure ends that one-shot request, and the client recovers/retries through the
+durable receipt protocol. Local uses isolated durable staging. Acknowledgement requires durable Local bytes or
+native COS/S3 parts plus the service receipt, not socket progress alone. Native metadata remains
 owner/root/configuration bound in Postgres (migration025); embedded byte handling has a 60-second read-idle
 limit, not a total upload timeout. The application's admitted publication metadata/locks remain durable.
 

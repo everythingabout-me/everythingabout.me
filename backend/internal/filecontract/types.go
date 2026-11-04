@@ -34,9 +34,13 @@ type Checksum struct {
 	Value     string `json:"value"`
 }
 
-// Metadata contains no database/native file identity. Nullable file-only fields
-// must be nil for folders; revision is metadata state, not a native write fence.
+// Metadata exposes service identity independently of native locators and content
+// generations. Nullable file-only fields are nil for folders.
 type Metadata struct {
+	ID               string     `json:"id"`
+	ParentID         *string    `json:"parentId"`
+	LastChangedAt    *time.Time `json:"lastChangedAt,omitempty"`
+	ChangeToken      string     `json:"changeToken,omitempty"`
 	Path             Path       `json:"path"`
 	ParentPath       Path       `json:"parentPath"`
 	Name             string     `json:"name"`

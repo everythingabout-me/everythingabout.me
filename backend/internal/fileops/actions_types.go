@@ -19,6 +19,9 @@ type NativeActions interface {
 	storage.NativeCopier
 }
 type ActionRequest struct {
+	EntryID        string `json:",omitempty"`
+	ParentID       string `json:",omitempty"`
+	Selection      string `json:",omitempty"`
 	Root           Root
 	Actor          Actor
 	Kind           string

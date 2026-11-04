@@ -44,10 +44,28 @@ export class FileApiError extends ApiError {
   }
 }
 
+/** Service identity and native location select the same resource. A string retains legacy path convenience. */
+export type EntrySelector = { id: string; path?: never } | { path: string; id?: never };
+export type FileSelector = string | EntrySelector;
+export type Destination =
+  | { path: string; parent?: never; name?: never }
+  | { parent: EntrySelector; name: string; path?: never };
+export type FileDestination = Destination;
+
+export type FileSearchOptions = {
+  q: string;
+  kind?: "file" | "folder";
+  mediaType?: string;
+  limit?: number;
+  cursor?: string;
+} & ({ path?: string; id?: never } | { id: string; path?: never });
+
 /** Indexed metadata; browsing never requires a live storage lookup. */
 export interface FileResource {
+  id: string;
+  parentId: string | null;
   path: string;
-  parentPath: string;
+  parentPath: string | null;
   name: string;
   kind: "file" | "folder";
   /** Revision of the indexed metadata and direct folder membership. */
@@ -59,7 +77,108 @@ export interface FileResource {
   sourceModifiedAt: string | null;
   createdAt: string;
   updatedAt: string;
+  /** Confirmed observed-index change state; folder values include visible descendants. */
+  lastChangedAt?: string;
+  /** Opaque equality marker, not a content validator or feed cursor. */
+  changeToken?: string;
   checksum: { algorithm: string; value: string } | null;
+}
+
+export type FileChangeFilter =
+  | { target: EntrySelector; kind: "file"; recursive: false }
+  | { target: EntrySelector; kind: "folder"; recursive: boolean };
+
+export interface FileChangeSnapshot {
+  id: string;
+  state: "ready";
+  filter: FileChangeFilter;
+  totalEntries: number;
+  entriesUrl: string;
+  changesCursor: string;
+  createdAt: string;
+  expiresAt: string;
+}
+
+export interface FileChangeSnapshotPage extends FileChangeSnapshot {
+  items: FileResource[];
+  nextCursor: string | null;
+}
+
+export interface FileChange {
+  id: string;
+  type: "upsert" | "remove" | "moved" | "invalidated" | "watch_ended";
+  coverage: "entry" | "subtree";
+  entryId?: string;
+  before?: FileResource;
+  after?: FileResource;
+  path?: string;
+  impactPaths?: string[];
+  affectedFolders?: FileResource[];
+  origin: string;
+  observedAt: string;
+  reason?: "deleted" | "access_lost";
+}
+
+export interface FileChangesPage {
+  items: FileChange[];
+  /** Always present, including empty pages; save with the applied changes. */
+  nextCursor: string;
+  hasMore: boolean;
+}
+
+export type FileSubscriptionInput = FileChangeFilter & { delivery: { type: "sse" } };
+
+export interface FileSubscription {
+  id: string;
+  filter: FileChangeFilter;
+  state: "active" | "ended";
+  expiresAt: string;
+  changesCursor: string;
+  eventsUrl: string;
+}
+
+export interface FileSubscriptionNotification {
+  subscriptionId: string;
+  type: "changes_available";
+  /** SSE id identifies a wakeup, never a consumer change checkpoint. */
+  notificationId: string;
+}
+
+export interface FileAuditActor {
+  kind: string;
+  principalId?: string;
+  appId?: string;
+  grantId?: string;
+  label?: string;
+  scope?: string;
+  canRead?: boolean;
+  canWrite?: boolean;
+  canChanges?: boolean;
+  canSubscribe?: boolean;
+  canEvents?: boolean;
+  policyGeneration?: string;
+}
+
+export interface FileAudit {
+  id: string;
+  action: string;
+  outcome: string;
+  allowed: boolean | null;
+  status: number;
+  bytesWritten?: number;
+  reasonCode?: string;
+  entryId?: string;
+  path?: string;
+  actor: FileAuditActor;
+  operationId?: string;
+  requestId?: string;
+  origin: string;
+  observedAt: string;
+}
+
+export interface FileAuditPage {
+  items: FileAudit[];
+  nextCursor: string | null;
 }
 
 export interface FileCollection {
@@ -104,6 +223,8 @@ export interface FilePrincipal {
   scope: { path: string };
   read: boolean;
   write: boolean;
+  changes: boolean;
+  subscribe: boolean;
   usage: { bytes: number; files: number; indexed: boolean };
   quota: FileQuota | null;
   reservations: FileReservations | null;
@@ -153,7 +274,23 @@ export interface FileUploadReceipts {
   watermark: number;
 }
 
+export interface FileChangeTrackingCapabilities {
+  available: boolean;
+  read: boolean;
+  subscribe: boolean;
+  delivery: "sse"[];
+  retentionSeconds: number;
+  subscriptionLifetimeSeconds: number;
+  snapshotLifetimeSeconds: number;
+  snapshotMaxEntries: number;
+  snapshotMaxBytes: number;
+  observation: "indexed";
+  externalChanges: "explicit-reconcile";
+}
+
 export interface FileCapabilities {
+  identity: { id: boolean; path: boolean; uniquePaths: boolean };
+  changeTracking: FileChangeTrackingCapabilities;
   path: string;
   read: boolean;
   write: boolean;
@@ -298,6 +435,9 @@ export interface Connection {
   read: boolean;
   write: boolean;
   events: boolean;
+  changes: boolean;
+  subscribe: boolean;
+  policyVersion: number;
   createdAt: string;
   lastUsedAt: string | null;
   expiresAt: string | null;
@@ -325,13 +465,17 @@ export interface AccountSummary {
   activity: ActivityItem[];
 }
 
-export interface FileUploadInput {
-  path: string;
+export type FileUploadCondition = { mode: "create" } | { mode: "replace"; contentRevision: string };
+
+export type FileUploadInput = {
   size: number;
   mediaType: string;
-  condition: { mode: "create" } | { mode: "replace"; contentRevision: string };
   sourceModifiedAt?: string;
-}
+} & (
+  | { path: string; condition: FileUploadCondition; destination?: never; target?: never }
+  | { destination: Destination; condition?: { mode: "create" }; path?: never; target?: never }
+  | { target: EntrySelector; condition: { mode: "replace"; contentRevision: string }; path?: never; destination?: never }
+);
 
 export interface FileUploadCollection {
   items: FileUploadSession[];
@@ -418,6 +562,53 @@ function post<T>(path: string, body?: unknown): Promise<T> {
 /** API paths are absolute; route and queue paths may omit the leading slash. */
 export function filePath(path: string): string {
   return path === "" ? "/" : path.startsWith("/") ? path : `/${path}`;
+}
+
+function invalidSelector(): never {
+  throw new ApiError("Select exactly one file ID or path, or one creation destination.", 400, { code: "invalid_selector" });
+}
+
+function hasOwn(value: object, key: string): boolean {
+  return Object.prototype.hasOwnProperty.call(value, key);
+}
+
+function entrySelector(value: FileSelector): EntrySelector {
+  // Empty route/queue strings historically select root; explicit JSON selectors must be nonempty.
+  if (typeof value === "string") return { path: filePath(value) };
+  if (!value || typeof value !== "object" || Array.isArray(value) || Object.keys(value).length !== 1) return invalidSelector();
+  if (hasOwn(value, "id") && typeof value.id === "string" && value.id.trim() !== "") return { id: value.id };
+  if (hasOwn(value, "path") && typeof value.path === "string" && value.path !== "") return { path: filePath(value.path) };
+  return invalidSelector();
+}
+
+function fileDestination(value: Destination): Destination {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return invalidSelector();
+  const keys = Object.keys(value);
+  if (keys.length === 1 && hasOwn(value, "path")) return entrySelector({ path: value.path! }) as { path: string };
+  if (keys.length !== 2 || !hasOwn(value, "parent") || !hasOwn(value, "name")
+    || typeof value.name !== "string" || value.name === "" || typeof value.parent !== "object" || value.parent === null) return invalidSelector();
+  if (value.name === "." || value.name === ".." || /[/\\\u0000-\u001f\u007f]/.test(value.name)) {
+    throw new ApiError("A destination name must be one valid filename segment.", 400, { code: "invalid_path" });
+  }
+  return { parent: entrySelector(value.parent), name: value.name };
+}
+
+function uploadInput(input: FileUploadInput): Record<string, unknown> {
+  if (!input || typeof input !== "object" || ["path", "target", "destination"].filter((key) => hasOwn(input, key)).length !== 1) return invalidSelector();
+  if (hasOwn(input, "condition") && (!input.condition || typeof input.condition !== "object" || !hasOwn(input.condition, "mode"))) return invalidSelector();
+  const mode = input.condition?.mode ?? "create";
+  if (mode !== "create" && mode !== "replace") return invalidSelector();
+  if (mode === "replace" && (input.condition?.mode !== "replace" || typeof input.condition.contentRevision !== "string" || input.condition.contentRevision === "")) return invalidSelector();
+  if (hasOwn(input, "path")) {
+    if (typeof input.path !== "string" || input.path === "") return invalidSelector();
+    return { ...input, path: filePath(input.path) };
+  }
+  if (hasOwn(input, "target")) {
+    if (mode !== "replace" || !input.target || typeof input.target !== "object") return invalidSelector();
+    return { ...input, target: entrySelector(input.target) };
+  }
+  if (mode !== "create") return invalidSelector();
+  return { ...input, destination: fileDestination(input.destination!) };
 }
 
 function fileURL(resource: string, values: Record<string, string | number | undefined> = {}): string {
@@ -556,20 +747,52 @@ export function isFileOperation(result: FileResource | FileOperation | void): re
 
 /** Unified resources and same-origin byte URLs. No provider locations are consumed. */
 export const files = {
-  metadata(path: string, signal?: AbortSignal): Promise<FileResource> {
-    return fileRequest(fileURL("", { path: filePath(path) }), { signal });
+  metadata(selector: FileSelector, signal?: AbortSignal): Promise<FileResource> {
+    return fileRequest(fileURL("", entrySelector(selector)), { signal });
   },
-  list(path: string, options: { limit?: number; cursor?: string } = {}): Promise<FileCollection> {
-    return fileRequest(fileURL("/list", { ...options, path: filePath(path) }));
+  list(selector: FileSelector, options: { limit?: number; cursor?: string } = {}): Promise<FileCollection> {
+    return fileRequest(fileURL("/list", { limit: options.limit, cursor: options.cursor, ...entrySelector(selector) }));
   },
-  search(options: { q: string; path?: string; kind?: "file" | "folder"; mediaType?: string; limit?: number; cursor?: string }): Promise<FileCollection> {
-    return fileRequest(fileURL("/search", { ...options, path: options.path === undefined ? undefined : filePath(options.path) }));
+  search(options: FileSearchOptions): Promise<FileCollection> {
+    const selected = Object.fromEntries(["id", "path"].filter((key) => hasOwn(options, key)).map((key) => [key, options[key as "id" | "path"]]));
+    return fileRequest(fileURL("/search", { ...options, ...(Object.keys(selected).length ? entrySelector(selected as EntrySelector) : {}) }));
   },
   me(): Promise<FilePrincipal> {
     return fileRequest(fileURL("/me"));
   },
-  capabilities(path?: string): Promise<FileCapabilities> {
-    return fileRequest(fileURL("/capabilities", { path: path === undefined ? undefined : filePath(path) }));
+  capabilities(selector?: FileSelector): Promise<FileCapabilities> {
+    return fileRequest(fileURL("/capabilities", selector === undefined ? {} : entrySelector(selector)));
+  },
+  createChangeSnapshot(filter: FileChangeFilter, signal?: AbortSignal): Promise<FileChangeSnapshot> {
+    return filePost("/change-snapshots", { ...filter, target: entrySelector(filter.target) }, undefined, signal);
+  },
+  changeSnapshot(id: string, options: { cursor?: string; limit?: number } = {}, signal?: AbortSignal): Promise<FileChangeSnapshotPage> {
+    return fileRequest(fileURL(`/change-snapshots/${encodeURIComponent(id)}`, options), { signal });
+  },
+  deleteChangeSnapshot(id: string, signal?: AbortSignal): Promise<void> {
+    return fileRequest(fileURL(`/change-snapshots/${encodeURIComponent(id)}`), { method: "DELETE", signal });
+  },
+  changes(cursor: string, options: { limit?: number } = {}, signal?: AbortSignal): Promise<FileChangesPage> {
+    return fileRequest(fileURL("/changes", { cursor, limit: options.limit }), { signal });
+  },
+  createSubscription(input: FileSubscriptionInput, signal?: AbortSignal): Promise<FileSubscription> {
+    return filePost("/subscriptions", { ...input, target: entrySelector(input.target) }, undefined, signal);
+  },
+  subscriptions(signal?: AbortSignal): Promise<{ items: FileSubscription[] }> {
+    return fileRequest(fileURL("/subscriptions"), { signal });
+  },
+  subscription(id: string, signal?: AbortSignal): Promise<FileSubscription> {
+    return fileRequest(fileURL(`/subscriptions/${encodeURIComponent(id)}`), { signal });
+  },
+  renewSubscription(id: string, signal?: AbortSignal): Promise<FileSubscription> {
+    return filePost(`/subscriptions/${encodeURIComponent(id)}/renew`, undefined, undefined, signal);
+  },
+  deleteSubscription(id: string, signal?: AbortSignal): Promise<void> {
+    return fileRequest(fileURL(`/subscriptions/${encodeURIComponent(id)}`), { method: "DELETE", signal });
+  },
+  /** Connect EventSource with the session cookie; notification IDs never advance pull progress. */
+  subscriptionEventsURL(id: string): string {
+    return fileURL(`/subscriptions/${encodeURIComponent(id)}/events`);
   },
   operation(id: string, signal?: AbortSignal): Promise<FileOperation> {
     return fileRequest(fileURL(`/operations/${encodeURIComponent(id)}`), { signal });
@@ -577,11 +800,11 @@ export const files = {
   cancelOperation(id: string, signal?: AbortSignal): Promise<FileOperation> {
     return filePost(`/operations/${encodeURIComponent(id)}/cancel`, undefined, undefined, signal);
   },
-  contentURL(path: string, disposition: "inline" | "attachment" = "attachment"): string {
-    return fileURL("/content", { path: filePath(path), disposition });
+  contentURL(selector: FileSelector, disposition: "inline" | "attachment" = "attachment"): string {
+    return fileURL("/content", { ...entrySelector(selector), disposition });
   },
-  thumbnailURL(path: string, width = 320, format = "webp"): string {
-    return fileURL("/thumbnail", { path: filePath(path), width, format });
+  thumbnailURL(selector: FileSelector, width = 320, format = "webp"): string {
+    return fileURL("/thumbnail", { ...entrySelector(selector), width, format });
   },
 };
 
@@ -590,7 +813,7 @@ async function allFiles(load: (cursor?: string) => Promise<FileCollection>): Pro
   let cursor: string | undefined;
   do {
     const page = await load(cursor);
-    for (const item of page.items) items.set(item.path, item);
+    for (const item of page.items) items.set(item.id, item);
     cursor = page.nextCursor ?? undefined;
   } while (cursor);
   return [...items.values()];
@@ -618,6 +841,8 @@ export const api = {
     read: boolean;
     write: boolean;
     events: boolean;
+    changes: boolean;
+    subscribe: boolean;
     expiresIn: number;
   }): Promise<CreatedConnection> {
     return post<CreatedConnection>("/api/connect/tokens", input);
@@ -626,7 +851,7 @@ export const api = {
   /** Rewrite an existing connection's policy. The secret, name and kind cannot change. */
   updateConnection(
     id: string,
-    input: { prefix: string; read: boolean; write: boolean; events: boolean; expiresIn: number },
+    input: { prefix: string; read: boolean; write: boolean; events: boolean; changes: boolean; subscribe: boolean; expiresIn: number },
   ): Promise<{ token: Connection }> {
     return request<{ token: Connection }>(`/api/connect/tokens/${encodeURIComponent(id)}`, {
       method: "PATCH",
@@ -695,6 +920,26 @@ export const api = {
     return post("/api/auth/email", input);
   },
 
+  /** Owner cookie management view; this resource uses plain JSON and Problems. */
+  audit(options: { cursor?: string; limit?: number } = {}, signal?: AbortSignal): Promise<FileAuditPage> {
+    const query = new URLSearchParams();
+    if (options.cursor !== undefined) query.set("cursor", options.cursor);
+    if (options.limit !== undefined) query.set("limit", String(options.limit));
+    const suffix = query.toString();
+    return fileRequest(`/api/audit${suffix ? `?${suffix}` : ""}`, { signal });
+  },
+
+  createChangeSnapshot: files.createChangeSnapshot,
+  changeSnapshot: files.changeSnapshot,
+  deleteChangeSnapshot: files.deleteChangeSnapshot,
+  changes: files.changes,
+  createSubscription: files.createSubscription,
+  subscriptions: files.subscriptions,
+  subscription: files.subscription,
+  renewSubscription: files.renewSubscription,
+  deleteSubscription: files.deleteSubscription,
+  subscriptionEventsURL: files.subscriptionEventsURL,
+
   metadata: files.metadata,
   fileMe: files.me,
   capabilities: files.capabilities,
@@ -704,14 +949,15 @@ export const api = {
   thumbnailURL: files.thumbnailURL,
 
   /** App navigation composed from resources, rather than a legacy server listing DTO. */
-  async list(path: string): Promise<ListResult> {
-    const absolute = filePath(path);
+  async list(selector: FileSelector): Promise<ListResult> {
+    const selected = entrySelector(selector);
     let node: FileResource | null;
-    try { node = await files.metadata(absolute); }
+    try { node = await files.metadata(selected); }
     catch (error) {
-      if (!(error instanceof ApiError) || error.status !== 404) throw error;
+      if (!(error instanceof ApiError) || error.status !== 404 || selected.id !== undefined) throw error;
       node = null;
     }
+    const absolute = node?.path ?? selected.path!;
     const breadcrumb: Crumb[] = [{ name: "", path: "/" }];
     let current = "";
     for (const name of absolute.split("/").filter(Boolean)) {
@@ -721,34 +967,42 @@ export const api = {
     return {
       path: absolute, parent: node?.parentPath ?? (absolute.slice(0, absolute.lastIndexOf("/")) || "/"),
       breadcrumb, node,
-      items: node?.kind === "folder" ? await allFiles((cursor) => files.list(absolute, { cursor })) : [],
+      items: node?.kind === "folder" ? await allFiles((cursor) => files.list(selected, { cursor })) : [],
     };
   },
 
-  async search(keyword: string): Promise<SearchResult> {
-    return { items: await allFiles((cursor) => files.search({ q: keyword, cursor })) };
+  async search(keyword: string, selector?: FileSelector): Promise<SearchResult> {
+    const selected = selector === undefined ? {} : entrySelector(selector);
+    return { items: await allFiles((cursor) => files.search({ q: keyword, cursor, ...selected })) };
   },
 
-  mkdir(path: string, parents = false): Promise<FileResource | FileOperation> {
-    return filePost("", { kind: "folder", path: filePath(path), parents });
+  mkdir(destination: string | Destination, parents = false): Promise<FileResource | FileOperation> {
+    if (typeof destination === "string") return filePost("", { kind: "folder", path: filePath(destination), parents });
+    const selected = fileDestination(destination);
+    if (parents && hasOwn(selected, "parent")) return invalidSelector();
+    return filePost("", { kind: "folder", destination: selected, parents });
   },
 
-  move(from: string, to: string, ifRevision: string): Promise<FileResource | FileOperation> {
-    return filePost("/move", { from: filePath(from), to: filePath(to), ifRevision }, { Prefer: "respond-async" });
+  move(from: FileSelector, to: string | Destination, ifRevision: string): Promise<FileResource | FileOperation> {
+    const source = typeof from === "string" ? filePath(from) : entrySelector(from);
+    const destination = typeof to === "string" ? filePath(to) : fileDestination(to);
+    return filePost("/move", { from: source, to: destination, ifRevision }, { Prefer: "respond-async" });
   },
 
-  copy(from: string, to: string, ifSourceRevision: string): Promise<FileResource | FileOperation> {
-    return filePost("/copy", { from: filePath(from), to: filePath(to), ifSourceRevision }, { Prefer: "respond-async" });
+  copy(from: FileSelector, to: string | Destination, ifSourceRevision: string): Promise<FileResource | FileOperation> {
+    const source = typeof from === "string" ? filePath(from) : entrySelector(from);
+    const destination = typeof to === "string" ? filePath(to) : fileDestination(to);
+    return filePost("/copy", { from: source, to: destination, ifSourceRevision }, { Prefer: "respond-async" });
   },
 
-  deletePath(path: string, recursive = false, ifRevision?: string): Promise<FileOperation | void> {
-    return fileRequest(fileURL("", { path: filePath(path), recursive: recursive ? "true" : undefined }), {
+  deletePath(selector: FileSelector, recursive = false, ifRevision?: string): Promise<FileOperation | void> {
+    return fileRequest(fileURL("", { ...entrySelector(selector), recursive: recursive ? "true" : undefined }), {
       method: "DELETE", headers: { Prefer: "respond-async", ...(ifRevision ? { "If-Revision": ifRevision } : {}) },
     });
   },
 
   createUpload(input: FileUploadInput, key: string, signal?: AbortSignal): Promise<FileUploadSession> {
-    return filePost("/uploads", { ...input, path: filePath(input.path) }, { "Idempotency-Key": key }, signal);
+    return filePost("/uploads", uploadInput(input), { "Idempotency-Key": key }, signal);
   },
 
   async uploadPart(id: string, number: number, blob: Blob, signal?: AbortSignal, onProgress?: (progress: UploadProgress) => void,
@@ -820,7 +1074,7 @@ export const api = {
   },
 
   /** Same-origin attachment; provider locations never reach the browser. */
-  downloadHref(path: string): string {
-    return files.contentURL(path, "attachment");
+  downloadHref(selector: FileSelector): string {
+    return files.contentURL(selector, "attachment");
   },
 };

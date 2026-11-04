@@ -134,6 +134,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/auth/email/code", s.wrap(s.handleNewEmailCode))
 	mux.HandleFunc("POST /api/auth/email", s.wrap(s.handleChangeEmail))
 	mux.HandleFunc("GET /api/account", s.wrap(s.handleAccount))
+	mux.HandleFunc("GET /api/audit", s.ownerAuditHandler())
 
 	mux.HandleFunc("GET /api/save-links", s.wrap(s.handleListSaveLinks))
 	mux.HandleFunc("POST /api/save-links", s.wrap(s.handleCreateSaveLink))

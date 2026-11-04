@@ -12,6 +12,8 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"everythingabout.me/backend/internal/filechanges"
+	"everythingabout.me/backend/internal/fileops"
 	"everythingabout.me/backend/internal/paths"
 	"everythingabout.me/backend/internal/storage"
 	"everythingabout.me/backend/internal/treescan"
@@ -21,7 +23,13 @@ import (
 type ScanDB interface {
 	BeginTx(context.Context, pgx.TxOptions) (pgx.Tx, error)
 }
-type ScanApplyOptions struct{ DryRun bool }
+type ScanApplyOptions struct {
+	DryRun bool
+	// ChangeRoot binds metadata revisions and external change records to the same
+	// namespace as the file API. Production reconcile always supplies it; nil is
+	// reserved for index-only utilities/tests with no configured storage binding.
+	ChangeRoot *fileops.Root
+}
 type ScanApplyReport struct{ Scanned, Inserted, Updated, Unchanged int }
 
 // ApplyScan imports a successful scan in one serializable transaction. It never
@@ -43,6 +51,11 @@ func ApplyScan(ctx context.Context, db ScanDB, ownerID string, result *treescan.
 		return report, err
 	}
 	ownerID = value.(string)
+	if root := opts.ChangeRoot; root != nil {
+		if root.OwnerID != ownerID || root.ConnectionID == "" || root.Generation < 1 || root.ContentRoot == "" || root.SystemRoot == "" || root.ContentRoot == root.SystemRoot {
+			return report, fmt.Errorf("scan changes require the owner's configured storage root")
+		}
+	}
 	records, err := result.Records()
 	if err != nil {
 		return report, err
@@ -71,6 +84,14 @@ func ApplyScan(ctx context.Context, db ScanDB, ownerID string, result *treescan.
 		defer cancel()
 		_ = tx.Rollback(rollbackCtx)
 	}()
+	if opts.ChangeRoot != nil && !opts.DryRun {
+		if _, err := filechanges.BindRoot(ctx, tx, ownerID, fileRootNamespace(*opts.ChangeRoot)); err != nil {
+			return report, fmt.Errorf("bind scan change root: %w", err)
+		}
+		if _, err := tx.Exec(ctx, configureNameComparisonSQL, ownerID, nameComparisonVersion(opts.ChangeRoot.CaseSensitive)); err != nil {
+			return report, fmt.Errorf("configure scan name comparison: %w", err)
+		}
+	}
 	// The session namespace lock precedes the serializable snapshot. Taking a
 	// transaction advisory lock as the first SELECT would establish a snapshot
 	// before the lock and could miss a deletion that just committed.
@@ -100,7 +121,7 @@ func ApplyScan(ctx context.Context, db ScanDB, ownerID string, result *treescan.
 		}
 	}
 	// Existing paths participate in preflight because no-prune imports retain them.
-	rows, err := tx.Query(ctx, `select path, is_dir from nodes where owner_id = $1::uuid`, ownerID)
+	rows, err := tx.Query(ctx, `select path, is_dir from file_entries where owner_id = $1::uuid`, ownerID)
 	if err != nil {
 		return report, err
 	}
@@ -130,6 +151,7 @@ func ApplyScan(ctx context.Context, db ScanDB, ownerID string, result *treescan.
 		return report, err
 	}
 
+	var changes []scanChangeCapture
 	for _, record := range records {
 		if err := ctx.Err(); err != nil {
 			return ScanApplyReport{}, err
@@ -157,8 +179,8 @@ func ApplyScan(ctx context.Context, db ScanDB, ownerID string, result *treescan.
 		report.Scanned++
 		if opts.DryRun {
 			var exists, changed bool
-			err := tx.QueryRow(ctx, `select exists(select 1 from nodes where owner_id=$1::uuid and path=$3),
-     exists(select 1 from nodes where owner_id=$1::uuid and path=$3 and (
+			err := tx.QueryRow(ctx, `select exists(select 1 from file_entries where owner_id=$1::uuid and path=$3),
+     exists(select 1 from file_entries where owner_id=$1::uuid and path=$3 and (
        key is distinct from $2::text or parent is distinct from $4::text or name is distinct from $5::text
        or is_dir is distinct from $6::boolean or size is distinct from $7::bigint
        or mime is distinct from coalesce($8::text,mime)
@@ -177,20 +199,26 @@ func ApplyScan(ctx context.Context, db ScanDB, ownerID string, result *treescan.
 			}
 			continue
 		}
+		var before capturedFileState
+		if opts.ChangeRoot != nil {
+			before, err = captureFileState(ctx, tx, ownerID, fileRootNamespace(*opts.ChangeRoot), p)
+			if err != nil {
+				return ScanApplyReport{}, fmt.Errorf("capture scanned entry %q: %w", p, err)
+			}
+		}
 		var inserted bool
 		err := tx.QueryRow(ctx, `insert into nodes
     (owner_id,key,path,parent,name,is_dir,size,mime,etag,storage_class,source_modified_at)
     values ($1::uuid,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
-    on conflict (owner_id,path) do update set
-      key=excluded.key, parent=excluded.parent, name=excluded.name,
+    on conflict (owner_id,parent_id,comparison_name) do update set
+      path=excluded.path, key=excluded.key, parent=excluded.parent, name=excluded.name,
       size=excluded.size, mime=coalesce(excluded.mime,nodes.mime),
       etag=coalesce(excluded.etag,nodes.etag),
       storage_class=coalesce(excluded.storage_class,nodes.storage_class),
       source_modified_at=coalesce(excluded.source_modified_at,nodes.source_modified_at),
       updated_at=now()
     where nodes.is_dir=excluded.is_dir and (
-      nodes.key is distinct from excluded.key or nodes.parent is distinct from excluded.parent
-      or nodes.name is distinct from excluded.name or nodes.size is distinct from excluded.size
+      nodes.name is distinct from excluded.name or nodes.size is distinct from excluded.size
       or nodes.mime is distinct from coalesce(excluded.mime,nodes.mime)
       or nodes.etag is distinct from coalesce(excluded.etag,nodes.etag)
       or nodes.storage_class is distinct from coalesce(excluded.storage_class,nodes.storage_class)
@@ -205,13 +233,21 @@ func ApplyScan(ctx context.Context, db ScanDB, ownerID string, result *treescan.
 		}
 		// A changed imported observation invalidates any saved native generation.
 		// Browsing must not attach the old content revision to external replacements.
-		if _, err := tx.Exec(ctx, `delete from file_content_generations where owner_id=$1::uuid and path=$2`, ownerID, p); err != nil {
+		if _, err := tx.Exec(ctx, `delete from file_content_generations where owner_id=$1::uuid and (node_id=file_tree_resolve($1::uuid,$2) or (node_id is null and path=$2))`, ownerID, p); err != nil {
 			return ScanApplyReport{}, fmt.Errorf("invalidate scanned content revision %q: %w", p, err)
+		}
+		if opts.ChangeRoot != nil {
+			changes = append(changes, scanChangeCapture{path: p, before: before})
 		}
 		if inserted {
 			report.Inserted++
 		} else {
 			report.Updated++
+		}
+	}
+	if opts.ChangeRoot != nil && len(changes) > 0 {
+		if err := settleScanChanges(ctx, tx, *opts.ChangeRoot, changes); err != nil {
+			return ScanApplyReport{}, fmt.Errorf("record scan changes: %w", err)
 		}
 	}
 	if err := ctx.Err(); err != nil {

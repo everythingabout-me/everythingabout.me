@@ -51,7 +51,10 @@ func filesUploadStateError(state fileops.UploadState) error {
 	}
 	return nil
 }
-func (s *Server) filesUploadResource(u fileops.Upload) map[string]any {
+func (s *Server) filesUploadResource(u fileops.Upload, scopes ...*fileRequest) map[string]any {
+	if len(scopes) > 0 {
+		u.Operation.Result = filesScopedResult(u.Operation.Result, scopes[0])
+	}
 	var intent storage.WriteIntent
 	_ = json.Unmarshal(u.Operation.Intent, &intent)
 	var result any
@@ -82,28 +85,104 @@ func filesUploadMaxSize(native fileops.NativeActions) int64 {
 	}
 	return max
 }
-func (s *Server) handleFilesCreateUpload(w http.ResponseWriter, r *http.Request, f *fileRequest) error {
-	var req struct {
-		Path             string     `json:"path"`
-		Size             *int64     `json:"size"`
-		MediaType        string     `json:"mediaType"`
-		SourceModifiedAt *time.Time `json:"sourceModifiedAt"`
-		Condition        struct {
-			Mode            string `json:"mode"`
-			ContentRevision string `json:"contentRevision"`
-		} `json:"condition"`
+
+type filesCreateUploadRequest struct {
+	Destination      *fc.Destination   `json:"destination"`
+	Target           *fc.EntrySelector `json:"target"`
+	Path             *string           `json:"path"`
+	Size             *int64            `json:"size"`
+	MediaType        string            `json:"mediaType"`
+	SourceModifiedAt *time.Time        `json:"sourceModifiedAt"`
+	Condition        struct {
+		Mode            string `json:"mode"`
+		ContentRevision string `json:"contentRevision"`
+	} `json:"condition"`
+}
+
+func filesUploadClientTarget(req filesCreateUploadRequest) (storage.WriteIntent, []filesReplaySelection, error) {
+	switch req.Condition.Mode {
+	case "", "create":
+		if req.Target != nil {
+			return storage.WriteIntent{}, nil, filesSelectorError()
+		}
+		destination, err := filesCreateDestination(req.Destination, req.Path)
+		if err != nil {
+			return storage.WriteIntent{}, nil, err
+		}
+		target, parentID := filesClientDestination(destination)
+		selector := fc.EntrySelector{Path: destination.Path}
+		if destination.Parent != nil {
+			selector = *destination.Parent
+		}
+		return storage.WriteIntent{Target: target, ParentID: parentID, Selection: filesDestinationSelection(destination)}, []filesReplaySelection{{selector: selector, write: true}}, nil
+	case "replace":
+		if req.Destination != nil || (req.Target == nil) == (req.Path == nil) {
+			return storage.WriteIntent{}, nil, filesSelectorError()
+		}
+		target := fc.EntrySelector{}
+		if req.Target != nil {
+			target = *req.Target
+		} else {
+			target.Path = fc.Path(*req.Path)
+		}
+		if err := target.Validate(); err != nil {
+			return storage.WriteIntent{}, nil, err
+		}
+		return storage.WriteIntent{Target: storage.Path(target.Path.Relative()), EntryID: target.ID, Selection: filesSelectorSelection(target)}, []filesReplaySelection{{selector: target, write: true}}, nil
+	default:
+		return storage.WriteIntent{}, nil, fc.NewProblem(400, "invalid_request", "The upload condition is invalid.")
 	}
+}
+
+func (s *Server) filesResolveUploadTarget(ctx context.Context, f *fileRequest, req filesCreateUploadRequest) (fc.Path, string, string, error) {
+	switch req.Condition.Mode {
+	case "", "create":
+		if req.Target != nil {
+			return "", "", "", filesSelectorError()
+		}
+		destination, err := filesCreateDestination(req.Destination, req.Path)
+		if err != nil {
+			return "", "", "", err
+		}
+		p, err := s.filesResolveDestination(ctx, f, destination)
+		selectedID := ""
+		if destination.Parent != nil {
+			selectedID = destination.Parent.ID
+		}
+		return p, filesDestinationSelection(destination), selectedID, err
+	case "replace":
+		if req.Destination != nil || (req.Target == nil) == (req.Path == nil) {
+			return "", "", "", filesSelectorError()
+		}
+		var target fc.EntrySelector
+		if req.Target != nil {
+			target = *req.Target
+		} else {
+			target.Path = fc.Path(*req.Path)
+		}
+		p, err := s.filesResolveSelector(ctx, f, target)
+		return p, filesSelectorSelection(target), target.ID, err
+	default:
+		return "", "", "", fc.NewProblem(400, "invalid_request", "The upload condition is invalid.")
+	}
+}
+
+func (s *Server) handleFilesCreateUpload(w http.ResponseWriter, r *http.Request, f *fileRequest) error {
+	var req filesCreateUploadRequest
 	if err := strictFilesJSON(r, &req); err != nil {
 		return err
 	}
-	p, err := fc.ParsePath(req.Path)
+	client, replaySelection, err := filesUploadClientTarget(req)
 	if err != nil {
 		return err
 	}
-	if p == "/" {
+	if client.Target == "" && client.Selection != "id" {
 		return fc.NewProblem(400, "invalid_path", "The root cannot contain file content.")
 	}
-	if err = f.RequireWrite(p); err != nil {
+	if err = f.RequireWrite(f.Scope); err != nil {
+		return err
+	}
+	if err = s.filesAuthorizeReplaySelection(r.Context(), f, replaySelection); err != nil {
 		return err
 	}
 	if req.Size == nil || *req.Size < 0 || *req.Size > filesMaxJSONBytes {
@@ -164,13 +243,37 @@ func (s *Server) handleFilesCreateUpload(w http.ResponseWriter, r *http.Request,
 		v := req.SourceModifiedAt.UTC()
 		req.SourceModifiedAt = &v
 	}
-	client := storage.WriteIntent{Target: storage.Path(p.Relative()), Size: *req.Size, MediaType: req.MediaType, SourceModifiedAt: req.SourceModifiedAt, ClientCondition: filesPutClientCondition(condition)}
+	client.Size, client.MediaType, client.SourceModifiedAt, client.ClientCondition = *req.Size, req.MediaType, req.SourceModifiedAt, filesPutClientCondition(condition)
 	if old, found, e := s.filesJournal.ReplayUpload(r.Context(), root, actor, key, client); e != nil {
 		return filesMutationProblem(e)
 	} else if found {
+		if e = s.filesAuthorizeReplaySelection(r.Context(), f, replaySelection); e != nil {
+			return e
+		}
+		if e = s.filesMutationAuthorize(r, f, native)(r.Context(), old.Operation); e != nil {
+			return filesMutationProblem(e)
+		}
 		w.Header().Set("Location", "/api/files/uploads/"+old.ID)
-		return writeFilesJSON(w, 200, s.filesUploadResource(old))
+		return writeFilesJSON(w, 200, s.filesUploadResource(old, f))
 	}
+	p, selection, selectedID, err := s.filesResolveUploadTarget(r.Context(), f, req)
+	if err != nil {
+		return err
+	}
+	if p == "/" {
+		return fc.NewProblem(400, "invalid_path", "The root cannot contain file content.")
+	}
+	if err = f.RequireWrite(p); err != nil {
+		return err
+	}
+	entryID, parentID, err := s.filesBindMutationSelection(r.Context(), f, p, selection, selectedID)
+	if err != nil {
+		return err
+	}
+	if condition.Mode == fc.PutCreate {
+		entryID = ""
+	}
+	client.Target, client.EntryID, client.ParentID = storage.Path(p.Relative()), entryID, parentID
 	intent := client
 	parentName := path.Dir(p.Relative())
 	if parentName == "." {
@@ -236,7 +339,7 @@ func (s *Server) handleFilesCreateUpload(w http.ResponseWriter, r *http.Request,
 		return filesMutationProblem(err)
 	}
 	w.Header().Set("Location", "/api/files/uploads/"+u.ID)
-	return writeFilesJSON(w, 201, s.filesUploadResource(u))
+	return writeFilesJSON(w, 201, s.filesUploadResource(u, f))
 }
 func (s *Server) filesUploadContext(r *http.Request, f *fileRequest) (fileops.NativeActions, fileops.Root, fileops.Actor, fileops.Upload, error) {
 	native, root, actor, err := s.fileMutationContext(r.Context(), f)
@@ -254,7 +357,7 @@ func (s *Server) handleFilesGetUpload(w http.ResponseWriter, r *http.Request, f 
 	if err != nil {
 		return err
 	}
-	return writeFilesJSON(w, 200, s.filesUploadResource(u))
+	return writeFilesJSON(w, 200, s.filesUploadResource(u, f))
 }
 func (s *Server) handleFilesListUploads(w http.ResponseWriter, r *http.Request, f *fileRequest) error {
 	_, root, actor, err := s.fileMutationContext(r.Context(), f)
@@ -288,7 +391,7 @@ func (s *Server) handleFilesListUploads(w http.ResponseWriter, r *http.Request, 
 	}
 	resources := make([]any, 0, len(items))
 	for _, u := range items {
-		resources = append(resources, s.filesUploadResource(u))
+		resources = append(resources, s.filesUploadResource(u, f))
 	}
 	return writeFilesJSON(w, 200, map[string]any{"items": resources, "nextCursor": next})
 }
@@ -432,7 +535,7 @@ func (s *Server) handleFilesCommitUpload(w http.ResponseWriter, r *http.Request,
 		return filesMutationProblem(err)
 	}
 	if u.Operation.State == fileops.Succeeded {
-		return writeFilesJSON(w, 200, json.RawMessage(u.Operation.Result))
+		return writeFilesJSON(w, 200, filesScopedResult(u.Operation.Result, f))
 	}
 	if u.Operation.Terminal() {
 		return filesOperationFailure(u.Operation)
@@ -440,7 +543,7 @@ func (s *Server) handleFilesCommitUpload(w http.ResponseWriter, r *http.Request,
 	if err = s.queueFileOperation(u.Operation); err != nil && !errors.Is(err, errFilesWorkerBusy) {
 		return err
 	}
-	return writeFilesOperation(w, u.Operation, 202)
+	return writeFilesOperation(w, u.Operation, 202, f)
 }
 func (s *Server) handleFilesAbortUpload(w http.ResponseWriter, r *http.Request, f *fileRequest) error {
 	_, root, actor, u, err := s.filesUploadContext(r, f)

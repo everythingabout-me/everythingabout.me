@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"everythingabout.me/backend/internal/auth"
+	"everythingabout.me/backend/internal/filechanges"
 	fc "everythingabout.me/backend/internal/filecontract"
 	"everythingabout.me/backend/internal/httpx"
 	"everythingabout.me/backend/internal/storage"
@@ -113,7 +114,10 @@ func filesProblem(err error) *fc.Problem {
 
 type filesResponseWriter struct {
 	http.ResponseWriter
-	started bool
+	started      bool
+	status       int
+	bytesWritten int64
+	writeErr     error
 }
 
 func (w *filesResponseWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
@@ -121,14 +125,25 @@ func (w *filesResponseWriter) WriteHeader(status int) {
 	if w.started {
 		return
 	}
+	// Informational responses do not commit the final response status.
+	if status >= 100 && status < 200 && status != http.StatusSwitchingProtocols {
+		w.ResponseWriter.WriteHeader(status)
+		return
+	}
 	w.started = true
+	w.status = status
 	w.ResponseWriter.WriteHeader(status)
 }
 func (w *filesResponseWriter) Write(data []byte) (int, error) {
 	if !w.started {
 		w.WriteHeader(200)
 	}
-	return w.ResponseWriter.Write(data)
+	n, err := w.ResponseWriter.Write(data)
+	w.bytesWritten += int64(n)
+	if err != nil {
+		w.writeErr = err
+	}
+	return n, err
 }
 func (w *filesResponseWriter) Flush() {
 	if !w.started {
@@ -138,6 +153,10 @@ func (w *filesResponseWriter) Flush() {
 }
 
 func (s *Server) fileWrap(fn fileHandler) http.HandlerFunc {
+	return s.fileWrapWithAudit(fn, s.recordFilesAudit)
+}
+
+func (s *Server) fileWrapWithAudit(fn fileHandler, persist filesAuditRecorder) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		clearReadDeadline := partReadIdle(w, r, uploadPartReadIdleTimeout)
 		defer clearReadDeadline()
@@ -148,8 +167,13 @@ func (s *Server) fileWrap(fn fileHandler) http.HandlerFunc {
 		}
 		response := &filesResponseWriter{ResponseWriter: w}
 		w = response
+		var audit *filechanges.Audit
+		finishedAudit := false
 		defer func() {
 			if recovered := recover(); recovered != nil {
+				if !finishedAudit {
+					filesAuditCompletion(r.Context(), persist, audit, response, fc.NewProblem(500, "handler_interrupted", "The request was interrupted."))
+				}
 				if response.started {
 					panic(http.ErrAbortHandler)
 				}
@@ -179,6 +203,8 @@ func (s *Server) fileWrap(fn fileHandler) http.HandlerFunc {
 			if principal == nil || principal.User == nil {
 				return fc.NewProblem(401, "unauthenticated", "A valid credential is required.")
 			}
+			audit = filesAuditAttempt(r, principal, w.Header().Get("X-Request-Id"))
+			r = r.WithContext(filechanges.WithActor(r.Context(), audit.Actor, audit.RequestID))
 			if r.Method != http.MethodGet && r.Method != http.MethodHead && r.Method != http.MethodOptions && source == fc.CookieCredential {
 				accepted := false
 				for _, origin := range s.cfg.FileCookieOrigins {
@@ -233,9 +259,24 @@ func (s *Server) fileWrap(fn fileHandler) http.HandlerFunc {
 			if source == fc.CookieCredential {
 				req.CSRFToken = verifier.FileCSRFToken(r)
 			}
+			if _, err := persist(r.Context(), audit); err != nil {
+				filesAuditIncomplete(audit, "admission")
+				if principal.Token != nil && (r.Method == http.MethodGet || r.Method == http.MethodHead) {
+					return fc.NewProblem(503, "audit_unavailable", "The access audit could not be recorded.")
+				}
+			}
 			return fn(w, r, req)
 		}
-		if err := run(); err != nil {
+		err := run()
+		if err == nil {
+			err = response.writeErr
+		}
+		if audit == nil && err != nil {
+			slog.Warn("file authentication rejected", "request_id", w.Header().Get("X-Request-Id"), "status", filesProblem(err).Status)
+		}
+		filesAuditCompletion(r.Context(), persist, audit, response, err)
+		finishedAudit = true
+		if err != nil {
 			if response.started {
 				panic(http.ErrAbortHandler)
 			}
@@ -275,10 +316,38 @@ func (s *Server) filesHandler() http.Handler {
 			routes["POST"] = s.handleFilesCopy
 		case fc.Base + "/thumbnail":
 			routes["GET"] = pending
+		case fc.Base + "/changes":
+			routes["GET"] = s.handleFilesChanges
+		case fc.Base + "/subscriptions":
+			routes["POST"] = s.handleFilesCreateSubscription
+			routes["GET"] = s.handleFilesListSubscriptions
+		case fc.Base + "/change-snapshots":
+			routes["POST"] = s.handleFilesCreateChangeSnapshot
 		case fc.Base + "/uploads":
 			routes["GET"] = s.handleFilesListUploads
 			routes["POST"] = s.handleFilesCreateUpload
 		default:
+			if strings.HasPrefix(r.URL.Path, fc.Base+"/subscriptions/") {
+				suffix := strings.TrimPrefix(r.URL.Path, fc.Base+"/subscriptions/")
+				parts := strings.Split(suffix, "/")
+				if len(parts) > 0 {
+					r.SetPathValue("id", parts[0])
+				}
+				if len(parts) == 1 {
+					routes["GET"] = s.handleFilesGetSubscription
+					routes["DELETE"] = s.handleFilesDeleteSubscription
+				}
+				if len(parts) == 2 && parts[1] == "renew" {
+					routes["POST"] = s.handleFilesRenewSubscription
+				}
+				if len(parts) == 2 && parts[1] == "events" {
+					routes["GET"] = s.handleFilesSubscriptionEvents
+				}
+			} else if strings.HasPrefix(r.URL.Path, fc.Base+"/change-snapshots/") && !strings.Contains(strings.TrimPrefix(r.URL.Path, fc.Base+"/change-snapshots/"), "/") {
+				r.SetPathValue("id", strings.TrimPrefix(r.URL.Path, fc.Base+"/change-snapshots/"))
+				routes["GET"] = s.handleFilesGetChangeSnapshot
+				routes["DELETE"] = s.handleFilesDeleteChangeSnapshot
+			}
 			if pendingFileWorkflow.MatchString(r.URL.Path) {
 				switch {
 				case strings.HasPrefix(r.URL.Path, fc.Base+"/operations/"):

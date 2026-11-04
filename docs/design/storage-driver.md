@@ -3,7 +3,11 @@
 > Native-tree contract, 2026-10-30. P1 read-only Local/COS/S3 trees are implemented;
 > mutation/publication interfaces and an opt-in Local create-only writer are implemented in P3.
 > P4 adds admitted Local actions and conservative COS/S3 staged adapters with explicit capability evidence.
-> Real COS/S3 probes remain unverified; default writes stay disabled. Preserving the readable tree is mandatory.
+> Limited recorded COS ETag observations do not establish all operation/deployment capabilities; default writes
+> stay disabled without admission. Preserving the readable tree is mandatory. The accepted stable-ID amendment
+> is implemented with canonical parent/name links and direct selectors; disposable integration/browser tests
+> passed and targeted race checks passed.
+> See [identity](file-identity.md) and [first-phase changes/audit](file-changes.md).
 > Implementation/configuration limits: [P1](storage-p1.md), [P3](storage-p3.md), [P4](storage-p4.md),
 > [object mutation admission](storage-p4-objects.md), [P5 durable ingress](storage-p5.md) and
 > [native multipart/receiver deployment](native-upload-deployment.md). Local parts use durable local staging;
@@ -20,9 +24,10 @@ to the same relative native folder/name structure. S3 uses ordinary prefix keys 
 cloud-drive adapters resolve paths to native IDs internally while preserving actual folders/names. A known
 native ID can accelerate lookup but cannot replace the visible destination tree.
 
-The API owns access control, index/search, private database keys, quota and durable operation journals.
-All clients address files/folders by path at the same API; neither database keys nor native IDs are public
-file handles. Drivers implement real
+The API owns access control, index/search, stable service IDs and parent/name mappings, quota and durable
+operation journals. All clients select existing files/folders by service ID or direct path at the same API.
+The service resolves IDs under owner/current path scope, binds admitted identity/location, and passes native
+paths/evidence to the driver. Native IDs and provider keys remain private; they are not service IDs. Drivers implement real
 file operations, native authentication, naming constraints, version evidence and backend recovery. Drivers
 must enumerate their content root, including existing files, so indexing and direct migration need no data
 rewrite. They do not own a separate application database or expose provider URLs to clients.
@@ -189,10 +194,14 @@ type NameRules struct {
 ```
 
 P4 may add a private `ContentIdentity` to Entry when the admitted driver proves a stable native identity
-independent of pathname. It does not expose a public file ID. Evidence-bound application content-generation
+independent of pathname. It is native continuity evidence, separate from the public stable service UUID.
+The service, not the driver, owns the public ID lifecycle and persisted root mapping. Same-owner moves and
+content replacement preserve service IDs; copies/recreation allocate fresh IDs. Evidence-bound application content-generation
 mappings may retain contentRevision across a proven copy/delete move, but must reject a changed native
 fingerprint. WriteIntent additionally captures optional source modification time, original client condition,
-and parent path/version so recovery cannot retarget a replaced ancestor.
+and parent path/version so recovery cannot retarget a replaced ancestor. ID-selected work captures file/parent
+ID and relevant ancestor namespace state as well: an intervening move/recreation fails target_changed rather
+than silently following a stable ID. Parent redaction and selector validation are API responsibilities.
 
 ### Reference-addressed reads
 
@@ -230,6 +239,10 @@ cancellation. The driver must not silently serve a different version or ignore a
 returns changed/unsupported and the API chooses an explicit fallback. Version pinning may use native versions,
 conditional reads, or coordinated exclusion of conflicting application mutations for the read duration.
 
+Files and folders share one native sibling namespace. Service uniqueness uses owner/root/parent and the
+versioned backend comparison-name rules; original accepted spelling stays visible. Different native IDs do
+not justify duplicate equivalent names. Root identity is persisted separately from a native root locator.
+
 NameRules are not enough to describe every provider restriction: adapters also validate all reserved names,
 normalization collisions, punctuation and trailing-character rules before mutation. Unsupported names return
 invalid_name/name_conflict, never an anonymous or escaped native filename. Duplicate native names that make a
@@ -255,7 +268,30 @@ is not claimed.
 NativeMover/Copier optimize a known supported operation. Capability failure before effects can fall back to
 journaled copy/verify/delete. Failure after possible effects must be reconciled first. A move cannot become a
 copy followed by unconditional source deletion; validate the source revision again before deleting it.
-NativeCopier must leave an independently usable destination file; no API-only reference alias or mutable hardlink.
+NativeCopier must leave an independently usable destination file with fresh service identity; no API-only
+reference alias or mutable hardlink. Non-atomic move settlement must not assign one ID to two surviving
+independent entries; partial-copy identity is settled under guards using native evidence.
+
+The coordinator uses a verified NativeTreeMove capability for eligible Local folder moves, capturing one
+root effect and relinking canonical parent/name without descendant enumeration solely to preserve service IDs.
+Eligibility requires native source evidence and a destination prefix no longer in UTF-8 bytes and no deeper
+in segments than the source. A growing prefix/depth uses the finite manifest to validate descendant limits.
+Generic flat-key moves still need per-entry native effects. Dynamic ancestry/search and derived caches may
+scale with candidates, depth or subtree size; service identity is not a universal O(1) claim.
+
+Migration 032 durably binds the service's change stream to a root/configuration namespace. Changing driver
+binding is not permission to silently reuse that stream. The service rejects mismatches; operators must stop
+writers, settle accepted work and use file-changes-reset after restore/rebind, even A → B → A. Reset preserves
+native bytes and rejects pending guards/nonterminal Operations; it does not strengthen native fencing or
+recover lost identity mappings. Producer/read/reset lock ordering is owned by the service, not the driver.
+
+The service publishes confirmed change facts and marker updates during index settlement, after native evidence
+is established. A subtree move can be one logical coverage=subtree event without a descendant event per file.
+Drivers do not emit speculative success, own public cursor positions or deliver notifications. The service
+captures before/after ancestry for privacy projection and recovery; unknown native outcomes retain operation
+guards. Indexed repeatable-read change snapshots freeze metadata, not native storage bytes. Explicit scans
+can publish observed external updates, but partial enumeration never authorizes deletion. See
+[file changes](file-changes.md) for observation, audit and first-phase SSE boundaries.
 
 ## 3. Staged writes and publication
 

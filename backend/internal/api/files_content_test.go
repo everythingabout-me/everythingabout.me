@@ -316,7 +316,7 @@ func TestFilesContentAuthorizationAndQueryBeforeNativeIO(t *testing.T) {
 	}{
 		{"path=%2Fprivate", "/allowed", nil, 404, "not_found"},
 		{"path=%2Ffile", "/", &auth.Token{CanRead: false}, 403, "forbidden"},
-		{"path=%2Ffile&path=%2Fother", "/", nil, 400, "invalid_request"},
+		{"path=%2Ffile&path=%2Fother", "/", nil, 400, "invalid_selector"},
 		{"path=%ZZ", "/", nil, 400, "invalid_request"},
 		{"path=%2F..%2Ffile", "/", nil, 400, "invalid_path"},
 	} {

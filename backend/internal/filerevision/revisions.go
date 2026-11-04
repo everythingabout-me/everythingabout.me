@@ -43,6 +43,8 @@ func Content(namespace string, entry storage.Entry) *string {
 // membership slice are not modified, allowing settlement and reads to share it.
 func Metadata(namespace string, metadata fc.Metadata, version []byte, membership []string) string {
 	metadata.Revision = ""
+	metadata.LastChangedAt = nil
+	metadata.ChangeToken = ""
 	h := sha256.New()
 	representation, _ := json.Marshal(metadata)
 	h.Write(representation)

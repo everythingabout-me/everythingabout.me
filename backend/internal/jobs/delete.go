@@ -43,11 +43,16 @@ func (s *Service) StartDelete(ctx context.Context, owner, path string) (*Job, er
 	if err != nil {
 		return nil, err
 	}
-	// DELETE RETURNING locks the captured rows. Concurrent observations cannot
-	// resurrect them through a stale serializable upload snapshot.
-	tag, err := tx.Exec(ctx, `with captured as (
- delete from nodes where owner_id=$2::uuid and (path=$3 or path like $4)
- returning path,key,is_dir,etag,size
+	// Materialize canonical locations before detaching any ancestor. DELETE locks
+	// the captured physical rows; its returned manifest must never use stale caches.
+	// Concurrent observations cannot resurrect them through a stale serializable
+	// upload snapshot.
+	tag, err := tx.Exec(ctx, `with entries as materialized (
+ select id,owner_id,path,key,is_dir,etag,size from file_entries
+ where owner_id=$2::uuid and (path=$3 or path like $4)
+ ), captured as (
+ delete from nodes n using entries e where n.id=e.id and n.owner_id=e.owner_id
+ returning e.path,e.key,e.is_dir,e.etag,e.size
  ) insert into fs_delete_entries(job_id,owner_id,path,key,is_dir,etag,size)
  select $1,$2::uuid,path,key,is_dir,etag,size from captured`, id, owner, path, nodes.EscapeLike(path)+"/%")
 	if err != nil {

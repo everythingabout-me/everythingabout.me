@@ -15,7 +15,10 @@ func filesOperationID(r *http.Request) string {
 	p := strings.TrimPrefix(r.URL.Path, "/api/files/operations/")
 	return strings.TrimSuffix(p, "/cancel")
 }
-func writeFilesOperation(w http.ResponseWriter, op fileops.Operation, status int) error {
+func writeFilesOperation(w http.ResponseWriter, op fileops.Operation, status int, scopes ...*fileRequest) error {
+	if len(scopes) > 0 {
+		op.Result = filesScopedResult(op.Result, scopes[0])
+	}
 	w.Header().Set("Location", "/api/files/operations/"+op.ID)
 	if !op.Terminal() {
 		w.Header().Set("Retry-After", "2")
@@ -88,7 +91,7 @@ func (s *Server) handleFilesGetOperation(w http.ResponseWriter, r *http.Request,
 			if upload.State != "open" {
 				_ = s.queueFileOperation(op)
 			}
-			return writeFilesOperation(w, op, 200)
+			return writeFilesOperation(w, op, 200, f)
 		} else if !fileops.IsCode(e, "not_found") {
 			return filesMutationProblem(e)
 		}
@@ -109,7 +112,7 @@ func (s *Server) handleFilesGetOperation(w http.ResponseWriter, r *http.Request,
 			return err
 		}
 	}
-	return writeFilesOperation(w, op, 200)
+	return writeFilesOperation(w, op, 200, f)
 }
 func (s *Server) handleFilesCancelOperation(w http.ResponseWriter, r *http.Request, f *fileRequest) error {
 	_, root, actor, err := s.fileMutationContext(r.Context(), f)
@@ -146,7 +149,7 @@ func (s *Server) handleFilesCancelOperation(w http.ResponseWriter, r *http.Reque
 	if !op.Terminal() {
 		status = 202
 	}
-	return writeFilesOperation(w, op, status)
+	return writeFilesOperation(w, op, status, f)
 }
 
 var errFilesWorkerBusy = errors.New("file operation workers are busy")

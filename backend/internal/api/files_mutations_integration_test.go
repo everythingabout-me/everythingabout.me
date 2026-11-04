@@ -21,6 +21,7 @@ import (
 
 	"everythingabout.me/backend/internal/auth"
 	"everythingabout.me/backend/internal/config"
+	fc "everythingabout.me/backend/internal/filecontract"
 	"everythingabout.me/backend/internal/fileops"
 	"everythingabout.me/backend/internal/nodes"
 	"everythingabout.me/backend/internal/storagebackend"
@@ -285,7 +286,10 @@ func TestFilesMutationsPostgresLocalConformance(t *testing.T) {
 			t.Fatal("native source mtime not preserved", e)
 		}
 		wire, _ := json.Marshal(value)
-		for _, secret := range []string{"\"id\":", "NativeRef", "ContentIdentity", "Checkpoint", "drive/", "tmpSecret"} {
+		if id, ok := value["id"].(string); !ok || !fc.ValidEntryID(id) {
+			t.Fatalf("missing public file identity: %v", value)
+		}
+		for _, secret := range []string{"NativeRef", "ContentIdentity", "Checkpoint", "drive/", "tmpSecret"} {
 			if strings.Contains(string(wire), secret) {
 				t.Fatalf("private mutation state leaked: %s", wire)
 			}
@@ -500,6 +504,131 @@ func TestFilesMutationsPostgresLocalConformance(t *testing.T) {
 				}
 				assertAbsent(t, owners[0], "ReplayMoved")
 			}
+		}
+	})
+	t.Run("stable identity through direct ID operations", func(t *testing.T) {
+		root := metadata(t, "/")
+		rootID := root["id"].(string)
+		if !fc.ValidEntryID(rootID) || root["parentId"] != nil || root["parentPath"] != nil {
+			t.Fatalf("root identity: %v", root)
+		}
+		folder := mkdir(t, "/Identity", false, 201)
+		folderID := folder["id"].(string)
+		scopedIdentity := makeToken(owners[0], "Identity", true, true, false)
+		scopedFolder := object(t, request("GET", "/api/files?id="+folderID, scopedIdentity, nil, nil), 200)
+		if scopedFolder["parentId"] != nil || scopedFolder["parentPath"] != nil {
+			t.Fatalf("concealed parent leaked: %v", scopedFolder)
+		}
+		problem(t, request("GET", "/api/files?id="+rootID, scopedIdentity, nil, nil), 404, "not_found")
+		body := []byte(`{"kind":"folder","destination":{"parent":{"id":"` + folderID + `"},"name":"Nested"}}`)
+		nested := object(t, request("POST", "/api/files", bearer, body, nil), 201)
+		if nested["parentId"] != folderID {
+			t.Fatalf("wrong parent identity: %v", nested)
+		}
+		createTarget := "/api/files/content?parentId=" + folderID + "&name=note.txt"
+		createHeaders := http.Header{"Idempotency-Key": {"identity-create"}}
+		created := object(t, request("PUT", createTarget, bearer, []byte("old"), createHeaders), 201)
+		id := created["id"].(string)
+		problem(t, request("GET", "/api/files?id="+id, otherOwner, nil, nil), 404, "not_found")
+		byID := object(t, request("GET", "/api/files?id="+id, bearer, nil, nil), 200)
+		if byID["path"] != "/Identity/note.txt" || byID["parentId"] != folderID {
+			t.Fatalf("ID lookup lost path: %v", byID)
+		}
+		read := request("GET", "/api/files/content?id="+id, bearer, nil, nil)
+		if read.Code != 200 || read.Body.String() != "old" {
+			t.Fatalf("ID content: %d %s", read.Code, read.Body.String())
+		}
+		replaceHeaders := http.Header{"If-Match": {`"` + created["contentRevision"].(string) + `"`}, "Idempotency-Key": {"identity-replace"}}
+		replaced := object(t, request("PUT", "/api/files/content?id="+id, bearer, []byte("new"), replaceHeaders), 200)
+		if replaced["id"] != id {
+			t.Fatal("replacement changed identity")
+		}
+		moveBody := []byte(`{"from":{"id":"` + id + `"},"to":{"parent":{"id":"` + nested["id"].(string) + `"},"name":"renamed.txt"},"ifRevision":"` + replaced["revision"].(string) + `"}`)
+		moveHeaders := http.Header{"Idempotency-Key": {"identity-move"}}
+		moved := object(t, request("POST", "/api/files/move", bearer, moveBody, moveHeaders), 200)
+		if moved["id"] != id || moved["path"] != "/Identity/Nested/renamed.txt" {
+			t.Fatalf("move identity: %v", moved)
+		}
+		moveAgain := object(t, request("POST", "/api/files/move", bearer, moveBody, moveHeaders), 200)
+		if moveAgain["revision"] != moved["revision"] {
+			t.Fatal("ID move replay changed saved result")
+		}
+		replaceAgain := object(t, request("PUT", "/api/files/content?id="+id, bearer, []byte("new"), replaceHeaders), 200)
+		if replaceAgain["revision"] != replaced["revision"] {
+			t.Fatal("ID replacement replay followed moved path")
+		}
+		assertAbsent(t, owners[0], "Identity/note.txt")
+		byID = object(t, request("GET", "/api/files?id="+id, bearer, nil, nil), 200)
+		if byID["path"] != moved["path"] {
+			t.Fatal("ID did not follow completed move")
+		}
+		copied := object(t, action("POST", "copy", moved["path"].(string), "/Identity/copy.txt", moved["revision"].(string), nil), 201)
+		if copied["id"] == id {
+			t.Fatal("copy reused source identity")
+		}
+		object(t, action("POST", "move", "/Identity/copy.txt", "/EscapedIdentity.txt", copied["revision"].(string), nil), 200)
+		problem(t, request("GET", "/api/files/content?id="+copied["id"].(string), scopedIdentity, nil, nil), 404, "not_found")
+		escapedCopy := []byte(`{"from":{"id":"` + copied["id"].(string) + `"},"to":"/Identity/forbidden.txt","ifSourceRevision":"` + copied["revision"].(string) + `"}`)
+		problem(t, request("POST", "/api/files/copy", scopedIdentity, escapedCopy, nil), 404, "not_found")
+		deleteHeaders := http.Header{"Idempotency-Key": {"identity-delete"}}
+		deleted := request("DELETE", "/api/files?id="+id, bearer, nil, deleteHeaders)
+		if deleted.Code != 204 {
+			t.Fatalf("ID delete: %d %s", deleted.Code, deleted.Body.String())
+		}
+		problem(t, request("GET", "/api/files?id="+id, bearer, nil, nil), 404, "not_found")
+		recreated := put(t, moved["path"].(string), []byte("recreated"), nil, 201)
+		if recreated["id"] == id {
+			t.Fatal("recreated file inherited retired identity")
+		}
+		if again := request("DELETE", "/api/files?id="+id, bearer, nil, deleteHeaders); again.Code != 204 {
+			t.Fatalf("retired ID delete replay: %d %s", again.Code, again.Body.String())
+		}
+		object(t, request("POST", "/api/files/move", bearer, moveBody, moveHeaders), 200)
+		object(t, request("PUT", "/api/files/content?id="+id, bearer, []byte("new"), replaceHeaders), 200)
+		if string(nativeBytes(t, owners[0], "Identity/Nested/renamed.txt")) != "recreated" {
+			t.Fatal("retired ID replay mutated recreated entry")
+		}
+		liveParent := metadata(t, "/Identity")
+		object(t, action("POST", "move", "/Identity", "/IdentityMoved", liveParent["revision"].(string), nil), 200)
+		createAgain := object(t, request("PUT", createTarget, bearer, []byte("old"), createHeaders), 201)
+		if createAgain["id"] != created["id"] || createAgain["revision"] != created["revision"] {
+			t.Fatal("parent ID create replay changed saved identity")
+		}
+		assertAbsent(t, owners[0], "Identity")
+		assertAbsent(t, owners[0], "IdentityMoved/note.txt")
+		problem(t, request("GET", "/api/files?id="+id+"&path=%2FIdentity", bearer, nil, nil), 400, "invalid_selector")
+	})
+	t.Run("upload and recursive mkdir replay survive changed parents", func(t *testing.T) {
+		mkdirBody := []byte(`{"kind":"folder","path":"/ReplayAncestors/A/B","parents":true}`)
+		mkdirHeaders := http.Header{"Idempotency-Key": {"mkdir-ancestor-replay"}}
+		first := object(t, request("POST", "/api/files", bearer, mkdirBody, mkdirHeaders), 201)
+		again := object(t, request("POST", "/api/files", bearer, mkdirBody, mkdirHeaders), 201)
+		if first["id"] != again["id"] || first["revision"] != again["revision"] {
+			t.Fatal("recursive mkdir replay changed saved result")
+		}
+		parent := mkdir(t, "/UploadReplay", false, 201)
+		body := []byte(`{"destination":{"parent":{"id":"` + parent["id"].(string) + `"},"name":"empty.txt"},"size":0}`)
+		headers := http.Header{"Idempotency-Key": {"upload-parent-replay"}}
+		upload := object(t, request("POST", "/api/files/uploads", bearer, body, headers), 201)
+		committed := request("POST", upload["commitUrl"].(string), bearer, nil, nil)
+		object(t, committed, 202)
+		done := poll(t, operationPath(t, committed), bearer)
+		if done["state"] != "succeeded" {
+			t.Fatalf("zero-byte replay fixture upload: %v", done)
+		}
+		current := metadata(t, "/UploadReplay")
+		object(t, action("POST", "move", "/UploadReplay", "/UploadReplayMoved", current["revision"].(string), nil), 200)
+		replay := object(t, request("POST", "/api/files/uploads", bearer, body, headers), 200)
+		if replay["id"] != upload["id"] || replay["state"] != "committed" {
+			t.Fatalf("moved parent upload replay: %v", replay)
+		}
+		assertAbsent(t, owners[0], "UploadReplay")
+		if removed := request("DELETE", endpoint("", "/UploadReplayMoved")+"&recursive=true", bearer, nil, nil); removed.Code != 204 {
+			t.Fatalf("delete upload parent: %d %s", removed.Code, removed.Body.String())
+		}
+		replay = object(t, request("POST", "/api/files/uploads", bearer, body, headers), 200)
+		if replay["id"] != upload["id"] {
+			t.Fatal("retired parent upload replay allocated a new session")
 		}
 	})
 	t.Run("async status and cancellation before native work", func(t *testing.T) {

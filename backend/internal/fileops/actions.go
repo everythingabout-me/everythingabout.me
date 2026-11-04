@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"path"
 	"sort"
 	"strings"
 	"time"
@@ -43,15 +44,18 @@ func NewActions(journal *Postgres, options ActionsOptions) (*Actions, error) {
 // the tree again. Folder versions must identify the folder, independent of child
 // membership, so our own top-down creations and postorder removals preserve them.
 type actionBinding struct {
+	Strategy string `json:",omitempty"`
 	Anchors  []storage.Entry
 	Sources  []storage.Entry
 	Existing *storage.Entry
 }
 
+const nativeTreeMoveStrategy = "native_tree_move"
+
 const maxActionEntries = 100000
 const maxActionPages = 1000
 
-func validateActionRequest(req ActionRequest, native NativeActions) error {
+func validateActionAuthority(req ActionRequest, native NativeActions) error {
 	if err := validateRoot(req.Root); err != nil {
 		return err
 	}
@@ -66,6 +70,12 @@ func validateActionRequest(req ActionRequest, native NativeActions) error {
 	}
 	if req.Actor.ID == "" || !req.Actor.CanWrite || storage.ValidatePath(req.Actor.Scope) != nil {
 		return E("forbidden", nil)
+	}
+	return nil
+}
+func validateActionRequest(req ActionRequest, native NativeActions) error {
+	if err := validateActionAuthority(req, native); err != nil {
+		return err
 	}
 	if storage.ValidatePath(req.From) != nil || storage.ValidatePath(req.To) != nil {
 		return E("invalid_path", nil)
@@ -100,8 +110,35 @@ func validateActionRequest(req ActionRequest, native NativeActions) error {
 	}
 	return nil
 }
+
+// Captured identities fence native effects, while client identity describes only
+// the selectors the caller supplied. Path aliases retain their legacy spelling.
+func actionClientIdentity(req ActionRequest) ActionRequest {
+	sourceMode, destinationMode, _ := strings.Cut(req.Selection, ":")
+	if req.Selection == "" {
+		sourceMode, destinationMode = "path", "path"
+	}
+	if req.Kind == "delete" {
+		destinationMode = "path"
+	}
+	if sourceMode == "id" {
+		req.From = ""
+	} else {
+		req.EntryID = ""
+	}
+	if destinationMode == "parentId" {
+		req.To = storage.Path(path.Base(string(req.To)))
+	} else {
+		req.ParentID = ""
+	}
+	if req.Selection == "path" || req.Selection == "path:path" {
+		req.Selection = ""
+	}
+	return req
+}
 func actionClientEqual(a, b ActionRequest) bool {
-	return a.Root == b.Root && a.Actor.ID == b.Actor.ID && a.Kind == b.Kind && a.From == b.From && a.To == b.To && a.Parents == b.Parents && a.Recursive == b.Recursive && a.IfRevision == b.IfRevision
+	a, b = actionClientIdentity(a), actionClientIdentity(b)
+	return a.Root == b.Root && a.Actor.ID == b.Actor.ID && a.Kind == b.Kind && a.From == b.From && a.To == b.To && a.Parents == b.Parents && a.Recursive == b.Recursive && a.IfRevision == b.IfRevision && a.EntryID == b.EntryID && a.ParentID == b.ParentID && a.Selection == b.Selection
 }
 func actionRequest(op Operation) (ActionRequest, error) {
 	var req ActionRequest
@@ -137,14 +174,19 @@ func actionGuards(req ActionRequest) []Guard {
 // public revision conditions, then freezes a finite manifest and exact liability.
 // Idempotent retries consult immutable client intent before inspecting live paths.
 func (a *Actions) Prepare(ctx context.Context, req ActionRequest, native NativeActions) (Operation, bool, error) {
-	if err := validateActionRequest(req, native); err != nil {
+	if err := validateActionAuthority(req, native); err != nil {
 		return Operation{}, false, err
 	}
+	// A stable-ID retry may now resolve From to To, or have no current From at
+	// all. Match the saved client intent before applying new-operation constraints.
 	if op, found, err := a.journal.ReplayAction(ctx, req); err != nil || found {
 		if err == nil {
 			err = a.options.Authorize(ctx, op)
 		}
 		return op, found, err
+	}
+	if err := validateActionRequest(req, native); err != nil {
+		return Operation{}, false, err
 	}
 	intent, err := json.Marshal(req)
 	if err != nil {
@@ -340,6 +382,38 @@ func captureAction(ctx context.Context, req ActionRequest, native NativeActions)
 	if err := addAncestors(parentPath(req.From)); err != nil {
 		return fail(err)
 	}
+	// An admitted atomic tree rename binds only the selected root. Descendants
+	// remain under the same native folder identity; walking them would turn rename
+	// admission and recovery into an operation proportional to tree size. Without
+	// stored subtree path-limit summaries, a growing byte prefix or depth must use
+	// the finite manifest to preflight every resulting descendant path.
+	if req.Kind == "move" && native.Describe().NativeTreeMove && len(req.To) <= len(req.From) && strings.Count(string(req.To), "/") <= strings.Count(string(req.From), "/") {
+		source, err := observe(ctx, native, req.From)
+		if err != nil {
+			return fail(err)
+		}
+		if source.Kind == storage.Folder && len(source.Version) > 0 {
+			if err = addAncestors(parentPath(req.To)); err != nil {
+				if storage.IsCode(err, "not_found") {
+					err = E("parent_missing", err)
+				}
+				return fail(err)
+			}
+			if err = validateActionName(req.To, native.StorageNameRules()); err != nil {
+				return fail(err)
+			}
+			if _, err = native.Stat(ctx, req.To); err == nil {
+				return fail(E("name_conflict", nil))
+			} else if !storage.IsCode(err, "not_found") {
+				return fail(err)
+			}
+			binding.Strategy = nativeTreeMoveStrategy
+			binding.Sources = []storage.Entry{source}
+			sourceEvidence[source.Path] = source
+			add("move", req.From, req.To, source.Version, 0)
+			return binding, manifest, reserve, nil
+		}
+	}
 	sources, err := snapshotActionTree(ctx, native, req.From, req.Kind != "delete" || req.Recursive)
 	if err != nil {
 		return fail(err)
@@ -472,7 +546,7 @@ func validateCapture(ctx context.Context, req ActionRequest, native NativeAction
 			return E("target_changed", err)
 		}
 	}
-	if len(b.Sources) > 0 {
+	if len(b.Sources) > 0 && b.Strategy != nativeTreeMoveStrategy {
 		current, err := snapshotActionTree(ctx, native, req.From, req.Kind != "delete" || req.Recursive)
 		if err != nil || len(current) != len(b.Sources) {
 			return E("target_changed", err)
@@ -650,6 +724,11 @@ func executeAction(ctx context.Context, native NativeActions, intent storage.Eff
 		return native.Mkdir(ctx, storage.Mutation{ID: intent.ID, Path: intent.Target, Conditions: intent.Conditions}, save)
 	case "delete":
 		return native.Remove(ctx, storage.Mutation{ID: intent.ID, Path: intent.Source, Conditions: storage.Conditions{ExpectedVersion: intent.SourceVersion}}, save)
+	case "move":
+		if !native.Describe().NativeTreeMove {
+			return storage.MutationResult{}, E("unsupported", nil)
+		}
+		return native.Move(ctx, storage.MoveRequest{ID: intent.ID, Source: intent.Source, Target: intent.Target, SourceVersion: intent.SourceVersion, TargetConditions: intent.Conditions}, save)
 	case "copy":
 		return native.Copy(ctx, storage.MoveRequest{ID: intent.ID, Source: intent.Source, Target: intent.Target, SourceVersion: intent.SourceVersion, TargetConditions: intent.Conditions}, save)
 	default:
@@ -657,6 +736,9 @@ func executeAction(ctx context.Context, native NativeActions, intent storage.Eff
 	}
 }
 func validateActionStep(ctx context.Context, native NativeActions, req ActionRequest, b actionBinding, op Operation, entry EntryEffect) error {
+	if b.Strategy == nativeTreeMoveStrategy && !native.Describe().NativeTreeMove {
+		return E("unsupported", nil)
+	}
 	for _, old := range b.Anchors {
 		current, err := observe(ctx, native, old.Path)
 		if entry.Action == "delete" && implicitFolderGone(old, err) {
@@ -751,7 +833,7 @@ func actionDeltas(op Operation) (int64, int64, error) {
 			delta = entry.Size
 		case "delete":
 			delta = -entry.Size
-		case "mkdir":
+		case "mkdir", "move":
 		default:
 			return 0, 0, E("invalid_intent", nil)
 		}
@@ -876,7 +958,7 @@ func observeActionResult(ctx context.Context, native NativeActions, op Operation
 		return ActionObservation{}, E("target_changed", err)
 	}
 	observation := ActionObservation{Entry: current}
-	if current.Kind == storage.Folder {
+	if current.Kind == storage.Folder && b.Strategy != nativeTreeMoveStrategy {
 		cursors := map[string]bool{}
 		seen := map[string]bool{}
 		cursor := ""

@@ -91,17 +91,20 @@ func (s *Server) serveTokenLink(w http.ResponseWriter, r *http.Request, plain st
 	switch {
 	case format == "json" || strings.Contains(accept, "application/json"):
 		httpx.WriteJSON(w, http.StatusOK, map[string]any{
-			"token":      plain,
-			"api":        base,
-			"prompt":     prompt,
-			"name":       token.Name,
-			"prefix":     token.Prefix,
-			"read":       token.CanRead,
-			"write":      token.CanWrite,
-			"events":     token.CanEvents,
-			"expiresAt":  token.ExpiresAt,
-			"createdAt":  token.CreatedAt,
-			"lastUsedAt": token.LastUsedAt,
+			"token":         plain,
+			"api":           base,
+			"prompt":        prompt,
+			"name":          token.Name,
+			"prefix":        token.Prefix,
+			"read":          token.CanRead,
+			"write":         token.CanWrite,
+			"events":        token.CanEvents,
+			"changes":       token.CanChanges,
+			"subscribe":     token.CanSubscribe,
+			"policyVersion": token.PolicyVersion,
+			"expiresAt":     token.ExpiresAt,
+			"createdAt":     token.CreatedAt,
+			"lastUsedAt":    token.LastUsedAt,
 		})
 		return nil
 	case format == "html" || strings.Contains(accept, "text/html"):
@@ -132,7 +135,7 @@ func textValue(value *string) string {
 // tokenPrompt is the full instructions behind the one-line Connect prompt. It is English
 // like every API artifact, and it is generated from the row so it cannot go stale.
 func tokenPrompt(base, plain string, token *auth.Token) string {
-	parts := make([]string, 0, 3)
+	parts := make([]string, 0, 5)
 	if token.CanRead {
 		parts = append(parts, "read")
 	}
@@ -141,6 +144,12 @@ func tokenPrompt(base, plain string, token *auth.Token) string {
 	}
 	if token.CanEvents {
 		parts = append(parts, "events")
+	}
+	if token.CanChanges {
+		parts = append(parts, "changes")
+	}
+	if token.CanSubscribe {
+		parts = append(parts, "subscribe")
 	}
 	access := strings.Join(parts, " + ")
 	if access == "" {
@@ -186,6 +195,12 @@ Read a file with GET /api/files/content?path=<URL-encoded absolute path>.
 	}
 	if token.CanWrite {
 		prompt += unifiedWritePrompt(base, plain, writePath)
+	}
+	if token.CanChanges {
+		prompt += "\nFile change history is explicitly granted. Consult GET /api/files/capabilities for the current change feed contract.\n"
+	}
+	if token.CanSubscribe {
+		prompt += "Live file change subscriptions are explicitly granted within the same file scope.\n"
 	}
 	return prompt
 }

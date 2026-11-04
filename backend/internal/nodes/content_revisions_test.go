@@ -131,8 +131,16 @@ func TestFinalFolderObservationAndNoopMetadata(t *testing.T) {
 	if m.SourceModifiedAt == nil || !m.SourceModifiedAt.Equal(final.ModifiedAt.Truncate(time.Millisecond)) {
 		t.Fatalf("response used stale mkdir observation: %s", raw)
 	}
-	if m.Revision != filerevision.Metadata(fileRootNamespace(root), m, nil, []string{"file:folder/a.txt"}) {
-		t.Fatal("final native membership omitted")
+	record, err := fileBrowseMetadata(ctx, pool, root.OwnerID, fileRootNamespace(root), "folder", nil)
+	if err != nil || record == nil {
+		t.Fatalf("folder membership %+v %v", record, err)
+	}
+	expected, err := IndexedMetadata(fileRootNamespace(root), *record)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m.Revision != expected.Revision || m.ChangeToken != expected.ChangeToken {
+		t.Fatalf("final folder metadata differs from browsing: response=%s expected=%+v", raw, expected)
 	}
 	// Existing mkdir observes a native folder; no index-only namespace effect is
 	// needed and repeated observations preserve application timestamps/revision.

@@ -40,18 +40,21 @@ const (
 
 // Token is the shape exposed for a token (never the secret).
 type Token struct {
-	ID         string  `json:"id"`
-	Name       string  `json:"name"`
-	Kind       string  `json:"kind"`
-	Prefix     string  `json:"prefix"`
-	CanRead    bool    `json:"read"`
-	CanWrite   bool    `json:"write"`
-	CanEvents  bool    `json:"events"`
-	CreatedAt  string  `json:"createdAt"`
-	LastUsedAt *string `json:"lastUsedAt"`
-	ExpiresAt  *string `json:"expiresAt"`
-	Revoked    bool    `json:"revoked"`
-	RevokedAt  *string `json:"revokedAt"`
+	ID            string  `json:"id"`
+	Name          string  `json:"name"`
+	Kind          string  `json:"kind"`
+	Prefix        string  `json:"prefix"`
+	CanRead       bool    `json:"read"`
+	CanWrite      bool    `json:"write"`
+	CanEvents     bool    `json:"events"`
+	CanChanges    bool    `json:"changes"`
+	CanSubscribe  bool    `json:"subscribe"`
+	PolicyVersion int64   `json:"policyVersion"`
+	CreatedAt     string  `json:"createdAt"`
+	LastUsedAt    *string `json:"lastUsedAt"`
+	ExpiresAt     *string `json:"expiresAt"`
+	Revoked       bool    `json:"revoked"`
+	RevokedAt     *string `json:"revokedAt"`
 
 	userID string
 }
@@ -145,14 +148,16 @@ func newTokenID() (string, error) {
 
 // NewTokenInput is the input for creating a token.
 type NewTokenInput struct {
-	UserID    string
-	Name      string
-	Kind      string
-	Prefix    string
-	CanRead   bool
-	CanWrite  bool
-	CanEvents bool
-	Expiry    *time.Time
+	UserID       string
+	Name         string
+	Kind         string
+	Prefix       string
+	CanRead      bool
+	CanWrite     bool
+	CanEvents    bool
+	CanChanges   bool
+	CanSubscribe bool
+	Expiry       *time.Time
 }
 
 // normalizeKind maps an empty kind to "app", which is the historical CLI default.
@@ -202,11 +207,25 @@ func normalizeName(kind, raw string) (string, error) {
 	return name, nil
 }
 
+// validateTokenPermissions requires explicit grants for change history and subscriptions.
+func validateTokenPermissions(read, write, events, changes, subscribe bool) error {
+	if changes && !read {
+		return httpx.BadRequest("changes permission requires read permission")
+	}
+	if subscribe && (!changes || !read) {
+		return httpx.BadRequest("subscribe permission requires changes and read permissions")
+	}
+	if !read && !write && !events {
+		return httpx.BadRequest("at least one of read, write or events is required")
+	}
+	return nil
+}
+
 // CreateToken mints a token and stores it, returning the plaintext (this once) and the
 // display shape.
 func (s *Service) CreateToken(ctx context.Context, input NewTokenInput) (string, *Token, error) {
-	if !input.CanRead && !input.CanWrite && !input.CanEvents {
-		return "", nil, httpx.BadRequest("at least one of read, write or events is required")
+	if err := validateTokenPermissions(input.CanRead, input.CanWrite, input.CanEvents, input.CanChanges, input.CanSubscribe); err != nil {
+		return "", nil, err
 	}
 
 	kind, err := normalizeKind(input.Kind)
@@ -246,14 +265,14 @@ func (s *Service) CreateToken(ctx context.Context, input NewTokenInput) (string,
 		expires  *string
 	)
 	err = s.db.Pool().QueryRow(ctx,
-		`insert into api_tokens (token_id, token_hash, user_id, name, kind, prefix, can_read, can_write, can_events, expires_at)
-		 values ($1, $2, $3::uuid, $4, $5, $6, $7, $8, $9, $10)
-		 returning token_id, name, kind, prefix, can_read, can_write, can_events,
+		`insert into api_tokens (token_id, token_hash, user_id, name, kind, prefix, can_read, can_write, can_events, can_changes, can_subscribe, expires_at)
+		 values ($1, $2, $3::uuid, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+		 returning token_id, name, kind, prefix, can_read, can_write, can_events, can_changes, can_subscribe, policy_version,
 		           `+isoUTC("created_at")+`,
 		           case when last_used_at is null then null else `+isoUTC("last_used_at")+` end,
 		           case when expires_at is null then null else `+isoUTC("expires_at")+` end`,
-		id, hashSecret(secret), input.UserID, name, kind, prefix, input.CanRead, input.CanWrite, input.CanEvents, expiresAt).
-		Scan(&token.ID, &token.Name, &token.Kind, &token.Prefix, &token.CanRead, &token.CanWrite, &token.CanEvents,
+		id, hashSecret(secret), input.UserID, name, kind, prefix, input.CanRead, input.CanWrite, input.CanEvents, input.CanChanges, input.CanSubscribe, expiresAt).
+		Scan(&token.ID, &token.Name, &token.Kind, &token.Prefix, &token.CanRead, &token.CanWrite, &token.CanEvents, &token.CanChanges, &token.CanSubscribe, &token.PolicyVersion,
 			&token.CreatedAt, &lastUsed, &expires)
 	if err != nil {
 		return "", nil, err
@@ -284,12 +303,12 @@ func (s *Service) SetTokenName(ctx context.Context, userID, tokenID, raw string)
 	err = s.db.Pool().QueryRow(ctx,
 		`update api_tokens set name = $3
 		  where user_id = $1::uuid and token_id = $2 and revoked_at is null
-		 returning token_id, name, kind, prefix, can_read, can_write, can_events,
+		 returning token_id, name, kind, prefix, can_read, can_write, can_events, can_changes, can_subscribe, policy_version,
 		           `+isoUTC("created_at")+`,
 		           case when last_used_at is null then null else `+isoUTC("last_used_at")+` end,
 		           case when expires_at is null then null else `+isoUTC("expires_at")+` end`,
 		userID, tokenID, name).
-		Scan(&token.ID, &token.Name, &token.Kind, &token.Prefix, &token.CanRead, &token.CanWrite, &token.CanEvents,
+		Scan(&token.ID, &token.Name, &token.Kind, &token.Prefix, &token.CanRead, &token.CanWrite, &token.CanEvents, &token.CanChanges, &token.CanSubscribe, &token.PolicyVersion,
 			&token.CreatedAt, &lastUsed, &expires)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -306,18 +325,20 @@ func (s *Service) SetTokenName(ctx context.Context, userID, tokenID, raw string)
 // UpdateTokenInput is the mutable policy of a connection: everything except its name, kind
 // and secret.
 type UpdateTokenInput struct {
-	Prefix    string
-	CanRead   bool
-	CanWrite  bool
-	CanEvents bool
-	Expiry    *time.Time // nil = never
+	Prefix       string
+	CanRead      bool
+	CanWrite     bool
+	CanEvents    bool
+	CanChanges   bool
+	CanSubscribe bool
+	Expiry       *time.Time // nil = never
 }
 
 // UpdateToken rewrites the policy of one token the user owns. The credential and the name
 // are untouched; the kind is read from the row so the lifetime cap stays correct.
 func (s *Service) UpdateToken(ctx context.Context, userID, tokenID string, input UpdateTokenInput) (*Token, error) {
-	if !input.CanRead && !input.CanWrite && !input.CanEvents {
-		return nil, httpx.BadRequest("at least one of read, write or events is required")
+	if err := validateTokenPermissions(input.CanRead, input.CanWrite, input.CanEvents, input.CanChanges, input.CanSubscribe); err != nil {
+		return nil, err
 	}
 	prefix, err := paths.Normalize(input.Prefix)
 	if err != nil {
@@ -350,14 +371,19 @@ func (s *Service) UpdateToken(ctx context.Context, userID, tokenID string, input
 	)
 	err = s.db.Pool().QueryRow(ctx,
 		`update api_tokens
-		    set prefix = $3, can_read = $4, can_write = $5, can_events = $6, expires_at = $7
+		    set policy_version = policy_version + case when
+                    row(prefix, can_read, can_write, can_events, can_changes, can_subscribe, expires_at)
+                    is distinct from row($3::text, $4::boolean, $5::boolean, $6::boolean, $7::boolean, $8::boolean, $9::timestamptz)
+                    then 1 else 0 end,
+                prefix = $3, can_read = $4, can_write = $5, can_events = $6,
+                can_changes = $7, can_subscribe = $8, expires_at = $9
 		  where user_id = $1::uuid and token_id = $2 and revoked_at is null
-		 returning token_id, name, kind, prefix, can_read, can_write, can_events,
+		 returning token_id, name, kind, prefix, can_read, can_write, can_events, can_changes, can_subscribe, policy_version,
 		           `+isoUTC("created_at")+`,
 		           case when last_used_at is null then null else `+isoUTC("last_used_at")+` end,
 		           case when expires_at is null then null else `+isoUTC("expires_at")+` end`,
-		userID, tokenID, prefix, input.CanRead, input.CanWrite, input.CanEvents, expiresAt).
-		Scan(&token.ID, &token.Name, &token.Kind, &token.Prefix, &token.CanRead, &token.CanWrite, &token.CanEvents,
+		userID, tokenID, prefix, input.CanRead, input.CanWrite, input.CanEvents, input.CanChanges, input.CanSubscribe, expiresAt).
+		Scan(&token.ID, &token.Name, &token.Kind, &token.Prefix, &token.CanRead, &token.CanWrite, &token.CanEvents, &token.CanChanges, &token.CanSubscribe, &token.PolicyVersion,
 			&token.CreatedAt, &lastUsed, &expires)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -374,7 +400,7 @@ func (s *Service) UpdateToken(ctx context.Context, userID, tokenID string, input
 // ListTokens returns every token for a user, revoked ones included for auditing.
 func (s *Service) ListTokens(ctx context.Context, userID string) ([]Token, error) {
 	rows, err := s.db.Pool().Query(ctx,
-		`select token_id, name, kind, prefix, can_read, can_write, can_events,
+		`select token_id, name, kind, prefix, can_read, can_write, can_events, can_changes, can_subscribe, policy_version,
 		        `+isoUTC("created_at")+`,
 		        case when last_used_at is null then null else `+isoUTC("last_used_at")+` end,
 		        case when expires_at is null then null else `+isoUTC("expires_at")+` end,
@@ -398,7 +424,7 @@ func (s *Service) ListTokens(ctx context.Context, userID string) ([]Token, error
 			revokedAt *string
 		)
 		if err := rows.Scan(&token.ID, &token.Name, &token.Kind, &token.Prefix,
-			&token.CanRead, &token.CanWrite, &token.CanEvents, &token.CreatedAt,
+			&token.CanRead, &token.CanWrite, &token.CanEvents, &token.CanChanges, &token.CanSubscribe, &token.PolicyVersion, &token.CreatedAt,
 			&lastUsed, &expires, &revoked, &revokedAt); err != nil {
 			return nil, err
 		}
@@ -425,7 +451,7 @@ func (s *Service) CountActiveTokens(ctx context.Context, userID string) (int, er
 // RevokeToken revokes a token: it immediately stops granting any permission.
 func (s *Service) RevokeToken(ctx context.Context, userID, tokenID string) error {
 	tag, err := s.db.Pool().Exec(ctx,
-		`update api_tokens set revoked_at = now()
+		`update api_tokens set revoked_at = now(), policy_version = policy_version + 1
 		  where user_id = $1::uuid and token_id = $2 and revoked_at is null`,
 		userID, tokenID)
 	if err != nil {
@@ -451,7 +477,7 @@ func (s *Service) VerifyToken(ctx context.Context, plain string) (*Token, error)
 		expires  *string
 	)
 	err := s.db.Pool().QueryRow(ctx,
-		`select user_id::text, token_id, name, kind, prefix, can_read, can_write, can_events,
+		`select user_id::text, token_id, name, kind, prefix, can_read, can_write, can_events, can_changes, can_subscribe, policy_version,
 		        `+isoUTC("created_at")+`,
 		        case when last_used_at is null then null else `+isoUTC("last_used_at")+` end,
 		        case when expires_at is null then null else `+isoUTC("expires_at")+` end,
@@ -462,7 +488,7 @@ func (s *Service) VerifyToken(ctx context.Context, plain string) (*Token, error)
 		    and (expires_at is null or expires_at > now())
 		  limit 1`, id).
 		Scan(&token.userID, &token.ID, &token.Name, &token.Kind, &token.Prefix,
-			&token.CanRead, &token.CanWrite, &token.CanEvents, &token.CreatedAt,
+			&token.CanRead, &token.CanWrite, &token.CanEvents, &token.CanChanges, &token.CanSubscribe, &token.PolicyVersion, &token.CreatedAt,
 			&lastUsed, &expires, &hash)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {

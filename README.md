@@ -25,9 +25,10 @@ Durable server sessions and accepted Operations continue under their existing re
 that retain session identity and source bytes can use the resumable API independently of this browser behavior.
 Parts from up to eight files share one global pool of sixteen concurrent requests; one file may use all sixteen.
 See [native uploads and receiver deployment](docs/design/native-upload-deployment.md) for the exact boundaries.
-Object connections need no bucket versioning: revisions are current-object ETags enforced with native
-conditional requests, so upload, replacement, folder creation, move, copy and deletion all work. Reads are
-validated but not version-pinned.
+Object connections need no bucket versioning: revisions use current-object ETags and operation-specific
+conditions. COS ignores PUT If-Match, so admitted replacement rechecks ETag under gateway coordination;
+external writers are not globally fenced. Upload, replacement, folder creation, move, copy and deletion are
+available on admitted roots. Reads are validated but not version-pinned.
 
 ## Accepted storage architecture
 
@@ -48,17 +49,38 @@ Page metadata, folder listings, search and indexed usage read Postgres directly,
 lookups. Content and mutations still access real storage; external edits appear after index synchronization.
 Existing reconcile/import is additive and does not prune externally deleted entries.
 
+The accepted [stable identity amendment](docs/design/file-identity.md) gives every file/folder and root a
+persisted service UUID. The same endpoints accept ID or direct path, with no preliminary ID lookup required.
+Metadata adds id/parentId while retaining path/parentPath; concealed parents are redacted. Move and content
+replacement retain IDs; copy and delete/recreate allocate fresh IDs. Files/folders share one unique native
+sibling namespace. IDs still require owner/current path-scope authorization. Canonical parent/name links,
+dynamic current paths and eligible Local native tree movement are implemented. Disposable Postgres, full
+Go/client and built-SPA Chrome acceptance passed; targeted race checks passed. A native Local non-growing folder move captures one root effect without descendant identity
+rewrites. Longer/deeper destinations and flat object moves retain finite fallback; dynamic ancestry/search
+costs remain depth-sensitive.
+
+[First-phase change tracking](docs/design/file-changes.md) adds recursive lastChangedAt/changeToken, durable
+ordered facts, immutable indexed snapshots, incremental pull, seven-day SSE subscriptions and owner-only audit.
+Snapshots are synchronous and bounded to 100,000 entries/64 MiB/25 seconds, with 24-hour lifetime; large/slow
+materialization fails explicitly, without an asynchronous snapshot Operation. SSE is a wakeup; pull checkpoints
+provide recovery. Webhooks and automatic retention scheduling are deferred. Change rows default to 90-day
+expiry; explicit pruning exists but is not automatically scheduled. Final integration evidence is tracked in
+the [implementation plan](docs/design/storage-implementation-plan.md).
+
 | Unified file contract | Interface / status |
 |---|---|
-| All file clients | `/api/files`: one path-based API for Web, iOS, Android, CLI and third parties |
+| All file clients | `/api/files`: one ID-or-path API for Web, iOS, Android, CLI and third parties |
 | Authentication (P2 active) | Explicit Bearer, or session cookie; Origin + session-bound CSRF required for mutations |
-| Metadata and listing (P2 active) | `GET /api/files?path=/...`; `GET /api/files/list?path=/...` |
+| Metadata and listing (ID/path implemented) | `GET /api/files?path=/...` or `?id=<UUID>`; same selectors for `/list` |
 | Search and principal (P2 active) | `GET /api/files/search`; `/api/files/me`; `/api/files/capabilities` |
-| File content (P2 active) | `GET/HEAD /api/files/content?path=/...`: same-origin streaming, safe single ranges |
+| File content (ID/path implemented) | `GET/HEAD /api/files/content?path=/...` or `?id=<UUID>`: same-origin streaming, safe single ranges |
 | Mutations (P4 admitted roots) | Verified baseline and explicit capability evidence; upload/replace/folder/move/copy/delete |
 | Long operations (P4) | `.../operations/{id}` and `/cancel`: durable progress, partial effects, recovery |
 | Resumable uploads (admitted roots) | POST/GET `.../uploads`; GET/DELETE `.../uploads/{id}`; PUT `.../parts/{number}` (native object parts or durable Local parts); GET `.../parts`; POST `.../commit` (publication + index, no object-body retransmission) |
-| Storage tree (P1/P4) | Native reads and admitted Local stage/publish/mkdir/move/copy/empty-only remove |
+| Storage tree (P1/P4/R3) | Native reads and admitted Local writes; eligible folder rename is one native root effect |
+| Incremental state (R4/R5) | Immutable change-snapshots; changes pull with policy-bound opaque checkpoints |
+| Notifications (R5 first phase) | Durable ID/path file/folder subscriptions and bounded SSE availability events |
+| Owner audit (R4) | GET /api/audit with owner cookie; captured file access and effect attribution |
 
 CDN/regional gateways and NAS connectors are internal deployment choices. Private cache hits require
 authorization; uploads need suitable streaming ingress. Self-hosting can run in one process without a CDN.
@@ -75,14 +97,16 @@ with additive migrations 016/017. P4 adds [admitted Local native writes and Oper
 with migrations 019/020. Writes default off: configure `FILE_COORDINATED_WRITES=true` only for coordinated
 Local writers, validate/import the native index, then run the explicit `eam storage-admit` command with
 `--owner-id UUID --writers-quiesced --evidence /secure/proof.json` before serving mutations. No production baseline or writer revocation is automatic. [COS/S3 mutation adapters](docs/design/storage-p4-objects.md)
-use one strategy: current-object ETag revisions with native `If-Match` / `If-None-Match`, no bucket
-versioning required. It needs exact connection probe evidence, a durable single-gateway spool, one-shot
+use one strategy: current-object ETag revisions with operation-specific native conditions or the documented
+coordinated COS PUT recheck, no bucket versioning required. It needs exact connection probe evidence, a durable single-gateway spool, one-shot
 requests and permanent guards for uncertain remote effects. Object admission requires `--writers-quiesced`
 and explicit `--physical-bytes` with inventory evidence.
 P5 adds [durable numbered-part ingress](docs/design/storage-p5.md) with migration 024, server SHA-256,
 watermarked receipts and restart recovery. The [native upload extension](docs/design/native-upload-deployment.md)
 adds shared native metadata (migration 025), direct unpublished object parts and lightweight native completion.
-Parts are 32 MiB with sixteen concurrent requests per session and at most 10000 parts. Explicit `multipartUploads`
+Parts are 32 MiB with sixteen concurrent requests per session and at most 10000 parts (320,000 MiB before
+lower backend/budget limits). Embedded native COS/S3 reception streams request bodies to the provider while
+hashing, without retaining a complete part. Displayed upload speed uses a trailing ten-second window. Explicit `multipartUploads`
 connection evidence is required; numbered object uploads no longer inherit the default 32 MiB single-PUT policy.
 The browser sends parts through a global pool of sixteen requests. `FILE_UPLOAD_INGRESS=embedded` keeps reception in
 `eam server`. Official `edgeone` mode signs exact parts and verifies COS state after ordinary EO forwarding;
@@ -328,21 +352,26 @@ curl -G -H "Authorization: Bearer eam_..." --data-urlencode 'path=/Apps/badminto
   https://your-host/api/files/list
 ```
 
-Content uses `GET/HEAD /api/files/content?path=/...`; the old `/api/files/<path>` family is retired.
-The table lists the active shared file resources and retained account/Connect entry points.
+Content uses `GET/HEAD /api/files/content?path=/...` or `?id=<UUID>` under the accepted amendment; the old
+`/api/files/<path>` family is retired. Query endpoints require exactly one nonempty id or path; search and
+capabilities alone default to the authorized root when both are absent. JSON EntrySelector is `{id}|{path}`;
+Destination is `{path}` or `{parent:{id}|{path},name}`. These identity forms and first-phase changes/audit
+resources are implemented and integration-verified on disposable roots; targeted race checks passed.
+Account/Connect retain their
+existing separate endpoints and envelopes.
 
 | Method | Path | Description |
 |---|---|---|
-| GET | `/api/files?path=` | Path-based indexed metadata; no synchronous storage lookup |
-| GET | `/api/files/list?path=&limit=&cursor=` | Indexed immediate children; owner-scoped SQL keyset pagination |
-| GET | `/api/files/search?q=&path=&kind=&mediaType=` | Authorized indexed search with scoped opaque cursors |
-| GET | `/api/files/me` · `/api/files/capabilities` | Indexed scope/usage and effective limits; cookie CSRF bootstrap |
-| GET, HEAD | `/api/files/content?path=` | Same-origin bytes and representation headers; single Range support |
-| PUT | `/api/files/content?path=` | Small admitted write; disabled with `503 edgeone_route_required` in edgeone mode |
-| POST | `/api/files` · `/api/files/move` · `/api/files/copy` | Admitted folder creation and finite native move/copy, no target merge |
-| DELETE | `/api/files?path=&recursive=true` | Captured native deletion; explicit recursion for nonempty folders |
+| GET | `/api/files?path=` or `?id=` | Indexed metadata by either selector; no synchronous storage lookup |
+| GET | `/api/files/list?path=&limit=&cursor=` (or `id=`) | Indexed immediate children; owner-scoped SQL keyset pagination |
+| GET | `/api/files/search?q=&path=&kind=&mediaType=` (or `id=`) | Authorized indexed search below selected folder; scoped opaque cursors |
+| GET | `/api/files/me` · `/api/files/capabilities` | Indexed scope/usage and effective limits (id/path or visible-root default); cookie CSRF bootstrap |
+| GET, HEAD | `/api/files/content?path=` or `?id=` | Same-origin bytes and representation headers; single Range support |
+| PUT | `/api/files/content?path=` or `?id=`; create via parentId/parentPath + name | Small admitted create/conditional replace; disabled with `503 edgeone_route_required` in edgeone mode |
+| POST | `/api/files` · `/api/files/move` · `/api/files/copy` | Folder destination; move/copy from EntrySelector to Destination; no target merge |
+| DELETE | `/api/files?path=&recursive=true` (or `id=`) | Captured native deletion and ID retirement; explicit recursion for nonempty folders |
 | GET, POST | `/api/files/operations/{id}` · `.../cancel` | Durable state/result and safe cancellation |
-| POST, GET | `/api/files/uploads` | Create/list persistent principal-bound upload sessions |
+| POST, GET | `/api/files/uploads` | Create with destination or replace target selector; list persistent principal-bound sessions |
 | GET, DELETE | `/api/files/uploads/{id}` | Compact durable status or open-session abort |
 | PUT | `/api/files/uploads/{id}/parts/{number}` | Embedded durable object part or Local chunk; server SHA-256 |
 | POST | `/api/files/uploads/{id}/parts/{number}/authorize` | Bind exact digest/size and issue a five-minute same-origin COS part request (edgeone mode) |
@@ -350,13 +379,26 @@ The table lists the active shared file resources and retained account/Connect en
 | POST | `/api/files/uploads/{id}/parts/{number}/confirm` | Verify native COS part size/ETag against bound MD5, persist receipt with checksum provenance |
 | GET | `/api/files/uploads/{id}/parts?limit=&cursor=` | Watermarked durable receipt pages |
 | POST | `/api/files/uploads/{id}/commit` | Frozen-manifest commit; metadata or stable Operation |
-| GET | `/me` | Current account, token permissions, usage |
+| POST | `/api/files/change-snapshots` | Complete bounded synchronous metadata baseline with committed feed checkpoint |
+| GET, DELETE | `/api/files/change-snapshots/{id}` | Immutable metadata pages or release retained snapshot |
+| GET | `/api/files/changes?cursor=&limit=` | Authorized fixed-filter changes: items, nextCursor, hasMore |
+| POST, GET | `/api/files/subscriptions` | Create/list principal-bound file/folder ID/path SSE subscriptions |
+| GET, DELETE | `/api/files/subscriptions/{id}` | Inspect/delete subscription |
+| POST | `/api/files/subscriptions/{id}/renew` | Extend an unexpired seven-day subscription lease |
+| GET | `/api/files/subscriptions/{id}/events` | Bounded SSE wakeup, independent of consumer checkpoint |
+| GET | `/api/audit?limit=&cursor=` | Owner-cookie file audit collection; no Bearer access |
+| GET | `/me` | Current account, token permissions including changes/subscribe/policyVersion, usage |
 | PATCH | `/me` | `{"name"}` names the connection this token belongs to (an app names itself after scanning) |
 | GET | `/s/<code>` | Agent instructions: a save-link code returns the save prompt; a Connect token (`eam_...`) returns that connection's prompt, live |
 
 All clients stream same-origin content or use P5 parts followed by explicit commit. Long work returns
 202 + Location below `/api/files/operations/{id}`; polling/cancellation uses that exact identity. Native
-uncertainty never authorizes blind re-upload. File identity is the path, and workflow IDs are temporary.
+uncertainty never authorizes blind re-upload. Stable service IDs are independent from temporary workflow IDs.
+Current full-path forms are intentionally retained: folder `{kind:"folder",path,parents?}`, move/copy string
+`from`/`to`, and upload top-level `path`. Folder path excludes destination; upload path excludes destination
+and target, and means destination in create mode or target in replace mode. New uploads canonically use
+`destination:Destination` to create, or `target:EntrySelector` plus contentRevision condition to replace.
+Admitted work binds identity and location; moved/recreated targets or ancestors fail `412 target_changed`.
 
 Save links (for agents):
 
@@ -368,13 +410,21 @@ The URL itself is the token plus the instructions: `GET` only returns a prompt a
 Generated save and Connect prompts call `/api/files` content or P5 session/part/commit endpoints and
 follow durable Operations. The account page can mint as many save links as needed, show recent use,
 and revoke them at any time; a revoked
-link stops working immediately. The short code has no `eam_` prefix and also works directly as a Bearer token for
-the full file API. The account page's "recent activity" lists who changed which path and when; save links and
-event submissions both land in `audit_log`.
+link stops working immediately. The short code has no eam_ prefix and also works directly as a Bearer token
+for its existing file read/write access, without implicit change-history or subscription grants. The account
+page's recent activity lists older recorded writes; Connect/account/event activity remains in audit_log,
+while the new owner file audit collection is separate.
+
+Changes require explicit file read plus changes; subscriptions/SSE additionally require subscribe. Existing
+tokens and save links receive neither implicitly. Owner sessions have both. Scope still follows native-aware
+paths; an ID cannot bypass it. Policy edits/revoke advance a monotonic generation, so old cursors cannot revive
+after grants are removed and restored. Names and identical policy saves do not advance it. GET /api/audit
+requires an owner cookie and uses plain resources/Problems independently from account activity.
 
 Token management:
 
 ```bash
+eam token create --email you@example.com --name sync --changes --subscribe
 eam token list   --email you@example.com
 eam token revoke --email you@example.com --id <token ID>
 ```
@@ -384,7 +434,9 @@ shows a QR code plus a one-line prompt, while its path, permissions and lifetime
 panel. The prompt links to `/s/<token>`, which returns the full instructions from the live row. The page
 mints apps only; tokens can still be created with the CLI or the web API and are listed there for revocation.
 Everything is backed by `api_tokens`. An app starts nameless and names itself with `PATCH /me` after
-scanning. The payload and the page design are in [docs/design/connect.md](docs/design/connect.md).
+scanning. File changes and Live file changes have separate explicit checkboxes, initially disabled; Read is
+required for both and File changes is also required for Live file changes. QR JSON stays credential-only;
+GET /me and the live instructions report current grants. The payload and the page design are in [docs/design/connect.md](docs/design/connect.md).
 
 ### The API the web UI uses
 
@@ -460,11 +512,23 @@ go run ./cmd/eam migrate                       # create / upgrade tables
 go run ./cmd/eam doctor [--write]              # self-check (`--write` writes a probe object, then deletes it)
 go run ./cmd/eam reconcile --owner … [--inventory …] [--dry-run]
 go run ./cmd/eam storage-resolve-upload --operation-id … [--dry-run]  # operator fallback: release a discarded upload whose abort answer was lost
+go run ./cmd/eam file-changes-prune --owner-id UUID [--dry-run]
+go run ./cmd/eam file-changes-reset --owner-id UUID --writers-quiesced [--dry-run]
 go run ./cmd/eam claim --email … [--dry-run] [--keep-source]
-go run ./cmd/eam token create --email … --name … [--prefix …] [--write=false]
+go run ./cmd/eam token create --email … --name … [--prefix …] [--write=false] [--changes] [--subscribe]
 go run ./cmd/eam token list   --email …
 go run ./cmd/eam token revoke --email … --id …
 ```
+
+Change pruning removes only an expired contiguous feed prefix, retaining effect receipts and file bytes.
+No automatic scheduler is wired. Change audit remains indefinitely; no 365-day deletion promise is made.
+Migration 032 binds each stream to one durable root/configuration namespace on first use; later mismatches
+reject access rather than silently rebind. After database restore or any root rebind, including A → B → A,
+stop application/external writers and settle accepted work before file-changes-reset. It refuses remaining
+mutation guards or nonterminal Operations, rotates the epoch, sets retained floor=head, expires old snapshots/
+subscriptions and clears markers without changing file IDs or native bytes. Dry-run rolls back. New clients
+must bootstrap again; even same-namespace restores need reset to invalidate restored checkpoints. See the
+[root lifecycle runbook](docs/design/file-changes.md#durable-root-binding-and-restorerebind-procedure).
 
 `make` has matching targets:
 
@@ -483,7 +547,8 @@ go run ./cmd/eam token revoke --email … --id …
 - **Passwords are optional**: once set you can sign in with one; an account without a password depends entirely on the email being reachable.
 - **A forgotten password is not fatal**: sign in with an email code and reset it on the account page; but losing the email itself leaves no recovery path (no backup email, no recovery codes).
 - **Rate limiting is in-process memory**: with multiple instances each keeps its own count, so strict limiting needs Redis.
-- **Renaming a directory** copies objects one at a time on the server, which takes ages at TB scale. Change it with coscli first, then reconcile.
+- **Directory movement depends on backend and destination**: eligible Local moves use native root rename; growing/deeper destinations and flat object trees retain finite work. Outside-tool moves followed by additive reconcile do not automatically preserve IDs or remove old index entries.
+- **Change tracking observes the index**: external creation/update appears after explicit scan/import; external deletions are not automatically pruned. Snapshot bounds, fixed cursor expiry and explicit retention maintenance apply. Webhooks, automatic prune scheduling and verified publisher identity are deferred.
 - **No instant upload (dedup)**: computing a full SHA256 over TBs means reading all the data once. If we ever do it, use `size + hash of the first and last 1MB`.
 - **Legacy data must be claimed by hand**: `eam claim` is O(number of objects) server-side copying; run `--dry-run` first.
 - **Deleting an account** only cascades database records; the objects under `drive/<userID>/` in COS must be cleaned up by prefix yourself.

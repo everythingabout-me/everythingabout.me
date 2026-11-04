@@ -121,6 +121,18 @@ func TestReconcilePostgresIdentityDryRunAndAtomicity(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Keep the focused scan fixture, then apply the real identity projection and
+	// change-marker dependencies used by the current nodes repository. Identity
+	// backfill intentionally synthesizes the known logical ancestor before scanning.
+	for _, migration := range []string{"026_file_identity.sql", "027_canonical_file_tree.sql", "028_file_changes.sql", "031_effective_change_markers.sql"} {
+		data, err := os.ReadFile("../../../sql/" + migration)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := pool.Exec(ctx, string(data)); err != nil {
+			t.Fatalf("migration %s: %v", migration, err)
+		}
+	}
 	owner := "11111111-1111-1111-1111-111111111111"
 	prefix := "drive/" + owner + "/"
 	scan := func(body string) *treescan.Result {
@@ -214,14 +226,14 @@ func TestReconcilePostgresIdentityDryRunAndAtomicity(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if report.Inserted != 2 || report.Updated != 0 || report.Unchanged != 1 || !reflect.DeepEqual(before, snapshot()) {
+	if report.Inserted != 1 || report.Updated != 0 || report.Unchanged != 2 || !reflect.DeepEqual(before, snapshot()) {
 		t.Fatalf("dry-run wrote or miscounted: %#v", report)
 	}
 	report, err = nodes.ApplyScan(ctx, pool, owner, result, nodes.ScanApplyOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if report.Inserted != 2 || report.Updated != 0 || report.Unchanged != 1 {
+	if report.Inserted != 1 || report.Updated != 0 || report.Unchanged != 2 {
 		t.Fatalf("initial import: %#v", report)
 	}
 	after := snapshot()

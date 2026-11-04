@@ -31,12 +31,12 @@ func (p *Postgres) ReplayAction(ctx context.Context, req ActionRequest) (Operati
 		if err != nil {
 			return err
 		}
+		if err = authorizeOperation(op, req.Root, req.Actor, true); err != nil {
+			return err
+		}
 		original, err := actionRequest(op)
 		if err != nil || !actionClientEqual(original, req) {
 			return E("idempotency_conflict", err)
-		}
-		if err = authorizeOperation(op, req.Root, req.Actor, true); err != nil {
-			return err
 		}
 		found = true
 		return nil
@@ -157,7 +157,15 @@ func validateFrozenAction(op Operation, b actionBinding, entries []ManifestEntry
 		}
 		expected = append(expected, entry)
 	}
-	if req.Kind == "mkdir" {
+	if b.Strategy != "" && b.Strategy != nativeTreeMoveStrategy {
+		return E("invalid_intent", nil)
+	}
+	if b.Strategy == nativeTreeMoveStrategy {
+		if req.Kind != "move" || req.From == "" || req.To == "" || req.From == req.To || len(b.Sources) != 1 || b.Sources[0].Kind != storage.Folder || len(b.Sources[0].Version) == 0 || b.Existing != nil {
+			return E("invalid_intent", nil)
+		}
+		add("move", req.From, req.To, b.Sources[0].Version, 0)
+	} else if req.Kind == "mkdir" {
 		if len(b.Sources) != 0 {
 			return E("invalid_intent", nil)
 		}

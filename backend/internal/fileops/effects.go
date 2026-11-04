@@ -248,6 +248,9 @@ func validateEntryResult(entry EntryEffect, result storage.MutationResult) error
 	if result.Entry.Kind != storage.File && result.Entry.Kind != storage.Folder {
 		return E("invalid_native_result", nil)
 	}
+	if entry.Action == "move" && entry.SourceEntry != nil && result.Entry.Kind != entry.SourceEntry.Kind {
+		return E("invalid_native_result", nil)
+	}
 	if result.Entry.Kind == storage.Folder && result.Entry.Size != 0 || result.Entry.Kind == storage.File && result.Entry.Size != entry.Size {
 		return E("invalid_native_result", nil)
 	}

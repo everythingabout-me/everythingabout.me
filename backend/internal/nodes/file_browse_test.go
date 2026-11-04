@@ -44,7 +44,7 @@ func TestIndexedBrowsingPaginationScopeAndHiddenRoots(t *testing.T) {
 	indexActionEntry(t, pool, other, "other-only.txt", false)
 	namespace := fileRootNamespace(owner)
 	root, err := service.FileBrowseMetadata(ctx, owner.OwnerID, namespace, "")
-	if err != nil || root == nil || !root.Row.IsDir || len(root.Membership) != 5 {
+	if err != nil || root == nil || !root.Row.IsDir || len(root.Membership) != 1 || root.Membership[0] != "membership:5" {
 		t.Fatalf("root %+v error %v", root, err)
 	}
 	var got []string
@@ -79,7 +79,7 @@ func TestIndexedBrowsingPaginationScopeAndHiddenRoots(t *testing.T) {
 	}
 	hidden := []string{"Folder/hidden"}
 	folder, err := service.FileBrowseMetadata(ctx, owner.OwnerID, namespace, "Folder", hidden...)
-	if err != nil || folder == nil || !reflect.DeepEqual(folder.Membership, []string{"file:Folder/nested.txt"}) {
+	if err != nil || folder == nil || !reflect.DeepEqual(folder.Membership, []string{"membership:2"}) {
 		t.Fatalf("visible membership %+v %v", folder, err)
 	}
 	missing, err := service.FileBrowseMetadata(ctx, owner.OwnerID, namespace, "Folder/hidden/secret.txt", hidden...)

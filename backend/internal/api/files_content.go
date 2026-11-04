@@ -31,11 +31,18 @@ func filesContentRevision(namespace string, e storage.Entry) *string {
 }
 
 func (s *Server) handleFilesContent(w http.ResponseWriter, r *http.Request, f *fileRequest) error {
-	p, err := fc.ParseQueryPath(r.URL.RawQuery)
+	p, err := s.filesResolveQuery(r.Context(), f, r.URL.RawQuery, false)
 	if err != nil {
 		return err
 	}
 	if err := f.RequireRead(p); err != nil {
+		return err
+	}
+	selector, err := fc.ParseSelectorQuery(r.URL.RawQuery, false)
+	if err != nil {
+		return err
+	}
+	if err := s.filesCheckReadIdentity(r.Context(), f, p, selector.ID); err != nil {
 		return err
 	}
 	native := storage.Path(p.Relative())
@@ -66,6 +73,13 @@ func (s *Server) filesContentByReference(w http.ResponseWriter, r *http.Request,
 		}
 		return false, err
 	}
+	selector, err := fc.ParseSelectorQuery(r.URL.RawQuery, false)
+	if err != nil {
+		return false, err
+	}
+	if selector.IsID() && record.Row.ID != selector.ID {
+		return false, fc.NewProblem(404, "not_found", "The selected file changed location.")
+	}
 	if record.Row.IsDir || record.Row.Key == "" {
 		return false, nil
 	}
@@ -90,6 +104,9 @@ func (s *Server) filesContentByReference(w http.ResponseWriter, r *http.Request,
 		}
 		if revision != nil {
 			tag = strconv.Quote(*revision)
+		}
+		if err := s.filesCheckReadIdentity(r.Context(), f, p, selector.ID); err != nil {
+			return false, err
 		}
 		// A conditional answer needs only the observation: no body is opened for 304.
 		if condition := filesContentCondition(r.Header, tag); condition != 0 {
@@ -135,6 +152,10 @@ func (s *Server) filesContentByReference(w http.ResponseWriter, r *http.Request,
 			}
 			continue
 		}
+		if err := s.filesCheckReadIdentity(r.Context(), f, p, selector.ID); err != nil {
+			read.Body.Close()
+			return false, err
+		}
 		return true, filesContentStream(w, r, f, native, read, tag, selected, status)
 	}
 	return false, storage.NewError("changed", native, nil)
@@ -150,6 +171,14 @@ func readLengthFor(read storage.Read, selected *filesByteRange) int64 {
 // filesContentByTraversal proves the path by listing its ancestors on every request.
 // It is the fallback when no index key is available.
 func (s *Server) filesContentByTraversal(w http.ResponseWriter, r *http.Request, f *fileRequest, native storage.Path) error {
+	p, err := fc.FromRelative(string(native))
+	if err != nil {
+		return err
+	}
+	selector, err := fc.ParseSelectorQuery(r.URL.RawQuery, false)
+	if err != nil {
+		return err
+	}
 	// Bound retries cover native replacements between metadata selection and Open.
 	// All headers come from Open's actual representation, never the preceding Stat.
 	for attempt := 0; attempt < 3; attempt++ {
@@ -199,6 +228,10 @@ func (s *Server) filesContentByTraversal(w http.ResponseWriter, r *http.Request,
 				}
 				return err
 			}
+		}
+		if err := s.filesCheckReadIdentity(r.Context(), f, p, selector.ID); err != nil {
+			read.Body.Close()
+			return err
 		}
 		tag := ""
 		revision, revisionErr := s.filesObservedContentRevision(r.Context(), f, read.Entry)

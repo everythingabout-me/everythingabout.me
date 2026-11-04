@@ -400,6 +400,10 @@ func TestUnchangedUploadPostgresRepairsMissingParents(t *testing.T) {
 	if after.ID != before.ID || after.UpdatedAt != before.UpdatedAt {
 		t.Fatal("repairing parents churned unchanged file metadata")
 	}
+	id, parentID, err := service.FileIdentity(ctx, owner, path)
+	if err != nil || id != before.ID || parentID == "" {
+		t.Fatalf("repaired canonical identity %q/%q error=%v", id, parentID, err)
+	}
 	for _, parentPath := range paths.AncestorsOf(path) {
 		if row, _ := service.Live(ctx, parentPath, owner); row == nil || !row.IsDir {
 			t.Fatalf("missing repaired parent %s", parentPath)

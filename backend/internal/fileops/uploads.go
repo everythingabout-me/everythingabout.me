@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"io"
 	"math"
+	"path"
 	"strings"
 	"time"
 
@@ -70,8 +71,25 @@ type UploadJournal interface {
 	MarkUploadChunksCleaned(context.Context, Root, Actor, string) error
 }
 
+func clientWriteIdentity(w storage.WriteIntent) storage.WriteIntent {
+	switch w.Selection {
+	case "id":
+		w.Target = ""
+		w.ParentID = ""
+	case "parentId":
+		w.Target = storage.Path(path.Base(string(w.Target)))
+		w.EntryID = ""
+	default:
+		w.EntryID, w.ParentID = "", ""
+	}
+	if w.Selection == "path" {
+		w.Selection = ""
+	}
+	return w
+}
+
 func clientUploadFingerprint(w storage.WriteIntent) (string, error) {
-	if w.ID != "" || w.Target == "" || storage.ValidatePath(w.Target) != nil || w.Size < 0 || strings.ContainsRune(w.ClientCondition, 0) {
+	if w.ID != "" || w.Target == "" && (w.Selection != "id" || w.EntryID == "") || storage.ValidatePath(w.Target) != nil || w.Size < 0 || strings.ContainsRune(w.ClientCondition, 0) {
 		return "", E("invalid_request", nil)
 	}
 	// Native Conditions, ParentPath and ParentVersion are captured admission evidence.
@@ -79,6 +97,7 @@ func clientUploadFingerprint(w storage.WriteIntent) (string, error) {
 	w.Conditions = storage.Conditions{}
 	w.ParentPath = ""
 	w.ParentVersion = nil
+	w = clientWriteIdentity(w)
 	if w.SourceModifiedAt != nil {
 		t := w.SourceModifiedAt.UTC()
 		w.SourceModifiedAt = &t

@@ -310,10 +310,16 @@ func TestEdgeOneForwardedCOSPostgresSignedUploadLifecycle(t *testing.T) {
 	}
 	actions := driver.(fileops.NativeActions)
 	binding := actions.StorageBinding()
-	root := fileops.Root{OwnerID: owner, ConnectionID: binding.ConnectionID, Generation: binding.Generation, ContentRoot: binding.ContentRoot, SystemRoot: binding.SystemRoot, CaseSensitive: actions.StorageNameRules().CaseSensitive, RetainsVersions: true}
+	root := fileops.Root{OwnerID: owner, ConnectionID: binding.ConnectionID, Generation: binding.Generation, ContentRoot: binding.ContentRoot, SystemRoot: binding.SystemRoot, CaseSensitive: actions.StorageNameRules().CaseSensitive, RetainsVersions: actions.Describe().RetainsVersions}
 	driver.Close()
 	journal := fileops.NewPostgres(db.Pool())
-	if e = journal.Initialize(ctx, root, fileops.Baseline{LogicalLimit: 64 << 20, PhysicalLimit: 256 << 20, NativeComplete: true, IndexCompared: true, LegacyWritersDrained: true, Evidence: json.RawMessage(`{"fixture":"fresh isolated COS root"}`)}); e != nil {
+	const fixturePartBytes int64 = 32 << 20
+	const fixtureFileBytes = fixturePartBytes + 8
+	// Reserve the file and every advertised concurrent receive slot. The
+	// capability assertion below keeps this fixture geometry tied to the API.
+	logicalLimit := 2 * fixtureFileBytes
+	physicalLimit := logicalLimit + int64(fileops.UploadPartSlots)*fixturePartBytes
+	if e = journal.Initialize(ctx, root, fileops.Baseline{LogicalLimit: logicalLimit, PhysicalLimit: physicalLimit, NativeComplete: true, IndexCompared: true, LegacyWritersDrained: true, Evidence: json.RawMessage(`{"fixture":"fresh isolated COS root"}`)}); e != nil {
 		t.Fatal(e)
 	}
 	cookie, _, e := authentication.CreateSession(ctx, owner, "edgeone fixture", "")
@@ -398,11 +404,18 @@ func TestEdgeOneForwardedCOSPostgresSignedUploadLifecycle(t *testing.T) {
 	if status != 200 {
 		t.Fatal(status, me)
 	}
+	status, capabilities := request("GET", "/api/files/capabilities", nil, nil)
+	if status != 200 || capabilities["uploads"] != true || capabilities["maxPartBytes"] != float64(fixturePartBytes) || capabilities["maxUploadParallelism"] != float64(fileops.UploadPartSlots) {
+		t.Fatal("fixture reservation geometry diverged from upload capabilities", status, capabilities)
+	}
+	quota, ok := capabilities["quota"].(map[string]any)
+	if !ok || quota["logicalLimitBytes"] != float64(logicalLimit) || quota["physicalLimitBytes"] != float64(physicalLimit) {
+		t.Fatal("fixture budget was not exposed by the admitted root", capabilities["quota"])
+	}
 	control := http.Header{"Origin": {front.URL}, "X-CSRF-Token": {me["csrfToken"].(string)}, "Content-Type": {"application/json"}}
 	target := "/ +%2F?#中文.bin"
-	// Raw binary spans two assigned parts, including a short final part. The part
-	// geometry is the service's 32 MiB, so the payload must exceed one full part.
-	payload := bytes.Repeat([]byte{0, 255, 13, 10, 128, 1, 2, 3}, (32<<20)/8+1)
+	// Raw binary spans two assigned parts, including a short final part.
+	payload := bytes.Repeat([]byte{0, 255, 13, 10, 128, 1, 2, 3}, int(fixtureFileBytes/8))
 	create, _ := json.Marshal(map[string]any{"path": target, "size": len(payload), "mediaType": "application/octet-stream"})
 	control.Set("Idempotency-Key", "edgeone-full-chain")
 	status, session := request("POST", "/api/files/uploads", create, control)
@@ -411,6 +424,14 @@ func TestEdgeOneForwardedCOSPostgresSignedUploadLifecycle(t *testing.T) {
 	}
 	id := session["id"].(string)
 	partSize := int(session["partSize"].(float64))
+	if int64(partSize) != fixturePartBytes || session["partCount"] != float64(2) || session["maxParallelism"] != float64(fileops.UploadPartSlots) {
+		t.Fatal("session geometry diverged from its admitted budget", session)
+	}
+	usage, err := journal.Usage(ctx, root, fileops.Actor{ID: "owner:" + owner, CanRead: true, CanWrite: true, ManageOwner: true})
+	wantPhysical := fixtureFileBytes + int64(fileops.UploadPartSlots)*fixturePartBytes
+	if err != nil || usage.LogicalReserved != fixtureFileBytes || usage.PhysicalReserved != wantPhysical {
+		t.Fatalf("upload reservation must include file bytes and concurrent receive headroom: %+v want physical%d error=%v", usage, wantPhysical, err)
+	}
 	prefix := "/api/files/uploads/" + id
 	for number := 1; number <= 2; number++ {
 		chunk := payload[(number-1)*partSize : min(number*partSize, len(payload))]

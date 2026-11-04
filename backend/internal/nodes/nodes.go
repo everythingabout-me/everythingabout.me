@@ -82,7 +82,7 @@ func scanNode(row pgx.Row) (*Row, error) {
 func (s *Service) List(ctx context.Context, ownerID, path string, limit int) ([]Row, error) {
 	rows, err := s.db.Pool().Query(ctx,
 		`select `+nodeColumns+`
-		   from nodes
+		   from file_entries
 		  where owner_id = $1::uuid
 		    and parent = $2
 		  order by is_dir desc, lower(name) asc
@@ -108,7 +108,7 @@ func (s *Service) Search(ctx context.Context, ownerID, keyword string, limit int
 	pattern := "%" + EscapeLike(keyword) + "%"
 	rows, err := s.db.Pool().Query(ctx,
 		`select `+nodeColumns+`
-		   from nodes
+		   from file_entries
 		  where owner_id = $1::uuid
 		    and (name ilike $2 or path ilike $2)
 		  order by is_dir desc, lower(name) asc
@@ -133,7 +133,7 @@ func (s *Service) Search(ctx context.Context, ownerID, keyword string, limit int
 func (s *Service) Live(ctx context.Context, path, ownerID string) (*Row, error) {
 	return scanNode(s.db.Pool().QueryRow(ctx,
 		`select `+nodeColumns+`
-		   from nodes
+		   from file_entries
 		  where owner_id = $1::uuid and path = $2
 		  limit 1`, ownerID, path))
 }
@@ -145,7 +145,7 @@ func (s *Service) EnsureParents(ctx context.Context, path, ownerID string) error
 		if _, err := s.db.Pool().Exec(ctx,
 			`insert into nodes (owner_id, key, path, parent, name, is_dir)
 			 values ($1::uuid, $2, $3, $4, $5, true)
-			 on conflict (owner_id, path) do nothing`,
+			 on conflict (owner_id, parent_id, comparison_name) do nothing`,
 			ownerID, paths.DirKeyFor(dir, ownerID), dir, paths.ParentOf(dir), paths.NameOf(dir),
 		); err != nil {
 			return err
@@ -182,8 +182,11 @@ func (s *Service) UpsertFile(ctx context.Context, input UpsertInput) (*Row, erro
 		`insert into nodes (owner_id, key, path, parent, name, is_dir, size, mime, etag, storage_class,
 		                    source_modified_at, meta)
 		 values ($1::uuid, $2, $3, $4, $5, false, $6, $7, $8, $9, $10, $11::jsonb)
-		 on conflict (owner_id, path)
+		 on conflict (owner_id, parent_id, comparison_name)
 		 do update set
+		   path = excluded.path,
+		   parent = excluded.parent,
+		   name = excluded.name,
 		   key = excluded.key,
 		   size = excluded.size,
 		   mime = excluded.mime,
@@ -226,11 +229,13 @@ func (s *Service) Purge(ctx context.Context, path, ownerID string) (int64, error
 		}
 	}
 
+	ids := make([]string, 0, len(rows))
+	for _, row := range rows {
+		ids = append(ids, row.ID)
+	}
 	tag, err := s.db.Pool().Exec(ctx,
-		`delete from nodes
-		  where owner_id = $1::uuid
-		    and (path = $2 or path like $3)`,
-		ownerID, path, EscapeLike(path)+"/%")
+		`delete from nodes where owner_id=$1::uuid and id=any($2::uuid[])`,
+		ownerID, ids)
 	if err != nil {
 		return 0, err
 	}
@@ -242,7 +247,7 @@ func (s *Service) CreateDirectory(ctx context.Context, path, ownerID string) (*R
 	return scanNode(s.db.Pool().QueryRow(ctx,
 		`insert into nodes (owner_id, key, path, parent, name, is_dir)
 		 values ($1::uuid, $2, $3, $4, $5, true)
-		 on conflict (owner_id, path) do nothing
+		 on conflict (owner_id, parent_id, comparison_name) do nothing
 		 returning `+nodeColumns,
 		ownerID, paths.DirKeyFor(path, ownerID), path, paths.ParentOf(path), paths.NameOf(path),
 	))
@@ -314,7 +319,7 @@ func (s *Service) ListPage(
 
 	rows, err := s.db.Pool().Query(ctx,
 		`select `+nodeColumns+`
-		   from nodes
+		   from file_entries
 		  where owner_id = $1::uuid
 		    and parent = $2
 		    and ($3::bool is null
@@ -343,7 +348,7 @@ func (s *Service) ListPage(
 func (s *Service) Usage(ctx context.Context, ownerID string) (bytes, files int64, err error) {
 	err = s.db.Pool().QueryRow(ctx,
 		`select coalesce(sum(size), 0), count(*)
-		   from nodes
+		   from file_entries
 		  where owner_id = $1::uuid
 		    and is_dir = false`, ownerID).Scan(&bytes, &files)
 	return bytes, files, err
@@ -380,7 +385,7 @@ func (s *Service) SearchPage(
 
 	rows, err := s.db.Pool().Query(ctx,
 		`select `+nodeColumns+`
-		   from nodes
+		   from file_entries
 		  where owner_id = $1::uuid
 		    and (name ilike $2 or path ilike $2)
 		    and ($3::text is null or path = $3 or path like $4)
@@ -413,7 +418,7 @@ func (s *Service) SearchPage(
 func (s *Service) Subtree(ctx context.Context, ownerID, path string) ([]Row, error) {
 	rows, err := s.db.Pool().Query(ctx,
 		`select `+nodeColumns+`
-		   from nodes
+		   from file_entries
 		  where owner_id = $1::uuid
 		    and (path = $2 or path like $3)
 		  order by length(path) asc, path asc`,

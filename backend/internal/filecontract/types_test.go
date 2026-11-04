@@ -12,7 +12,7 @@ import (
 var fixtureTime = time.Date(2026, 10, 30, 4, 0, 0, 0, time.UTC)
 
 func fixtureMetadata(path fc.Path) fc.Metadata {
-	return fc.Metadata{Path: path, ParentPath: "/Notes", Name: "cafe\u0301%2F+.md", Kind: "file", Revision: "nr_observed", ContentRevision: ptr("cr_observed"), Size: ptr(int64(0)), MediaType: ptr("text/markdown"), CreatedAt: fixtureTime, UpdatedAt: fixtureTime}
+	return fc.Metadata{ID: "11111111-1111-4111-8111-111111111111", ParentID: ptr("22222222-2222-4222-8222-222222222222"), Path: path, ParentPath: "/Notes", Name: "cafe\u0301%2F+.md", Kind: "file", Revision: "nr_observed", ContentRevision: ptr("cr_observed"), Size: ptr(int64(0)), MediaType: ptr("text/markdown"), CreatedAt: fixtureTime, UpdatedAt: fixtureTime}
 }
 
 func jsonObject(t *testing.T, value any) map[string]any {
@@ -40,15 +40,16 @@ func assertJSON(t *testing.T, value any, expected string) {
 	}
 }
 
-func TestPathOnlyMetadataWireFixture(t *testing.T) {
+func TestStableIdentityMetadataWireFixture(t *testing.T) {
 	assertJSON(t, fixtureMetadata("/Notes/cafe\u0301%2F+.md"), `{
+  "id":"11111111-1111-4111-8111-111111111111","parentId":"22222222-2222-4222-8222-222222222222",
   "path":"/Notes/cafe\u0301%2F+.md","parentPath":"/Notes","name":"cafe\u0301%2F+.md","kind":"file",
   "revision":"nr_observed","contentRevision":"cr_observed","size":0,"mediaType":"text/markdown",
   "sourceModifiedAt":null,"createdAt":"2026-10-30T04:00:00Z","updatedAt":"2026-10-30T04:00:00Z","checksum":null
  }`)
 	folder := fc.Metadata{Path: "/Notes", ParentPath: "/", Name: "Notes", Kind: "folder", Revision: "nr_folder", CreatedAt: fixtureTime, UpdatedAt: fixtureTime}
 	assertJSON(t, folder, `{
-  "path":"/Notes","parentPath":"/","name":"Notes","kind":"folder","revision":"nr_folder",
+  "id":"","parentId":null,"path":"/Notes","parentPath":"/","name":"Notes","kind":"folder","revision":"nr_folder",
   "contentRevision":null,"size":null,"mediaType":null,"sourceModifiedAt":null,
   "createdAt":"2026-10-30T04:00:00Z","updatedAt":"2026-10-30T04:00:00Z","checksum":null
  }`)
@@ -103,8 +104,8 @@ func TestOperationWireFixtures(t *testing.T) {
 			if result["path"] != string(metadata.Path) || result["revision"] != metadata.Revision {
 				t.Fatalf("result = %#v", result)
 			}
-			if _, ok := result["id"]; ok {
-				t.Fatal("file result exposes an ID")
+			if result["id"] != metadata.ID || result["parentId"] != *metadata.ParentID {
+				t.Fatal("file result lost stable identity")
 			}
 		})
 	}

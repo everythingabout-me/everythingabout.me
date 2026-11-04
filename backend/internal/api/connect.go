@@ -31,6 +31,8 @@ type connectBody struct {
 	Read      bool   `json:"read"`
 	Write     bool   `json:"write"`
 	Events    bool   `json:"events"`
+	Changes   bool   `json:"changes"`
+	Subscribe bool   `json:"subscribe"`
 	ExpiresIn int64  `json:"expiresIn"` // seconds; 0 = never (apps only)
 }
 
@@ -113,14 +115,16 @@ func (s *Server) handleConnectCreate(w http.ResponseWriter, r *http.Request) err
 	}
 
 	secret, token, err := s.auth.CreateToken(r.Context(), auth.NewTokenInput{
-		UserID:    user.ID,
-		Name:      body.Name,
-		Kind:      body.Kind,
-		Prefix:    body.Prefix,
-		CanRead:   body.Read,
-		CanWrite:  body.Write,
-		CanEvents: body.Events,
-		Expiry:    expiry,
+		UserID:       user.ID,
+		Name:         body.Name,
+		Kind:         body.Kind,
+		Prefix:       body.Prefix,
+		CanRead:      body.Read,
+		CanWrite:     body.Write,
+		CanEvents:    body.Events,
+		CanChanges:   body.Changes,
+		CanSubscribe: body.Subscribe,
+		Expiry:       expiry,
 	})
 	if err != nil {
 		return err
@@ -166,6 +170,8 @@ type connectUpdateBody struct {
 	Read      bool   `json:"read"`
 	Write     bool   `json:"write"`
 	Events    bool   `json:"events"`
+	Changes   bool   `json:"changes"`
+	Subscribe bool   `json:"subscribe"`
 	ExpiresIn int64  `json:"expiresIn"` // seconds; 0 = never (apps only)
 }
 
@@ -196,16 +202,28 @@ func (s *Server) handleConnectUpdate(w http.ResponseWriter, r *http.Request) err
 	}
 
 	token, err := s.auth.UpdateToken(r.Context(), user.ID, r.PathValue("id"), auth.UpdateTokenInput{
-		Prefix:    body.Prefix,
-		CanRead:   body.Read,
-		CanWrite:  body.Write,
-		CanEvents: body.Events,
-		Expiry:    expiry,
+		Prefix:       body.Prefix,
+		CanRead:      body.Read,
+		CanWrite:     body.Write,
+		CanEvents:    body.Events,
+		CanChanges:   body.Changes,
+		CanSubscribe: body.Subscribe,
+		Expiry:       expiry,
 	})
 	if err != nil {
 		return err
 	}
 
+	s.recordAudit(r, &auth.Principal{User: user}, "connection.update", "", http.StatusOK, map[string]any{
+		"id":            token.ID,
+		"scope":         token.Prefix,
+		"read":          token.CanRead,
+		"write":         token.CanWrite,
+		"events":        token.CanEvents,
+		"changes":       token.CanChanges,
+		"subscribe":     token.CanSubscribe,
+		"policyVersion": token.PolicyVersion,
+	})
 	w.Header().Set("Cache-Control", "no-store")
 	return s.ok(w, map[string]any{"token": token})
 }
@@ -257,12 +275,15 @@ func (s *Server) handleAPIPatchMe(w http.ResponseWriter, r *http.Request) error 
 	}
 	w.Header().Set("Cache-Control", "no-store")
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{
-		"name":      token.Name,
-		"prefix":    token.Prefix,
-		"read":      token.CanRead,
-		"write":     token.CanWrite,
-		"events":    token.CanEvents,
-		"expiresAt": token.ExpiresAt,
+		"name":          token.Name,
+		"prefix":        token.Prefix,
+		"read":          token.CanRead,
+		"write":         token.CanWrite,
+		"events":        token.CanEvents,
+		"changes":       token.CanChanges,
+		"subscribe":     token.CanSubscribe,
+		"policyVersion": token.PolicyVersion,
+		"expiresAt":     token.ExpiresAt,
 	})
 	return nil
 }

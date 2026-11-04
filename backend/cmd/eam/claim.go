@@ -55,7 +55,7 @@ func runClaim(args []string) error {
 
 	rows, err := db.Pool().Query(ctx,
 		`select id::text, path, key, is_dir
-		   from nodes
+		   from file_entries
 		  where owner_id is null
 		  order by is_dir asc, path asc`)
 	if err != nil {

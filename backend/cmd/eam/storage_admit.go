@@ -153,7 +153,7 @@ func runStorageAdmit(args []string) error {
 	if err != nil {
 		return err
 	}
-	rows, err := tx.Query(ctx, `select path,key,parent,name,is_dir,size from nodes where owner_id=$1::uuid order by path`, *owner)
+	rows, err := tx.Query(ctx, `select path,key,parent,name,is_dir,size from file_entries where owner_id=$1::uuid order by path`, *owner)
 	if err != nil {
 		return err
 	}

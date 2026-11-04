@@ -8,6 +8,7 @@ import (
 	"everythingabout.me/backend/internal/objectmutation"
 	"everythingabout.me/backend/internal/storage"
 	"github.com/aws/aws-sdk-go-v2/aws"
+	v4 "github.com/aws/aws-sdk-go-v2/aws/signer/v4"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/aws-sdk-go-v2/service/s3/types"
 )
@@ -29,7 +30,11 @@ func (b *mutationBackend) BeginMultipart(ctx context.Context, in objectmutation.
 func (b *mutationBackend) PutPart(ctx context.Context, key, id string, number int, body io.Reader, size int64) (string, error) {
 	ctx, cancel := context.WithTimeout(ctx, 60*time.Second)
 	defer cancel()
-	out, err := b.client.UploadPart(ctx, &s3.UploadPartInput{Bucket: aws.String(b.bucket), Key: aws.String(key), UploadId: aws.String(id), PartNumber: aws.Int32(int32(number)), Body: body, ContentLength: aws.Int64(size)})
+	// The body is a single-pass stream whose digest is finalized during transport.
+	// Keep SigV4 request authentication without the SDK's pre-signing body rewind.
+	out, err := b.client.UploadPart(ctx, &s3.UploadPartInput{Bucket: aws.String(b.bucket), Key: aws.String(key), UploadId: aws.String(id), PartNumber: aws.Int32(int32(number)), Body: body, ContentLength: aws.Int64(size)}, func(options *s3.Options) {
+		options.APIOptions = append(options.APIOptions, v4.SwapComputePayloadSHA256ForUnsignedPayloadMiddleware)
+	})
 	if err != nil {
 		return "", mutationWriteError(key, err)
 	}
@@ -58,6 +63,7 @@ func (b *mutationBackend) CompleteMultipart(ctx context.Context, in objectmutati
 	}
 	return objectmutation.Object{Key: in.Key, VersionID: aws.ToString(out.VersionId), ETag: aws.ToString(out.ETag), Size: in.Size, MediaType: in.MediaType, Metadata: cloneMutationMetadata(in.Metadata)}, nil
 }
+
 var _ objectmutation.MultipartInspector = (*mutationBackend)(nil)
 
 // InspectMultipart asks the provider whether this exact upload session still exists. A
