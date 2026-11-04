@@ -455,9 +455,10 @@ authority nor proves inactivity of external API clients, other origins or device
 semantics and API fields are unchanged.
 
 For admitted native COS/S3 multipart sessions, each acknowledged service part already resides in unpublished
-provider multipart state. Bounded per-part buffering verifies exact length/hash and binds immutable identity;
-no full-file local assembly or whole-file PUT follows. Commit performs native completion and result/index
-settlement, with provider latency and unknown-outcome protection; it is not a database-only operation.
+provider multipart state. Streamed per-part reception verifies exact length and content under the slot lock and
+records the resulting identity; no full-file local assembly or whole-file PUT follows. Commit performs native
+completion and result/index settlement, with provider latency and unknown-outcome protection; it is not a
+database-only operation.
 
 ### COS-signed transport through EdgeOne
 
@@ -513,12 +514,15 @@ provided digest mismatch with `422 checksum_mismatch`; there is no receipt for a
 
 A part slot is immutable once acknowledged. An identical replay returns its existing receipt; different bytes
 return `409 part_conflict` and cannot replace it. Without a supplied digest, consume/hash the replay to compare;
-never assume a duplicate number means identical content. Concurrent attempts for one slot use isolated native
-attempts or serialized provider writes; ambiguous in-flight attempts must be reconciled before reuse. The
-service must also fence late native effects: a reused native slot cannot receive different content while an
-older request is uncertain. Bind/verify chunk identity before irreversible native writes or isolate attempts,
-using bounded spool where necessary. Acknowledgment
-requires durable provider/staging bytes plus a durable receipt, not bytes in memory or an SDK progress callback.
+never assume a duplicate number means identical content. Concurrent attempts for one slot are serialized by the
+slot lock, and the receipt is written before that lock is released, so a confirmed slot is never written again
+and a late attempt cannot change bytes an existing receipt already describes. An attempt that fails before its
+receipt is confirmed leaves the slot reserved by number, size, and session but not bound by content; a later
+replay may replace those bytes, and the receipt recorded afterwards always describes what the provider now
+holds. Nothing unconfirmed is acknowledged or assembled. A part may therefore be streamed to the provider in
+one pass; buffering or spooling is required only when mismatched bytes must be rejected before they reach the
+provider. Acknowledgment requires durable provider/staging bytes plus a durable receipt, not bytes in memory or
+an SDK progress callback.
 
 Status counters count unique acknowledged parts only. GET parts returns receipts in acknowledgement order,
 with a cursor binding session and a captured acknowledgement watermark. Later receipts do not shift those

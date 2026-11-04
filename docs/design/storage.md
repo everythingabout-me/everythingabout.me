@@ -191,7 +191,8 @@ remain private except the narrow signed request needed for EO ordinary forwardin
 
 For COS numbered uploads, durable parts must reach native unpublished multipart storage during the upload
 phase. Do not wait until commit to assemble a full local file and send it in a second whole-file PUT. Embedded
-reception may buffer one bounded part for server hashing. Official signed mode keeps file bytes entirely off the
+reception streams each part straight to the provider while hashing it, so no payload is retained and the client's
+send rate follows the provider's. Official signed mode keeps file bytes entirely off the
 application and binds a client digest tuple before issuing authority; COS validates Content-MD5 and the app checks
 native size/ETag before a provenance-labeled receipt. Session/native-part metadata live in Postgres, with no
 extra receiver machine. Commit verifies coverage and current conditions, completes native multipart once and

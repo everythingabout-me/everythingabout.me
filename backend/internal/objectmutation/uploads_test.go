@@ -3,11 +3,13 @@ package objectmutation
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"io"
 	"sync"
 	"testing"
+	"time"
 
 	"everythingabout.me/backend/internal/storage"
 )
@@ -43,6 +45,7 @@ type nativeTestBackend struct {
 	beginCalls, partCalls, completeCalls, abortCalls int
 	failPart, failComplete                           bool
 	abortErr                                         error
+	onPart                                           func()
 }
 
 func (b *nativeTestBackend) BeginMultipart(context.Context, Put) (string, error) {
@@ -51,6 +54,9 @@ func (b *nativeTestBackend) BeginMultipart(context.Context, Put) (string, error)
 }
 func (b *nativeTestBackend) PutPart(_ context.Context, _ string, _ string, n int, body io.Reader, size int64) (string, error) {
 	b.partCalls++
+	if b.onPart != nil {
+		b.onPart()
+	}
 	data, e := io.ReadAll(body)
 	if e != nil {
 		return "", e
@@ -166,19 +172,85 @@ func TestNativeNumberedPartsIndependentReceiverSealAndNoWholeFilePut(t *testing.
 	}
 }
 
-func TestNativePartUncertaintyBindsContentAndAbortReleasesLiability(t *testing.T) {
+// A part body is forwarded to the provider while it is still arriving: the provider is
+// entered before the request ends, which is what lets the receiver hold no payload.
+func TestNativePartStreamsIntoProviderWhileBodyStillArrives(t *testing.T) {
+	driver, backend, _, _ := nativeFixture(t)
+	metadata := &memoryUploadMetadata{}
+	in := nativeIntent(t, driver, "streamed", 4)
+	entered := make(chan struct{})
+	backend.onPart = func() { close(entered) }
+	body, writer := io.Pipe()
+	go func() {
+		_, _ = writer.Write([]byte("da"))
+		<-entered
+		_, _ = writer.Write([]byte("ta"))
+		_ = writer.Close()
+	}()
+	accepted := make(chan error, 1)
+	go func() {
+		_, e := driver.ReceivePart(context.Background(), in, storage.UploadPart{Number: 1, Size: 4}, body, metadata, keepPart)
+		accepted <- e
+	}()
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		_ = writer.Close()
+		t.Fatal("the provider was not reached until the whole part had arrived")
+	}
+	if e := <-accepted; e != nil {
+		t.Fatal(e)
+	}
+	if string(backend.parts[1]) != "data" {
+		t.Fatalf("provider received %q", backend.parts[1])
+	}
+}
+
+func TestNativePartTruncatedStreamIsASizeMismatchThatStaysUnconfirmed(t *testing.T) {
+	driver, backend, _, _ := nativeFixture(t)
+	metadata := &memoryUploadMetadata{}
+	in := nativeIntent(t, driver, "short-part", 4)
+	_, e := driver.ReceivePart(context.Background(), in, storage.UploadPart{Number: 1, Size: 4}, bytes.NewReader([]byte("da")), metadata, keepPart)
+	requireCode(t, e, "size_mismatch")
+	if backend.parts[1] != nil {
+		t.Fatal("a truncated part was recorded")
+	}
+	receipt, e := driver.ReceivePart(context.Background(), in, storage.UploadPart{Number: 1, Size: 4}, bytes.NewReader([]byte("data")), metadata, keepPart)
+	if e != nil {
+		t.Fatal(e)
+	}
+	if receipt.SHA256 != fmt.Sprintf("%x", sha256.Sum256([]byte("data"))) || receipt.Handle == "" {
+		t.Fatalf("retry did not confirm the complete part: %+v", receipt)
+	}
+}
+
+func TestNativePartReservationBindsSlotAndConfirmationBindsContent(t *testing.T) {
 	driver, backend, _, _ := nativeFixture(t)
 	metadata := &memoryUploadMetadata{}
 	in := nativeIntent(t, driver, "part-lost", 4)
 	backend.failPart = true
-	_, e := driver.ReceivePart(context.Background(), in, storage.UploadPart{Number: 1, Size: 4}, bytes.NewReader([]byte("data")), metadata, keepPart)
-	if e == nil {
+	if _, e := driver.ReceivePart(context.Background(), in, storage.UploadPart{Number: 1, Size: 4}, bytes.NewReader([]byte("data")), metadata, keepPart); e == nil {
 		t.Fatal("lost native reply reported ACK")
 	}
-	_, e = driver.ReceivePart(context.Background(), in, storage.UploadPart{Number: 1, Size: 4}, bytes.NewReader([]byte("evil")), metadata, keepPart)
-	requireCode(t, e, "part_conflict")
 	if backend.partCalls != 1 {
-		t.Fatal("different content reached uncertain native slot")
+		t.Fatalf("uncertain receive never reached the provider: %d", backend.partCalls)
+	}
+	// A streamed part has no digest before its bytes arrive, so the failed attempt reserved
+	// the slot by number, size, and session only. The next replay owns the bytes and is
+	// recorded as the confirmed content.
+	receipt, e := driver.ReceivePart(context.Background(), in, storage.UploadPart{Number: 1, Size: 4}, bytes.NewReader([]byte("evil")), metadata, keepPart)
+	if e != nil {
+		t.Fatal(e)
+	}
+	if receipt.SHA256 != fmt.Sprintf("%x", sha256.Sum256([]byte("evil"))) || string(backend.parts[1]) != "evil" {
+		t.Fatalf("receipt %+v does not describe the stored bytes %q", receipt, backend.parts[1])
+	}
+	// Once confirmed, the recorded digest fences the slot: different content is rejected
+	// before it can reach the provider again.
+	_, e = driver.ReceivePart(context.Background(), in, storage.UploadPart{Number: 1, Size: 4}, bytes.NewReader([]byte("data")), metadata, keepPart)
+	requireCode(t, e, "part_conflict")
+	if backend.partCalls != 2 {
+		t.Fatal("different content reached a confirmed native slot")
 	}
 	if e = driver.Discard(context.Background(), in, nil); e != nil {
 		t.Fatal(e)

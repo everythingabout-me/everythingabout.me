@@ -20,10 +20,10 @@ var _ storage.DiscardProver = (*Driver)(nil)
 const nativePartSize int64 = 8 << 20
 const nativeMaxParts = 10000
 
-// Bounded independently of users/sessions. Payloads are released after a part RPC;
-// independent receivers need no shared filesystem and never retain a whole file.
+// Bounded independently of users/sessions. A part body is streamed straight to the
+// provider, so a slot bounds a concurrent request rather than a retained payload.
 // Two full per-upload admissions (fileops.UploadPartSlots each) may be in flight
-// at once; every payload is one 8 MiB part, never a whole file.
+// at once; independent receivers need no shared filesystem.
 var nativeReceiveSlots = make(chan struct{}, 32)
 
 type nativeSession struct {
@@ -173,26 +173,16 @@ func (d *Driver) ReceivePart(ctx context.Context, in storage.WriteIntent, part s
 	}
 	var result storage.UploadPart
 	err = metadata.WithUploadMetadata(ctx, d.namespace, in.ID, part.Number, func(record storage.UploadMetadataRecord) error {
-		data := make([]byte, int(part.Size))
-		_, e := io.ReadFull(&ctxReader{ctx, body}, data)
-		if e != nil {
-			if errors.Is(e, io.EOF) || errors.Is(e, io.ErrUnexpectedEOF) {
-				return fail("size_mismatch", in.Target)
+		finish := func(candidate *nativePartReceipt) error {
+			result = storage.UploadPart{Number: candidate.Number, Size: candidate.Size, SHA256: candidate.SHA256, Handle: string(encodeNative(candidate))}
+			accepted, e := accept(result)
+			if e != nil {
+				return e
 			}
-			return e
-		}
-		var extra [1]byte
-		n, readErr := io.ReadFull(&ctxReader{ctx, body}, extra[:])
-		if n != 0 {
-			return fail("size_mismatch", in.Target)
-		}
-		if readErr != io.EOF {
-			return readErr
-		}
-		h := sha256.Sum256(data)
-		hash := hex.EncodeToString(h[:])
-		if part.SHA256 != "" && part.SHA256 != hash {
-			return fail("digest_mismatch", in.Target)
+			if !sameJSON(result, accepted) {
+				return fail("invalid_evidence", in.Target)
+			}
+			return nil
 		}
 		current, e := readNative[nativeSession](ctx, record, "session")
 		if e != nil {
@@ -208,47 +198,146 @@ func (d *Driver) ReceivePart(ctx context.Context, in storage.WriteIntent, part s
 		if e != nil {
 			return e
 		}
+		if candidate != nil {
+			if candidate.Signed || candidate.Number != part.Number || candidate.Size != part.Size || candidate.UploadID != session.UploadID {
+				return fail("part_conflict", in.Target)
+			}
+			if candidate.ETag != "" {
+				// The slot already holds confirmed bytes. Hash the replay instead of
+				// giving the provider a second chance to overwrite them.
+				hash, e := partDigest(ctx, body, part.Size, in.Target)
+				if e != nil {
+					return e
+				}
+				if part.SHA256 != "" && part.SHA256 != hash {
+					return fail("digest_mismatch", in.Target)
+				}
+				if candidate.SHA256 != hash {
+					return fail("part_conflict", in.Target)
+				}
+				return finish(candidate)
+			}
+		}
+		// The transport is the only pass over these bytes, so the digest is unknown until
+		// the stream ends. Reserve the slot (number, size, session) before any byte can
+		// reach the provider so a crash or a replay cannot hand this number to another
+		// upload; the digest and the provider ETag complete the same receipt below, still
+		// under this one part lock.
 		if candidate == nil {
-			candidate = &nativePartReceipt{Number: part.Number, Size: part.Size, SHA256: hash, UploadID: session.UploadID}
-			// Bind bytes durably BEFORE the native slot can receive them. A timed-out
-			// prior request can only ever race identical content at this native slot.
+			candidate = &nativePartReceipt{Number: part.Number, Size: part.Size, UploadID: session.UploadID, Uncertain: true}
 			if e = record.Put(ctx, partMetadataKey(part.Number), encodeNative(candidate)); e != nil {
 				return e
 			}
-		}
-		if candidate.Signed || candidate.Number != part.Number || candidate.Size != part.Size || candidate.SHA256 != hash || candidate.UploadID != session.UploadID {
-			return fail("part_conflict", in.Target)
-		}
-		if candidate.ETag == "" {
-			priorUncertain := candidate.Uncertain
+		} else if !candidate.Uncertain {
 			candidate.Uncertain = true
 			if e = record.Put(ctx, partMetadataKey(part.Number), encodeNative(candidate)); e != nil {
 				return e
 			}
-			tag, e := d.backend.(MultipartBackend).PutPart(ctx, d.key(in.Target, storage.File), session.UploadID, part.Number, bytes.NewReader(data), part.Size)
-			if e != nil {
-				return e
-			}
-			if tag == "" || len(tag) > 256 {
-				return fail("invalid_backend_response", in.Target)
-			}
-			candidate.ETag = tag
-			candidate.Uncertain = priorUncertain
-			if e = record.Put(ctx, partMetadataKey(part.Number), encodeNative(candidate)); e != nil {
-				return e
-			}
 		}
-		result = storage.UploadPart{Number: candidate.Number, Size: candidate.Size, SHA256: candidate.SHA256, Handle: string(encodeNative(candidate))}
-		accepted, e := accept(result)
+		hash, tag, e := d.streamPart(ctx, in, session.UploadID, part, body)
 		if e != nil {
 			return e
 		}
-		if !sameJSON(result, accepted) {
-			return fail("invalid_evidence", in.Target)
+		if part.SHA256 != "" && part.SHA256 != hash {
+			return fail("digest_mismatch", in.Target)
 		}
-		return nil
+		if candidate.SHA256 != "" && candidate.SHA256 != hash {
+			return fail("part_conflict", in.Target)
+		}
+		candidate.SHA256 = hash
+		candidate.ETag = tag
+		candidate.Uncertain = false
+		if e = record.Put(ctx, partMetadataKey(part.Number), encodeNative(candidate)); e != nil {
+			return e
+		}
+		return finish(candidate)
 	})
 	return result, err
+}
+
+// exactReader exposes the assigned part length to the provider transport and reports a
+// truncated body as io.ErrUnexpectedEOF, so a short request is a size mismatch instead of
+// a silently smaller part.
+type exactReader struct {
+	reader    io.Reader
+	remaining int64
+	short     bool
+}
+
+func (r *exactReader) Read(p []byte) (int, error) {
+	if r.remaining <= 0 {
+		return 0, io.EOF
+	}
+	if int64(len(p)) > r.remaining {
+		p = p[:r.remaining]
+	}
+	n, err := r.reader.Read(p)
+	r.remaining -= int64(n)
+	if r.remaining > 0 && (err == io.EOF || err == io.ErrUnexpectedEOF) {
+		r.short = true
+		return n, io.ErrUnexpectedEOF
+	}
+	return n, err
+}
+
+// streamPart forwards the request body to the provider while hashing the same bytes, so
+// no part is ever held in memory. The body cannot be replayed, so a provider failure ends
+// this request; the client retries the part through the receipt protocol, where a
+// confirmed slot is answered without a second write.
+func (d *Driver) streamPart(ctx context.Context, in storage.WriteIntent, uploadID string, part storage.UploadPart, body io.Reader) (string, string, error) {
+	source := &ctxReader{ctx: ctx, reader: body}
+	exact := &exactReader{reader: source, remaining: part.Size}
+	digest := sha256.New()
+	tag, err := d.backend.(MultipartBackend).PutPart(ctx, d.key(in.Target, storage.File), uploadID, part.Number, io.TeeReader(exact, digest), part.Size)
+	if err != nil {
+		if exact.short {
+			return "", "", fail("size_mismatch", in.Target)
+		}
+		return "", "", err
+	}
+	if tag == "" || len(tag) > 256 {
+		return "", "", fail("invalid_backend_response", in.Target)
+	}
+	if exact.remaining != 0 {
+		return "", "", fail("size_mismatch", in.Target)
+	}
+	if err = partEnd(source, in.Target); err != nil {
+		return "", "", err
+	}
+	return hex.EncodeToString(digest.Sum(nil)), tag, nil
+}
+
+// partDigest hashes a replayed body under the same size rules without storing it.
+func partDigest(ctx context.Context, body io.Reader, size int64, target storage.Path) (string, error) {
+	source := &ctxReader{ctx: ctx, reader: body}
+	exact := &exactReader{reader: source, remaining: size}
+	digest := sha256.New()
+	if _, err := io.Copy(digest, exact); err != nil {
+		if exact.short {
+			return "", fail("size_mismatch", target)
+		}
+		return "", err
+	}
+	if exact.remaining != 0 {
+		return "", fail("size_mismatch", target)
+	}
+	if err := partEnd(source, target); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(digest.Sum(nil)), nil
+}
+
+// partEnd succeeds only when the body ended exactly at the part boundary.
+func partEnd(source io.Reader, target storage.Path) error {
+	var extra [1]byte
+	n, err := io.ReadFull(source, extra[:])
+	if n != 0 {
+		return fail("size_mismatch", target)
+	}
+	if err != io.EOF {
+		return err
+	}
+	return nil
 }
 
 func (d *Driver) SealStage(ctx context.Context, in storage.WriteIntent, parts []storage.UploadPart, metadata storage.UploadMetadata, cp storage.Checkpoint) (storage.Staged, error) {
