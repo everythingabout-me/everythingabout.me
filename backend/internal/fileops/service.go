@@ -502,12 +502,12 @@ func (s *Service) Cleanup(ctx context.Context, root Root, actor Actor, id string
 	return cleanup.MarkCleaned(ctx, root, actor, id)
 }
 
-// ReconcileDiscard resolves a receipt that can never be confirmed: a receiver that died
-// between its part request and the reply leaves physical liability retained after the
-// allocation was discarded, so ordinary cleanup would retry forever. Ordinary cleanup
-// runs first (it aborts the native session and records the discarded phase), then the
-// driver must prove with the provider that the session no longer exists, and only then
-// does cleanup release the reservation. With apply false this is a read-only probe and
+// ReconcileDiscard is the operator fallback for an allocation whose abort never got a
+// definite provider answer, so ordinary cleanup cannot release it. Ordinary cleanup runs
+// first (it aborts the native session and records the discarded phase), then the driver
+// must prove with the provider that the session no longer exists, and only then does
+// cleanup release the reservation. A definite abort answer already releases the
+// allocation in the ordinary path. With apply false this is a read-only probe and
 // nothing is written. It never publishes bytes, completes a multipart upload, or
 // replays a part request.
 func (s *Service) ReconcileDiscard(ctx context.Context, root Root, actor Actor, id string, writer storage.StagedWriter, apply bool) (storage.DiscardEvidence, error) {

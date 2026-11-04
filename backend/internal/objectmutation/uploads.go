@@ -352,30 +352,27 @@ func (d *Driver) DiscardParts(ctx context.Context, in storage.WriteIntent, metad
 			return e
 		}
 		if session.UploadID != "" {
-			if e = d.backend.(MultipartBackend).AbortMultipart(ctx, d.key(in.Target, storage.File), session.UploadID); e != nil {
+			proof, e := readNative[nativeDiscardProof](ctx, record, discardProofKey)
+			if e != nil {
 				return e
 			}
-			// A terminal successful Complete consumes the immutable upload. Otherwise,
-			// an earlier lost part reply may still hide provider-side work after Abort;
-			// retain physical liability for operator/provider lifecycle reconciliation.
-			applied := false
-			if local, e := d.load("write", in.ID); e == nil && local.Phase == "applied" {
-				applied = true
-			}
-			if !applied {
-				proof, e := readNative[nativeDiscardProof](ctx, record, discardProofKey)
-				if e != nil {
+			if !provesDiscarded(proof, session.UploadID) {
+				if e = d.backend.(MultipartBackend).AbortMultipart(ctx, d.key(in.Target, storage.File), session.UploadID); e != nil {
+					// The abort outcome is unknown: the provider may still hold the
+					// session and its parts, so every receipt stays retained and the
+					// caller retries. Only a definite provider answer releases liability.
 					return e
 				}
-				count := int((in.Size + nativePartSize - 1) / nativePartSize)
-				for number := 1; number <= count; number++ {
-					p, e := readNative[nativePartReceipt](ctx, record, partMetadataKey(number))
-					if e != nil {
-						return e
-					}
-					if p != nil && p.Uncertain && !provesDiscarded(proof, session.UploadID) {
-						return fail("recovery_required", in.Target)
-					}
+				// A definite abort consumes the whole allocation: the provider deletes
+				// the upload session and every part stored under it, so a receipt that
+				// no reply ever confirmed (its receiver died between the part request
+				// and the answer) can no longer hide bytes anything could complete,
+				// read, or replay. Record that answer as durable evidence bound to this
+				// one UploadID. Without it, a single uncertain receipt would retain the
+				// reservation and retry cleanup forever, even though cancelling or
+				// losing an upload mid-flight is an ordinary outcome.
+				if e = record.Put(ctx, discardProofKey, encodeNative(&nativeDiscardProof{UploadID: session.UploadID, Observed: time.Now().UTC(), Via: "abort"})); e != nil {
+					return e
 				}
 			}
 		}
@@ -383,7 +380,9 @@ func (d *Driver) DiscardParts(ctx context.Context, in storage.WriteIntent, metad
 	})
 }
 
-// discardProofKey holds operator-reviewed provider evidence for one allocation.
+// discardProofKey holds durable provider evidence for one allocation: either the
+// definite answer to our own abort ("abort"), or the explicit operator probe recorded
+// for an allocation whose abort never got a definite answer ("operator").
 const discardProofKey = "discard-proof"
 
 // nativeDiscardProof is durable proof that the provider no longer knows the exact
@@ -392,7 +391,8 @@ const discardProofKey = "discard-proof"
 type nativeDiscardProof struct {
 	UploadID string
 	Observed time.Time
-	Parts    int
+	Parts    int    // parts the provider still reported, when an operator probed
+	Via      string // "abort" or "operator"; empty for proofs recorded before Via existed
 }
 
 func provesDiscarded(proof *nativeDiscardProof, uploadID string) bool {
@@ -462,7 +462,7 @@ func (d *Driver) discardEvidence(ctx context.Context, in storage.WriteIntent, me
 		if state.Present {
 			return fail("recovery_required", in.Target)
 		}
-		return record.Put(work, discardProofKey, encodeNative(&nativeDiscardProof{UploadID: session.UploadID, Observed: time.Now().UTC(), Parts: state.Parts}))
+		return record.Put(work, discardProofKey, encodeNative(&nativeDiscardProof{UploadID: session.UploadID, Observed: time.Now().UTC(), Parts: state.Parts, Via: "operator"}))
 	})
 	return evidence, err
 }

@@ -140,14 +140,18 @@ liability for outstanding signed authority/uncertain native requests, rather tha
 proof that provider work is terminal. Final-path unknown outcomes retain their existing guard; no repeated
 Complete or timeout-based unlock is introduced. Native publication remains server-controlled.
 
-When a receiver loses a part reply, that receipt stays uncertain and cleanup keeps its physical reservation
-instead of assuming provider work is gone. Resolve such an operation with
-`eam storage-resolve-upload --operation-id UUID [--dry-run]`: ordinary cleanup first aborts the recorded
-allocation and durably records its discarded phase, then the command asks the provider whether that exact upload
-session still exists (COS `NoSuchUpload`). Only when the provider no longer knows it is the proof recorded and
-cleanup allowed to release the reservation. A provider that still reports the session, a driver without the
-provider inspection capability, and any non-terminal operation are refused. Nothing on this path publishes,
-completes a multipart upload, or replays a part request.
+When a receiver loses a part reply, that receipt stays uncertain, but it must not outlive the allocation.
+Cleanup aborts the recorded session, and a definite abort answer (provider success, or `NoSuchUpload` when the
+session is already gone) is itself terminal: the provider deletes the upload and every part under it, so no
+receipt can hide bytes anything could complete, read, or replay. That answer is recorded durably against the
+one upload ID and releases every receipt, including ones no reply ever confirmed. An unknown abort outcome
+keeps the reservation, and the ordinary retry records the answer as soon as the provider supplies it. The
+operator command `eam storage-resolve-upload --operation-id UUID [--dry-run]` remains the fallback for an
+allocation whose abort never gets an answer (a provider that keeps failing, or a driver without abort):
+it runs ordinary cleanup first, then asks the provider whether that exact session still exists (COS
+`NoSuchUpload`) and records that as evidence. A provider that still reports the session, a driver without the
+inspection capability, and any non-terminal operation are refused. Nothing on this path publishes, completes a
+multipart upload, or replays a part request.
 
 Provider lifecycle must retain acknowledged native parts for the advertised session lifetime (up to seven days),
 and handle orphaned allocations after a lost initiation reply. Do not recreate an allocation beneath acknowledged

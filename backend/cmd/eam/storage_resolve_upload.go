@@ -20,12 +20,12 @@ import (
 
 var resolveOperationID = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
 
-// runStorageResolveUpload finishes cleanup for a terminal upload whose discarded
-// allocation still keeps an unconfirmed part receipt. A receiver that dies between its
-// part request and the reply leaves that receipt permanently uncertain, so ordinary
-// cleanup retains the physical liability and retries forever. This command proves with
-// the provider that the allocation no longer exists and then lets the ordinary cleanup
-// release the reservation. It runs the same discard/cleanup path as the server worker;
+// runStorageResolveUpload finishes cleanup for a terminal upload whose abort never got a
+// definite provider answer, so ordinary cleanup keeps the allocation. (A definite abort
+// answer releases it without this command; only an unknown outcome - a failing provider
+// or a driver without abort - reaches here.) This command proves with the provider that
+// the allocation no longer exists and then lets the ordinary cleanup release the
+// reservation. It runs the same discard/cleanup path as the server worker;
 // publication, completion, upload and index commits are unreachable from here.
 func runStorageResolveUpload(args []string) error {
 	flags := flag.NewFlagSet("storage-resolve-upload", flag.ContinueOnError)

@@ -324,6 +324,10 @@ Native success followed by index failure leaves real changed files. Recover/inde
 return the same recorded client outcome, and settle quota; do not delete a final file just because its database
 acknowledgement is missing. After any final effect starts, cancellation is best effort until a definite outcome.
 Discard removes temporary resources only, using known checkpoint IDs; it never blindly deletes the Target path.
+Discard must be terminal for a numbered upload once the provider definitely accepts the abort (or reports the
+session absent): the whole allocation, including parts whose replies were lost, is gone at that point, so no
+part receipt may keep the reservation or make cleanup retry forever. While the abort outcome
+is unknown, retain liability and retry; that is a transport problem, not a user-visible file.
 
 A writable connection must supply EffectRecovery (even when its only safe answer is OutcomeUnknown) and a
 bounded operational plan for discovering/expiring temporary allocations. P3 coordinators additionally require

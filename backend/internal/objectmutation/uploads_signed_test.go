@@ -105,7 +105,7 @@ func TestSignedNativeGrantConfirmAndStableReplay(t *testing.T) {
 		t.Fatal(err)
 	}
 }
-func TestSignedNativeAbortRetainsIssuedAuthorityLiability(t *testing.T) {
+func TestSignedNativeAbortReleasesIssuedAuthorityLiability(t *testing.T) {
 	d, b, metadata := signedFixture(t)
 	ctx := context.Background()
 	in := nativeIntent(t, d, "aborted-signed", 4)
@@ -115,7 +115,9 @@ func TestSignedNativeAbortRetainsIssuedAuthorityLiability(t *testing.T) {
 	if err := d.Discard(ctx, in, nil); err != nil {
 		t.Fatal(err)
 	}
-	requireCode(t, d.DiscardParts(ctx, in, metadata), "recovery_required")
+	if err := d.DiscardParts(ctx, in, metadata); err != nil {
+		t.Fatalf("definite abort must release issued authority: %v", err)
+	}
 	_, err := d.AuthorizePart(ctx, in, signedInput([]byte("data")), metadata, time.Now().Add(5*time.Minute))
 	requireCode(t, err, "upload_aborted")
 	_, err = d.ConfirmPart(ctx, in, 1, metadata, keepPart)

@@ -169,7 +169,11 @@ a required create/replace condition must reject that write capability instead of
 in-place partial overwrite. Conditions against arbitrary external writers need native support or coordinated
 exclusive access; API locks guarantee only the stated application-controlled writer model.
 
-Aborting an open upload can discard temporary data. Once final publication is in flight, cancellation is best
+Aborting an open upload can discard temporary data. A definite abort answer is terminal for the whole
+allocation: the provider deletes the upload session and every part stored under it, so a part receipt that no
+reply ever confirmed must not keep its reservation once that answer exists. Retain liability only while the
+abort outcome is unknown, and retry until the provider gives an answer; ordinary cancellation must never need
+an operator to unstick it. Once final publication is in flight, cancellation is best
 effort and cannot return a definitive aborted state while the native result is unknown. A successful late
 publication is reconciled as committed, not hidden only in the database. Temporary cleanup never removes a
 committed path merely because its final database result was lost.

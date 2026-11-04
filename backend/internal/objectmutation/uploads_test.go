@@ -42,6 +42,7 @@ type nativeTestBackend struct {
 	parts                                            map[int][]byte
 	beginCalls, partCalls, completeCalls, abortCalls int
 	failPart, failComplete                           bool
+	abortErr                                         error
 }
 
 func (b *nativeTestBackend) BeginMultipart(context.Context, Put) (string, error) {
@@ -89,7 +90,7 @@ func (b *nativeTestBackend) CompleteMultipart(ctx context.Context, in Put, _ str
 }
 func (b *nativeTestBackend) AbortMultipart(context.Context, string, string) error {
 	b.abortCalls++
-	return nil
+	return b.abortErr
 }
 func nativeFixture(t *testing.T) (*Driver, *nativeTestBackend, storage.Config, Options) {
 	_, base, binding, options := fixture(t)
@@ -165,7 +166,7 @@ func TestNativeNumberedPartsIndependentReceiverSealAndNoWholeFilePut(t *testing.
 	}
 }
 
-func TestNativePartUncertaintyBindsContentAndRetainsAbortLiability(t *testing.T) {
+func TestNativePartUncertaintyBindsContentAndAbortReleasesLiability(t *testing.T) {
 	driver, backend, _, _ := nativeFixture(t)
 	metadata := &memoryUploadMetadata{}
 	in := nativeIntent(t, driver, "part-lost", 4)
@@ -182,11 +183,17 @@ func TestNativePartUncertaintyBindsContentAndRetainsAbortLiability(t *testing.T)
 	if e = driver.Discard(context.Background(), in, nil); e != nil {
 		t.Fatal(e)
 	}
-	requireCode(t, driver.DiscardParts(context.Background(), in, metadata), "recovery_required")
+	if e = driver.DiscardParts(context.Background(), in, metadata); e != nil {
+		t.Fatalf("definite abort must release an unconfirmable receipt: %v", e)
+	}
 	_, e = driver.ReceivePart(context.Background(), in, storage.UploadPart{Number: 1, Size: 4}, bytes.NewReader([]byte("data")), metadata, keepPart)
 	requireCode(t, e, "upload_aborted")
 	if backend.completeCalls != 0 || backend.abortCalls != 1 {
 		t.Fatal("aborted upload published or cleanup omitted")
+	}
+	// The recorded abort evidence is terminal: a retried cleanup must not abort again.
+	if e = driver.DiscardParts(context.Background(), in, metadata); e != nil || backend.abortCalls != 1 {
+		t.Fatalf("repeated discard re-aborted: %v calls=%d", e, backend.abortCalls)
 	}
 }
 

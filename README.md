@@ -459,7 +459,7 @@ cd backend && go run ./cmd/eam --help          # or ./bin/eam --help
 go run ./cmd/eam migrate                       # create / upgrade tables
 go run ./cmd/eam doctor [--write]              # self-check (`--write` writes a probe object, then deletes it)
 go run ./cmd/eam reconcile --owner … [--inventory …] [--dry-run]
-go run ./cmd/eam storage-resolve-upload --operation-id … [--dry-run]  # release a discarded upload stuck on an unconfirmed part reply
+go run ./cmd/eam storage-resolve-upload --operation-id … [--dry-run]  # operator fallback: release a discarded upload whose abort answer was lost
 go run ./cmd/eam claim --email … [--dry-run] [--keep-source]
 go run ./cmd/eam token create --email … --name … [--prefix …] [--write=false]
 go run ./cmd/eam token list   --email …
