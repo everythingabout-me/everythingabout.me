@@ -9,10 +9,16 @@ import { pendingFileOperation, setUploadOwner, settleFileOperation } from "./upl
 // Files that may hold an open session at once. Byte transfer is limited separately
 // by one global part pool so a slow part never idles a connection.
 const MAX_PARALLEL_UPLOADS = 8;
-// Part requests in flight across every file (measured best for 8 MiB parts).
-const PART_POOL_SIZE = 8;
+// Part requests in flight across every file. An embedded 8 MiB part sustains only
+// about 1 MiB/s to the bucket, so throughput is roughly this count times that rate:
+// sixteen reaches the measured link ceiling, and more only costs payload memory.
+// Sessions cap a single file at their own maxParallelism.
+const PART_POOL_SIZE = 16;
 const PART_UPLOAD_ATTEMPTS = 3;
 const PART_RETRY_DELAY_MS = 250;
+// A 429 means every receive slot is busy, which is the receiver asking this part to
+// wait rather than a lost part: retry without spending a transfer attempt.
+const PART_BUSY_WAITS = 60;
 export type UploadStatus = "queued" | "waiting" | "uploading" | "finalizing" | "failed" | "completed";
 export interface DeletionWait {
   operationId: string;
@@ -350,7 +356,9 @@ export function useUploadQueue(onUploaded: (task: UploadTask, item: Item) => voi
           const uploadOne = async (number: number) => {
             const chunk = chunkFor(number);
             try {
-              for (let attempt = 0; attempt < PART_UPLOAD_ATTEMPTS; attempt++) {
+              let attempt = 0;
+              let busy = 0;
+              while (attempt < PART_UPLOAD_ATTEMPTS) {
                 if (batch.signal.aborted) throw new DOMException("Upload canceled", "AbortError");
                 let receipt;
                 try {
@@ -361,7 +369,15 @@ export function useUploadQueue(onUploaded: (task: UploadTask, item: Item) => voi
                   }, session.transport);
                 } catch (error) {
                   if (batch.signal.aborted) throw error;
-                  if (!(error instanceof ApiError) || !([0, 408, 425, 429, 500, 502, 503, 504].includes(error.status)
+                  if (error instanceof ApiError && error.status === 429) {
+                    // The receiver is full with other parts. Waiting is the protocol;
+                    // counting this as a failed attempt would abort the whole file.
+                    if (++busy > PART_BUSY_WAITS) throw error;
+                    inFlight.delete(number); progress();
+                    await retryDelay(Math.min(busy, 3));
+                    continue;
+                  }
+                  if (!(error instanceof ApiError) || !([0, 408, 425, 500, 502, 503, 504].includes(error.status)
                     || session.transport === "cos-signed" && error.status === 409 && error.code === "part_pending")) throw error;
                   // A lost ACK may already represent durable success. Inspect the
                   // original session and exact byte identity before any replay.
@@ -369,9 +385,9 @@ export function useUploadQueue(onUploaded: (task: UploadTask, item: Item) => voi
                   if (status.state !== "open") throw error;
                   receipt = (await readReceipts(batch.signal)).get(number);
                   if (!receipt) {
-                    if (attempt + 1 === PART_UPLOAD_ATTEMPTS) throw error;
+                    if (++attempt === PART_UPLOAD_ATTEMPTS) throw error;
                     inFlight.delete(number); progress();
-                    await retryDelay(attempt);
+                    await retryDelay(attempt - 1);
                     continue;
                   }
                 }

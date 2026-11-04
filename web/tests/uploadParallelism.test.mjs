@@ -70,7 +70,7 @@ for (const [ordering, maxParallelism, expected] of [["any", 2, 2], ["any", 1, 1]
   });
 }
 
-test("signed sessions share the global eight-part pool and pass transport on every request", async (t) => {
+test("signed sessions share the global sixteen-part pool and pass transport on every request", async (t) => {
   const server = uploadServer();
   const create = server.api.createUpload;
   server.api.createUpload = async (...args) => {
@@ -89,12 +89,12 @@ test("signed sessions share the global eight-part pool and pass transport on eve
   };
   const harness = await mount(t, server.api);
   harness.render().enqueue(["a", "b", "c", "d"].map((path) => ({ path, file: new File(["abcdefgh"], path) })), "", () => false);
-  await harness.until(() => active === 8);
+  await harness.until(() => active === 16);
   await harness.tick();
-  assert.equal(peak, 8, "never more than eight part requests across all files");
+  assert.equal(peak, 16, "never more than sixteen part requests across all files");
   gate.resolve();
   await harness.until((queue) => queue.tasks.length === 4 && queue.tasks.every((task) => task.status === "completed"));
-  assert.equal(peak, 8);
+  assert.equal(peak, 16);
   assert.deepEqual(modes, Array(16).fill("cos-signed"));
 });
 
@@ -151,7 +151,7 @@ test("a transient failure checks receipts then retries the same part with bounde
 test("automatic part retries stop after three attempts and preserve the original session", async (t) => {
   const server = uploadServer();
   let attempts = 0;
-  server.api.uploadPart = async () => { attempts++; throw new TestApiError("busy", 429); };
+  server.api.uploadPart = async () => { attempts++; throw new TestApiError("server error", 500); };
   const harness = await mount(t, server.api);
   harness.render().enqueue([entry("ab")], "", () => false);
   await harness.until(() => [...harness.timers.values()].some(({ delay }) => delay === 250));
@@ -164,6 +164,33 @@ test("automatic part retries stop after three attempts and preserve the original
   assert.equal(server.sessions.size, 1);
   assert.equal(server.calls.filter(([kind]) => kind === "commit").length, 0);
   assert.equal([...harness.timers.values()].filter(({ delay }) => delay < 1000).length, 0);
+});
+
+test("receiver backpressure waits without spending a part attempt or failing the file", async (t) => {
+  const server = uploadServer();
+  const send = server.api.uploadPart;
+  let rejected = 0;
+  server.api.uploadPart = async (...args) => {
+    // More rejections than PART_UPLOAD_ATTEMPTS: a busy receiver must not exhaust them.
+    if (++rejected <= 4) throw new TestApiError("receiver busy", 429, { code: "rate_limited" });
+    return send(...args);
+  };
+  const harness = await mount(t, server.api);
+  harness.render().enqueue([entry("ab")], "", () => false);
+  await harness.until(() => [...harness.timers.values()].some(({ delay }) => delay === 500));
+  assert.equal(server.calls.filter(([kind]) => kind === "part").length, 0);
+  // Backpressure is not an ambiguous ACK: no status or receipt query is needed.
+  assert.equal(server.calls.filter(([kind]) => kind === "status").length, 0);
+  assert.equal(server.calls.filter(([kind]) => kind === "receipts").length, 1, "only the initial receipt read");
+  for (const delay of [500, 1000, 2000, 2000]) {
+    await harness.until(() => [...harness.timers.values()].some(({ delay: pending }) => pending === delay));
+    await harness.tick(delay);
+  }
+  const queue = await harness.until(complete);
+  assert.equal(queue.tasks[0].status, "completed");
+  assert.equal(rejected, 5);
+  assert.equal(server.calls.filter(([kind]) => kind === "part").length, 1, "the part transfers exactly once");
+  assert.equal(server.calls.filter(([kind]) => kind === "commit").length, 1);
 });
 
 test("a conflicting receipt after an ambiguous ACK never resends or commits", async (t) => {

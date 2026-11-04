@@ -5,7 +5,7 @@
 > unpublished native multipart state during upload, with shared Postgres metadata and no full-file
 > assembly/PUT at commit. Local retains durable local staging. Native multipart requires explicit connection
 > evidence; its numbered-upload limit is independent of the small single-PUT limit. P6 now uses four file
-> slots with up to four concurrent parts per file. The public session/receipt/Operation contract remains.
+> slots with up to sixteen concurrent parts per file. The public session/receipt/Operation contract remains.
 > Official COS now uses same-origin signed part requests through ordinary EdgeOne forwarding, not an extra
 > upload server or edge function. Authorize/confirm supplement the embedded part PUT; signed receipt provenance
 > distinguishes client SHA-256 assertions from COS-verified MD5. See the current deployment document above.
@@ -35,7 +35,7 @@ An exact target guard prevents coordinated target ABA and conflicts with ancesto
 clients/native tools remain subject to the declared coordinated writer model; database guards do not fence them.
 A conflicting same-path session returns operation_in_progress without cancelling the earlier session.
 
-Geometry is fixed at 8 MiB, 1-based part numbers, at most 10000 parts and eight parallel byte requests per session.
+Geometry is fixed at 8 MiB, 1-based part numbers, at most 10000 parts and sixteen parallel byte requests per session.
 The last part has the exact remainder. A zero-byte session has no parts and can commit immediately. Whole-file
 checksum input is unsupported and rejected; optional part Content-Digest is verified and every part is server
 hashed. SHA-256 receipts are lowercase hexadecimal. Sessions/list/status never contain an unbounded part array.

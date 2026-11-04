@@ -346,7 +346,7 @@ A retry body is still consumed/validated before claiming it matches a stored res
 
 Clients use numbered service parts and the same create/status/receipt/commit lifecycle. Sessions explicitly
 advertise transport `embedded` or `cos-signed`; they never let clients choose an arbitrary origin or provider.
-Current geometry is 8 MiB parts, `ordering:any`, at most eight parallel parts per file and 10000 parts.
+Current geometry is 8 MiB parts, `ordering:any`, at most sixteen parallel parts per file and 10000 parts.
 Session lists use opaque UUID keysets; receipt pages use acknowledgement keysets and a fixed `watermark`.
 Commit returns a stable Operation until index/result settlement. Same-path sessions are rejected while an
 older guard is active; the server does not cancel it on create. Admitted native COS/S3 uploads support up to 80000 MiB
@@ -387,7 +387,7 @@ Example response (numbers are illustrative, not universal defaults):
   "size":18234122311,
   "partSize":33554432,
   "partCount":544,
-  "maxParallelism":8,
+  "maxParallelism":16,
   "ordering":"any",
   "nextPart":null,
   "receivedParts":0,
@@ -410,9 +410,11 @@ part; replay of earlier acknowledged parts remains allowed. An out-of-order new 
 and scheduling rule, not separate provider protocols. The service may use durable staging to support more
 parallelism when its quotas and benchmarks justify the cost. `maxParallelism` is an upper bound, not a target.
 
-The browser keeps at most eight files with open sessions and sends parts through one global pool of eight byte
+The browser keeps at most eight files with open sessions and sends parts through one global pool of sixteen byte
 requests with no extra per-file cap, limited only by session.maxParallelism and ordering. A freed slot goes to the
-earliest-started file's next part. Transient part failures have bounded backoff; before replaying an uncertain request, query the original
+earliest-started file's next part. Transient part failures have bounded backoff; a `429 rate_limited` answer means every
+receive slot is busy and this part must simply wait, so it retries the same part without spending a failed attempt or
+aborting the file. Before replaying an uncertain request, query the original
 session and verify its durable part receipt against the retained File's part hash before skipping bytes or
 replaying. The browser queue lives only in memory for the current Files page/document and survives folder
 navigation. Refresh/close discards it; the next page starts empty, without restoring failed tasks, session waits

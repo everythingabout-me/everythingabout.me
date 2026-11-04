@@ -19,7 +19,12 @@ func Open(ctx context.Context, databaseURL string) (*DB, error) {
 	if err != nil {
 		return nil, err
 	}
-	cfg.MaxConns = 10
+	// A part receiver holds one connection for the whole native part transfer
+	// (seconds per 8 MiB part), and fileops admits up to UploadPartSlots of them
+	// per upload while keeping half the pool free for receipt transactions and
+	// ordinary requests. Sizing the pool below twice that admission would throttle
+	// receivers silently, below the parallelism their sessions advertise.
+	cfg.MaxConns = 40
 	cfg.MaxConnIdleTime = 30 * time.Second
 
 	pool, err := pgxpool.NewWithConfig(ctx, cfg)

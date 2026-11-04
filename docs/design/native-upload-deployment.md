@@ -20,7 +20,7 @@ COS parts are unpublished until server-controlled completion. Commit verifies ex
 seals the manifest and performs native completion once, followed by index/result settlement. It never assembles
 or uploads another whole-file body. It is a native publication operation, not just a database update.
 
-Both transports share one global pool of eight browser part requests (up to eight files; one file may use all eight),
+Both transports share one global pool of sixteen browser part requests (up to eight files; one file may use all sixteen),
 8 MiB parts and at most 10000 parts (80000 MiB before budgets or lower storage limits). Small single-content PUT
 has its separate default 32 MiB/object maximum 5 GiB policy and is disabled in edgeone mode. Zero-byte sessions
 have no parts and use the existing guarded zero-byte publication at commit.
@@ -120,7 +120,7 @@ and persists Local bytes or native COS/S3 parts before acknowledging the receipt
 owner/root/configuration bound in Postgres (migration025); embedded byte handling has a 60-second read-idle
 limit, not a total upload timeout. The application's admitted publication metadata/locks remain durable.
 
-The browser retains four-by-four scheduling, combined progress, bounded same-page retries and exact
+The browser retains global part-pool scheduling, combined progress, bounded same-page retries and exact
 session/create-key recovery. Before skipping bytes it verifies receipt hashes against the File retained in the
 current page. The upload queue exists only in memory for the current Files page/document: folder navigation
 preserves it, while refresh/close discards it without failed-task restoration or File reselection. A browser-native

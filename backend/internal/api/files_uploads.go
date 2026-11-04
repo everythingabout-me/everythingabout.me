@@ -21,7 +21,12 @@ import (
 
 const filesUploadPartSize int64 = 8 << 20
 const filesUploadMaxParts = 10000
-const filesUploadParallelism = 8
+
+// filesUploadParallelism is what every session advertises as maxParallelism, so
+// it must equal the receiver's admission rather than a separate wish. Sizing it
+// by hand above the receiver made clients race for rejected slots; sizing it
+// below measured throughput left the transfer starving.
+const filesUploadParallelism = fileops.UploadPartSlots
 
 // FileUploadSpool stores private durable chunks independently of final publication.
 type FileUploadSpool interface {

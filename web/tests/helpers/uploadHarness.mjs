@@ -148,7 +148,9 @@ export async function setup(overrides = {}, options = {}) {
     return event;
   };
   const same = (a, b) => a && b && a.length === b.length && a.every((value, i) => Object.is(value, b[i]));
-  const schedule = (callback, delay, repeat) => { assert.ok([250, 500, 2000, 15000].includes(delay), `unexpected timer ${delay}`); timers.set(++timerId, { callback, delay, repeat }); return timerId; };
+  // Only the queue's documented waits may be scheduled: part retries 250/500, receiver-busy backoff up to 2000,
+  // the operation poll at 2000 and the 15 s status deadline.
+  const schedule = (callback, delay, repeat) => { assert.ok([250, 500, 1000, 2000, 15000].includes(delay), `unexpected timer ${delay}`); timers.set(++timerId, { callback, delay, repeat }); return timerId; };
   const runtime = {
     api: { me: async () => ({ id: owner }), ...overrides }, ApiError: TestApiError,
     localStorage: storage, crypto: webcrypto, window, navigator,

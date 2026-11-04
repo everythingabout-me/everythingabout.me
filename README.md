@@ -23,7 +23,7 @@ File reselection. A browser-native beforeunload warning is registered while queu
 finalizing tasks remain.
 Durable server sessions and accepted Operations continue under their existing recovery/expiry rules. Clients
 that retain session identity and source bytes can use the resumable API independently of this browser behavior.
-Parts from up to eight files share one global pool of eight concurrent requests; one file may use all eight.
+Parts from up to eight files share one global pool of sixteen concurrent requests; one file may use all sixteen.
 See [native uploads and receiver deployment](docs/design/native-upload-deployment.md) for the exact boundaries.
 Object connections need no bucket versioning: revisions are current-object ETags enforced with native
 conditional requests, so upload, replacement, folder creation, move, copy and deletion all work. Reads are
@@ -82,9 +82,9 @@ and explicit `--physical-bytes` with inventory evidence.
 P5 adds [durable numbered-part ingress](docs/design/storage-p5.md) with migration 024, server SHA-256,
 watermarked receipts and restart recovery. The [native upload extension](docs/design/native-upload-deployment.md)
 adds shared native metadata (migration 025), direct unpublished object parts and lightweight native completion.
-Parts are 8 MiB with four concurrent requests per session and at most 10000 parts. Explicit `multipartUploads`
+Parts are 8 MiB with sixteen concurrent requests per session and at most 10000 parts. Explicit `multipartUploads`
 connection evidence is required; numbered object uploads no longer inherit the default 32 MiB single-PUT policy.
-The browser sends parts through a global pool of eight requests. `FILE_UPLOAD_INGRESS=embedded` keeps reception in
+The browser sends parts through a global pool of sixteen requests. `FILE_UPLOAD_INGRESS=embedded` keeps reception in
 `eam server`. Official `edgeone` mode signs exact parts and verifies COS state after ordinary EO forwarding;
 no edge function or additional upload server is needed. It requires `signedMultipartParts` evidence in addition
 to native multipart admission. Receipts label client SHA-256 assertions plus COS-verified MD5 distinctly from

@@ -22,7 +22,9 @@ const nativeMaxParts = 10000
 
 // Bounded independently of users/sessions. Payloads are released after a part RPC;
 // independent receivers need no shared filesystem and never retain a whole file.
-var nativeReceiveSlots = make(chan struct{}, 16)
+// Two full per-upload admissions (fileops.UploadPartSlots each) may be in flight
+// at once; every payload is one 8 MiB part, never a whole file.
+var nativeReceiveSlots = make(chan struct{}, 32)
 
 type nativeSession struct {
 	Intent   storage.WriteIntent
