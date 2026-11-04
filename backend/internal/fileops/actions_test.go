@@ -249,6 +249,31 @@ func TestActionsPostgres(t *testing.T) {
 		_, _, err = a.Prepare(ctx, req, n)
 		requireCode(t, err, "idempotency_conflict")
 	})
+	t.Run("guards fence only the affected paths", func(t *testing.T) {
+		p, r, actor := seedOwner(t, pool, provenBaseline(4, 4, 100, 100))
+		n := newActionNative(r)
+		n.put("trash", storage.Folder, "")
+		n.put("trash/old.bin", storage.File, "old")
+		n.put("keep", storage.Folder, "")
+		n.put("keep/a.txt", storage.File, "a")
+		a := actionCoordinator(t, p, nil)
+		// An open upload elsewhere holds its target guard for its whole session.
+		upload := mustBegin(t, p, genericRequest(r, actor, "keep/a.txt", 0))
+		op := prepareAction(t, a, ActionRequest{Root: r, Actor: actor, Kind: "delete", From: "trash/old.bin"}, n)
+		if len(op.Guards) != 1 || op.Guards[0].Path != "trash/old.bin" || op.Guards[0].Subtree {
+			t.Fatalf("delete guards = %+v", op.Guards)
+		}
+		if out := runAction(t, a, op, actor, n); out.State != Succeeded {
+			t.Fatalf("unrelated upload blocked the delete: %s", out.State)
+		}
+		// The same path must still conflict, and must name the blocking operation.
+		_, _, err := a.Prepare(ctx, ActionRequest{Root: r, Actor: actor, Kind: "delete", From: "keep/a.txt"}, n)
+		requireCode(t, err, "operation_in_progress")
+		var conflict *Error
+		if !errors.As(err, &conflict) || conflict.OperationID != upload.ID {
+			t.Fatalf("conflict lost the blocking operation: %v", err)
+		}
+	})
 	t.Run("recursive copy finite paginated independent and charged", func(t *testing.T) {
 		p, r, actor := seedOwner(t, pool, provenBaseline(7, 7, 100, 100))
 		n := newActionNative(r)
@@ -399,7 +424,7 @@ func TestActionsPostgres(t *testing.T) {
 		if _, err = a.Cancel(ctx, r, actor, op.ID); err != nil {
 			t.Fatal(err)
 		}
-		_, _, err = p.Begin(ctx, genericRequest(r, actor, "unrelated", 0))
+		_, _, err = p.Begin(ctx, genericRequest(r, actor, "dst/child", 0))
 		requireCode(t, err, "operation_in_progress")
 		id := n.calls[0].ID
 		n.receipts[id] = storage.Inspection{State: storage.NotApplied, Evidence: []byte("old request fenced and unused")}
@@ -553,4 +578,36 @@ func TestActionsPostgres(t *testing.T) {
 			t.Fatal(out.State, len(n.calls))
 		}
 	})
+}
+
+func TestActionGuardsFenceAffectedPaths(t *testing.T) {
+	actor := Actor{ID: "principal", CanWrite: true}
+	cases := []struct {
+		name string
+		req  ActionRequest
+		want []Guard
+	}{
+		{"file delete", ActionRequest{Kind: "delete", From: "a/b.bin"}, []Guard{{Path: "a/b.bin"}}},
+		{"recursive delete", ActionRequest{Kind: "delete", From: "a", Recursive: true}, []Guard{{Path: "a", Subtree: true}}},
+		{"move", ActionRequest{Kind: "move", From: "a", To: "b"}, []Guard{{Path: "a", Subtree: true}, {Path: "b", Subtree: true}}},
+		{"copy", ActionRequest{Kind: "copy", From: "a", To: "b"}, []Guard{{Path: "a", Subtree: true}, {Path: "b", Subtree: true}}},
+		{"mkdir", ActionRequest{Kind: "mkdir", To: "new"}, []Guard{{Path: "new", Subtree: true}}},
+		// Missing ancestors are only discovered after admission, so this case keeps
+		// the whole-scope fence that the frozen manifest relies on.
+		{"mkdir with parents", ActionRequest{Kind: "mkdir", To: "new/deep", Parents: true}, []Guard{{Path: "", Subtree: true}}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			c.req.Actor = actor
+			got := actionGuards(c.req)
+			if len(got) != len(c.want) {
+				t.Fatalf("guards = %+v, want %+v", got, c.want)
+			}
+			for i := range got {
+				if got[i] != c.want[i] {
+					t.Fatalf("guards = %+v, want %+v", got, c.want)
+				}
+			}
+		})
+	}
 }

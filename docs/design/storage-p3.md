@@ -33,6 +33,13 @@ NFC and the configured case rules, cover exact/subtree/ancestor conflicts, and a
 expiry. P3 conservatively keeps the owner's budget root binding immutable, including after settlement;
 connection/root replacement needs an explicit future migration, not a new generation bypass.
 
+Action guards name the native paths the action observes or mutates: the deletion target (subtree only when
+recursive), both endpoints of a move or copy, and the mkdir target. A long-lived guard elsewhere — an open or
+abandoned upload session, for instance — therefore cannot turn an unrelated mutation into
+`operation_in_progress`, while overlapping paths still conflict. `mkdir` with `parents` is the exception and
+keeps the actor-scope fence, because its missing ancestors are discovered only after admission and the frozen
+manifest must stay covered.
+
 Worker claims use DB time, random tokens and increasing epochs. Every checkpoint/state update validates
 its lease fence. An expired lease may allow inspection by a successor, but never permits a second final
 publication while the first is uncertain. Releasing a finished worker lease does not release guards or

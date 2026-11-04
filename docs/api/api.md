@@ -265,6 +265,11 @@ Completed rename/move returns `200` file/folder metadata; copy returns `201`; de
 work returns `202 + Operation + Location`. The public action is the same even when backend work differs.
 Cancellation/failure of multi-file work can leave native partial effects; the Operation records them.
 
+Mutations fence only the native paths they observe or mutate, so an open upload session elsewhere in the
+drive never blocks an unrelated rename, copy or delete. A genuinely overlapping path returns
+`409 operation_in_progress` with the blocking `operationId`; wait for that exact Operation, or abort the
+identified open upload session when the conflict is a resumable upload of the same target.
+
 ## 5. Downloads and safe media
 
 GET by path returns `200` bytes, HEAD returns matching representation headers without a body. Root or

@@ -111,6 +111,28 @@ func actionRequest(op Operation) (ActionRequest, error) {
 	return req, nil
 }
 
+// actionGuards fences exactly the native paths this action observes or mutates.
+// An outstanding operation elsewhere in the drive (a slow or abandoned upload, for
+// example) keeps its own target guard for its whole session and must not turn an
+// unrelated delete, move, copy or mkdir into operation_in_progress.
+//
+// mkdir with Parents is the exception: its missing ancestors are discovered only
+// after the guard is taken, and the frozen manifest must keep them covered, so that
+// case retains the actor-scope fence.
+func actionGuards(req ActionRequest) []Guard {
+	switch req.Kind {
+	case "delete":
+		return []Guard{{Path: req.From, Subtree: req.Recursive}}
+	case "move", "copy":
+		return []Guard{{Path: req.From, Subtree: true}, {Path: req.To, Subtree: true}}
+	case "mkdir":
+		if !req.Parents {
+			return []Guard{{Path: req.To, Subtree: true}}
+		}
+	}
+	return []Guard{{Path: req.Actor.Scope, Subtree: true}}
+}
+
 // Prepare acquires an exclusion guard before any native observation, validates
 // public revision conditions, then freezes a finite manifest and exact liability.
 // Idempotent retries consult immutable client intent before inspecting live paths.
@@ -128,7 +150,7 @@ func (a *Actions) Prepare(ctx context.Context, req ActionRequest, native NativeA
 	if err != nil {
 		return Operation{}, false, err
 	}
-	op, replay, err := a.journal.Begin(ctx, BeginRequest{Root: req.Root, Actor: req.Actor, Kind: req.Kind, IdempotencyKey: req.IdempotencyKey, Intent: intent, Guards: []Guard{{Path: req.Actor.Scope, Subtree: true}}})
+	op, replay, err := a.journal.Begin(ctx, BeginRequest{Root: req.Root, Actor: req.Actor, Kind: req.Kind, IdempotencyKey: req.IdempotencyKey, Intent: intent, Guards: actionGuards(req)})
 	if err != nil {
 		return op, replay, err
 	}
