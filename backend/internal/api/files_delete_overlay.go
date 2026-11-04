@@ -34,7 +34,13 @@ func (s *Server) filesDeleteOverlay(ctx context.Context, owner string, driver st
 	if len(roots) == 0 {
 		return driver, nil
 	}
-	return &pendingDeleteDriver{Driver: driver, roots: roots}, nil
+	overlay := &pendingDeleteDriver{Driver: driver, roots: roots}
+	// Only claim the reference-reader capability when the wrapped driver has it, so a
+	// handler never depends on an interface the underlying storage cannot serve.
+	if _, ok := driver.(storage.ReferenceReader); ok {
+		return &pendingDeleteReferenceDriver{pendingDeleteDriver: overlay}, nil
+	}
+	return overlay, nil
 }
 
 type pendingDeleteDriver struct {
@@ -109,4 +115,34 @@ func (d *pendingDeleteDriver) List(ctx context.Context, p storage.Path, request 
 		request.Cursor = page.NextCursor
 	}
 	return storage.Page{}, storage.NewError("resource_limit", p, nil)
+}
+
+// pendingDeleteReferenceDriver keeps hiding accepted deletions on the reference-addressed
+// read path. It exists as a separate type so the capability is present only when the
+// wrapped driver can actually serve reference reads.
+type pendingDeleteReferenceDriver struct{ *pendingDeleteDriver }
+
+func (d *pendingDeleteReferenceDriver) StatReference(ctx context.Context, p storage.Path, ref []byte) (storage.Entry, error) {
+	if d.hidden(p) {
+		return storage.Entry{}, storage.NewError("not_found", p, nil)
+	}
+	entry, err := d.Driver.(storage.ReferenceReader).StatReference(ctx, p, ref)
+	if err == nil && d.hidden(entry.Path) {
+		return storage.Entry{}, storage.NewError("not_found", p, nil)
+	}
+	return entry, err
+}
+
+func (d *pendingDeleteReferenceDriver) OpenReference(ctx context.Context, p storage.Path, ref []byte, opts storage.ReadOptions) (storage.Read, error) {
+	if d.hidden(p) {
+		return storage.Read{}, storage.NewError("not_found", p, nil)
+	}
+	read, err := d.Driver.(storage.ReferenceReader).OpenReference(ctx, p, ref, opts)
+	if err == nil && d.hidden(read.Entry.Path) {
+		if read.Body != nil {
+			_ = read.Body.Close()
+		}
+		return storage.Read{}, storage.NewError("not_found", p, nil)
+	}
+	return read, err
 }

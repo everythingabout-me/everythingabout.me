@@ -3,6 +3,7 @@ package api
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"mime"
@@ -38,6 +39,117 @@ func (s *Server) handleFilesContent(w http.ResponseWriter, r *http.Request, f *f
 		return err
 	}
 	native := storage.Path(p.Relative())
+	// The owner index already proved which native key spells this path, so content is
+	// addressed by that key: one HEAD for the representation, one ranged GET for the
+	// bytes. Path traversal stays for drivers without the capability and whenever the
+	// index cannot name the file, because storage remains the authority for bytes.
+	if reader, ok := f.Driver.(storage.ReferenceReader); ok {
+		served, err := s.filesContentByReference(w, r, f, reader, p, native)
+		if err != nil || served {
+			return err
+		}
+	}
+	return s.filesContentByTraversal(w, r, f, native)
+}
+
+// filesContentByReference serves content from an indexed native key. It reports
+// served=false only when the index cannot name the file, never to hide an error.
+func (s *Server) filesContentByReference(w http.ResponseWriter, r *http.Request, f *fileRequest, reader storage.ReferenceReader, p fc.Path, native storage.Path) (bool, error) {
+	if s.filesIndex == nil {
+		return false, nil
+	}
+	record, err := s.filesIndexedRecord(r.Context(), f, p)
+	if err != nil {
+		var problem *fc.Problem
+		if errors.As(err, &problem) && problem.Status == http.StatusNotFound {
+			return false, nil
+		}
+		return false, err
+	}
+	if record.Row.IsDir || record.Row.Key == "" {
+		return false, nil
+	}
+	ref := []byte(record.Row.Key)
+	for attempt := 0; attempt < 3; attempt++ {
+		entry, err := reader.StatReference(r.Context(), native, ref)
+		if err != nil {
+			// A key from another root generation is stale evidence, not authority to
+			// read elsewhere: fall back to the traversal that proves the path natively.
+			if storage.IsCode(err, "stale_reference") {
+				return false, nil
+			}
+			return false, err
+		}
+		if entry.Kind != storage.File {
+			return false, fc.NewProblem(409, "not_a_file", "The path is not a file.")
+		}
+		tag := ""
+		revision, revisionErr := s.filesObservedContentRevision(r.Context(), f, entry)
+		if revisionErr != nil {
+			return false, revisionErr
+		}
+		if revision != nil {
+			tag = strconv.Quote(*revision)
+		}
+		// A conditional answer needs only the observation: no body is opened for 304.
+		if condition := filesContentCondition(r.Header, tag); condition != 0 {
+			if condition == http.StatusPreconditionFailed {
+				return false, fc.NewProblem(condition, "precondition_failed", "The file does not match the requested content condition.")
+			}
+			filesContentCacheHeaders(w.Header(), tag)
+			w.WriteHeader(condition)
+			return true, nil
+		}
+		status := http.StatusOK
+		var selected *filesByteRange
+		options := storage.ReadOptions{Version: entry.Version}
+		if r.Method != http.MethodHead && f.Driver.Describe().RangeRead && filesIfRange(r.Header, tag) {
+			selected, err = filesParseRange(strings.Join(r.Header.Values("Range"), ","), entry.Size)
+			if err != nil {
+				w.Header().Set("Content-Range", fmt.Sprintf("bytes */%d", entry.Size))
+				return false, err
+			}
+			if selected != nil {
+				options.Offset, options.Length = selected.offset, &selected.length
+				status = http.StatusPartialContent
+			}
+		}
+		if r.Method == http.MethodHead {
+			filesContentHeaders(w.Header(), f, native, entry, entry.Size, tag, selected, filesInlineRequested(r))
+			w.WriteHeader(status)
+			return true, nil
+		}
+		read, err := reader.OpenReference(r.Context(), native, ref, options)
+		if err != nil {
+			if storage.IsCode(err, "changed") || storage.IsCode(err, "invalid_range") {
+				continue
+			}
+			return false, err
+		}
+		// The transfer must still be the representation the observation promised;
+		// otherwise select again instead of pairing old validators with new bytes.
+		if read.Entry.Size != entry.Size || !bytes.Equal(read.Entry.Version, entry.Version) ||
+			read.Offset != options.Offset || read.Length != readLengthFor(read, selected) {
+			if err := read.Body.Close(); err != nil {
+				return false, err
+			}
+			continue
+		}
+		return true, filesContentStream(w, r, f, native, read, tag, selected, status)
+	}
+	return false, storage.NewError("changed", native, nil)
+}
+
+func readLengthFor(read storage.Read, selected *filesByteRange) int64 {
+	if selected != nil {
+		return selected.length
+	}
+	return read.Entry.Size
+}
+
+// filesContentByTraversal proves the path by listing its ancestors on every request.
+// It is the fallback when no index key is available.
+func (s *Server) filesContentByTraversal(w http.ResponseWriter, r *http.Request, f *fileRequest, native storage.Path) error {
 	// Bound retries cover native replacements between metadata selection and Open.
 	// All headers come from Open's actual representation, never the preceding Stat.
 	for attempt := 0; attempt < 3; attempt++ {
@@ -163,57 +275,73 @@ func (s *Server) handleFilesContent(w http.ResponseWriter, r *http.Request, f *f
 			if err := read.Body.Close(); err != nil {
 				return err
 			}
-		}
-		header := w.Header()
-		filesContentCacheHeaders(header, tag)
-		header.Set("Content-Type", filesContentType(read.Entry))
-		disposition := "attachment"
-		if r.URL.Query().Get("disposition") == "inline" && filesSafeInline(header.Get("Content-Type")) {
-			disposition = "inline"
-		}
-		header.Set("Content-Disposition", mime.FormatMediaType(disposition, map[string]string{"filename": path.Base(string(p))}))
-		header.Set("X-Content-Type-Options", "nosniff")
-		header.Set("Content-Length", strconv.FormatInt(read.Length, 10))
-		if f.Driver.Describe().RangeRead {
-			header.Set("Accept-Ranges", "bytes")
-		}
-		if selected != nil {
-			header.Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", selected.offset, selected.offset+selected.length-1, read.Entry.Size))
-		}
-		if r.Method == http.MethodHead {
+			filesContentHeaders(w.Header(), f, native, read.Entry, read.Length, tag, selected, filesInlineRequested(r))
 			w.WriteHeader(status)
 			return nil
 		}
-		// Cancellation must unblock a native Read, including a blocked network read.
-		// Native bodies need not support concurrent duplicate Close calls.
-		var closeOnce sync.Once
-		var closeErr error
-		closeBody := func() error {
-			closeOnce.Do(func() { closeErr = read.Body.Close() })
-			return closeErr
-		}
-		stop := context.AfterFunc(r.Context(), func() { _ = closeBody() })
-		defer stop()
-		defer func() {
-			if err := closeBody(); err != nil {
-				panic(http.ErrAbortHandler)
-			}
-		}()
-		w.WriteHeader(status)
-		reader := &filesContextReader{ctx: r.Context(), reader: read.Body}
-		if _, err := io.CopyN(w, reader, read.Length); err != nil || reader.failure != nil {
-			panic(http.ErrAbortHandler)
-		}
-		// Verify EOF as well as length; drivers can discover truncation/transport errors
-		// on the read after the last advertised byte. Never append a JSON error here.
-		var extra [1]byte
-		n, err := reader.Read(extra[:])
-		if n != 0 || err != io.EOF {
-			panic(http.ErrAbortHandler)
-		}
-		return nil
+		return filesContentStream(w, r, f, native, read, tag, selected, status)
 	}
 	return storage.NewError("changed", native, nil)
+}
+
+// filesInlineRequested is the only way a response may use inline disposition; the media
+// type itself still has to be on the safe list.
+func filesInlineRequested(r *http.Request) bool {
+	return r.URL.Query().Get("disposition") == "inline"
+}
+
+// filesContentHeaders writes the representation headers shared by conditional, HEAD and
+// body responses. length is the number of bytes this response carries.
+func filesContentHeaders(header http.Header, f *fileRequest, native storage.Path, entry storage.Entry, length int64, tag string, selected *filesByteRange, inline bool) {
+	filesContentCacheHeaders(header, tag)
+	header.Set("Content-Type", filesContentType(entry))
+	disposition := "attachment"
+	if inline && filesSafeInline(header.Get("Content-Type")) {
+		disposition = "inline"
+	}
+	header.Set("Content-Disposition", mime.FormatMediaType(disposition, map[string]string{"filename": path.Base(string(native))}))
+	header.Set("X-Content-Type-Options", "nosniff")
+	header.Set("Content-Length", strconv.FormatInt(length, 10))
+	if f.Driver.Describe().RangeRead {
+		header.Set("Accept-Ranges", "bytes")
+	}
+	if selected != nil {
+		header.Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", selected.offset, selected.offset+selected.length-1, entry.Size))
+	}
+}
+
+// filesContentStream writes an already selected representation and keeps cancellation and
+// truncation strict: the response is either the whole advertised length or aborted.
+func filesContentStream(w http.ResponseWriter, r *http.Request, f *fileRequest, native storage.Path, read storage.Read, tag string, selected *filesByteRange, status int) error {
+	filesContentHeaders(w.Header(), f, native, read.Entry, read.Length, tag, selected, filesInlineRequested(r))
+	// Cancellation must unblock a native Read, including a blocked network read.
+	// Native bodies need not support concurrent duplicate Close calls.
+	var closeOnce sync.Once
+	var closeErr error
+	closeBody := func() error {
+		closeOnce.Do(func() { closeErr = read.Body.Close() })
+		return closeErr
+	}
+	stop := context.AfterFunc(r.Context(), func() { _ = closeBody() })
+	defer stop()
+	defer func() {
+		if err := closeBody(); err != nil {
+			panic(http.ErrAbortHandler)
+		}
+	}()
+	w.WriteHeader(status)
+	reader := &filesContextReader{ctx: r.Context(), reader: read.Body}
+	if _, err := io.CopyN(w, reader, read.Length); err != nil || reader.failure != nil {
+		panic(http.ErrAbortHandler)
+	}
+	// Verify EOF as well as length; drivers can discover truncation/transport errors
+	// on the read after the last advertised byte. Never append a JSON error here.
+	var extra [1]byte
+	n, err := reader.Read(extra[:])
+	if n != 0 || err != io.EOF {
+		panic(http.ErrAbortHandler)
+	}
+	return nil
 }
 
 func filesCloseRead(read storage.Read) error {

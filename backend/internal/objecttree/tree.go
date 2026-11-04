@@ -417,16 +417,80 @@ func (t *Tree) Open(ctx context.Context, path storage.Path, opts storage.ReadOpt
 	if opts.Offset < 0 || (opts.Length != nil && (*opts.Length <= 0 || opts.Offset > math.MaxInt64-*opts.Length)) {
 		return storage.Read{}, fail("invalid_range", path)
 	}
-	selected, err := parseVersion(opts.Version)
-	if err != nil {
-		return storage.Read{}, err
-	}
 	entry, err := t.resolve(ctx, path)
 	if err != nil {
 		return storage.Read{}, err
 	}
 	if entry.Kind != storage.File {
 		return storage.Read{}, fail("not_file", path)
+	}
+	read, err := t.fetch(ctx, path, t.key(path), opts, done)
+	if err != nil {
+		return storage.Read{}, err
+	}
+	retained = true
+	return read, nil
+}
+
+// StatReference observes a file through a key the caller's index proved for this exact
+// path. Unlike Stat it never lists ancestors: a byte-exact HEAD is the whole proof, and
+// a reference that is not the key this tree derives for the path is a stale index.
+func (t *Tree) StatReference(ctx context.Context, path storage.Path, ref []byte) (storage.Entry, error) {
+	ctx, done, err := t.operation(ctx)
+	if err != nil {
+		return storage.Entry{}, err
+	}
+	defer done()
+	if err := t.check(ctx, path); err != nil {
+		return storage.Entry{}, err
+	}
+	if path == "" || string(ref) != t.key(path) {
+		return storage.Entry{}, fail("stale_reference", path)
+	}
+	obj, err := t.backend.Head(ctx, string(ref))
+	if err != nil {
+		return storage.Entry{}, err
+	}
+	if obj.Key != string(ref) || obj.Size < 0 {
+		return storage.Entry{}, fail("invalid_backend_response", path)
+	}
+	return t.entry(path, obj), nil
+}
+
+// OpenReference transfers through the same proven key without resolving the path.
+func (t *Tree) OpenReference(ctx context.Context, path storage.Path, ref []byte, opts storage.ReadOptions) (storage.Read, error) {
+	ctx, done, err := t.operation(ctx)
+	if err != nil {
+		return storage.Read{}, err
+	}
+	retained := false
+	defer func() {
+		if !retained {
+			done()
+		}
+	}()
+	if err := t.check(ctx, path); err != nil {
+		return storage.Read{}, err
+	}
+	if path == "" || string(ref) != t.key(path) {
+		return storage.Read{}, fail("stale_reference", path)
+	}
+	if opts.Offset < 0 || (opts.Length != nil && (*opts.Length <= 0 || opts.Offset > math.MaxInt64-*opts.Length)) {
+		return storage.Read{}, fail("invalid_range", path)
+	}
+	read, err := t.fetch(ctx, path, string(ref), opts, done)
+	if err != nil {
+		return storage.Read{}, err
+	}
+	retained = true
+	return read, nil
+}
+
+// fetch issues exactly one ranged or full GET for an already proven key.
+func (t *Tree) fetch(ctx context.Context, path storage.Path, key string, opts storage.ReadOptions, done func()) (storage.Read, error) {
+	selected, err := parseVersion(opts.Version)
+	if err != nil {
+		return storage.Read{}, err
 	}
 	ranged := opts.Offset > 0 || opts.Length != nil
 	rangeHeader := ""
@@ -436,7 +500,7 @@ func (t *Tree) Open(ctx context.Context, path storage.Path, opts storage.ReadOpt
 			rangeHeader += strconv.FormatInt(opts.Offset+*opts.Length-1, 10)
 		}
 	}
-	response, err := t.backend.Get(ctx, t.key(path), rangeHeader, selected)
+	response, err := t.backend.Get(ctx, key, rangeHeader, selected)
 	if err != nil {
 		return storage.Read{}, err
 	}
@@ -466,7 +530,6 @@ func (t *Tree) Open(ctx context.Context, path storage.Path, opts storage.ReadOpt
 		return reject("invalid_backend_response")
 	}
 	response.Object.Size = fullSize
-	retained = true
 	return storage.Read{Body: &exactBody{body: response.Body, remaining: response.Length, cleanup: done}, Entry: t.entry(path, response.Object), Offset: opts.Offset, Length: response.Length}, nil
 }
 func parseContentRange(value string) (int64, int64, int64, error) {

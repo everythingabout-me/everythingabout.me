@@ -194,6 +194,35 @@ mappings may retain contentRevision across a proven copy/delete move, but must r
 fingerprint. WriteIntent additionally captures optional source modification time, original client condition,
 and parent path/version so recovery cannot retarget a replaced ancestor.
 
+### Reference-addressed reads
+
+Content delivery must not re-derive the namespace on every transfer. `Stat` and `Open` answer path-addressed
+questions, so an object adapter proves the spelling by listing each ancestor (depth × directory size native
+calls) before it can touch one object. A driver may therefore implement the optional capability
+
+```go
+type ReferenceReader interface {
+    StatReference(context.Context, Path, []byte) (Entry, error) // one native HEAD
+    OpenReference(context.Context, Path, []byte, ReadOptions) (Read, error) // one ranged GET
+}
+```
+
+where the `[]byte` is the native key the owner-scoped index already stores for that path. The index only says
+where the file is; bytes and validators still come from native responses, and README-level behaviour is
+unchanged because `Stat`/`Open` remain the authority whenever no reference is available. Implementations must
+compare the reference with the key they derive for the path and return `stale_reference` for anything else:
+a stale index is not authority to read a different object or another root generation.
+
+Reference equality is byte-exact: a key from an older root generation, or one whose spelling the requested
+path cannot reproduce byte for byte, deliberately falls back to path-addressed traversal instead of guessing
+that two spellings denote the same object.
+
+Callers order the calls as observation → condition → transfer, so a 304 or a HEAD costs one native request and
+nothing is opened. `OpenReference` transfers exactly the requested range once; it must not open a full object
+and discard it to reposition. Because native object reads are validated but not version-pinned, the returned
+`Entry.Version` is the revision the caller observed with `StatReference`, exactly as `Open` already reports the
+revision from its own HEAD.
+
 Missing entries return a typed not_found error; not nil success. List is mandatory even on read-only drivers.
 The service recurses paginated child listings or uses an optional inventory optimization. Native IDs/versions
 remain private and are not file contents or public app IDs. Read callers must close Body and handle context

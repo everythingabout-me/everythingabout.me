@@ -65,6 +65,22 @@ type Driver interface {
 	Describe() Descriptor
 	Close() error
 }
+
+// ReferenceReader serves content through a native reference (the object key) that the
+// owner-scoped index already proved for this exact path. Path-addressed Stat and Open
+// must re-establish namespace truth by walking ancestors; a reference-addressed read
+// skips that walk, so serving content does not list every ancestor directory.
+//
+// The reference is not authority to read arbitrary objects: an implementation must
+// compare it with the key it derives for the path and refuse anything else as
+// "stale_reference". Bytes and validators still come from native responses; the index
+// only says where the file is. StatReference is one native observation (HEAD) and
+// OpenReference is one ranged transfer (GET), so a conditional revalidation can be
+// answered after the observation, before any body is opened.
+type ReferenceReader interface {
+	StatReference(ctx context.Context, p Path, ref []byte) (Entry, error)
+	OpenReference(ctx context.Context, p Path, ref []byte, options ReadOptions) (Read, error)
+}
 type Factory interface {
 	Open(context.Context, Config) (Driver, error)
 }

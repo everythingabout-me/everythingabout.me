@@ -173,6 +173,46 @@ func Run(t *testing.T, construct func(*httptest.Server) (storage.Factory, error)
 			t.Fatalf("GET representation was replaced by preflight metadata: %+v", read.Entry)
 		}
 	})
+	t.Run("indexed_references_skip_ancestor_listing", func(t *testing.T) {
+		native, _, driver := setup(t)
+		ctx := context.Background()
+		reader, ok := driver.(storage.ReferenceReader)
+		if !ok {
+			t.Fatal("tree does not serve reference-addressed reads")
+		}
+		key := []byte("drive/alice/" + special)
+		native.mu.Lock()
+		before := native.listRequests
+		native.mu.Unlock()
+		entry, err := reader.StatReference(ctx, storage.Path(special), key)
+		if err != nil || entry.Kind != storage.File || entry.Size != 10 || len(entry.Version) == 0 {
+			t.Fatalf("reference stat: %+v %v", entry, err)
+		}
+		read, err := reader.OpenReference(ctx, storage.Path(special), key, storage.ReadOptions{Offset: 2, Length: ptr(4)})
+		if err != nil {
+			t.Fatal(err)
+		}
+		data, readErr := io.ReadAll(read.Body)
+		read.Body.Close()
+		if readErr != nil || string(data) != "2345" || read.Length != 4 || read.Entry.Size != 10 {
+			t.Fatalf("reference range: %q %+v %v", data, read, readErr)
+		}
+		native.mu.Lock()
+		after := native.listRequests
+		native.mu.Unlock()
+		if after != before {
+			t.Fatalf("reference read listed ancestors: %d pages", after-before)
+		}
+		// A reference is never authority to read a different object.
+		for _, ref := range [][]byte{[]byte("drive/bob/private"), []byte("drive/alice"), []byte("drive/alice/../bob/private"), nil} {
+			if _, err := reader.StatReference(ctx, storage.Path(special), ref); !storage.IsCode(err, "stale_reference") {
+				t.Fatalf("foreign reference accepted %q: %v", ref, err)
+			}
+			if _, err := reader.OpenReference(ctx, storage.Path(special), ref, storage.ReadOptions{}); !storage.IsCode(err, "stale_reference") {
+				t.Fatalf("foreign reference opened %q: %v", ref, err)
+			}
+		}
+	})
 	t.Run("versions_conditions_and_missing", func(t *testing.T) {
 		native, _, driver := setup(t)
 		ctx := context.Background()

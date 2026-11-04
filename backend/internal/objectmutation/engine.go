@@ -289,6 +289,69 @@ func (d *Driver) Open(ctx context.Context, p storage.Path, options storage.ReadO
 	return read, nil
 }
 
+// StatReference observes one file through an index-proved key: one HEAD, no ancestor
+// listing. The reference must be the key this driver derives for the path, otherwise
+// the index describes a different native root and the read fails closed.
+func (d *Driver) StatReference(ctx context.Context, p storage.Path, ref []byte) (storage.Entry, error) {
+	ctx, done, err := d.operation(ctx)
+	if err != nil {
+		return storage.Entry{}, err
+	}
+	defer done()
+	if err = storage.ValidatePath(p); err != nil || p == "" {
+		return storage.Entry{}, fail("not_file", p)
+	}
+	if !bytes.Equal(ref, []byte(d.key(p, storage.File))) {
+		return storage.Entry{}, fail("stale_reference", p)
+	}
+	obj, err := d.backend.Head(ctx, d.key(p, storage.File))
+	if err != nil {
+		return storage.Entry{}, err
+	}
+	return d.objectEntry(p, storage.File, obj)
+}
+
+// OpenReference transfers through the same index-proved key in one ranged GET. The
+// returned entry carries the revision the caller observed with StatReference: native
+// object reads are validated but not version-pinned, exactly as Open documents.
+func (d *Driver) OpenReference(ctx context.Context, p storage.Path, ref []byte, options storage.ReadOptions) (storage.Read, error) {
+	ctx, done, err := d.operation(ctx)
+	if err != nil {
+		return storage.Read{}, err
+	}
+	if err = storage.ValidatePath(p); err != nil || p == "" {
+		done()
+		return storage.Read{}, fail("not_file", p)
+	}
+	if !bytes.Equal(ref, []byte(d.key(p, storage.File))) {
+		done()
+		return storage.Read{}, fail("stale_reference", p)
+	}
+	tree, ok := d.tree.(storage.ReferenceReader)
+	if !ok {
+		done()
+		return storage.Read{}, fail("unsupported", p)
+	}
+	treeOptions := options
+	// The tree's version is a provider version id; this driver's revision is the ETag.
+	treeOptions.Version = nil
+	read, err := tree.OpenReference(ctx, p, ref, treeOptions)
+	if err != nil {
+		done()
+		return storage.Read{}, err
+	}
+	if read.Body == nil || read.Entry.Path != p || read.Entry.Kind != storage.File {
+		if read.Body != nil {
+			read.Body.Close()
+		}
+		done()
+		return storage.Read{}, fail("changed", p)
+	}
+	read.Entry.Version = bytes.Clone(options.Version)
+	read.Body = &operationBody{ReadCloser: read.Body, done: done}
+	return read, nil
+}
+
 type operationBody struct {
 	io.ReadCloser
 	once sync.Once

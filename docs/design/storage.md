@@ -85,7 +85,11 @@ not require a provider round trip on every page view. SQL applies owner/scope fi
 before returning a bounded page. Folder metadata revisions use indexed direct-child membership.
 
 Successful application mutations settle the native result and index together through the durable journal.
-Content reads, mutation capture/validation and explicit scans still access the native backend. External edits
+Content reads, mutation capture/validation and explicit scans still access the native backend. A content read
+is addressed by the native key the index already holds: one native HEAD proves the representation, conditions
+are evaluated, and one ranged GET transfers the bytes. Content delivery never rebuilds the namespace by
+listing ancestors; when the index cannot name the file, native path resolution is the fallback and the index
+is repaired by reconcile, not by the request. External edits
 are visible after index synchronization; metadata can temporarily describe a file whose native content has
 changed or disappeared. An unavailable/missing index is reported explicitly, never replaced with an implicit
 storage scan in the page request. Existing reconcile/import is additive and does not prune deleted external

@@ -285,6 +285,12 @@ and Content-Range; an unsatisfiable range returns `416` with `Content-Range: byt
 requests are ignored and return a full `200`, as HTTP permits. HEAD ignores Range. `If-Range` mismatch returns
 the full representation; a resuming client must detect that and restart. Never mix revisions.
 
+Content is addressed by the native key the owner index recorded for the path. The endpoint observes the
+representation with one native HEAD, evaluates conditions, and issues at most one ranged GET; a `304` or a
+`HEAD` therefore costs one native request and opens no body. A read must not enumerate ancestor directories to
+re-prove the path: when the index cannot name the file, native path resolution is the explicit fallback, and
+index repair stays a reconcile concern rather than part of the request.
+
 Select a proven native content version/snapshot for the response, or coordinate all application writes
 against the read. External in-place changes cannot be frozen by an application lock or an open FD alone.
 Do not claim strong ETags/pinning from size and mtime alone; use trustworthy native evidence or verification.

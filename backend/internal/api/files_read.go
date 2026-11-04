@@ -106,19 +106,29 @@ func filesHiddenRoots(f *fileRequest) []string {
 	return nil
 }
 
-func (s *Server) filesIndexedMetadata(ctx context.Context, f *fileRequest, p fc.Path) (fc.Metadata, error) {
+// filesIndexedRecord returns the owner-scoped index row for one path, including the
+// native key that content reads address directly.
+func (s *Server) filesIndexedRecord(ctx context.Context, f *fileRequest, p fc.Path) (*nodes.FileBrowseRecord, error) {
 	if err := f.RequireRead(p); err != nil {
-		return fc.Metadata{}, err
+		return nil, err
 	}
 	if s.filesIndex == nil {
-		return fc.Metadata{}, fc.NewProblem(503, "temporarily_unavailable", "The file index is unavailable.")
+		return nil, fc.NewProblem(503, "temporarily_unavailable", "The file index is unavailable.")
 	}
 	record, err := s.filesIndex.FileBrowseMetadata(ctx, f.Principal.User.ID, f.ContentNamespace, p.Relative(), filesHiddenRoots(f)...)
 	if err != nil {
-		return fc.Metadata{}, err
+		return nil, err
 	}
 	if record == nil {
-		return fc.Metadata{}, fc.NewProblem(404, "not_found", "The indexed path was not found.")
+		return nil, fc.NewProblem(404, "not_found", "The indexed path was not found.")
+	}
+	return record, nil
+}
+
+func (s *Server) filesIndexedMetadata(ctx context.Context, f *fileRequest, p fc.Path) (fc.Metadata, error) {
+	record, err := s.filesIndexedRecord(ctx, f, p)
+	if err != nil {
+		return fc.Metadata{}, err
 	}
 	metadata, err := nodes.IndexedMetadata(f.ContentNamespace, *record)
 	if err != nil {

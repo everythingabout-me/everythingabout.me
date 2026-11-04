@@ -223,6 +223,19 @@ func (t *fakeTree) Open(ctx context.Context, path storage.Path, opts storage.Rea
 	}
 	return storage.Read{Entry: e, Body: io.NopCloser(bytes.NewReader(data[opts.Offset : opts.Offset+length])), Offset: opts.Offset, Length: length}, nil
 }
+func (t *fakeTree) StatReference(ctx context.Context, path storage.Path, ref []byte) (storage.Entry, error) {
+	if string(ref) != t.root+string(path) {
+		return storage.Entry{}, fail("stale_reference", path)
+	}
+	return t.Stat(ctx, path)
+}
+func (t *fakeTree) OpenReference(ctx context.Context, path storage.Path, ref []byte, opts storage.ReadOptions) (storage.Read, error) {
+	if string(ref) != t.root+string(path) {
+		return storage.Read{}, fail("stale_reference", path)
+	}
+	return t.Open(ctx, path, opts)
+}
+
 func fixture(t *testing.T) (*Driver, *fakeBackend, storage.Config, Options) {
 	t.Helper()
 	b := newFake()
@@ -645,4 +658,53 @@ func TestObjectReceiptDifferentRootAndIDRejected(t *testing.T) {
 	in.ID = "one"
 	_, err = d.Inspect(ctx, in, raw)
 	requireCode(t, err, "invalid_evidence")
+}
+
+func TestReferenceReadsUseTheProvenKey(t *testing.T) {
+	d, b, _, _ := fixture(t)
+	ctx := context.Background()
+	key := "drive/owner/file.txt"
+	b.mu.Lock()
+	b.current[key] = Object{Key: key, VersionID: "v1", ETag: "etag-v1", Size: 3, MediaType: "text/plain"}
+	b.versions[key] = map[string][]byte{"v1": []byte("abc")}
+	heads := b.heads
+	b.mu.Unlock()
+
+	reader := storage.ReferenceReader(d)
+	entry, err := reader.StatReference(ctx, "file.txt", []byte(key))
+	if err != nil || entry.Size != 3 || string(entry.Version) != "native-etag:etag-v1" || string(entry.NativeRef) != key {
+		t.Fatalf("reference stat: %+v %v", entry, err)
+	}
+	b.mu.Lock()
+	observed := b.heads
+	b.mu.Unlock()
+	if observed != heads+1 {
+		t.Fatalf("reference stat made %d native HEADs", observed-heads)
+	}
+	// A key from another path or root generation is stale evidence, never a redirect.
+	for _, ref := range []string{"drive/owner/other.txt", "drive/other/file.txt", ""} {
+		if _, err := reader.StatReference(ctx, "file.txt", []byte(ref)); !storage.IsCode(err, "stale_reference") {
+			t.Fatalf("stat accepted foreign key %q: %v", ref, err)
+		}
+		if _, err := reader.OpenReference(ctx, "file.txt", []byte(ref), storage.ReadOptions{}); !storage.IsCode(err, "stale_reference") {
+			t.Fatalf("open accepted foreign key %q: %v", ref, err)
+		}
+	}
+	b.mu.Lock()
+	afterForeign := b.heads
+	b.mu.Unlock()
+	if afterForeign != observed {
+		t.Fatal("foreign keys reached native storage")
+	}
+
+	length := int64(1)
+	read, err := reader.OpenReference(ctx, "file.txt", []byte(key), storage.ReadOptions{Offset: 1, Length: &length, Version: entry.Version})
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, readErr := io.ReadAll(read.Body)
+	closeErr := read.Body.Close()
+	if readErr != nil || closeErr != nil || string(data) != "b" || read.Length != 1 || !bytes.Equal(read.Entry.Version, entry.Version) {
+		t.Fatalf("reference read: %q %+v %v %v", data, read, readErr, closeErr)
+	}
 }
