@@ -43,7 +43,7 @@ var benchPartSize = func() int64 {
 	if n, err := strconv.ParseInt(os.Getenv("EAM_STORAGE_BENCH_PART_SIZE"), 10, 64); err == nil && n > 0 {
 		return n
 	}
-	return 8 << 20
+	return 32 << 20
 }()
 
 // benchMetadata is an in-memory UploadMetadata with the documented fencing:

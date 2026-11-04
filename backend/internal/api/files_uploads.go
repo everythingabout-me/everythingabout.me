@@ -19,7 +19,7 @@ import (
 	"everythingabout.me/backend/internal/uploadspool"
 )
 
-const filesUploadPartSize int64 = 8 << 20
+const filesUploadPartSize int64 = 32 << 20
 const filesUploadMaxParts = 10000
 
 // filesUploadParallelism is what every session advertises as maxParallelism, so

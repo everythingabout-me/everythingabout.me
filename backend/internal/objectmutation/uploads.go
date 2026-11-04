@@ -17,7 +17,7 @@ import (
 
 var _ storage.DiscardProver = (*Driver)(nil)
 
-const nativePartSize int64 = 8 << 20
+const nativePartSize int64 = 32 << 20
 const nativeMaxParts = 10000
 
 // Bounded independently of users/sessions. A part body is streamed straight to the

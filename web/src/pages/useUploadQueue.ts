@@ -9,10 +9,10 @@ import { pendingFileOperation, setUploadOwner, settleFileOperation } from "./upl
 // Files that may hold an open session at once. Byte transfer is limited separately
 // by one global part pool so a slow part never idles a connection.
 const MAX_PARALLEL_UPLOADS = 8;
-// Part requests in flight across every file. An embedded 8 MiB part sustains only
-// about 1 MiB/s to the bucket, so throughput is roughly this count times that rate:
-// sixteen reaches the measured link ceiling, and more only costs payload memory.
-// Sessions cap a single file at their own maxParallelism.
+// Part requests in flight across every file. A part is long enough that even a slow
+// stream keeps its connection busy, so throughput is roughly this count times the
+// per-stream rate: sixteen reaches the measured link ceiling, and more only costs
+// payload memory. Sessions cap a single file at their own maxParallelism.
 const PART_POOL_SIZE = 16;
 const PART_UPLOAD_ATTEMPTS = 3;
 const PART_RETRY_DELAY_MS = 250;
@@ -84,6 +84,22 @@ function waitMessage(wait: DeletionWait): string {
 async function sha256(blob: Blob): Promise<string> {
   const bytes = await crypto.subtle.digest("SHA-256", await blob.arrayBuffer());
   return [...new Uint8Array(bytes)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+// Verifying a receipt reads the whole part into one ArrayBuffer for SubtleCrypto, so
+// a full batch of 32 MiB parts would hold hundreds of MiB at once. Verification is
+// CPU work on bytes that are already durable, never a reason to widen the link, so
+// it runs in a small queue instead of one buffer per in-flight part.
+const VERIFY_SLOTS = 2;
+const verifyPool = { active: 0, waiters: [] as (() => void)[] };
+async function withVerifySlot<T>(run: () => Promise<T>): Promise<T> {
+  if (verifyPool.active < VERIFY_SLOTS && verifyPool.waiters.length === 0) verifyPool.active++;
+  else await new Promise<void>((resolve) => verifyPool.waiters.push(resolve));
+  try {
+    return await run();
+  } finally {
+    const next = verifyPool.waiters.shift();
+    if (next) next(); else verifyPool.active--;
+  }
 }
 export function useUploadQueue(onUploaded: (task: UploadTask, item: Item) => void): UploadQueue {
   const [tasks, setTasks] = useState<UploadTask[]>([]);
@@ -412,7 +428,7 @@ export function useUploadQueue(onUploaded: (task: UploadTask, item: Item) => voi
                   }
                 }
                 if (receipt.number !== number) throw new Error("The part receipt identity changed.");
-                await verifyReceipt(receipt);
+                await withVerifySlot(() => verifyReceipt(receipt));
                 if (batch.signal.aborted) return;
                 receipts.set(number, receipt);
                 received += receipt.size;

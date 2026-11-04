@@ -35,7 +35,7 @@ An exact target guard prevents coordinated target ABA and conflicts with ancesto
 clients/native tools remain subject to the declared coordinated writer model; database guards do not fence them.
 A conflicting same-path session returns operation_in_progress without cancelling the earlier session.
 
-Geometry is fixed at 8 MiB, 1-based part numbers, at most 10000 parts and sixteen parallel byte requests per session.
+Geometry is fixed at 32 MiB, 1-based part numbers, at most 10000 parts and sixteen parallel byte requests per session.
 The last part has the exact remainder. A zero-byte session has no parts and can commit immediately. Whole-file
 checksum input is unsupported and rejected; optional part Content-Digest is verified and every part is server
 hashed. SHA-256 receipts are lowercase hexadecimal. Sessions/list/status never contain an unbounded part array.

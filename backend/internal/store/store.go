@@ -20,7 +20,7 @@ func Open(ctx context.Context, databaseURL string) (*DB, error) {
 		return nil, err
 	}
 	// A part receiver holds one connection for the whole native part transfer
-	// (seconds per 8 MiB part), and fileops admits up to UploadPartSlots of them
+	// (seconds per 32 MiB part), and fileops admits up to UploadPartSlots of them
 	// per upload while keeping half the pool free for receipt transactions and
 	// ordinary requests. Sizing the pool below twice that admission would throttle
 	// receivers silently, below the parallelism their sessions advertise.

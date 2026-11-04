@@ -82,7 +82,7 @@ and explicit `--physical-bytes` with inventory evidence.
 P5 adds [durable numbered-part ingress](docs/design/storage-p5.md) with migration 024, server SHA-256,
 watermarked receipts and restart recovery. The [native upload extension](docs/design/native-upload-deployment.md)
 adds shared native metadata (migration 025), direct unpublished object parts and lightweight native completion.
-Parts are 8 MiB with sixteen concurrent requests per session and at most 10000 parts. Explicit `multipartUploads`
+Parts are 32 MiB with sixteen concurrent requests per session and at most 10000 parts. Explicit `multipartUploads`
 connection evidence is required; numbered object uploads no longer inherit the default 32 MiB single-PUT policy.
 The browser sends parts through a global pool of sixteen requests. `FILE_UPLOAD_INGRESS=embedded` keeps reception in
 `eam server`. Official `edgeone` mode signs exact parts and verifies COS state after ordinary EO forwarding;

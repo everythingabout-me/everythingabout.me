@@ -21,7 +21,7 @@ seals the manifest and performs native completion once, followed by index/result
 or uploads another whole-file body. It is a native publication operation, not just a database update.
 
 Both transports share one global pool of sixteen browser part requests (up to eight files; one file may use all sixteen),
-8 MiB parts and at most 10000 parts (80000 MiB before budgets or lower storage limits). Small single-content PUT
+32 MiB parts and at most 10000 parts (80000 MiB before budgets or lower storage limits). Small single-content PUT
 has its separate default 32 MiB/object maximum 5 GiB policy and is disabled in edgeone mode. Zero-byte sessions
 have no parts and use the existing guarded zero-byte publication at commit.
 
@@ -87,7 +87,7 @@ At the existing public origin, configure an EO rule matching **PUT** with the ex
 | App/provider selector headers | Remove Cookie, application Authorization, X-CSRF-Token, all x-cos-* headers and unrelated application identity headers before COS |
 | Cache | Disable caching for transfers and all upload control routes |
 | Redirects/fallback | No redirects, URL normalization or fallback to application ingress; route failure must fail the upload |
-| Body limit/timeouts | At least the advertised 8 MiB part size and suitable transfer timeouts; the site's 800 MB ordinary upload limit is sufficient |
+| Body limit/timeouts | At least the advertised 32 MiB part size and suitable transfer timeouts; the site's 800 MB ordinary upload limit is sufficient |
 
 The byte request intentionally carries COS authorization in the signed query, not the application Bearer header.
 Control requests use the normal Cookie/CSRF or explicit Bearer rules. XHR does not explicitly add application

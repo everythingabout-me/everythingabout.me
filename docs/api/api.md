@@ -352,7 +352,7 @@ A retry body is still consumed/validated before claiming it matches a stored res
 
 Clients use numbered service parts and the same create/status/receipt/commit lifecycle. Sessions explicitly
 advertise transport `embedded` or `cos-signed`; they never let clients choose an arbitrary origin or provider.
-Current geometry is 8 MiB parts, `ordering:any`, at most sixteen parallel parts per file and 10000 parts.
+Current geometry is 32 MiB parts, `ordering:any`, at most sixteen parallel parts per file and 10000 parts.
 Session lists use opaque UUID keysets; receipt pages use acknowledgement keysets and a fixed `watermark`.
 Commit returns a stable Operation until index/result settlement. Same-path sessions are rejected while an
 older guard is active; the server does not cancel it on create. Admitted native COS/S3 uploads support up to 80000 MiB
@@ -468,7 +468,7 @@ When transport is `cos-signed`, use these control endpoints instead of sending b
 POST B/uploads/u_.../parts/1/authorize
 Content-Type: application/json
 
-{"size":8388608,"sha256":"<64 lowercase hexadecimal characters>","md5":"<canonical base64 of 16 bytes>"}
+{"size":33554432,"sha256":"<64 lowercase hexadecimal characters>","md5":"<canonical base64 of 16 bytes>"}
 ```
 
 Success returns `{method:"PUT",url,headers,expiresAt}`. The URL is origin-relative below

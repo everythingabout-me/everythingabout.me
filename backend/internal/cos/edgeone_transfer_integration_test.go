@@ -400,8 +400,9 @@ func TestEdgeOneForwardedCOSPostgresSignedUploadLifecycle(t *testing.T) {
 	}
 	control := http.Header{"Origin": {front.URL}, "X-CSRF-Token": {me["csrfToken"].(string)}, "Content-Type": {"application/json"}}
 	target := "/ +%2F?#中文.bin"
-	// Raw binary spans two assigned parts, including a short final part.
-	payload := bytes.Repeat([]byte{0, 255, 13, 10, 128, 1, 2, 3}, (8<<20)/8+1)
+	// Raw binary spans two assigned parts, including a short final part. The part
+	// geometry is the service's 32 MiB, so the payload must exceed one full part.
+	payload := bytes.Repeat([]byte{0, 255, 13, 10, 128, 1, 2, 3}, (32<<20)/8+1)
 	create, _ := json.Marshal(map[string]any{"path": target, "size": len(payload), "mediaType": "application/octet-stream"})
 	control.Set("Idempotency-Key", "edgeone-full-chain")
 	status, session := request("POST", "/api/files/uploads", create, control)
