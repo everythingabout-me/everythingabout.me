@@ -218,37 +218,43 @@ test("zero-byte upload commits an empty session without a part request", async (
   assert.equal(callsOf(server, "commit").length, 1);
 });
 
-test("four files each send four parts concurrently and yield to a later small file", async (t) => {
+test("a global eight-part pool refills immediately and favors the earliest file", async (t) => {
   const server = uploadServer();
   const send = server.api.uploadPart;
   const create = server.api.createUpload;
   server.api.createUpload = async (...args) => ({ ...await create(...args), maxParallelism: 8 });
   server.api.uploadStatus = async (id) => ({ ...server.sessions.get(id), maxParallelism: 8 });
-  const gate = deferred();
+  const gates = new Map();
   let active = 0, peak = 0;
   const perFile = new Map(), peaks = new Map();
   server.api.uploadPart = async (...args) => {
-    const id = args[0];
+    const [id, number] = args;
     active++; peak = Math.max(peak, active);
     perFile.set(id, (perFile.get(id) ?? 0) + 1);
     peaks.set(id, Math.max(peaks.get(id) ?? 0, perFile.get(id)));
-    try {
-      if (args[1] <= 4 && id !== "session-5") await gate.promise;
-      return await send(...args);
-    } finally { active--; perFile.set(id, perFile.get(id) - 1); }
+    const gate = deferred();
+    gates.set(`${id}:${number}`, gate);
+    try { await gate.promise; return await send(...args); }
+    finally { active--; perFile.set(id, perFile.get(id) - 1); }
   };
   const harness = await mount(t, server.api);
   enqueue(harness, [...Array.from({ length: 4 }, (_, i) => entry(`large-${i}`, "abcdefghijklmnop")), entry("small", "x")]);
-  await harness.until(() => active === 16);
-  assert.equal(server.sessions.size, 4, "only four active files may allocate/send");
-  assert.equal(peak, 16);
-  assert.deepEqual([...peaks.values()], [4, 4, 4, 4]);
-  gate.resolve();
+  await harness.until(() => active === 8);
+  await harness.tick();
+  assert.equal(peak, 8, "the pool caps part requests across files");
+  assert.ok([...peaks.values()].every((value) => value <= 4), "each file stays within four parts");
+  // Finishing one part immediately starts exactly one more, without waiting for its batch.
+  const first = [...gates.keys()][0];
+  gates.get(first).resolve();
+  await harness.until(() => gates.size === 9);
+  assert.equal(active, 8);
+  const started = [...gates.keys()].at(-1);
+  assert.equal(started.split(":")[0], first.split(":")[0], "the freed slot goes to the earliest file's next part");
+  const release = () => { for (const gate of gates.values()) gate.resolve(); };
+  const timer = setInterval(release, 1);
+  t.after(() => clearInterval(timer));
   await harness.until(allComplete);
-  assert.equal(peak, 16);
-  const parts = callsOf(server, "part");
-  const small = parts.findIndex(([, id]) => id === "session-5");
-  for (let i = 1; i <= 4; i++) assert.ok(small < parts.findIndex(([, id, number]) => id === `session-${i}` && number === 8), "small file advances before the original large files drain");
+  assert.equal(peak, 8);
 });
 
 test("shared delete Operation polls once, retains Files, frees slots and resumes only exact succeeded identity", async (t) => {

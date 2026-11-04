@@ -6,7 +6,12 @@ import type { UploadEntry } from "./uploadSelection";
 import { claimUploadPath } from "./uploadOwnership";
 import { pendingFileOperation, setUploadOwner, settleFileOperation } from "./uploadPersistence";
 
-const MAX_PARALLEL_UPLOADS = 4;
+// Files that may hold an open session at once. Byte transfer is limited separately
+// by one global part pool so a slow part never idles a connection.
+const MAX_PARALLEL_UPLOADS = 8;
+// Part requests in flight across every file (measured best for 8 MiB parts).
+const PART_POOL_SIZE = 8;
+// Per-file cap, further limited by session.maxParallelism and ordering.
 const MAX_PARALLEL_PARTS = 4;
 const PART_UPLOAD_ATTEMPTS = 3;
 const PART_RETRY_DELAY_MS = 250;
@@ -52,6 +57,7 @@ export interface UploadQueue {
   retry(id: string): void;
 }
 interface Runtime { controller: AbortController; }
+interface PartWaiter { rank: number; number: number; resolve: () => void; }
 const relative = (path: string) => path.replace(/^\/+|\/+$/g, "");
 let sequence = 0;
 function taskId(): string { return `upload-${Date.now().toString(36)}-${(++sequence).toString(36)}-${Math.random().toString(36).slice(2)}`; }
@@ -80,7 +86,31 @@ export function useUploadQueue(onUploaded: (task: UploadTask, item: Item) => voi
   const verified = useRef(new Map<string, { file: File; parts: Map<number, string> }>());
   const pollBusy = useRef(false);
   const deadlines = useRef(new Set<ReturnType<typeof setTimeout>>());
+  // Global part pool: the earliest-started file (then lowest part number) gets the
+  // next free slot, so files finish in order instead of all advancing slowly.
+  const partPool = useRef({ active: 0, waiters: [] as PartWaiter[] });
+  const ranks = useRef(new Map<string, number>());
+  const nextRank = useRef(0);
   finishRef.current = onUploaded;
+  const releasePart = useCallback(() => {
+    const pool = partPool.current;
+    const next = pool.waiters.shift();
+    if (next) next.resolve(); else pool.active--;
+  }, []);
+  const acquirePart = useCallback((rank: number, number: number, signal: AbortSignal) => new Promise<void>((resolve, reject) => {
+    const pool = partPool.current;
+    if (signal.aborted) { reject(new DOMException("Upload canceled", "AbortError")); return; }
+    if (pool.active < PART_POOL_SIZE && !pool.waiters.length) { pool.active++; resolve(); return; }
+    const waiter: PartWaiter = { rank, number, resolve: () => { signal.removeEventListener("abort", abort); resolve(); } };
+    const abort = () => {
+      const at = pool.waiters.indexOf(waiter);
+      if (at >= 0) pool.waiters.splice(at, 1);
+      reject(new DOMException("Upload canceled", "AbortError"));
+    };
+    signal.addEventListener("abort", abort, { once: true });
+    const at = pool.waiters.findIndex((other) => other.rank > rank || other.rank === rank && other.number > number);
+    pool.waiters.splice(at < 0 ? pool.waiters.length : at, 0, waiter);
+  }), []);
   const update = useCallback((mutate: (current: UploadTask[]) => UploadTask[]) => {
     if (!mounted.current) return;
     const next = mutate(tasksRef.current);
@@ -290,9 +320,9 @@ export function useUploadQueue(onUploaded: (task: UploadTask, item: Item) => voi
       let received = [...receipts.values()].reduce((sum, receipt) => sum + receipt.size, 0);
       patch(id, { loaded: received });
       const missing: number[] = [];
-      // A sliding window of `parallelism` workers drains the missing parts so one slow
-      // part never idles the other connections. The turn only ends early (after one
-      // window's worth of parts) when another file is queued and needs a slot.
+      // Up to `parallelism` workers drain this file's missing parts; every request also
+      // takes a slot from the global part pool, so the next queued part starts as soon
+      // as any part anywhere finishes.
       for (let number = 1; number <= session.partCount && (session.ordering !== "ascending" || missing.length < 1); number++) {
         if (!receipts.has(number)) missing.push(number);
       }
@@ -361,21 +391,28 @@ export function useUploadQueue(onUploaded: (task: UploadTask, item: Item) => voi
               batch.abort();
             }
           };
-          let started = 0;
-          const othersWaiting = () => tasksRef.current.some((task) => task.id !== id && task.status === "queued" && !task.cancelRequested);
-          const take = () => started >= parallelism && othersWaiting() ? undefined : pending.shift();
+          const rank = ranks.current.get(id) ?? Number.MAX_SAFE_INTEGER;
           await Promise.all(Array.from({ length: Math.min(parallelism, pending.length) }, async () => {
-            for (let number = take(); number !== undefined && !batch.signal.aborted; number = take()) {
-              started++;
-              await uploadOne(number);
-            }
+            let holding = false;
+            try {
+              for (let number = pending.shift(); number !== undefined && !batch.signal.aborted; number = pending.shift()) {
+                // Keep a held slot unless a higher-priority part is waiting for it.
+                const head = partPool.current.waiters[0];
+                if (holding && head && (head.rank < rank || head.rank === rank && head.number < number)) { holding = false; releasePart(); }
+                if (!holding) {
+                  try { await acquirePart(rank, number, batch.signal); }
+                  catch (error) { if (failure === undefined && !signal.aborted) failure = error; return; }
+                  holding = true;
+                }
+                await uploadOne(number);
+              }
+            } finally { if (holding) releasePart(); }
           }));
         } finally { signal.removeEventListener("abort", abortBatch); }
         if (signal.aborted) return;
         if (failure !== undefined) { patch(id, { loaded: received }); throw failure; }
-        patch(id, { loaded: received, status: "queued", speed: 0 });
-        // Yield after one bounded part batch so later files get a turn too.
-        if (receipts.size !== session.partCount) return;
+        // Ascending sessions send one new part per turn; requeue for the next one.
+        if (receipts.size !== session.partCount) { patch(id, { loaded: received, status: "queued", speed: 0 }); return; }
       }
       patch(id, { status: "finalizing", uploaded: true, loaded: session.size, speed: 0 });
       const result = await api.commitUpload(session.id, signal);
@@ -393,7 +430,7 @@ export function useUploadQueue(onUploaded: (task: UploadTask, item: Item) => voi
       running.current.delete(id);
       pumpRef.current();
     }
-  }, [applyOperation, complete, patch]);
+  }, [acquirePart, applyOperation, complete, patch, releasePart]);
   const pump = useCallback(() => {
     if (!ready.current || !mounted.current) return;
     while (running.current.size < MAX_PARALLEL_UPLOADS) {
@@ -405,6 +442,8 @@ export function useUploadQueue(onUploaded: (task: UploadTask, item: Item) => voi
       const eligibleIds = new Set(eligible.map((task) => task.id));
       const next = [...ordered.slice(at + 1), ...ordered.slice(0, at + 1)].find((task) => eligibleIds.has(task.id))!;
       cursor.current = next.id;
+      // Pool priority follows the order files first start, kept across retries/turns.
+      if (!ranks.current.has(next.id)) ranks.current.set(next.id, nextRank.current++);
       const runtime = { controller: new AbortController() };
       running.current.set(next.id, runtime);
       patch(next.id, { status: "uploading", error: undefined });

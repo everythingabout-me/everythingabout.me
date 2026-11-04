@@ -20,7 +20,7 @@ COS parts are unpublished until server-controlled completion. Commit verifies ex
 seals the manifest and performs native completion once, followed by index/result settlement. It never assembles
 or uploads another whole-file body. It is a native publication operation, not just a database update.
 
-Both transports retain four concurrent files, up to four parts per file (maximum sixteen browser data requests),
+Both transports share one global pool of eight browser part requests (up to eight files, four parts per file),
 8 MiB parts and at most 10000 parts (80000 MiB before budgets or lower storage limits). Small single-content PUT
 has its separate default 32 MiB/object maximum 5 GiB policy and is disabled in edgeone mode. Zero-byte sessions
 have no parts and use the existing guarded zero-byte publication at commit.

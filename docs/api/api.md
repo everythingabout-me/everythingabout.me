@@ -405,9 +405,9 @@ part; replay of earlier acknowledged parts remains allowed. An out-of-order new 
 and scheduling rule, not separate provider protocols. The service may use durable staging to support more
 parallelism when its quotas and benchmarks justify the cost. `maxParallelism` is an upper bound, not a target.
 
-The browser advances at most four files concurrently, with up to four part requests per file (sixteen byte
-requests overall), capped by session.maxParallelism and ordering. It yields between bounded batches for
-fairness. Transient part failures have bounded backoff; before replaying an uncertain request, query the original
+The browser keeps at most eight files with open sessions and sends parts through one global pool of eight byte
+requests, at most four per file, capped by session.maxParallelism and ordering. A freed slot goes to the
+earliest-started file's next part. Transient part failures have bounded backoff; before replaying an uncertain request, query the original
 session and verify its durable part receipt against the retained File's part hash before skipping bytes or
 replaying. The browser queue lives only in memory for the current Files page/document and survives folder
 navigation. Refresh/close discards it; the next page starts empty, without restoring failed tasks, session waits

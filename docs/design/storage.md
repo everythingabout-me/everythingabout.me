@@ -189,9 +189,10 @@ native size/ETag before a provenance-labeled receipt. Session/native-part metada
 extra receiver machine. Commit verifies coverage and current conditions, completes native multipart once and
 settles the index/result; it is not merely a database update or another full-byte transfer.
 
-The browser schedules four files concurrently and up to four numbered parts per file, respecting each session's
-maxParallelism and ordering. This permits at most sixteen simultaneous browser part requests. Yield between
-bounded batches so selected small files can progress. Transient retries query durable receipts before replaying
+The browser keeps up to eight files with open sessions and sends their numbered parts through one global pool
+of eight part requests, with at most four per file, respecting each session's maxParallelism and ordering. A
+freed slot immediately goes to the earliest-started file's next part, so files finish in order and one slow part
+never idles a connection. Transient retries query durable receipts before replaying
 an uncertain part; acknowledged content is immutable and receipt hashes are verified against the retained File
 before reuse. The browser queue exists only in memory for the current Files page/document and survives folder
 navigation. Refresh/close discards it without restoring failed tasks or requesting File reselection. Register the

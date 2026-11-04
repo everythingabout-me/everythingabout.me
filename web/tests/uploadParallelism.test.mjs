@@ -70,7 +70,7 @@ for (const [ordering, maxParallelism, expected] of [["any", 2, 2], ["any", 1, 1]
   });
 }
 
-test("signed sessions retain four-file by four-part concurrency and pass transport on every request", async (t) => {
+test("signed sessions share the global eight-part pool and pass transport on every request", async (t) => {
   const server = uploadServer();
   const create = server.api.createUpload;
   server.api.createUpload = async (...args) => {
@@ -89,11 +89,13 @@ test("signed sessions retain four-file by four-part concurrency and pass transpo
   };
   const harness = await mount(t, server.api);
   harness.render().enqueue(["a", "b", "c", "d"].map((path) => ({ path, file: new File(["abcdefgh"], path) })), "", () => false);
-  await harness.until(() => active === 16);
-  assert.equal(peak, 16);
-  assert.deepEqual(modes, Array(16).fill("cos-signed"));
+  await harness.until(() => active === 8);
+  await harness.tick();
+  assert.equal(peak, 8, "never more than eight part requests across all files");
   gate.resolve();
   await harness.until((queue) => queue.tasks.length === 4 && queue.tasks.every((task) => task.status === "completed"));
+  assert.equal(peak, 8);
+  assert.deepEqual(modes, Array(16).fill("cos-signed"));
 });
 
 test("signed part_pending confirmation retries identical bytes within the original session", async (t) => {
