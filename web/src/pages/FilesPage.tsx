@@ -217,32 +217,24 @@ const UploadRow = memo(function UploadRow({
                 : uploadStatusText(upload.status)}
             </span>
           )}
-        </div>
-        <div className={styles.uploadMeta}>
-          {isDir ? (
-            <>
-              <span>{t("drive.uploadFileCount", { count: upload.files.toLocaleString() })}</span>
-              <span className={styles.uploadSep}>·</span>
-              <span>{t("drive.uploadedFileCount", { count: upload.completedFiles.toLocaleString() })}</span>
-            </>
-          ) : (
-            <>
-              <span>{formatBytes(upload.size)}</span>
-              {upload.status === "uploading" && (
-                <>
-                  <span className={styles.uploadSep}>·</span>
-                  <span>{formatSpeed(upload.speed)}</span>
-                </>
-              )}
-              {task?.error && (
-                <>
-                  <span className={styles.uploadSep}>·</span>
-                  <span className={styles.uploadError} title={task.error}>{task.error}</span>
-                </>
-              )}
-            </>
+          {!isDir && upload.status === "uploading" && (
+            <span className={styles.uploadSpeed}>
+              <span className={styles.uploadSep} aria-hidden="true">·</span>
+              {formatSpeed(upload.speed)}
+            </span>
           )}
         </div>
+        {isDir ? (
+          <div className={styles.uploadMeta}>
+            <span>{t("drive.uploadFileCount", { count: upload.files.toLocaleString() })}</span>
+            <span className={styles.uploadSep}>·</span>
+            <span>{t("drive.uploadedFileCount", { count: upload.completedFiles.toLocaleString() })}</span>
+          </div>
+        ) : task?.error ? (
+          <div className={styles.uploadMeta}>
+            <span className={styles.uploadError} title={task.error}>{task.error}</span>
+          </div>
+        ) : null}
         {upload.waitMessage && <div className={styles.uploadWaitMessage}>{upload.waitMessage}</div>}
       </div>
       {showProgress ? (

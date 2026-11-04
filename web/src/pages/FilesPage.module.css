@@ -968,7 +968,7 @@ a.crumb:hover {
 .uploadRow {
   display: flex;
   gap: 0;
-  min-height: 76px;
+  min-height: 58px;
   padding: 0;
 }
 
@@ -979,7 +979,7 @@ a.crumb:hover {
   gap: 14px;
   flex: 1;
   min-width: 0;
-  min-height: 76px;
+  min-height: 58px;
   padding: 12px 12px 12px 20px;
 }
 
@@ -1014,6 +1014,17 @@ a.crumb:hover {
   font-size: 11px;
   font-weight: 500;
   line-height: 1;
+  white-space: nowrap;
+}
+
+.uploadSpeed {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex: none;
+  color: var(--text-3);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
   white-space: nowrap;
 }
 
