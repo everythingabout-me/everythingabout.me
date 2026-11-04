@@ -39,8 +39,11 @@ first admission. Existing over-quota files are preserved. An already initialized
 usage without resetting counters or replacing evidence/limits; another root/generation requires migration.
 
 Starting a mutation wrapper creates private system ledger directories, so perform initial admission before
-serving mutation-enabled requests. No startup path automatically trusts an index SUM or creates an empty
-budget. Missing baseline returns a safe unavailable response. Keep `APP_SECRET`, independent SES credentials
+serving mutation-enabled requests. No startup path automatically trusts an index SUM. The server may establish
+the zero budget for a brand-new owner only after the owner has no index/accounting row and a complete native
+scan is empty; an owner with any prior row still returns a safe unavailable response and requires the command
+above. (A coordinated Local writer creates its own empty staging namespace, which that automatic check
+accepts.) Keep `APP_SECRET`, independent SES credentials
 and explicit `FILE_COOKIE_ORIGINS` from earlier phases. Cookie changes require the `/api/files/me` CSRF token.
 
 ## HTTP resources

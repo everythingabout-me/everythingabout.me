@@ -139,6 +139,88 @@ func (p *Postgres) Initialize(ctx context.Context, root Root, base Baseline) err
 		return err
 	})
 }
+
+// ownerFileActivitySQL covers every row that could describe content this owner
+// already held. A missing budget plus any of these rows means the automatic
+// empty-owner path cannot prove the accounting and the operator must admit it.
+const ownerFileActivitySQL = `select exists(select 1 from nodes where owner_id=$1)
+	or exists(select 1 from file_operations where owner_id=$1)
+	or exists(select 1 from file_uploads where owner_id=$1)
+	or exists(select 1 from file_reservations where owner_id=$1)
+	or exists(select 1 from file_entry_charges where owner_id=$1)
+	or exists(select 1 from file_content_generations where owner_id=$1)
+	or exists(select 1 from file_action_bindings where owner_id=$1)
+	or exists(select 1 from file_credit_claims where owner_id=$1)`
+
+type rowQuerier interface {
+	QueryRow(context.Context, string, ...any) pgx.Row
+}
+
+func ownerHasFileActivity(ctx context.Context, q rowQuerier, ownerID string) (bool, error) {
+	var active bool
+	err := q.QueryRow(ctx, ownerFileActivitySQL, ownerID).Scan(&active)
+	return active, err
+}
+
+// HasFileActivity is the cheap precondition for automatic empty-owner admission.
+// It is not a snapshot or a writer fence; AdmitEmptyOwner re-checks under the
+// owner lock before inserting anything.
+func (p *Postgres) HasFileActivity(ctx context.Context, root Root) (bool, error) {
+	if err := validateRoot(root); err != nil {
+		return false, err
+	}
+	return ownerHasFileActivity(ctx, p.pool, root.OwnerID)
+}
+
+// AdmitEmptyOwner establishes the zero baseline for an owner that has never held a
+// file. It is the only automatic initialization: the caller has already proved the
+// exact native root empty and no retained object generation possible. Any prior
+// index, operation, upload, reservation, charge or generation row leaves the owner
+// on the operator-admitted path, so a restore or missing baseline can never be
+// papered over with a zero count.
+func (p *Postgres) AdmitEmptyOwner(ctx context.Context, root Root, logicalLimit, physicalLimit int64) error {
+	if err := validateRoot(root); err != nil {
+		return err
+	}
+	if logicalLimit < 0 || physicalLimit < 0 || logicalLimit > 9007199254740991 || physicalLimit > 9007199254740991 {
+		return E("invalid_request", nil)
+	}
+	evidence, err := canonicalJSON(json.RawMessage(`{"version":1,"reason":"empty-owner-provisioning"}`))
+	if err != nil {
+		return err
+	}
+	base := Baseline{LogicalLimit: logicalLimit, PhysicalLimit: physicalLimit, NativeComplete: true, IndexCompared: true, LegacyWritersDrained: true, Evidence: evidence}
+	return p.transaction(ctx, root.OwnerID, func(tx pgx.Tx) error {
+		var stored []byte
+		err := tx.QueryRow(ctx, `select root_binding from file_budgets where owner_id=$1 for update`, root.OwnerID).Scan(&stored)
+		if err == nil {
+			// An operator may have admitted this owner first. Never replace a real
+			// baseline with a zero one; only confirm the binding is still ours.
+			var prior Root
+			if err = json.Unmarshal(stored, &prior); err != nil {
+				return err
+			}
+			if prior != root {
+				return E("root_conflict", nil)
+			}
+			return nil
+		}
+		if !errors.Is(err, pgx.ErrNoRows) {
+			return err
+		}
+		active, err := ownerHasFileActivity(ctx, tx, root.OwnerID)
+		if err != nil {
+			return err
+		}
+		if active {
+			return E("baseline_required", nil)
+		}
+		rb, _ := json.Marshal(root)
+		bb, _ := json.Marshal(base)
+		_, err = tx.Exec(ctx, `insert into file_budgets(owner_id,root_binding,baseline,logical_bytes,physical_bytes,logical_limit,physical_limit) values($1,$2,$3,0,0,$4,$5)`, root.OwnerID, rb, bb, base.LogicalLimit, base.PhysicalLimit)
+		return err
+	})
+}
 func (p *Postgres) Usage(ctx context.Context, root Root, a Actor) (Usage, error) {
 	var u Usage
 	if err := validateRoot(root); err != nil {

@@ -185,6 +185,11 @@ func (s *Server) handleVerifyCode(w http.ResponseWriter, r *http.Request) error 
 	if user == nil {
 		return httpx.Internal("failed to create account; please retry")
 	}
+	if !existing {
+		// A brand-new account can be admitted without an operator only while its
+		// native root is provably empty; failures fall back to the first-write path.
+		s.filesProvisionNewOwner(r.Context(), user.ID)
+	}
 
 	if err := s.auth.TouchLastLogin(r.Context(), user.ID); err != nil {
 		return err

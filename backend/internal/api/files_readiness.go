@@ -14,8 +14,10 @@ func (s *Server) filesWriteReadiness(ctx context.Context, f *fileRequest) (bool,
 	if !ok {
 		return false, nil, nil
 	}
-	b := native.StorageBinding()
-	root := fileops.Root{OwnerID: b.OwnerID, ConnectionID: b.ConnectionID, Generation: b.Generation, ContentRoot: b.ContentRoot, SystemRoot: b.SystemRoot, CaseSensitive: native.StorageNameRules().CaseSensitive, RetainsVersions: native.Describe().RetainsVersions}
+	root, ok := filesRootFor(native)
+	if !ok {
+		return false, nil, nil
+	}
 	usage, err := s.filesJournal.Usage(ctx, root, fileops.Actor{ID: "owner:" + root.OwnerID, CanRead: true, CanWrite: true, ManageOwner: true})
 	if fileops.IsCode(err, "baseline_required") || fileops.IsCode(err, "root_conflict") {
 		return false, nil, nil

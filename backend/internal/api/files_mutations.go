@@ -93,8 +93,10 @@ func (s *Server) fileMutationContext(ctx context.Context, f *fileRequest) (fileo
 	if !ok {
 		return nil, fileops.Root{}, fileops.Actor{}, fc.NewProblem(422, "unsupported_option", "This root does not support safe native file mutations.")
 	}
-	binding := native.StorageBinding()
-	root := fileops.Root{OwnerID: binding.OwnerID, ConnectionID: binding.ConnectionID, Generation: binding.Generation, ContentRoot: binding.ContentRoot, SystemRoot: binding.SystemRoot, CaseSensitive: native.StorageNameRules().CaseSensitive, RetainsVersions: native.Describe().RetainsVersions}
+	root, ok := filesRootFor(native)
+	if !ok {
+		return nil, fileops.Root{}, fileops.Actor{}, fc.NewProblem(422, "unsupported_option", "This root does not expose a stable storage binding.")
+	}
 	actor := fileops.Actor{ID: filePrincipalID(f.Principal), Scope: storage.Path(f.Scope.Relative()), CanRead: f.Principal.Token == nil || f.Principal.Token.CanRead, CanWrite: f.Principal.Token == nil || f.Principal.Token.CanWrite, ManageOwner: f.Principal.Token == nil}
 	if attribution, requestID, ok := filechanges.ActorFromContext(ctx); ok {
 		actor.Label = attribution.Label
@@ -108,8 +110,7 @@ func (s *Server) fileMutationContext(ctx context.Context, f *fileRequest) (fileo
 		}
 	}
 	// This internal readiness query does not disclose owner-wide usage to a token.
-	_, err := s.filesJournal.Usage(ctx, root, fileops.Actor{ID: "owner:" + root.OwnerID, CanRead: true, CanWrite: true, ManageOwner: true})
-	if err != nil {
+	if _, err := s.filesUsage(ctx, native, root); err != nil {
 		return nil, root, actor, filesMutationProblem(err)
 	}
 	return native, root, actor, nil

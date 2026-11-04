@@ -84,6 +84,12 @@ go run ./cmd/eam storage-admit --owner-id 00000000-0000-0000-0000-000000000001 \
 # Review, then repeat without --dry-run before serving writes.
 ```
 
+A brand-new owner may instead be admitted automatically on first write (or sign-up) when all of these hold:
+the owner has no index, operation, upload, reservation, charge or generation row; a complete scan of the
+content root is empty; the binding spool is empty; the exact connection report declares `singleGateway`; and
+the driver reports no retained generations (the admitted object write model already assumes none). Anything
+else stays on the command above.
+
 Object baseline evidence must contain a nonempty `retainedVersionInventory` reference. The explicit
 physical byte amount must include any retained object history and be at least current logical bytes.
 Native/index comparison checks exact current names, kinds, size and parents. Read-only HEAD checks require

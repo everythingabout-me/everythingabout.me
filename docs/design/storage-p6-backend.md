@@ -90,7 +90,9 @@ never be obtained, `eam storage-resolve-upload --operation-id …` remains the f
    --writers-quiesced --evidence /secure/baseline-proof.json --dry-run`, review it and repeat without dry-run.
    Object admission additionally requires `--physical-bytes` covering retained versions and the required
    `retainedVersionInventory` evidence. Follow P4's empty system/spool admission requirements; do not start
-   mutation wrappers first. Missing or mismatched baseline must fail closed, without automatic initialization.
+   mutation wrappers first. Missing or mismatched baseline must fail closed; the only exception is the
+   zero baseline the server establishes for a brand-new owner whose index, accounting and native root are
+   all provably empty. Any owner with a prior row still requires the command above.
 7. **Verify the new path.** With test data inside the admitted root, confirm cookie Origin/CSRF and Bearer
    isolation, same-origin preview/download with no provider redirect, restart/resume part receipts, commit
    identity, Operation completion, explicit recursion, conditional replacement and native-file portability.

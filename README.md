@@ -96,7 +96,10 @@ on all three backends. P3 adds [durable journals, guards, quota reservations and
 with additive migrations 016/017. P4 adds [admitted Local native writes and Operations](docs/design/storage-p4.md)
 with migrations 019/020. Writes default off: configure `FILE_COORDINATED_WRITES=true` only for coordinated
 Local writers, validate/import the native index, then run the explicit `eam storage-admit` command with
-`--owner-id UUID --writers-quiesced --evidence /secure/proof.json` before serving mutations. No production baseline or writer revocation is automatic. [COS/S3 mutation adapters](docs/design/storage-p4-objects.md)
+`--owner-id UUID --writers-quiesced --evidence /secure/proof.json` for every owner that already holds content.
+The only automatic baseline is the zero one for a brand-new owner whose index, accounting and native root are
+all provably empty; every other missing or mismatched baseline, and every writer revocation, stays
+operator-only. [COS/S3 mutation adapters](docs/design/storage-p4-objects.md)
 use one strategy: current-object ETag revisions with operation-specific native conditions or the documented
 coordinated COS PUT recheck, no bucket versioning required. It needs exact connection probe evidence, a durable single-gateway spool, one-shot
 requests and permanent guards for uncertain remote effects. Object admission requires `--writers-quiesced`
