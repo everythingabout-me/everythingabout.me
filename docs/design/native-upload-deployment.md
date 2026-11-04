@@ -140,6 +140,15 @@ liability for outstanding signed authority/uncertain native requests, rather tha
 proof that provider work is terminal. Final-path unknown outcomes retain their existing guard; no repeated
 Complete or timeout-based unlock is introduced. Native publication remains server-controlled.
 
+When a receiver loses a part reply, that receipt stays uncertain and cleanup keeps its physical reservation
+instead of assuming provider work is gone. Resolve such an operation with
+`eam storage-resolve-upload --operation-id UUID [--dry-run]`: ordinary cleanup first aborts the recorded
+allocation and durably records its discarded phase, then the command asks the provider whether that exact upload
+session still exists (COS `NoSuchUpload`). Only when the provider no longer knows it is the proof recorded and
+cleanup allowed to release the reservation. A provider that still reports the session, a driver without the
+provider inspection capability, and any non-terminal operation are refused. Nothing on this path publishes,
+completes a multipart upload, or replays a part request.
+
 Provider lifecycle must retain acknowledged native parts for the advertised session lifetime (up to seven days),
 and handle orphaned allocations after a lost initiation reply. Do not recreate an allocation beneath acknowledged
 receipts after provider loss. Drain existing sessions and old issued authority before changing transport or

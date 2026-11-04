@@ -262,3 +262,37 @@ func TestMutationInvalidNativeReadsAndZeroBody(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestMutationInspectMultipartProvesOnlyNoSuchUpload(t *testing.T) {
+	_, b, _ := mutationFixture(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != "GET" || !r.URL.Query().Has("uploadId") {
+			t.Errorf("unexpected inspection request: %s %s", r.Method, r.URL.String())
+		}
+		switch r.URL.Query().Get("uploadId") {
+		case "gone":
+			w.WriteHeader(404)
+			io.WriteString(w, `<?xml version="1.0" encoding="UTF-8"?><Error><Code>NoSuchUpload</Code><Message>gone</Message></Error>`)
+		case "live":
+			io.WriteString(w, `<?xml version="1.0" encoding="UTF-8"?><ListPartsResult><Bucket>test-bucket</Bucket><Key>k</Key><UploadId>live</UploadId><PartNumberMarker>0</PartNumberMarker><NextPartNumberMarker>1</NextPartNumberMarker><MaxParts>1000</MaxParts><IsTruncated>false</IsTruncated><Part><PartNumber>1</PartNumber><LastModified>2026-11-02T01:00:00.000Z</LastModified><ETag>"tag-1"</ETag><Size>4</Size></Part></ListPartsResult>`)
+		default:
+			w.WriteHeader(500)
+		}
+	}))
+	inspect := b.(objectmutation.MultipartInspector)
+	for _, tc := range []struct {
+		id      string
+		present bool
+		parts   int
+	}{{"gone", false, 0}, {"live", true, 1}} {
+		state, err := inspect.InspectMultipart(context.Background(), "drive/alice/x.bin", tc.id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if state.Present != tc.present || state.Parts != tc.parts {
+			t.Fatalf("%s: unexpected state %+v", tc.id, state)
+		}
+	}
+	if _, err := inspect.InspectMultipart(context.Background(), "drive/alice/x.bin", "broken"); !storage.IsCode(err, "backend_error") {
+		t.Fatalf("indeterminate provider answer was treated as terminal: %v", err)
+	}
+}

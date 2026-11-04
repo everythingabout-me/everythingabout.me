@@ -39,6 +39,33 @@ type NumberedUploadWriter interface {
 	DiscardParts(context.Context, WriteIntent, UploadMetadata) error
 }
 
+// DiscardEvidence is a read-only provider report for the allocation of one intent.
+// UploadAbsent is the only observation that proves its parts can never be completed,
+// read, or replayed: the provider no longer knows the upload session at all.
+type DiscardEvidence struct {
+	UploadAbsent bool
+	Parts        int // parts the provider still reports when UploadAbsent is false
+}
+
+// DiscardProver is an explicit operator capability on a numbered upload driver. A
+// receiver that dies between its part request and the reply leaves a receipt that stays
+// uncertain forever, which retains physical liability after the allocation was
+// discarded. ObserveDiscard is read-only; ProveDiscard records provider evidence that
+// the allocation no longer exists so a later discard may release those receipts. It
+// never publishes bytes, completes a multipart upload, or replays a part request.
+type DiscardProver interface {
+	ObserveDiscard(context.Context, WriteIntent, UploadMetadata) (DiscardEvidence, error)
+	ProveDiscard(context.Context, WriteIntent, UploadMetadata) (DiscardEvidence, error)
+}
+
+// StagedDiscardProver is the staged-writer form of DiscardProver: the same evidence,
+// resolved through the writer's own durable upload metadata rather than through a
+// caller-supplied identity.
+type StagedDiscardProver interface {
+	ObserveDiscard(context.Context, WriteIntent) (DiscardEvidence, error)
+	ProveDiscard(context.Context, WriteIntent) (DiscardEvidence, error)
+}
+
 // SignedUploadPart binds the client SHA-256 assertion and the COS-verified MD5.
 // SHA-256 is not server-computed when file bytes bypass the application.
 type SignedUploadPart struct {

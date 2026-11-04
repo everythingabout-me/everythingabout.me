@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"io"
 	"math"
 	"strings"
 	"time"
@@ -128,4 +129,57 @@ func uploadState(u Upload) UploadState {
 	default:
 		return UploadCommitting
 	}
+}
+
+// NativeUploadWriter adapts a numbered native upload to the staged writer contract.
+// Stage seals durable part receipts only; Publish and Inspect come from NativeActions;
+// Discard releases the unpublished allocation. The server worker and the operator
+// resolver share it so both observe exactly one writer contract.
+type NativeUploadWriter struct {
+	NativeActions
+	numbered storage.NumberedUploadWriter
+	metadata storage.UploadMetadata
+	// Parts are the durable receipts a commit seals, ordered by part number.
+	Parts []storage.UploadPart
+}
+
+var (
+	_ storage.StagedWriter        = (*NativeUploadWriter)(nil)
+	_ storage.StagedDiscardProver = (*NativeUploadWriter)(nil)
+)
+
+func NewNativeUploadWriter(native NativeActions, numbered storage.NumberedUploadWriter, metadata storage.UploadMetadata) *NativeUploadWriter {
+	return &NativeUploadWriter{NativeActions: native, numbered: numbered, metadata: metadata}
+}
+
+func (w *NativeUploadWriter) Stage(ctx context.Context, intent storage.WriteIntent, _ io.Reader, cp storage.Checkpoint) (storage.Staged, error) {
+	return w.numbered.SealStage(ctx, intent, w.Parts, w.metadata, cp)
+}
+
+// Discard keeps existing final-path evidence authoritative: it never aborts a native
+// upload while the publication driver still reports an unknown final request.
+func (w *NativeUploadWriter) Discard(ctx context.Context, intent storage.WriteIntent, evidence []byte) error {
+	if err := w.NativeActions.Discard(ctx, intent, evidence); err != nil {
+		return err
+	}
+	return w.numbered.DiscardParts(ctx, intent, w.metadata)
+}
+
+// ObserveDiscard and ProveDiscard expose the driver's provider reconciliation through
+// this writer's durable metadata. A driver without that capability is unsupported
+// rather than silently treated as terminal.
+func (w *NativeUploadWriter) ObserveDiscard(ctx context.Context, in storage.WriteIntent) (storage.DiscardEvidence, error) {
+	prover, ok := w.numbered.(storage.DiscardProver)
+	if !ok {
+		return storage.DiscardEvidence{}, E("unsupported", nil)
+	}
+	return prover.ObserveDiscard(ctx, in, w.metadata)
+}
+
+func (w *NativeUploadWriter) ProveDiscard(ctx context.Context, in storage.WriteIntent) (storage.DiscardEvidence, error) {
+	prover, ok := w.numbered.(storage.DiscardProver)
+	if !ok {
+		return storage.DiscardEvidence{}, E("unsupported", nil)
+	}
+	return prover.ProveDiscard(ctx, in, w.metadata)
 }

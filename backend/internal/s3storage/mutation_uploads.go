@@ -58,6 +58,28 @@ func (b *mutationBackend) CompleteMultipart(ctx context.Context, in objectmutati
 	}
 	return objectmutation.Object{Key: in.Key, VersionID: aws.ToString(out.VersionId), ETag: aws.ToString(out.ETag), Size: in.Size, MediaType: in.MediaType, Metadata: cloneMutationMetadata(in.Metadata)}, nil
 }
+var _ objectmutation.MultipartInspector = (*mutationBackend)(nil)
+
+// InspectMultipart asks the provider whether this exact upload session still exists. A
+// missing session (NoSuchUpload) is the terminal observation that none of its parts can
+// ever be completed, read, or replayed; any other failure leaves the allocation unknown.
+func (b *mutationBackend) InspectMultipart(ctx context.Context, key, id string) (objectmutation.MultipartState, error) {
+	ctx, cancel := context.WithTimeout(ctx, 60*time.Second)
+	defer cancel()
+	out, err := b.client.ListParts(ctx, &s3.ListPartsInput{Bucket: aws.String(b.bucket), Key: aws.String(key), UploadId: aws.String(id)})
+	if err != nil {
+		mapped := mutationReadError(ctx, key, err, false)
+		if storage.IsCode(mapped, "not_found") {
+			return objectmutation.MultipartState{}, nil
+		}
+		return objectmutation.MultipartState{}, mapped
+	}
+	if out == nil {
+		return objectmutation.MultipartState{}, storage.NewError("invalid_backend_response", storage.Path(key), nil)
+	}
+	return objectmutation.MultipartState{Present: true, Parts: len(out.Parts)}, nil
+}
+
 func (b *mutationBackend) AbortMultipart(ctx context.Context, key, id string) error {
 	ctx, cancel := context.WithTimeout(ctx, 60*time.Second)
 	defer cancel()

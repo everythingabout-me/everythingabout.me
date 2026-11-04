@@ -10,9 +10,12 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"time"
 
 	"everythingabout.me/backend/internal/storage"
 )
+
+var _ storage.DiscardProver = (*Driver)(nil)
 
 const nativePartSize int64 = 8 << 20
 const nativeMaxParts = 10000
@@ -358,13 +361,17 @@ func (d *Driver) DiscardParts(ctx context.Context, in storage.WriteIntent, metad
 				applied = true
 			}
 			if !applied {
+				proof, e := readNative[nativeDiscardProof](ctx, record, discardProofKey)
+				if e != nil {
+					return e
+				}
 				count := int((in.Size + nativePartSize - 1) / nativePartSize)
 				for number := 1; number <= count; number++ {
 					p, e := readNative[nativePartReceipt](ctx, record, partMetadataKey(number))
 					if e != nil {
 						return e
 					}
-					if p != nil && p.Uncertain {
+					if p != nil && p.Uncertain && !provesDiscarded(proof, session.UploadID) {
 						return fail("recovery_required", in.Target)
 					}
 				}
@@ -372,4 +379,88 @@ func (d *Driver) DiscardParts(ctx context.Context, in storage.WriteIntent, metad
 		}
 		return nil
 	})
+}
+
+// discardProofKey holds operator-reviewed provider evidence for one allocation.
+const discardProofKey = "discard-proof"
+
+// nativeDiscardProof is durable proof that the provider no longer knows the exact
+// upload session, so no part of it can be completed, read, or replayed. It releases
+// retained liability only: it is never publication, content, or receipt evidence.
+type nativeDiscardProof struct {
+	UploadID string
+	Observed time.Time
+	Parts    int
+}
+
+func provesDiscarded(proof *nativeDiscardProof, uploadID string) bool {
+	return proof != nil && uploadID != "" && proof.UploadID == uploadID
+}
+
+// ObserveDiscard reports, read-only, whether the provider still knows the allocation
+// recorded for this intent. It is an operator probe and writes no receipt.
+func (d *Driver) ObserveDiscard(ctx context.Context, in storage.WriteIntent, metadata storage.UploadMetadata) (storage.DiscardEvidence, error) {
+	return d.discardEvidence(ctx, in, metadata, false)
+}
+
+// ProveDiscard records provider proof that a discarded allocation no longer exists, so
+// DiscardParts may release receipts no reply ever confirmed. It refuses a live
+// allocation and any provider answer other than "no such upload".
+func (d *Driver) ProveDiscard(ctx context.Context, in storage.WriteIntent, metadata storage.UploadMetadata) (storage.DiscardEvidence, error) {
+	return d.discardEvidence(ctx, in, metadata, true)
+}
+
+func (d *Driver) discardEvidence(ctx context.Context, in storage.WriteIntent, metadata storage.UploadMetadata, prove bool) (storage.DiscardEvidence, error) {
+	var evidence storage.DiscardEvidence
+	if metadata == nil {
+		return evidence, fail("invalid_config", in.Target)
+	}
+	// Reconciliation inspects historical work: admission limits may have changed since
+	// the upload was accepted, so only the intent shape is revalidated here.
+	if err := validateRecoveryIntent(in); err != nil {
+		return evidence, err
+	}
+	inspector, ok := d.backend.(MultipartInspector)
+	if !ok {
+		return evidence, fail("unsupported", in.Target)
+	}
+	work, done, err := d.operation(ctx)
+	if err != nil {
+		return evidence, err
+	}
+	defer done()
+	// Number -1 is a shared metadata-only lookup; proving needs the exclusive session
+	// fence so the evidence is written against the same session that was observed.
+	number := -1
+	if prove {
+		number = 0
+	}
+	err = metadata.WithUploadMetadata(work, d.namespace, in.ID, number, func(record storage.UploadMetadataRecord) error {
+		session, e := readNative[nativeSession](work, record, "session")
+		if e != nil {
+			return e
+		}
+		if session == nil || session.UploadID == "" {
+			return fail("not_found", in.Target)
+		}
+		if !sameJSON(session.Intent, in) {
+			return fail("intent_conflict", in.Target)
+		}
+		if prove && session.Phase != "discarded" {
+			return fail("invalid_transition", in.Target)
+		}
+		state, e := inspector.InspectMultipart(work, d.key(in.Target, storage.File), session.UploadID)
+		if e != nil {
+			return e
+		}
+		evidence = storage.DiscardEvidence{UploadAbsent: !state.Present, Parts: state.Parts}
+		if !prove {
+			return nil
+		}
+		if state.Present {
+			return fail("recovery_required", in.Target)
+		}
+		return record.Put(work, discardProofKey, encodeNative(&nativeDiscardProof{UploadID: session.UploadID, Observed: time.Now().UTC(), Parts: state.Parts}))
+	})
+	return evidence, err
 }

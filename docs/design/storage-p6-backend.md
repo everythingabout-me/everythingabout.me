@@ -59,7 +59,9 @@ out of reports. Retain application/account metadata backups independently from n
 3. **Drain or fence with actual provider evidence.** Revoke/rotate credentials or change provider policy where
    appropriate, but do not assume rotation invalidates every temporary credential or already accepted request.
    Establish the relevant provider semantics and terminate or fence old publishers. Resolve retained multipart
-   sessions and uncertain final requests using a reviewed provider-specific procedure. A database completion,
+   sessions and uncertain final requests using a reviewed provider-specific procedure (for a numbered upload
+allocation that is `eam storage-resolve-upload --operation-id …`, which requires provider `NoSuchUpload`
+evidence before it releases retained physical liability). A database completion,
    cancellation, TTL expiry, elapsed wait, process death or successful HEAD does not prove older native requests
    terminal. Download grants can also remain readable until their actual provider expiry/revocation. If native
    quiescence cannot be proved, keep replacement writes disabled. Never label an unknown request aborted merely

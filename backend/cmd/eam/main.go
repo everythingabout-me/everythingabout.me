@@ -6,6 +6,7 @@
 //	eam reconcile --owner email-or-UUID [--inventory inventory.csv] [--dry-run]
 //	eam storage-admit --owner-id UUID --writers-quiesced --evidence proof.json [--dry-run]
 //	eam storage-baseline --owner-id UUID --output new-baseline.json
+//	eam storage-resolve-upload --operation-id UUID [--dry-run]
 //	eam claim --email email [--dry-run] [--keep-source]
 package main
 
@@ -47,6 +48,8 @@ func main() {
 		err = runStorageAdmit(args)
 	case "storage-baseline":
 		err = runStorageBaseline(args)
+	case "storage-resolve-upload":
+		err = runStorageResolveUpload(args)
 	case "claim":
 		err = runClaim(args)
 	case "token":
@@ -77,6 +80,7 @@ usage:
   eam storage-admit --owner-id UUID --writers-quiesced --evidence proof.json [--physical-limit N] [--dry-run]
   eam storage-baseline --owner-id UUID --output new-baseline.json [--writers-quiesced]
   eam storage-baseline --input baseline.json --output recheck.json [--quota-bytes N]
+  eam storage-resolve-upload --operation-id UUID [--dry-run]  resolve a terminal upload stuck on an unconfirmed part receipt
   eam claim --email email [--dry-run] [--keep-source]
   eam token create --email email --name name [--prefix path] [--write=false]
   eam token list   --email email

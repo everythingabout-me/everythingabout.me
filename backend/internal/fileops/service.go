@@ -502,6 +502,66 @@ func (s *Service) Cleanup(ctx context.Context, root Root, actor Actor, id string
 	return cleanup.MarkCleaned(ctx, root, actor, id)
 }
 
+// ReconcileDiscard resolves a receipt that can never be confirmed: a receiver that died
+// between its part request and the reply leaves physical liability retained after the
+// allocation was discarded, so ordinary cleanup would retry forever. Ordinary cleanup
+// runs first (it aborts the native session and records the discarded phase), then the
+// driver must prove with the provider that the session no longer exists, and only then
+// does cleanup release the reservation. With apply false this is a read-only probe and
+// nothing is written. It never publishes bytes, completes a multipart upload, or
+// replays a part request.
+func (s *Service) ReconcileDiscard(ctx context.Context, root Root, actor Actor, id string, writer storage.StagedWriter, apply bool) (storage.DiscardEvidence, error) {
+	var evidence storage.DiscardEvidence
+	if writer == nil {
+		return evidence, E("unsupported", nil)
+	}
+	if err := validateWriterRoot(root, writer); err != nil {
+		return evidence, err
+	}
+	op, err := s.journal.Get(ctx, root, actor, id)
+	if err != nil {
+		return evidence, err
+	}
+	if !op.Terminal() {
+		return evidence, E("operation_in_progress", nil)
+	}
+	intent, err := operationIntent(op)
+	if err != nil {
+		return evidence, err
+	}
+	prover, ok := writer.(storage.StagedDiscardProver)
+	if !ok {
+		return evidence, E("unsupported", nil)
+	}
+	if op.CleanedAt != nil {
+		return evidence, nil
+	}
+	if !apply {
+		return prover.ObserveDiscard(ctx, intent)
+	}
+	err = s.Cleanup(ctx, root, actor, id, writer)
+	if err == nil {
+		// No receipt was uncertain: the reservation is already released and there is
+		// nothing to prove.
+		return evidence, nil
+	}
+	// A retained receipt is reported by the driver as a storage code and by the journal
+	// as an operation code; either one means "nothing may be released yet".
+	if !IsCode(err, "recovery_required") && !storage.IsCode(err, "recovery_required") {
+		return evidence, err
+	}
+	if op, err = s.journal.Get(ctx, root, actor, id); err != nil {
+		return evidence, err
+	}
+	if op.CleanedAt != nil {
+		return evidence, nil
+	}
+	if evidence, err = prover.ProveDiscard(ctx, intent); err != nil {
+		return evidence, err
+	}
+	return evidence, s.Cleanup(ctx, root, actor, id, writer)
+}
+
 type WriterResolver func(context.Context, Root) (storage.StagedWriter, func() error, error)
 
 func (s *Service) Sweep(ctx context.Context, limit int, resolve WriterResolver) error {

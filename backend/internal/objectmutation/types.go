@@ -68,6 +68,19 @@ type MultipartBackend interface {
 	AbortMultipart(context.Context, string, string) error
 }
 
+// MultipartInspector reports whether the provider still knows an upload session. It is
+// an operator-reconciliation capability, not publication authority: a session the
+// provider no longer knows can never be completed and can never serve its parts again.
+// A backend without it cannot prove a discarded allocation terminal, so retained
+// liability stays until the provider lifecycle is inspected out of band.
+type MultipartInspector interface {
+	InspectMultipart(context.Context, string, string) (MultipartState, error)
+}
+type MultipartState struct {
+	Present bool
+	Parts   int // parts the provider still reports when Present
+}
+
 // SignedMultipartBackend is intentionally COS-specific capability, not a generic
 // S3 compatibility claim. SignPart binds exact content MD5/length and native slot.
 type SignedMultipartBackend interface {

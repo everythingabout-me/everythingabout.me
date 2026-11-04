@@ -74,3 +74,25 @@ func (b *mutationBackend) AbortMultipart(ctx context.Context, key, id string) er
 	}
 	return nil
 }
+
+var _ objectmutation.MultipartInspector = (*mutationBackend)(nil)
+
+// InspectMultipart asks COS whether this exact upload session still exists. A missing
+// session (NoSuchUpload) is the terminal observation that none of its parts can ever be
+// completed, read, or replayed; any other failure leaves the allocation unknown.
+func (b *mutationBackend) InspectMultipart(ctx context.Context, key, id string) (objectmutation.MultipartState, error) {
+	result, response, err := b.client.Object.ListParts(ctx, key, id, &sdk.ObjectListPartsOptions{MaxParts: "1000"})
+	if err != nil {
+		if sdk.IsNotFoundError(err) {
+			return objectmutation.MultipartState{}, nil
+		}
+		return objectmutation.MultipartState{}, mutationReadError(ctx, key, err, false)
+	}
+	if response == nil || result == nil {
+		return objectmutation.MultipartState{}, storage.NewError("invalid_backend_response", storage.Path(key), nil)
+	}
+	if response.StatusCode == http.StatusNotFound {
+		return objectmutation.MultipartState{}, nil
+	}
+	return objectmutation.MultipartState{Present: true, Parts: len(result.Parts)}, nil
+}
