@@ -23,9 +23,9 @@ const PART_BUSY_WAITS = 60;
 // and re-rendering the whole file list for events the eye cannot separate only burns
 // main-thread time while a part is streaming.
 const PROGRESS_INTERVAL_MS = 1000;
-// The displayed speed covers the latest ten seconds. A part is 8 MiB, so a three-second
-// window read 0 B/s whenever parts landed less often than that (under roughly 2.7 MB/s),
-// which is most links. Ten seconds still surfaces a real stall, without inventing zeros.
+// The displayed speed covers the latest ten seconds. Streamed parts report send progress
+// continuously, so this window only smooths: it damps each part's socket-buffer lead and
+// the gaps between receipts. A genuine stall still reaches 0 B/s, ten seconds later.
 const SPEED_WINDOW_MS = 10000;
 interface ProgressSample { at: number; loaded: number }
 export type UploadStatus = "queued" | "waiting" | "uploading" | "finalizing" | "failed" | "completed";
