@@ -218,7 +218,7 @@ test("zero-byte upload commits an empty session without a part request", async (
   assert.equal(callsOf(server, "commit").length, 1);
 });
 
-test("a global eight-part pool refills immediately and favors the earliest file", async (t) => {
+test("a global eight-part pool has no per-file cap and refills in file order", async (t) => {
   const server = uploadServer();
   const send = server.api.uploadPart;
   const create = server.api.createUpload;
@@ -242,14 +242,14 @@ test("a global eight-part pool refills immediately and favors the earliest file"
   await harness.until(() => active === 8);
   await harness.tick();
   assert.equal(peak, 8, "the pool caps part requests across files");
-  assert.ok([...peaks.values()].every((value) => value <= 4), "each file stays within four parts");
+  assert.deepEqual([...peaks.entries()], [["session-1", 8]], "one file may use the whole pool");
   // Finishing one part immediately starts exactly one more, without waiting for its batch.
   const first = [...gates.keys()][0];
   gates.get(first).resolve();
   await harness.until(() => gates.size === 9);
   assert.equal(active, 8);
   const started = [...gates.keys()].at(-1);
-  assert.equal(started.split(":")[0], first.split(":")[0], "the freed slot goes to the earliest file's next part");
+  assert.equal(started, "session-2:1", "with the first file fully in flight, the freed slot goes to the next file");
   const release = () => { for (const gate of gates.values()) gate.resolve(); };
   const timer = setInterval(release, 1);
   t.after(() => clearInterval(timer));

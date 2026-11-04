@@ -15,7 +15,7 @@ token and preserve explicit Origin checks; no invalid Bearer fallback is introdu
 
 The browser queue uses P5 sessions, exact numbered parts, server receipts, explicit commit and standard
 Operations. Up to eight files hold open sessions; their parts share one global pool of eight byte requests
-(at most four per file, capped by the session's maxParallelism and ordering). A freed slot goes to the
+(a single file may use all eight, capped by the session's maxParallelism and ordering). A freed slot goes to the
 earliest-started file's next part. Transient part errors allow three total attempts with 250/500 ms backoff;
 each uncertain result queries and verifies durable receipts before any identical replay. Parallel progress sums
 confirmed bytes and current per-part progress without double-counting. Folder selection/drop retains all original paths, parents and explicit empty

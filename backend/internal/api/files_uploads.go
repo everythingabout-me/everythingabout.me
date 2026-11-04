@@ -21,7 +21,7 @@ import (
 
 const filesUploadPartSize int64 = 8 << 20
 const filesUploadMaxParts = 10000
-const filesUploadParallelism = 4
+const filesUploadParallelism = 8
 
 // FileUploadSpool stores private durable chunks independently of final publication.
 type FileUploadSpool interface {

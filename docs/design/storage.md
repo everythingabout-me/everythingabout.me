@@ -190,7 +190,7 @@ extra receiver machine. Commit verifies coverage and current conditions, complet
 settles the index/result; it is not merely a database update or another full-byte transfer.
 
 The browser keeps up to eight files with open sessions and sends their numbered parts through one global pool
-of eight part requests, with at most four per file, respecting each session's maxParallelism and ordering. A
+of eight part requests with no extra per-file cap, respecting each session's maxParallelism and ordering. A
 freed slot immediately goes to the earliest-started file's next part, so files finish in order and one slow part
 never idles a connection. Transient retries query durable receipts before replaying
 an uncertain part; acknowledged content is immutable and receipt hashes are verified against the retained File

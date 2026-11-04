@@ -11,8 +11,6 @@ import { pendingFileOperation, setUploadOwner, settleFileOperation } from "./upl
 const MAX_PARALLEL_UPLOADS = 8;
 // Part requests in flight across every file (measured best for 8 MiB parts).
 const PART_POOL_SIZE = 8;
-// Per-file cap, further limited by session.maxParallelism and ordering.
-const MAX_PARALLEL_PARTS = 4;
 const PART_UPLOAD_ATTEMPTS = 3;
 const PART_RETRY_DELAY_MS = 250;
 export type UploadStatus = "queued" | "waiting" | "uploading" | "finalizing" | "failed" | "completed";
@@ -282,7 +280,7 @@ export function useUploadQueue(onUploaded: (task: UploadTask, item: Item) => voi
         || session.partCount !== Math.ceil(session.size / session.partSize) || !Number.isSafeInteger(session.maxParallelism)
         || session.maxParallelism < 1 || !["any", "ascending"].includes(session.ordering)
         || session.transport !== undefined && !["embedded", "cos-signed"].includes(session.transport)) throw new Error("Invalid upload session geometry.");
-      const parallelism = session.ordering === "ascending" ? 1 : Math.min(MAX_PARALLEL_PARTS, session.maxParallelism);
+      const parallelism = session.ordering === "ascending" ? 1 : Math.min(PART_POOL_SIZE, session.maxParallelism);
       let verification = verified.current.get(session.id);
       if (!verification || verification.file !== file) {
         verification = { file, parts: new Map() };
