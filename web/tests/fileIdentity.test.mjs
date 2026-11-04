@@ -105,7 +105,10 @@ test("retired ID navigation preserves not_found and never invents a destination"
   const { api, FileApiError } = await client();
   const calls = capture(t, () => json({ type: "urn:eam:error:not_found", title: "Not found", status: 404, code: "not_found", detail: "Not found.", requestId: "req_test" }, 404));
   await assert.rejects(api.list({ id: fileID }), (error) => error instanceof FileApiError && error.status === 404);
-  assert.equal(calls.length, 1);
+  // The speculative first page rides along with the metadata read, so a vanished ID costs one
+  // round trip rather than a metadata wait followed by a page read.
+  assert.equal(calls.length, 2);
+  for (const { url } of calls) assert.deepEqual([...url.searchParams], [["id", fileID]]);
 });
 
 test("root and scoped-root metadata retain a real ID while concealed parent fields stay null", async (t) => {

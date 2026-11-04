@@ -648,7 +648,7 @@ async function fileRequest<T>(url: string, init?: RequestInit): Promise<T> {
     headers.set("X-CSRF-Token", await fileCSRF());
   }
   const response = await fetch(url, { ...init, headers, credentials: "same-origin" });
-  if (response.status === 401 || response.status === 403) csrfRequest = undefined;
+  if (response.status === 401 || response.status === 403) forgetSession();
   if (response.status === 204) return undefined as T;
   const payload: unknown = await response.json().catch(() => { throw httpError(response.status); });
   return filePayload<T>(payload, response.status);
@@ -808,15 +808,111 @@ export const files = {
   },
 };
 
-async function allFiles(load: (cursor?: string) => Promise<FileCollection>): Promise<FileResource[]> {
+async function allFiles(
+  load: (cursor?: string) => Promise<FileCollection>,
+  firstPage?: Promise<FileCollection>,
+): Promise<FileResource[]> {
   const items = new Map<string, FileResource>();
-  let cursor: string | undefined;
-  do {
-    const page = await load(cursor);
+  let page = firstPage ? await firstPage : await load();
+  for (;;) {
     for (const item of page.items) items.set(item.id, item);
-    cursor = page.nextCursor ?? undefined;
-  } while (cursor);
+    const cursor = page.nextCursor ?? undefined;
+    if (!cursor) break;
+    page = await load(cursor);
+  }
   return [...items.values()];
+}
+
+function selectorKey(selected: EntrySelector): string {
+  return selected.id !== undefined ? `id:${selected.id}` : `path:${selected.path}`;
+}
+
+function missingPathAsNull(error: unknown, selected: EntrySelector): null {
+  // A path that does not exist is an empty listing the page renders as "not found"; an ID
+  // selector keeps failing because a vanished ID is a real error for the caller.
+  if (error instanceof ApiError && error.status === 404 && selected.id === undefined) return null;
+  throw error;
+}
+
+/**
+ * One directory read for the page: the parent metadata and the first page are independent
+ * queries, so both start together instead of paying two round trips in sequence.
+ */
+async function loadListing(selected: EntrySelector): Promise<ListResult> {
+  const nodeRequest = files.metadata(selected).catch((error: unknown) => missingPathAsNull(error, selected));
+  const firstPage = files.list(selected);
+  // A file selector only needs its metadata; the page request answers 409. Keep that rejection
+  // from surfacing as unhandled even though the branch below never awaits it.
+  firstPage.catch(() => undefined);
+
+  const node = await nodeRequest;
+  const absolute = node?.path ?? selected.path!;
+  const breadcrumb: Crumb[] = [{ name: "", path: "/" }];
+  let current = "";
+  for (const name of absolute.split("/").filter(Boolean)) {
+    current += `/${name}`;
+    breadcrumb.push({ name, path: current });
+  }
+  return {
+    path: absolute, parent: node?.parentPath ?? (absolute.slice(0, absolute.lastIndexOf("/")) || "/"),
+    breadcrumb, node,
+    items: node?.kind === "folder" ? await allFiles((cursor) => files.list(selected, { cursor }), firstPage) : [],
+  };
+}
+
+/**
+ * Listings warmed by hovering a row, so opening it does not wait for a round trip. An entry is
+ * single use and expires quickly: a listing is a snapshot, and a mutation must not be followed
+ * by a stale page.
+ */
+const listingPrefetches = new Map<string, { listing: Promise<ListResult>; expiresAt: number }>();
+const listingPrefetchTTL = 10_000;
+const listingPrefetchLimit = 24;
+
+/** Session-bound state that must not survive a sign-out or an expired credential. */
+function forgetSession(): void {
+  csrfRequest = undefined;
+  listingPrefetches.clear();
+}
+
+/** Warm one listing before the click that opens it; safe to call repeatedly. */
+export function prefetchListing(selector: FileSelector): void {
+  let selected: EntrySelector;
+  try {
+    selected = entrySelector(selector);
+  } catch {
+    return;
+  }
+  const key = selectorKey(selected);
+  const known = listingPrefetches.get(key);
+  if (known && known.expiresAt > Date.now()) {
+    // Still useful: keep it, but move it to the end so the size cap drops colder entries.
+    listingPrefetches.delete(key);
+    listingPrefetches.set(key, known);
+    return;
+  }
+  listingPrefetches.delete(key);
+  const entry: { listing: Promise<ListResult>; expiresAt: number } = {
+    listing: loadListing(selected), expiresAt: Number.POSITIVE_INFINITY,
+  };
+  entry.listing.then(
+    () => { entry.expiresAt = Date.now() + listingPrefetchTTL; },
+    () => { if (listingPrefetches.get(key) === entry) listingPrefetches.delete(key); },
+  );
+  listingPrefetches.set(key, entry);
+  while (listingPrefetches.size > listingPrefetchLimit) {
+    const oldest = listingPrefetches.keys().next().value;
+    if (oldest === undefined) break;
+    listingPrefetches.delete(oldest);
+  }
+}
+
+function takeListingPrefetch(selected: EntrySelector): Promise<ListResult> | null {
+  const key = selectorKey(selected);
+  const entry = listingPrefetches.get(key);
+  if (!entry) return null;
+  listingPrefetches.delete(key);
+  return entry.expiresAt > Date.now() ? entry.listing : null;
 }
 
 export const api = {
@@ -886,7 +982,7 @@ export const api = {
 
   async logout(): Promise<void> {
     await post("/api/auth/logout");
-    csrfRequest = undefined;
+    forgetSession();
   },
 
   async setPassword(input: {
@@ -951,24 +1047,7 @@ export const api = {
   /** App navigation composed from resources, rather than a legacy server listing DTO. */
   async list(selector: FileSelector): Promise<ListResult> {
     const selected = entrySelector(selector);
-    let node: FileResource | null;
-    try { node = await files.metadata(selected); }
-    catch (error) {
-      if (!(error instanceof ApiError) || error.status !== 404 || selected.id !== undefined) throw error;
-      node = null;
-    }
-    const absolute = node?.path ?? selected.path!;
-    const breadcrumb: Crumb[] = [{ name: "", path: "/" }];
-    let current = "";
-    for (const name of absolute.split("/").filter(Boolean)) {
-      current += `/${name}`;
-      breadcrumb.push({ name, path: current });
-    }
-    return {
-      path: absolute, parent: node?.parentPath ?? (absolute.slice(0, absolute.lastIndexOf("/")) || "/"),
-      breadcrumb, node,
-      items: node?.kind === "folder" ? await allFiles((cursor) => files.list(selected, { cursor })) : [],
-    };
+    return takeListingPrefetch(selected) ?? loadListing(selected);
   },
 
   async search(keyword: string, selector?: FileSelector): Promise<SearchResult> {
@@ -1029,7 +1108,7 @@ export const api = {
         if (!settled && !signal?.aborted) onProgress?.({ loaded: event.loaded, total: blob.size });
       };
       xhr.onload = () => {
-        if (xhr.status === 401 || xhr.status === 403) csrfRequest = undefined;
+        if (xhr.status === 401 || xhr.status === 403) forgetSession();
         try { finish(undefined, filePayload<FileUploadReceipt>(JSON.parse(xhr.responseText), xhr.status)); }
         catch (error) { finish(error instanceof ApiError ? error : httpError(xhr.status)); }
       };

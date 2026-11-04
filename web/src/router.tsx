@@ -48,6 +48,11 @@ export const router = createBrowserRouter([
     // Matches /files and every logical path below it: /files/Photos/2024/a.jpg.
     path: "/files/*",
     element: <FilesPage />,
+    // Every folder click is a new splat value on this same route instance, so the default
+    // revalidation would spend a blocking `/api/auth/me` round trip before the listing even
+    // starts. The page redirects to /login on a 401 from any file request, so the loader only
+    // needs to run when the page is entered.
+    shouldRevalidate: () => false,
     loader: async () => ({ user: await requireUser() }),
     ...pageBoundary,
   },

@@ -59,17 +59,42 @@ test("path navigation composes metadata and every page without an ID lookup or e
   assert.equal(calls.length, 3);
 });
 
-test("file detail avoids listing children and missing paths remain distinguishable", async (t) => {
+test("file detail resolves from metadata while the speculative page read stays harmless", async (t) => {
   const { api } = await client();
   const calls = [];
   mockFetch(t, async (input) => {
     const url = new URL(input, "https://drive.example");
     calls.push(url.pathname);
-    return url.searchParams.get("path") === "/missing" ? json(problem(404, "not_found"), 404) : json(resource("/a.txt"));
+    if (url.searchParams.get("path") === "/missing") return json(problem(404, "not_found"), 404);
+    return url.pathname === "/api/files/list" ? json(problem(409, "not_a_folder"), 409) : json(resource("/a.txt"));
   });
   assert.equal((await api.list("a.txt")).node.kind, "file");
   assert.equal((await api.list("missing")).node, null);
-  assert.deepEqual(calls, ["/api/files", "/api/files"]);
+  // Opening an entry is one round trip: metadata and the first page are requested together and
+  // the page read of a non-folder is discarded, not awaited or reported.
+  assert.deepEqual(calls, ["/api/files", "/api/files/list", "/api/files", "/api/files/list"]);
+});
+
+test("a hovered listing answers exactly one open, then reads again", async (t) => {
+  const { api, prefetchListing } = await client();
+  const calls = [];
+  mockFetch(t, async (input) => {
+    const url = new URL(input, "https://drive.example");
+    calls.push(url.pathname);
+    return url.pathname === "/api/files/list"
+      ? json({ items: [resource("/Photos/a.jpg")], nextCursor: null })
+      : json(resource("/Photos", "folder"));
+  });
+  prefetchListing("/Photos");
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  const warmed = calls.length;
+  assert.equal(warmed, 2);
+  const listing = await api.list("/Photos");
+  assert.deepEqual(listing.items.map((item) => item.path), ["/Photos/a.jpg"]);
+  assert.equal(calls.length, warmed);
+  // Prefetches are single use: the next open reads current state instead of a stale snapshot.
+  await api.list("/Photos");
+  assert.equal(calls.length, warmed + 2);
 });
 
 test("Problem errors preserve code and operation identity without cookie fallback", async (t) => {

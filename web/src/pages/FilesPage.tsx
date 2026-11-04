@@ -10,7 +10,7 @@ import {
   useState,
 } from "react";
 import { Link, useBlocker, useLoaderData, useLocation, useNavigate } from "react-router";
-import { ApiError, api, filePath, isFileOperation, type AuthUser, type Crumb, type Item, type FileOperation } from "../api/client";
+import { ApiError, api, filePath, isFileOperation, prefetchListing, type AuthUser, type Crumb, type Item, type FileOperation } from "../api/client";
 import { AppHeader } from "../components/AppHeader";
 import {
   ChevronDownIcon,
@@ -166,9 +166,36 @@ const ItemRow = memo(function ItemRow({
   item: Item;
   activeQuery: boolean;
 }) {
+  const prefetchTimer = useRef<number | null>(null);
+  const cancelPrefetch = useCallback(() => {
+    if (prefetchTimer.current === null) return;
+    window.clearTimeout(prefetchTimer.current);
+    prefetchTimer.current = null;
+  }, []);
+  // Only folders: opening one is a listing read, while a file is one metadata read that the
+  // page needs anyway, and warming it would also ask for the children of a file.
+  const folderPath = item.kind === "folder" ? item.path : null;
+  // A short pause is intent; sweeping the pointer across a long list should not fetch.
+  const schedulePrefetch = useCallback(() => {
+    if (folderPath === null || prefetchTimer.current !== null) return;
+    prefetchTimer.current = window.setTimeout(() => {
+      prefetchTimer.current = null;
+      prefetchListing(folderPath);
+    }, 90);
+  }, [folderPath]);
+  useEffect(() => cancelPrefetch, [cancelPrefetch]);
+
   return (
     // Every entry is a real URL: folders list their contents, files open their detail page.
-    <Link className={styles.row} to={filesHref(item.path)} title={item.name}>
+    <Link
+      className={styles.row}
+      to={filesHref(item.path)}
+      title={item.name}
+      onPointerEnter={schedulePrefetch}
+      onPointerLeave={cancelPrefetch}
+      onFocus={schedulePrefetch}
+      onBlur={cancelPrefetch}
+    >
       <span className={styles.glyph}>
         <GlyphFor name={item.name} mime={item.mediaType} isDir={item.kind === "folder"} />
       </span>
@@ -1070,7 +1097,11 @@ export function FilesPage() {
                         </span>
                       )}
                       {!isLast ? (
-                        <Link className={styles.crumb} to={filesHref(crumb.path)}>
+                        <Link
+                          className={styles.crumb}
+                          to={filesHref(crumb.path)}
+                          onPointerEnter={() => prefetchListing(crumb.path)}
+                        >
                           {crumbName(crumb)}
                         </Link>
                       ) : renaming ? (
