@@ -67,6 +67,20 @@ function formatSpeed(bytesPerSecond: number): string {
   return `${formatSize(bytesPerSecond)}/s`;
 }
 
+/** Keeps two decimals below the unit so a per-second progress tick always moves the number. */
+function formatPreciseBytes(bytes: number): string {
+  if (!(bytes > 0)) return "0 B";
+  if (bytes < 1024) return `${Math.round(bytes)} B`;
+  const units = ["KB", "MB", "GB", "TB"];
+  let value = bytes / 1024;
+  let index = 0;
+  while (value >= 1024 && index < units.length - 1) {
+    value /= 1024;
+    index += 1;
+  }
+  return `${value.toFixed(2)} ${units[index]}`;
+}
+
 /** Matches the backend: directories first, the rest sorted by lowercased name. */
 function compareNames(a: string, b: string): number {
   const left = a.toLowerCase();
@@ -234,7 +248,7 @@ const UploadRow = memo(function UploadRow({
       {showProgress ? (
         <div className={styles.uploadProgress}>
           <div className={styles.uploadProgressLabel}>
-            <span>{formatBytes(upload.loaded)} / {formatBytes(upload.size)}</span>
+            <span>{formatPreciseBytes(upload.loaded)} / {formatBytes(upload.size)}</span>
             <span className={styles.uploadPercent}>{upload.percent}%</span>
           </div>
           <div
@@ -246,7 +260,7 @@ const UploadRow = memo(function UploadRow({
             aria-valuenow={upload.percent}
             aria-valuetext={t("drive.uploadProgressValue", {
               percent: upload.percent,
-              sent: formatBytes(upload.loaded),
+              sent: formatPreciseBytes(upload.loaded),
               total: formatBytes(upload.size),
             })}
           >

@@ -19,6 +19,14 @@ const PART_RETRY_DELAY_MS = 250;
 // A 429 means every receive slot is busy, which is the receiver asking this part to
 // wait rather than a lost part: retry without spending a transfer attempt.
 const PART_BUSY_WAITS = 60;
+// Progress reaches the list once a second. XHR reports bytes many times per second,
+// and re-rendering the whole file list for events the eye cannot separate only burns
+// main-thread time while a part is streaming.
+const PROGRESS_INTERVAL_MS = 1000;
+// The displayed speed covers only the latest few seconds, so a stalled link visibly
+// drops instead of being averaged away over the whole transfer.
+const SPEED_WINDOW_MS = 3000;
+interface ProgressSample { at: number; loaded: number }
 export type UploadStatus = "queued" | "waiting" | "uploading" | "finalizing" | "failed" | "completed";
 export interface DeletionWait {
   operationId: string;
@@ -322,7 +330,7 @@ export function useUploadQueue(onUploaded: (task: UploadTask, item: Item) => voi
       const receipts = await readReceipts(signal);
       if (signal.aborted) return;
       let received = [...receipts.values()].reduce((sum, receipt) => sum + receipt.size, 0);
-      patch(id, { loaded: received });
+      patch(id, { loaded: received, speed: 0 });
       const missing: number[] = [];
       // Up to `parallelism` workers drain this file's missing parts; every request also
       // takes a slot from the global part pool, so the next queued part starts as soon
@@ -336,12 +344,24 @@ export function useUploadQueue(onUploaded: (task: UploadTask, item: Item) => voi
         const abortBatch = () => batch.abort();
         signal.addEventListener("abort", abortBatch, { once: true });
         const inFlight = new Map<number, number>();
-        const began = performance.now();
-        const baseline = received;
-        const progress = () => {
+        const samples: ProgressSample[] = [];
+        const flush = () => {
           if (signal.aborted || batch.signal.aborted) return;
+          const at = performance.now();
           const loaded = Math.min(session.size, received + [...inFlight.values()].reduce((sum, bytes) => sum + bytes, 0));
-          patch(id, { loaded, speed: Math.max(0, loaded - baseline) * 1000 / Math.max(300, performance.now() - began) });
+          samples.push({ at, loaded });
+          while (samples.length > 1 && at - samples[0].at > SPEED_WINDOW_MS) samples.shift();
+          const elapsed = at - samples[0].at;
+          patch(id, { loaded, speed: elapsed > 0 ? Math.max(0, loaded - samples[0].loaded) * 1000 / elapsed : 0 });
+        };
+        // One sample per second, independent of how often XHR reports bytes: the list
+        // stays readable, and a stalled link visibly falls to 0 B/s instead of freezing
+        // on its last value.
+        const ticker = setInterval(flush, PROGRESS_INTERVAL_MS);
+        deadlines.current.add(ticker);
+        const cancelProgress = () => {
+          clearInterval(ticker);
+          deadlines.current.delete(ticker);
         };
         const retryDelay = (attempt: number) => new Promise<void>((resolve, reject) => {
           if (batch.signal.aborted) { reject(new DOMException("Upload canceled", "AbortError")); return; }
@@ -365,7 +385,6 @@ export function useUploadQueue(onUploaded: (task: UploadTask, item: Item) => voi
                   receipt = await api.uploadPart(session.id, number, chunk, batch.signal, (sample) => {
                     if (batch.signal.aborted || receipts.has(number)) return;
                     inFlight.set(number, Math.max(inFlight.get(number) ?? 0, Math.max(0, Math.min(chunk.size, sample.loaded))));
-                    progress();
                   }, session.transport);
                 } catch (error) {
                   if (batch.signal.aborted) throw error;
@@ -373,7 +392,7 @@ export function useUploadQueue(onUploaded: (task: UploadTask, item: Item) => voi
                     // The receiver is full with other parts. Waiting is the protocol;
                     // counting this as a failed attempt would abort the whole file.
                     if (++busy > PART_BUSY_WAITS) throw error;
-                    inFlight.delete(number); progress();
+                    inFlight.delete(number);
                     await retryDelay(Math.min(busy, 3));
                     continue;
                   }
@@ -386,7 +405,7 @@ export function useUploadQueue(onUploaded: (task: UploadTask, item: Item) => voi
                   receipt = (await readReceipts(batch.signal)).get(number);
                   if (!receipt) {
                     if (++attempt === PART_UPLOAD_ATTEMPTS) throw error;
-                    inFlight.delete(number); progress();
+                    inFlight.delete(number);
                     await retryDelay(attempt - 1);
                     continue;
                   }
@@ -397,7 +416,6 @@ export function useUploadQueue(onUploaded: (task: UploadTask, item: Item) => voi
                 receipts.set(number, receipt);
                 received += receipt.size;
                 inFlight.delete(number);
-                progress();
                 return;
               }
             } catch (error) {
@@ -422,7 +440,7 @@ export function useUploadQueue(onUploaded: (task: UploadTask, item: Item) => voi
               }
             } finally { if (holding) releasePart(); }
           }));
-        } finally { signal.removeEventListener("abort", abortBatch); }
+        } finally { signal.removeEventListener("abort", abortBatch); cancelProgress(); }
         if (signal.aborted) return;
         if (failure !== undefined) { patch(id, { loaded: received }); throw failure; }
         // Ascending sessions send one new part per turn; requeue for the next one.
@@ -591,7 +609,9 @@ export function useUploadQueue(onUploaded: (task: UploadTask, item: Item) => voi
     }, 2000);
     return () => {
       mounted.current = false; ready.current = false; controller.abort(); clearInterval(timer);
-      for (const deadline of deadlines.current) clearTimeout(deadline);
+      // Progress tickers are intervals, so they need clearInterval even though they
+      // share the deadline set with timeouts.
+      for (const deadline of deadlines.current) { clearTimeout(deadline); clearInterval(deadline); }
       deadlines.current.clear();
       for (const runtime of running.current.values()) runtime.controller.abort();
       running.current.clear();

@@ -27,16 +27,28 @@ test("combined progress includes every active part exactly once as ACKs arrive o
   pending.get(3).progress({ loaded: 3 });
   pending.get(4).progress({ loaded: 1 });
   let queue = await harness.settle();
+  // Samples land once a second rather than on every byte event, so in-flight bytes
+  // are summed at flush time: each active part counts once, and the value appears on
+  // the next tick.
+  assert.equal(queue.tasks[0].loaded, 0);
+  queue = await harness.tick(1000);
   assert.equal(queue.tasks[0].loaded, 7);
-  assert.ok(queue.tasks[0].speed > 0);
+  // The first sample has nothing to measure against, so the speed appears with the
+  // second one.
+  assert.equal(queue.tasks[0].speed, 0);
   pending.get(2).gate.resolve();
-  await harness.until((queue) => queue.tasks[0].loaded === 10);
+  await harness.settle();
+  // The ACK moves the part's bytes from in-flight to durable, so the total is the
+  // part's full size even though its last sample was smaller.
+  queue = await harness.tick(1000);
+  assert.equal(queue.tasks[0].loaded, 10);
+  assert.ok(queue.tasks[0].speed > 0);
   pending.get(2).progress({ loaded: 100 });
   // A transport must not emit progress after its ACK; remaining requests are
   // clamped individually, so oversized in-flight samples cannot exceed the file.
   pending.get(1).progress({ loaded: 100 });
   pending.get(3).progress({ loaded: 100 });
-  queue = await harness.settle();
+  queue = await harness.tick(1000);
   assert.ok(queue.tasks[0].loaded <= 13);
   for (const { gate } of pending.values()) gate.resolve();
   await harness.until(complete);
