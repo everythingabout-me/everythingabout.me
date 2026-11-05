@@ -12,7 +12,7 @@ runtime still relays bytes through the application or uses per-part COS authoriz
 
 ```
 Class A:    client --presigned part PUT / read GET--> object store (unpublished multipart)
-Class B:    client --session PUT / download link--> cloud drive (unpublished session or staging file)
+Class B:    client --session PUT / download link--> cloud drive (provider upload session at the destination)
 Class C:    client --part PUT / content GET--> application --> Local or native COS/S3
 All:        client --create/sign/commit/grant--> application API; only the server commit publishes
 ```

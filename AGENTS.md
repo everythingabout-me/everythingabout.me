@@ -300,7 +300,7 @@ Variants: `Committed locally main@abc1234, not pushed` / `Not committed (tests f
   Each connection selects one transfer class (A presigned parts, B cloud-drive sessions, C relay); a transfer
   never falls back to another class. Grants are scoped to one upload session or one file, time-limited,
   renewable and recorded before they are issued. Class A part URLs bind exact length and no digest. Clients
-  only write unpublished provider state (staging folder on cloud drives); only the server commit publishes. A provider credential is never
+  never publish: class A/C by construction, class B (cloud drives) by client contract; the server commit publishes. A provider credential is never
   issued to a principal whose scope is narrower than its reach. See `docs/design/transfer-protocol.md`.
 - Delete or rewrite an existing migration; only append.
 - Change the 5173 port or the `/api` proxy in `web/vite.config.ts` — COS CORS and the development flow depend

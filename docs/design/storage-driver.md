@@ -356,7 +356,7 @@ type TransferPlan struct {
     PartSize    int64  // provider-mandated; the client does not choose
     MaxParallel int
     ExpiresAt   time.Time
-    Handle      []byte // native upload/session/staging identity, checkpointed before the plan is returned
+    Handle      []byte // native upload/session identity, checkpointed before the plan is returned
     Payload     []byte // class-specific client payload, opaque to the service
 }
 
@@ -408,8 +408,7 @@ type EffectRecovery interface {
 }
 ```
 
-`PlanWrite` creates unpublished provider state (native multipart upload, staging-folder upload session or open
-provider upload session), checkpoints its handle under the intent fence and returns the first grants.
+`PlanWrite` creates the native multipart upload or provider upload session, checkpoints its handle under the intent fence and returns the first grants.
 It never receives the bytes. `SignParts` re-signs or extends class A part URLs for the same bound lengths.
 `InspectWrite` reports what the provider holds. `CommitWrite` re-establishes the binding, verifies full
 coverage at the provider and performs the publishing call itself; a client success response is not evidence.
@@ -468,18 +467,17 @@ provider rules, signing rules and deployment requirements; a driver supplies onl
 
 A driver serving class A or B must provide `PlannedWriter` and `ReadGranter` and meet these rules:
 
-- **Unpublished until commit.** Nothing a client sends may become visible at the destination before
-  `CommitWrite`. Object stores use native multipart. OneDrive, Google Drive and Box upload into the connection's
-  staging folder and `CommitWrite` moves the file to the destination, for create and replace alike. Dropbox keeps
-  the session open until the server's `finish`; because the client's token could finish it elsewhere, this is a
-  client contract and the driver must report it so the service issues that token only to full-scope principals.
+- **Server commit.** Class A keeps bytes in an unpublished native multipart upload, so only `CompleteMultipartUpload`
+  publishes. Class B sessions are created at the destination and the server completes them (OneDrive deferred
+  commit, Box commit, Dropbox finish; Google Drive completes on the final chunk). Because the client holds what
+  could also complete a class-B session, server-only publication there is a client contract; a file that
+  appears without a commit is indexed at session expiry like any outside change.
 - **Queryable.** `InspectWrite` must report what the provider actually holds (part listing, session range or
   offset). Client writes therefore never create an ambiguous final-path effect; only `CommitWrite` can, and it
   follows the ordinary §3 guard and recovery rules.
-- **Conflict rules at commit.** Create fails on an existing name and replace moves over the old file. A driver
-  without an atomic no-replace move or create (Google Drive allows duplicate names) sets `AtomicCreate=false`,
-  which capabilities expose. Replacement through staging gives the file a new provider identity; the driver
-  does not try to preserve provider version history.
+- **Conflict rules at session creation.** Create fails on an existing name; replace targets the existing provider
+  file with its native revision condition where one exists. A driver without an atomic no-replace create
+  (Google Drive allows duplicate names) sets `AtomicCreate=false`, which capabilities expose.
 - **Scoped grants.** Part URLs bind one part of one native upload with its exact length and no digest. Read
   grants bind one file. A provider credential that reaches beyond one file or session is reported as such so the
   service can refuse it to narrower principals.

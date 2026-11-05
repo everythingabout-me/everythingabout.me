@@ -28,11 +28,10 @@ reconfiguration, allowed only while the connection has no open sessions, and it 
 
 1. **The application never carries file bytes in classes A and B.** Only control requests do. Derived
    representations (thumbnails, converted previews) are application output and are not covered by this rule.
-2. **Only the server publishes.** A client transfers bytes into unpublished provider state (a native multipart
-   upload, a staging file or an open provider session); only a server commit makes them a file at the
-   destination path. This holds by construction wherever the client holds only a session-scoped capability
-   (classes A and C, OneDrive, Google Drive, Box staging). On Dropbox the client holds a provider token and
-   publication by the server is a client contract (§5). A client success response is never evidence.
+2. **Only the server publishes.** In classes A and C this holds by construction: the client can only fill an
+   unpublished native upload or send parts to the application. In class B it is a client contract, because the
+   provider session or token the client holds could also finish the upload (§5). A client success response is
+   never evidence.
 3. **One ledger.** All classes converge on `open → committing → committed` with the same guards, tombstones,
    idempotency records and change facts.
 4. **Every grant is scoped to one session or one file**, time-limited and recorded before it is issued. Upload
@@ -131,32 +130,28 @@ and the receipt records "provider-listed length" as its evidence.
 
 ## 5. Class B — cloud-drive sessions
 
-The server creates the provider upload session and the client only sends bytes. Wherever the provider allows
-it, the session targets a **staging folder** of the connection, so even a client that finishes the provider
-upload itself can only produce a staging file; the server commit then moves it to the destination. Create and
-replace follow the same path and differ only in the final move.
+The server creates the provider upload session directly at the destination, with the conflict rule set at
+creation; the client only sends bytes; the server commit verifies the provider state and settles. Replacement
+targets the existing provider file, so the provider's own version history, file ID and share links are kept.
 
-| Provider | Upload target | Client writes | Server commit | Create (no replace) | Replace |
+| Provider | Session created by the server | Client writes | Server commit | Create (no replace) | Replace |
 |---|---|---|---|---|---|
-| OneDrive | `createUploadSession` for a temporary name in the staging folder | Ordered `PUT`s to the pre-authenticated `uploadUrl`; the final fragment creates the staging file | Move into the destination folder | Move with `conflictBehavior: fail` | Move with `conflictBehavior: replace` |
-| Google Drive | Resumable session in the staging folder under a temporary name, initiated with the browser's `Origin` | Ordered `PUT`s to the session URI; the final chunk creates the staging file | `files.update`: rename and move into the destination folder | Not atomic: Drive allows duplicate names, so only the application guard prevents them | Move the new file in, then delete the old one (briefly two siblings, never none) |
-| Box | `POST /files/upload_sessions` in the staging folder under a temporary name | `PUT` parts with the per-part SHA-1 `Digest` Box requires | Box session commit with the part list and the whole-file SHA-1, then move into the destination | Move; Box rejects name conflicts | Rename the old file aside, move the new one in, delete the old one |
-| Dropbox | `upload_session/start` (no bytes) | `upload_session/append_v2` with the session ID and offset | `upload_session/finish` directly at the destination path | `mode: add`, `autorename: false` | `mode: update` with the observed `rev` |
+| OneDrive | `createUploadSession` at the destination with `deferCommit: true` | Ordered `PUT`s to the pre-authenticated `uploadUrl` | Completes the deferred session | `conflictBehavior: fail` | Session on the existing item with `If-Match` |
+| Google Drive | Resumable `files.create` or `files.update` session, initiated with the browser's `Origin` | Ordered `PUT`s to the session URI; the final chunk completes the file | Verifies and settles | Not atomic: Drive allows duplicate names, so only the application guard prevents them | `files.update` on the existing file; no native condition |
+| Box | `POST /files/upload_sessions` (new file) or `/files/{id}/upload_sessions` (new version) | `PUT` parts with the per-part SHA-1 `Digest` Box requires | Session commit with the part list and the whole-file SHA-1 | Box rejects name conflicts | New version with `If-Match` on the file ETag |
+| Dropbox | `upload_session/start` (no bytes) | `upload_session/append_v2` with the session ID and offset | `upload_session/finish` at the destination | `mode: add`, `autorename: false` | `mode: update` with the observed `rev` |
 
-Dropbox chooses the destination in the `finish` call itself, so a staging folder cannot bind it, and its token
-can write anywhere in the app folder. On Dropbox, server-only publication is therefore a client contract, backed
-by the rule that such a token is only issued to a principal whose scope already covers the whole connection.
+Except on Google Drive, nothing is visible until the server commits. Server-only publication in class B is a
+client contract rather than a construction: the session URL or provider token in the client's hands could also
+finish the upload. It is backed by two rules. Provider tokens go only to principals whose scope already covers
+the whole connection (below). A file that appears without a server commit is a complete upload the principal
+asked for, and the sweeper indexes it at session expiry the same way reconcile indexes any outside change.
 
-Consequences, stated rather than worked around:
+Abandoned sessions leave nothing on OneDrive, Box and Dropbox. On Google Drive a client that sent the final
+chunk but never committed leaves a complete file, which the sweeper indexes.
 
-- **Replacement through staging gives the file a new provider identity** on OneDrive, Google Drive and Box: the
-  provider's own version history, file ID and share links do not carry over. Dropbox `update` keeps them. The
-  service ID, path and contract are unaffected.
-- **Google Drive has no atomic create.** Its driver reports `AtomicCreate=false` and `GET B/capabilities`
-  reports `atomicCreate:false`; uniqueness rests on the application guard and does not hold against outside
-  writers.
-- An abandoned session leaves at most a staging file or an unfinished provider session, never a file at the
-  user's path; the expiry sweeper deletes it.
+Google Drive has no atomic create: its driver reports `AtomicCreate=false` and `GET B/capabilities` reports
+`atomicCreate:false`; uniqueness rests on the application guard and does not hold against outside writers.
 
 Payload:
 
@@ -274,10 +269,10 @@ reconcile path.
 
 Open sessions expire after 24 hours of inactivity (sign requests, status queries and relayed parts count as
 activity), with a hard limit of seven days, capped by the provider session's own lifetime. Expiry aborts the
-native upload or provider session and deletes any staging file. Committing sessions do not expire; they follow
+native upload or provider session. Committing sessions do not expire; they follow
 worker leases and recovery.
 
-Abort deletes the provider state: `AbortMultipartUpload` (A), `DELETE` on the session or staging file (B), the
+Abort deletes the provider state: `AbortMultipartUpload` (A), `DELETE` on the provider session (B), the
 staged bytes (C). Dropbox has no abort call; an unfinished Dropbox session lapses and never becomes a file.
 
 ## 10. Signing rules
@@ -309,8 +304,7 @@ upload instead of consuming application bandwidth.
 
 **Class B.** Register the provider application once: Box requires the application origins in its CORS
 allowlist; Google Drive sessions are initiated with the browser's `Origin`; OneDrive and Dropbox need no
-origin configuration. OneDrive, Google Drive and Box connections keep a staging folder inside the app folder,
-outside the user's content root.
+origin configuration.
 
 **Class C.** Nothing beyond the application itself.
 

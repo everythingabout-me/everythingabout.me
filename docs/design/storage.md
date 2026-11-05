@@ -31,9 +31,9 @@ redacted. Native/provider locators remain private outside transfer grants; a ser
 `{path}` or `{parent:{id}|{path},name}`. The [API](../api/api.md) lists retained current path shortcuts.
 There is no version path segment. Hosted origin is `https://everythingabout.me`; self-hosted origin
 is the user's domain or LAN endpoint. The application checks the user, target and quota before issuing any
-grant. In classes A and B the client moves bytes into unpublished provider state (a native multipart upload,
-a staging file or an open provider session) and the application never carries them; only the application's
-commit verifies provider state and publishes at the destination path. In class C the application receives
+grant. In classes A and B the client moves bytes into a native multipart upload or a provider upload session
+and the application never carries them; the application's commit verifies provider state and publishes at the
+destination path (in class B this is a client contract, see the transfer protocol). In class C the application receives
 parts and writes them to Local staging or unpublished native multipart. No class needs an edge function, a
 separate upload server or full-file local assembly, and a transfer never falls back to another class. Clients
 do not select storage providers or upload origins.

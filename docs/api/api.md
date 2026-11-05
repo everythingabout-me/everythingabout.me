@@ -573,8 +573,7 @@ any part whose URL expired or returned 403; a re-signed number keeps its bound l
 unsigned `Content-MD5` header as a transmission check. Until commit a part URL's holder can rewrite that part;
 this is accepted.
 
-**Class B.** `url` is the provider session the server created, targeting the connection's staging folder
-except on Dropbox; `credential` appears only for providers whose
+**Class B.** `url` is the provider session the server created at the destination; `credential` appears only for providers whose
 write endpoint is not self-authenticating (Dropbox, Box), and only for principals whose scope covers the
 credential's reach (otherwise `403 transfer_scope_exceeded`). Box clients also send per-part SHA-1 digests and
 report the whole-file SHA-1 with commit, computed incrementally alongside the upload.
@@ -622,15 +621,15 @@ at the destination.
 | Class | Commit behaviour |
 |---|---|
 | A | Lists native parts, verifies every number with its exact bound length, performs `CompleteMultipartUpload` once at the final key, then settles index/quota |
-| B | Verifies the provider holds the full length, then publishes: moves the staging file into the destination (OneDrive, Google Drive; Box after its session commit) or calls `upload_session/finish` at the destination (Dropbox); then settles |
+| B | Verifies the provider holds the full length, then completes the provider session itself (OneDrive deferred commit, Box session commit, Dropbox `upload_session/finish`; Google Drive completes on the final chunk), then settles |
 | C | Verifies coverage from durable receipts and publishes |
 
-Create and replace use the same staging path and differ only in the final move: create fails on an existing
-name, replace moves over the old file. Google Drive has no atomic create, so its connections report
-`atomicCreate:false`. Replacement through staging gives the file a new provider identity on OneDrive, Google
-Drive and Box (provider version history and share links do not carry over); Dropbox `mode: update` with the
-observed `rev` keeps them. On Dropbox the client holds a token that could finish the session itself, so
-server-only publication there is a client contract. Class A clients report no ETags. Per-provider details are in
+Class B sessions are created at the destination with the conflict rule set up front: create fails on an
+existing name, and replace targets the existing provider file with its native revision condition where one
+exists (OneDrive and Box `If-Match`, Dropbox `rev`), keeping the provider's version history. Google Drive has no
+atomic create (`atomicCreate:false`) and no conditional replace. Server-only publication in class B is a client
+contract: a file that appears without a commit is indexed by the sweeper at session expiry. Class A clients
+report no ETags. Per-provider details are in
 [transfer protocol §5](../design/transfer-protocol.md#5-class-b--cloud-drive-sessions).
 
 ```text
@@ -650,7 +649,7 @@ call can have an ambiguous effect; it enters outcome_unknown and blocks conflict
 resolves it.
 
 DELETE upload aborts open sessions atomically (`204`, repeat `204`) and discards provider state:
-`AbortMultipartUpload` for class A, the provider session and staging file for class B (an unfinished Dropbox
+`AbortMultipartUpload` for class A, the provider session for class B (an unfinished Dropbox
 session simply lapses), the staged bytes for class C. It returns `409 commit_in_progress` for committing
 sessions and `409 already_committed` after publication; use operation cancellation for a committing upload.
 Once the final commit call is in flight, cancellation is best effort and never reports a definite abort while
