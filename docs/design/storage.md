@@ -1,25 +1,24 @@
 # Storage and the unified file API
 
-> Native file portability is a mandatory, user-confirmed requirement, 2026-10-30. P0–P6 foundations exist.
+> Native file portability is a mandatory, user-confirmed requirement.
 > Stable ID/direct ID-or-path selection, canonical identity, eligible Local native tree moves and first-phase
 > [change tracking/audit/SSE](file-changes.md) are implemented in the shared branch, 2026-11-04; final integrated
 > verification passed on disposable Postgres/client/built-SPA Chrome fixtures; targeted race checks
-> passed. See [identity](file-identity.md) and the [current plan](storage-implementation-plan.md).
+> passed. See [identity](file-identity.md).
 >
 > **User decision: native files must retain complete folder structure, filenames, and original bytes.**
 > Leaving Everything must not require its database, a manifest interpreter, or a proprietary export tool.
 > This supersedes the anonymous immutable-content layout in the earlier draft. Contracts:
-> [file API](../api/api.md), [storage driver](storage-driver.md). Retired protocol behavior remains in
-> [legacy-api.md](../api/legacy-api.md); [the source audit](storage-implementation-review.md) is historical.
+> [file API](../api/api.md), [storage driver](storage-driver.md), [transfer protocol](transfer-protocol.md).
 
-## 1. Two layers, one public origin
+## 1. Two layers, one control origin
 
 The API layer owns user authentication, authorization, search/indexing, quota, transfer sessions and operation
 coordination. The current delivery targets official COS and self-hosted Local/COS; other storage adapters remain
-optional. Clients use one API origin and no provider SDK, signing secret or broad STS credentials. The official
-EdgeOne upload mode is an explicit exception to the previous prohibition on client-visible provider parameters:
-clients receive a short-lived signed part request under the same origin, containing the required native upload
-parameters but no key material. Public identity is a stable service UUID; its current native location is
+optional. Every control request uses one API origin, and clients receive no provider SDK, signing secret or
+broad credential. Only a direct class moves bytes outside that origin, and only through a single-transfer
+capability: a class-A signed part request binds one exact part, a class-B provider session binds one exact
+upload. Both carry no key material and no authority beyond the transfer they were issued for. Public identity is a stable service UUID; its current native location is
 also directly selectable by path.
 
 All clients use `/api/files`: Web, iOS, Android, CLI and third parties. There is no browser-only file API.
@@ -30,18 +29,21 @@ need no preliminary ID lookup. Metadata includes id/parentId and path/parentPath
 redacted. Native/provider locators remain private; a service ID is never authorization. Destinations use
 `{path}` or `{parent:{id}|{path},name}`. The [API](../api/api.md) lists retained current path shortcuts.
 There is no version path segment. Hosted origin is `https://everythingabout.me`; self-hosted origin
-is the user's domain or LAN endpoint. The official service uses `FILE_UPLOAD_INGRESS=edgeone`: the application
-checks the user, target and quota, then signs an exact COS UploadPart request. The browser sends that request
-to a reserved path on the same public origin. EdgeOne ordinary forwarding removes the fixed route prefix,
-sets the COS bucket Host and forwards the unchanged signed query, required headers and body directly to COS.
-COS authenticates the request and validates its bound Content-MD5. No edge function, separate upload server,
-full-file local assembly or application-server byte relay is involved. Application control endpoints verify
-COS part state, persist receipts and retain sole authority to complete/publish and settle the index.
+is the user's domain or LAN endpoint. Each storage connection declares exactly one
+[transfer class](transfer-protocol.md), and the application checks the user, target and quota before issuing
+any grant. For class A the application signs an exact part request; the browser sends it either to a reserved
+path on the same public origin, where an edge forwards the unchanged signed query, required headers and body
+directly to the provider, or to the provider endpoint under a bucket CORS rule. For class B the application
+creates the provider upload session and the browser writes to it directly. Neither class involves an edge
+function, a separate upload server, full-file local assembly or application-server byte relay. Application
+control endpoints verify provider state, persist receipts and retain sole authority to complete/publish and
+settle the index.
 
-Self-hosting defaults to an embedded receiver in the application process, without a CDN or another service.
-It accepts the same upload-session lifecycle and writes to configured Local or object storage. With COS,
-parts are uploaded during reception; with Local, bytes remain isolated until native publication. Embedded
-clients receive no native handles or signatures. The official signed transport is selected by session metadata;
+A backend that cannot be written to directly is a class-C connection, and reception happens inside the
+application process without a CDN or another service. It accepts the same upload-session lifecycle and writes to
+configured Local or object storage. With an object backend, parts are uploaded during reception; with Local,
+bytes remain isolated until native publication. Relay
+clients receive no native handles or general signatures. A direct class is selected by the connection and recorded on each session;
 clients do not select arbitrary storage providers or upload origins.
 
 ## 2. Native readable layout is a requirement
@@ -212,21 +214,22 @@ committed path merely because its final database result was lost.
 
 Prefer local streaming/range seeks, native rename, server-side copy/reflink, connection reuse, bounded
 buffers/backpressure, native multipart and measured fair scheduling across files and parts. Clients share one
-session/receipt/commit lifecycle with explicit embedded or same-origin signed transport. Provider request details
-remain private except the narrow signed request needed for EO ordinary forwarding.
+session/receipt/commit lifecycle with one declared transfer class. Provider request details remain private
+except the narrow signed request a class-A session issues to the client.
 
-For COS numbered uploads, durable parts must reach native unpublished multipart storage during the upload
-phase. Do not wait until commit to assemble a full local file and send it in a second whole-file PUT. Embedded
-reception streams each part straight to the provider while hashing it, so no payload is retained and the client's
-send rate follows the provider's. Official signed mode keeps file bytes entirely off the
-application and binds a client digest tuple before issuing authority; COS validates Content-MD5 and the app checks
-native size/ETag before a provenance-labeled receipt. Session/native-part metadata live in Postgres, with no
+For numbered uploads, durable parts must reach native unpublished multipart storage during the upload phase.
+Do not wait until commit to assemble a full local file and send it in a second whole-file PUT. A class-C
+receiver streams each part straight to the provider while hashing it, so no payload is retained and the
+client's send rate follows the provider's. A class-A session keeps file bytes entirely off the application and
+binds a client digest tuple before issuing authority; the provider validates the signature and digest, and the
+application checks native size and part state before a provenance-labeled receipt. Session/native-part metadata
+live in Postgres, with no
 extra receiver machine. Commit verifies coverage and current conditions, completes native multipart once and
 settles the index/result; it is not merely a database update or another full-byte transfer.
 
 The browser runs up to eight queue tasks; failed tasks can retain open sessions, so eight is not a hard cap
 on server sessions. Running tasks send numbered parts through one global pool
-of sixteen part requests with no extra per-file cap, respecting each session's maxParallelism and ordering. A
+of sixteen part requests with no extra per-file cap, respecting each session's maxParallelism. A
 freed slot immediately goes to the earliest-started file's next part, so files finish in order and one slow part
 never idles a connection. Transient retries query durable receipts before replaying
 an uncertain part; acknowledged content is immutable and receipt hashes are verified against the retained File
@@ -245,7 +248,7 @@ A new selection can automatically replace an abandoned `open` session without an
 owns the lock; an actual tab conflict fails inline. Missing/failed ownership never permits an unlocked abort.
 This coordinates cooperating same-origin tabs in one browser, not external clients, origins or devices, and
 supplies no server authority. Exact session/Operation checks and publication guards remain authoritative;
-see [P6 ownership and recovery](storage-p6.md#resources-uploads-and-recovery) for the full lifecycle.
+see [transfer protocol](transfer-protocol.md#3-session-lifecycle) for the full lifecycle.
 
 Readable final paths can cost an extra publish copy on S3 or require per-file copies for a folder move. These
 are accepted costs when unavoidable; never optimize them by quietly replacing the native tree with anonymous
@@ -299,8 +302,8 @@ A same-namespace restore still requires reset. See the [root runbook](file-chang
 
 ## 8. Acceptance and implementation
 
-The [implementation plan](storage-implementation-plan.md) maps this contract to verified source gaps,
-dependency-ordered phases and release gates. It does not change runtime behavior.
+This contract is verified by conformance tests plus explicit deployment gates. Neither test suites nor code
+presence attest a production root admission, a live provider configuration or a performance SLA.
 
 Before replacing the current implementation:
 
@@ -313,6 +316,5 @@ Before replacing the current implementation:
 - Test upload receipts/restart/expiry and logical versus physical budget accounting.
 - Keep application metadata backup/restore distinct from ordinary file portability.
 
-The earlier source audit remains useful for COS implementation defects; its recommendations are historical
-and must be interpreted against the current native-tree, identity and first-phase change implementation.
-R0–R5 passed integrated disposable tests; live deployment gates remain separate. This documentation does not move runtime data.
+Integrated disposable tests do not move runtime data, and a passing suite is not evidence that a specific
+deployment is admitted. This documentation does not move runtime data.

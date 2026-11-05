@@ -304,5 +304,5 @@ edits. Native watcher/feed overflow, automatic reconciliation, complete outside-
 retention operation and webhook delivery remain separate work. The implementation preserves current COS ETag,
 EO signed-part, native upload, admitted writer and unknown-outcome limits in the [storage contract](storage.md).
 
-Final integration evidence belongs in the [implementation plan](storage-implementation-plan.md). Code presence
-and disposable tests do not attest a production root admission, live EO/IAM/COS configuration or performance SLA.
+Code presence and disposable tests do not attest a production root admission, live provider IAM/configuration
+or a performance SLA.

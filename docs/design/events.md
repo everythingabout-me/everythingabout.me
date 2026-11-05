@@ -225,7 +225,7 @@ Same table, same read path. **No second-class "app event" citizen**: the only di
 
 ## 6. Write API
 
-The current event routes below follow the [legacy/runtime API](../api/legacy-api.md): Bearer, UTC, and the
+The current event routes below follow the runtime API conventions: Bearer, UTC, and the
 existing response conventions. They are not part of the replacement [file API](../api/api.md), which uses
 stable node IDs, plain JSON/Problem Details, and same-origin content. During implementation, event media
 references and generated instructions must be aligned with that contract; existing path payload examples

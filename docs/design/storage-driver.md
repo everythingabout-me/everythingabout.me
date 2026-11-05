@@ -1,17 +1,15 @@
 # Storage driver contract
 
-> Native-tree contract, 2026-10-30. P1 read-only Local/COS/S3 trees are implemented;
-> mutation/publication interfaces and an opt-in Local create-only writer are implemented in P3.
-> P4 adds admitted Local actions and conservative COS/S3 staged adapters with explicit capability evidence.
-> Limited recorded COS ETag observations do not establish all operation/deployment capabilities; default writes
-> stay disabled without admission. Preserving the readable tree is mandatory. The accepted stable-ID amendment
-> is implemented with canonical parent/name links and direct selectors; disposable integration/browser tests
-> passed and targeted race checks passed.
+> Native-tree contract. Read-only Local/COS/S3 trees, mutation/publication interfaces and an opt-in Local
+> create-only writer exist. Limited recorded COS ETag observations do not establish every operation or
+> deployment capability, so default writes stay disabled without admission. Preserving the readable tree is
+> mandatory. Stable IDs are implemented with canonical parent/name links and direct selectors; disposable
+> integration/browser tests and targeted race checks passed.
 > See [identity](file-identity.md) and [first-phase changes/audit](file-changes.md).
-> Implementation/configuration limits: [P1](storage-p1.md), [P3](storage-p3.md), [P4](storage-p4.md),
-> [object mutation admission](storage-p4-objects.md), [P5 durable ingress](storage-p5.md) and
-> [native multipart/receiver deployment](native-upload-deployment.md). Local parts use durable local staging;
-> admitted COS/S3 parts use unpublished native multipart, independent of small content-PUT policy.
+> Configuration and deployment limits live in [transfer protocol](transfer-protocol.md). Every connection
+> declares exactly one transfer class, which fixes
+> how bytes reach it; local parts use durable local staging and admitted COS/S3 parts use unpublished native
+> multipart, independent of small content-PUT policy.
 >
 > [Architecture](storage.md) requires original names, complete native folder structure and directly usable
 > file bytes. [The file API](../api/api.md) remains same-origin and backend-neutral. This replaces the
@@ -193,8 +191,8 @@ type NameRules struct {
 }
 ```
 
-P4 may add a private `ContentIdentity` to Entry when the admitted driver proves a stable native identity
-independent of pathname. It is native continuity evidence, separate from the public stable service UUID.
+A driver may expose a private `ContentIdentity` on Entry when it proves a stable native identity independent
+of pathname. It is native continuity evidence, separate from the public stable service UUID.
 The service, not the driver, owns the public ID lifecycle and persisted root mapping. Same-owner moves and
 content replacement preserve service IDs; copies/recreation allocate fresh IDs. Evidence-bound application content-generation
 mappings may retain contentRevision across a proven copy/delete move, but must reject a changed native
@@ -293,10 +291,13 @@ guards. Indexed repeatable-read change snapshots freeze metadata, not native sto
 can publish observed external updates, but partial enumeration never authorizes deletion. See
 [file changes](file-changes.md) for observation, audit and first-phase SSE boundaries.
 
-## 3. Staged writes and publication
+## 3. Writes and publication
 
 Receiving bytes separately from the final native path is still valuable. A staged file is temporary, not the
 permanent representation of committed user data. The final successful file must exist at its original path.
+
+Classes A and B never hand bytes to the driver, so their writer plans and then verifies; class C stages bytes
+through the driver. Both end in the same publication state and the same ledger.
 
 ```go
 package storage
@@ -337,7 +338,28 @@ type Inspection struct {
     Evidence []byte
 }
 
-type StagedWriter interface {
+// PlannedWriter is the writer for a direct class. The driver never receives the bytes; it binds
+// geometry, issues the client's transfer plan, and later confirms provider state itself.
+type PlannedWriter interface {
+    PlanWrite(context.Context, WriteIntent, Checkpoint) (TransferPlan, error)
+    InspectWrite(context.Context, WriteIntent, []byte) (Inspection, error)
+    CommitWrite(context.Context, WriteIntent, []byte, Checkpoint) (MutationResult, error)
+    DiscardWrite(context.Context, WriteIntent, []byte) error
+}
+
+// TransferPlan is the class payload handed to the client executor, plus the binding the driver
+// needs to confirm it later. It never contains a secret broader than this one transfer.
+type TransferPlan struct {
+    Class       string // "presigned-parts" | "resumable-session"
+    PartSize    int64  // provider-mandated; the client does not choose
+    MaxParallel int
+    ExpiresAt   time.Time
+    Queryable   bool // whether InspectWrite can ask the provider what it received
+    Payload     []byte // class-specific, opaque to the service
+}
+
+// RelayWriter is the writer for class C. Only this class hands the application the bytes.
+type RelayWriter interface {
     Stage(context.Context, WriteIntent, io.Reader, Checkpoint) (Staged, error)
     Publish(context.Context, Staged, Checkpoint) (MutationResult, error)
     Inspect(context.Context, WriteIntent, []byte) (Inspection, error)
@@ -359,10 +381,16 @@ type EffectRecovery interface {
 }
 ```
 
-Stage writes exact bytes to isolated temporary storage/native state, checks declared size and any accepted
-checksum, and returns only durable complete staging. Checkpoint persists native IDs, intermediate phases and
-receipt/evidence under the intent fence. Stage retries cannot overwrite a different in-flight attempt. Lost
-allocation handles require discoverability/expiry/reconciliation, not an exactly-once allocation claim.
+`PlanWrite` binds size, geometry, target conditions and expiry before the client may write anything, and its
+result is recorded under the intent fence. It never hands the service the bytes and never returns a credential
+wider than the single transfer. `CommitWrite` re-establishes the binding, asks the provider what it actually
+holds, and only then publishes; a client success response is not evidence.
+
+`Stage` (class C only) writes exact bytes to isolated temporary storage/native state, checks declared size and
+any accepted checksum, and returns only durable complete staging. Checkpoint persists native IDs, intermediate
+phases and receipt/evidence under the intent fence. Both writers obey the same rule: a retry under one intent
+cannot overwrite a different in-flight attempt, and lost allocation handles require
+discoverability/expiry/reconciliation rather than an exactly-once allocation claim.
 
 Publish changes the actual readable destination using an admitted no-replace/replace operation. Check the
 captured target conditions and record final native-effect intent before sending it. Local rename or S3 object
@@ -395,52 +423,49 @@ part receipt may keep the reservation or make cleanup retry forever. While the a
 is unknown, retain liability and retry; that is a transport problem, not a user-visible file.
 
 A writable connection must supply EffectRecovery (even when its only safe answer is OutcomeUnknown) and a
-bounded operational plan for discovering/expiring temporary allocations. P3 coordinators additionally require
-`BoundStagedWriter`/`BoundEffectRecovery` construction identity (`StorageBinding`, `StorageNameRules`) and
-reject a mismatched owner/connection/generation/root before native I/O; the identity must come from the
-actual admitted driver, with credentials excluded. Trusted action callbacks must use that same bound executor.
+bounded operational plan for discovering/expiring temporary allocations. Coordinators additionally require
+bound writer construction identity for `PlannedWriter` and `RelayWriter` (`StorageBinding`, `StorageNameRules`)
+together with `BoundEffectRecovery`, and reject a mismatched owner/connection/generation/root before native I/O;
+the identity must come from the actual admitted driver, with credentials excluded. Trusted action callbacks must
+use that same bound executor.
 List/scan content and staging areas
 is an operational requirement, with inventory extensions where useful. Inventory does not itself prove garbage
 is safe to delete: a restored database may be behind real storage, and old native requests may still be active.
 
-## 4. Optional native upload acceleration
+## 4. Transfer classes
 
-Keep the public numbered-part protocol unchanged. Internally a native upload extension may offer
-Begin / Query / WritePart / SealStage / Abort with versioned opaque state and checkpoint updates on every
-state-changing step. SealStage produces a Staged result, not an anonymous committed object. Publication must
-still satisfy §3 and end at the intended readable native path.
+A connection declares exactly one transfer class, and the class fixes how bytes reach it. Class A
+(`presigned-parts`) serves S3-compatible object stores, class B (`resumable-session`) serves cloud drives,
+and class C (`relay`) serves backends the application must write through. [Transfer protocol](transfer-protocol.md)
+owns the class definitions, endpoint shapes, part geometry, signing rules and recovery bounds; a driver only
+supplies the parts the protocol asks for.
 
-Native multipart may stream to the final key while unpublished; native offset providers may upload to a
-sibling temporary file then rename. If the provider cannot separate byte reception from safe final visibility,
-use durable gateway spool or decline the requested write semantics. Public nextPart/concurrency/part geometry
-must fit native alignment/count/ingress limits. ACK only durable bytes and durable service receipts.
+A driver that claims a direct class must provide:
 
-Retain per-part server hashes; don't infer them from opaque native ETags. Different payloads cannot race into
-the same native slot; bind identity before unsafe native writes or isolate/abandon the native upload. Verify a
-chunk before irreversible offset append if native checksum rejection is not atomic. Query half-written offsets
-after ambiguity and keep bounded spool as needed. Credential refresh does not extend native session retention;
-cap public expiry or retain enough data to recreate it. Explicitly fail unrecoverable native session loss.
+- **PlanWrite** — the class payload for one bound intent: every URL and header set the client needs, any
+  credential the provider requires, the provider-mandated part size and the parallelism bound.
+- **InspectWrite** — an authoritative answer for an ambiguous effect: native part listing, session status, or
+  an explicit "cannot be queried" that forces the connection's short expiry bound.
+- **CommitWrite** — provider-side finalization where the class requires it, followed by ordinary settlement.
 
-The official COS delivery uses signed UploadPart requests carried through EdgeOne ordinary forwarding. The
-application binds size, client SHA-256 assertion and Content-MD5 before issuing a short-lived exact request;
-only UploadPart is authorized, never completion, deletion or arbitrary writes. The browser receives an
-origin-relative transfer URL and required headers, with no signing secret or broad temporary credentials.
-COS verifies the signature and Content-MD5; the application independently lists native parts and checks exact
-size and admitted ETag=MD5 semantics before accepting the service receipt. The client SHA-256 remains an
-assertion, not an application-computed checksum. Receipts expose checksumSource accordingly. Do not relabel
-COS ETags as SHA-256 or claim cryptographic verification that the provider did not perform.
+The staged/publish/recovery semantics of §3 are unchanged and are shared by every class. A class changes only
+how bytes arrive; it never changes what a committed file means, when a receipt is durable, or how an uncertain
+final-path effect is fenced. Drivers do not emit speculative success, own public cursor positions or deliver
+notifications.
 
-Self-hosted embedded reception computes SHA-256 while receiving and keeps the existing native multipart or
-Local staging path. Both transports retain the same immutable service-part identity and staged publication
-journal. Signed grants can survive client cancellation/revocation until their actual expiry, and provider
-requests may outlive it; cleanup retains unresolved physical liability and final-path guards as required.
-Complete is still server-controlled and native success is required before index/result settlement. No full
-file is downloaded or assembled at commit. Native allocation and part metadata are owner/root-bound database
-records, while the application's final-publication ledger retains its admitted durability requirements.
+Whole-file bytes are never assembled by the application in classes A and B. When a provider cannot separate
+byte reception from safe final visibility and cannot be written to directly, the connection is class C and the
+ordinary §3 staging rules apply unchanged. A connection may not silently change class: an unavailable direct
+route fails the transfer rather than relaying its bytes.
+
+Receipts state what actually verified. A provider digest, a signature-bound length or a client assertion are
+different evidence and must be labelled separately; never relabel a provider ETag as SHA-256 or claim a
+verification the provider did not perform.
 
 Other provider adapters remain optional future integrations. Do not introduce a universal offset/token
-abstraction merely to anticipate them, or expose broad STS credentials. The user-confirmed same-origin signed
-part transport supersedes earlier blanket no-presigning/no-native-parameter language for official COS only.
+abstraction merely to anticipate them, and never expose a broad credential or an arbitrary upload origin to a
+client. Signed grants can survive client cancellation or revocation until their actual expiry, and provider
+requests may outlive it; cleanup retains unresolved physical liability and final-path guards as required.
 
 ## 5. Backend mappings and conformance
 

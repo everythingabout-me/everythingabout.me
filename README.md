@@ -10,21 +10,22 @@ Next.js.
 Current browser and Bearer upload implementation:
 
 ```
-Official:   client --same-origin signed part PUT--> EdgeOne ordinary forwarding --> COS
-            client --create/authorize/confirm/commit--> application API --> COS control + index
-Self-host:  client --session + part PUT--> embedded application receiver --> Local or native COS/S3
+Class A:    client --signed part PUT--> provider (via same-origin edge relay, or direct)
+            client --create/commit--> application API --> provider control + index
+Class B:    client --session PUT--> cloud drive (direct); client --create/commit--> application API
+Class C:    client --part PUT--> application receiver --> Local or native COS/S3
 ```
 
 Native COS/S3 parts are durable before acknowledgement. Commit seals metadata and completes native publication,
-then settles the index/result; it does not assemble and reupload the entire file. Local uses its embedded durable
-staging. Unknown native effects remain guarded. The browser queue lives only in memory for the current Files
+then settles the index/result; it does not assemble and reupload the entire file. A class-C connection uses its
+own durable staging. Unknown native effects remain guarded. The browser queue lives only in memory for the current Files
 page/document: folder navigation preserves it, while refresh/close discards it without failed-task restoration or
 File reselection. A browser-native beforeunload warning is registered while queued, waiting, uploading or
 finalizing tasks remain.
 Durable server sessions and accepted Operations continue under their existing recovery/expiry rules. Clients
 that retain session identity and source bytes can use the resumable API independently of this browser behavior.
 Parts from up to eight files share one global pool of sixteen concurrent requests; one file may use all sixteen.
-See [native uploads and receiver deployment](docs/design/native-upload-deployment.md) for the exact boundaries.
+See [transfer protocol](docs/design/transfer-protocol.md) for the exact boundaries.
 Object connections need no bucket versioning: revisions use current-object ETags and operation-specific
 conditions. COS ignores PUT If-Match, so admitted replacement rechecks ETag under gateway coordination;
 external writers are not globally fenced. Upload, replacement, folder creation, move, copy and deletion are
@@ -33,11 +34,11 @@ available on admitted roots. Reads are validated but not version-pinned.
 ## Accepted storage architecture
 
 The [architecture](docs/design/storage.md) defines two layers: a unified API consumed by every app,
-and storage drivers for local filesystems, S3/COS, cloud drives, WebDAV, and NAS. Control requests and file
-bytes use one configured origin: `https://everythingabout.me` when hosted, or the operator's domain/LAN
-endpoint when self-hosted. No provider SDK or signing secret reaches clients. Official uploads receive an
-origin-relative short-lived signed COS part request; EO forwards it and COS authenticates it. Native request
-parameters are an explicit approved exception to earlier blanket no-presigning rules.
+and storage drivers for local filesystems, S3/COS, cloud drives, WebDAV, and NAS. Every control request uses
+one configured origin: `https://everythingabout.me` when hosted, or the operator's domain/LAN endpoint when
+self-hosted. Bytes leave that origin only in a direct transfer class, and only through a single-transfer
+capability: class A receives an exact signed part request, class B a provider upload session. No provider SDK
+or signing secret reaches clients.
 
 The [new file API](docs/api/api.md) and [driver contract](docs/design/storage-driver.md) are clean-slate
 specifications with no legacy-client compatibility requirement. The actual storage retains complete native
@@ -64,68 +65,47 @@ ordered facts, immutable indexed snapshots, incremental pull, seven-day SSE subs
 Snapshots are synchronous and bounded to 100,000 entries/64 MiB/25 seconds, with 24-hour lifetime; large/slow
 materialization fails explicitly, without an asynchronous snapshot Operation. SSE is a wakeup; pull checkpoints
 provide recovery. Webhooks and automatic retention scheduling are deferred. Change rows default to 90-day
-expiry; explicit pruning exists but is not automatically scheduled. Final integration evidence is tracked in
-the [implementation plan](docs/design/storage-implementation-plan.md).
+expiry; explicit pruning exists but is not automatically scheduled.
 
 | Unified file contract | Interface / status |
 |---|---|
 | All file clients | `/api/files`: one ID-or-path API for Web, iOS, Android, CLI and third parties |
-| Authentication (P2 active) | Explicit Bearer, or session cookie; Origin + session-bound CSRF required for mutations |
+| Authentication | Explicit Bearer, or session cookie; Origin + session-bound CSRF required for mutations |
 | Metadata and listing (ID/path implemented) | `GET /api/files?path=/...` or `?id=<UUID>`; same selectors for `/list` |
-| Search and principal (P2 active) | `GET /api/files/search`; `/api/files/me`; `/api/files/capabilities` |
+| Search and principal | `GET /api/files/search`; `/api/files/me`; `/api/files/capabilities` |
 | File content (ID/path implemented) | `GET/HEAD /api/files/content?path=/...` or `?id=<UUID>`: same-origin streaming, safe single ranges |
-| Mutations (P4 admitted roots) | Verified baseline and explicit capability evidence; upload/replace/folder/move/copy/delete |
-| Long operations (P4) | `.../operations/{id}` and `/cancel`: durable progress, partial effects, recovery |
+| Mutations (admitted roots) | Verified baseline and explicit capability evidence; upload/replace/folder/move/copy/delete |
+| Long operations | `.../operations/{id}` and `/cancel`: durable progress, partial effects, recovery |
 | Resumable uploads (admitted roots) | POST/GET `.../uploads`; GET/DELETE `.../uploads/{id}`; PUT `.../parts/{number}` (native object parts or durable Local parts); GET `.../parts`; POST `.../commit` (publication + index, no object-body retransmission) |
-| Storage tree (P1/P4/R3) | Native reads and admitted Local writes; eligible folder rename is one native root effect |
+| Storage tree | Native reads and admitted Local writes; eligible folder rename is one native root effect |
 | Incremental state (R4/R5) | Immutable change-snapshots; changes pull with policy-bound opaque checkpoints |
 | Notifications (R5 first phase) | Durable ID/path file/folder subscriptions and bounded SSE availability events |
 | Owner audit (R4) | GET /api/audit with owner cookie; captured file access and effect attribution |
 
 CDN/regional gateways and NAS connectors are internal deployment choices. Private cache hits require
 authorization; uploads need suitable streaming ingress. Self-hosting can run in one process without a CDN.
-See the architecture for performance tradeoffs, the [current implementation plan](docs/design/storage-implementation-plan.md),
-and the [predecessor audit](docs/design/storage-implementation-review.md).
-P0 foundations are available: [boundary decisions, read-only baseline capture and write-admission runbook](docs/design/storage-p0.md)
-and [isolated native capability evidence](docs/design/storage-p0-capabilities.md). They do not activate the replacement file API.
 
-P1 adds [read-only Local/COS/S3 native trees, backend configuration and safe index import](docs/design/storage-p1.md).
-`STORAGE_BACKEND=local` or `s3` starts without COS configuration; native reads/import are available internally and
-through maintenance commands. P2 now adds [authenticated metadata/search and same-origin file bytes](docs/design/storage-p2.md)
-on all three backends. P3 adds [durable journals, guards, quota reservations and native recovery](docs/design/storage-p3.md),
-with additive migrations 016/017. P4 adds [admitted Local native writes and Operations](docs/design/storage-p4.md)
-with migrations 019/020. Writes default off: configure `FILE_COORDINATED_WRITES=true` only for coordinated
-Local writers, validate/import the native index, then run the explicit `eam storage-admit` command with
-`--owner-id UUID --writers-quiesced --evidence /secure/proof.json` for every owner that already holds content.
-The only automatic baseline is the zero one for a brand-new owner whose index, accounting and native root are
-all provably empty; every other missing or mismatched baseline, and every writer revocation, stays
-operator-only. [COS/S3 mutation adapters](docs/design/storage-p4-objects.md)
-use one strategy: current-object ETag revisions with operation-specific native conditions or the documented
-coordinated COS PUT recheck, no bucket versioning required. It needs exact connection probe evidence, a durable single-gateway spool, one-shot
-requests and permanent guards for uncertain remote effects. Object admission requires `--writers-quiesced`
-and explicit `--physical-bytes` with inventory evidence.
-P5 adds [durable numbered-part ingress](docs/design/storage-p5.md) with migration 024, server SHA-256,
-watermarked receipts and restart recovery. The [native upload extension](docs/design/native-upload-deployment.md)
-adds shared native metadata (migration 025), direct unpublished object parts and lightweight native completion.
-Parts are 32 MiB with sixteen concurrent requests per session and at most 10000 parts (320,000 MiB before
-lower backend/budget limits). Embedded native COS/S3 reception streams request bodies to the provider while
-hashing, without retaining a complete part. Displayed upload speed uses a trailing ten-second window. Explicit `multipartUploads`
-connection evidence is required; numbered object uploads no longer inherit the default 32 MiB single-PUT policy.
-The browser sends parts through a global pool of sixteen requests. `FILE_UPLOAD_INGRESS=embedded` keeps reception in
-`eam server`. Official `edgeone` mode signs exact parts and verifies COS state after ordinary EO forwarding;
-no edge function or additional upload server is needed. It requires `signedMultipartParts` evidence in addition
-to native multipart admission. Receipts label client SHA-256 assertions plus COS-verified MD5 distinctly from
-embedded server-computed SHA-256.
-P6 [switches Web/media/generated instructions](docs/design/storage-p6.md) to the same resources and Problems,
-removes browser storage SDKs, and retires legacy file routes with 410. [Old authority drain](docs/design/storage-p6-backend.md)
-is a separate deployment gate; issued grants and in-flight effects were not revoked by this code change.
+Every storage connection declares exactly one [transfer class](docs/design/transfer-protocol.md). Class A
+(`presigned-parts`) covers S3-compatible object stores and returns windows of signed part URLs; class B
+(`resumable-session`) covers cloud drives and returns a provider upload session; class C (`relay`) covers
+backends the application must write through. Classes A and B never carry bytes through the application, for
+reads or writes. Part geometry, read grants and concurrency bounds are advertised per session from connection
+capabilities rather than fixed by the contract; the current default is 32 MiB parts with sixteen concurrent
+requests, and class B geometry comes from the provider. Receipts label client SHA-256 assertions,
+provider-verified digests and server-computed SHA-256 distinctly.
 
-The old `/api/files/{path...}` wildcard has been removed. Use `/api/files/content?path=/...` for downloads.
-Legacy COS file routes return 410; historical behavior remains in the [legacy reference](docs/api/legacy-api.md).
-Server startup requires a stable `APP_SECRET`; production also requires explicit SES credentials.
-See the [P1 upgrade steps](docs/design/storage-p1.md#configuration-and-identity-upgrade) before changing
-storage/database credentials. Configure `FILE_COOKIE_ORIGINS` for cookie mutations and credentialed CORS;
-GET `/api/files/me` bootstraps its session-bound CSRF token. P2 adds no database schema changes.
+Writes stay behind explicit admission. Configure `FILE_COORDINATED_WRITES=true` only for coordinated writers,
+validate and import the native index, then run `eam storage-admit --owner-id UUID --writers-quiesced
+--evidence /secure/proof.json` for every owner that already holds content, with `--physical-bytes` and
+inventory evidence for object connections. The only automatic baseline is the zero one for a brand-new owner
+whose index, accounting and native root are all provably empty; every other missing or mismatched baseline, and
+every writer revocation, stays operator-only. Object connections use current-object ETag revisions with native
+conditions; COS ignores `If-Match`, so replacement rechecks the ETag under a coordinated PUT, and no bucket
+versioning is required. `STORAGE_BACKEND=local` or `s3` starts without COS configuration.
+
+Server startup requires a stable `APP_SECRET`; production also requires explicit SES credentials. Configure
+`FILE_COOKIE_ORIGINS` for cookie mutations and credentialed CORS; GET `/api/files/me` bootstraps its
+session-bound CSRF token.
 
 ## Stack and layout
 
@@ -144,12 +124,13 @@ make build          # build web/dist, then compile bin/eam
 ./bin/eam server    # production: / serves the SPA, /api/* serves the API
 ```
 
-For the official COS deployment set `FILE_UPLOAD_INGRESS=edgeone`. Configure the existing EO site to forward
-only PUT `/api/files/transfer/…` directly to the COS origin after removing the fixed prefix, preserving signed
-query/headers/body and setting the bucket Host. All application control requests stay on `eam server`. No edge
-function or extra upload machine is required. App byte ingress fails closed if EO routing is missing; short
-content PUT is disabled in this mode. See [EO deployment requirements](docs/design/native-upload-deployment.md#edgeone-configuration).
-The previous `external` mode and extra gateway command have been removed.
+A class-A connection has two deployments. With the same-origin edge relay — the default for the official COS
+deployment, `FILE_UPLOAD_INGRESS=edgeone` — the edge forwards only PUT `/api/files/transfer/…` directly to the
+provider after removing the fixed prefix, preserving signed query/headers/body and setting the provider Host;
+application byte ingress fails closed so a missing rule cannot silently consume application bandwidth. Without
+the edge the browser writes to the provider endpoint and the bucket carries the CORS rule described in the
+[transfer protocol](docs/design/transfer-protocol.md#11-deployment). All control requests stay on `eam server`
+in both deployments, and no edge function or extra upload machine is required.
 
 In development the frontend runs on Vite (5173, proxying `/api` to 8080) and the backend runs on Go (8080):
 
@@ -196,7 +177,7 @@ The key sits directly on the path (`drive/<userID>/Photos/2024/a.jpg`), which me
   so nothing downloads on first paint and a single chunk (~191KB gzip) is fetched when you open one, with the per-format renderer loading on top of that; formats without a preview still offer a download
 - Drag / multi-select upload: placeholder rows appear immediately, with a queue, progress, and speed, cancelable, retryable on failure; `/` focuses search. Selecting a file again after refresh/close starts a new upload without extra confirmation for an abandoned open session. An active upload in another cooperating same-origin tab in the same browser produces an inline retryable conflict, with no popup.
 - Folder uploads: drag folders or choose **Upload → Upload folder** to retain the selected root and nested paths. The list shows only immediate children throughout upload; each folder summarizes selected descendant file counts, confirmed files, bytes and percentage. Pending folders are navigable, completed rows lose their progress bars, and folder actions cancel/retry the remaining descendants. Dragged folders also preserve empty directories; the browser folder picker only exposes directories containing files. Existing directories merge, while replacing files requires confirmation.
-- The upload queue and selected Files remain in memory during folder navigation within the current Files page/document. Refresh/close discards the queue; reopening starts empty, without restored failed tasks or File reselection. A browser-native beforeunload warning is registered while queued, waiting, uploading or finalizing tasks remain. Same-page retries retain idempotency keys and verify receipt hashes; cancellation reconciles the same session/Operation. No unload-time abort API is required. The current user's old `eam.uploads.v1:<owner>` localStorage record is removed without executing it; owner-scoped pending delete identities remain independent. Durable backend recovery/expiry and accepted Operations continue unchanged. Apply all forward migrations, including `024_file_uploads.sql`, before starting the new binary. See [P6 client acceptance](docs/design/storage-p6.md) and the separate [authority drain](docs/design/storage-p6-backend.md).
+- The upload queue and selected Files remain in memory during folder navigation within the current Files page/document. Refresh/close discards the queue; reopening starts empty, without restored failed tasks or File reselection. A browser-native beforeunload warning is registered while queued, waiting, uploading or finalizing tasks remain. Same-page retries retain idempotency keys and verify receipt hashes; cancellation reconciles the same session/Operation. No unload-time abort API is required. The current user's old `eam.uploads.v1:<owner>` localStorage record is removed without executing it; owner-scoped pending delete identities remain independent. Durable backend recovery/expiry and accepted Operations continue unchanged. Apply all forward migrations, including `024_file_uploads.sql`, before starting the new binary.
 - Search matches both the filename and the full path, and each result shows its directory on the right
 - New directories use an inline input, and deletion has a confirmation dialog (it is permanent)
 - One shared top bar on every signed-in page: brand, `Home` / `Files` navigation with the current page highlighted, the account chip, and the file page's search and upload actions
@@ -300,12 +281,11 @@ directory with coscli first, then run `reconcile --owner you@example.com`.
 
 ### COS connection admission
 
-Clients use the application origin for all file requests and bytes. Browser bucket CORS and STS issuance
-are no longer part of the file protocol. Keep provider credentials server-side and select the connection's
-explicit [object admission](docs/design/storage-p4-objects.md). It requires proven native ETag and absence
-conditions (no bucket versioning) and coordinated-writer evidence, including the separate
-[legacy-authority drain](docs/design/storage-p6-backend.md). Unsupported image conversions use authorized raw
-content or placeholders.
+Clients use the application origin for every control request; bytes leave it only in a direct transfer class.
+Browser bucket CORS and STS issuance are not part of the file protocol, and provider credentials stay
+server-side. Object admission requires proven native ETag and absence conditions (no bucket versioning) plus
+coordinated-writer evidence, and a class-A connection additionally requires its bucket CORS rule. Unsupported
+image conversions use authorized raw content or placeholders.
 
 ## Loading terabytes of data the first time
 
@@ -342,8 +322,7 @@ first; in the unified API, recursive directory deletion requires explicit `?recu
 ### The public API (for third-party apps / scripts / AI agents)
 
 The unified authenticated file API serves browser and Bearer clients at `/api/files`; see
-[its contract](docs/api/api.md), [P5 limits](docs/design/storage-p5.md), and [P6 cutover](docs/design/storage-p6.md).
-Historical protocols are retained in the [legacy reference](docs/api/legacy-api.md) and return 410.
+[its contract](docs/api/api.md) and the [transfer protocol](docs/design/transfer-protocol.md).
 
 ```bash
 # first issue a token for an app that can only touch Apps/badminton
@@ -370,17 +349,16 @@ existing separate endpoints and envelopes.
 | GET | `/api/files/search?q=&path=&kind=&mediaType=` (or `id=`) | Authorized indexed search below selected folder; scoped opaque cursors |
 | GET | `/api/files/me` · `/api/files/capabilities` | Indexed scope/usage and effective limits (id/path or visible-root default); cookie CSRF bootstrap |
 | GET, HEAD | `/api/files/content?path=` or `?id=` | Same-origin bytes and representation headers; single Range support |
-| PUT | `/api/files/content?path=` or `?id=`; create via parentId/parentPath + name | Small admitted create/conditional replace; disabled with `503 edgeone_route_required` in edgeone mode |
+| PUT | `/api/files/content?path=` or `?id=`; create via parentId/parentPath + name | Small admitted create/conditional replace; disabled with `503 edgeone_route_required` when a class-A connection uses the edge relay |
 | POST | `/api/files` · `/api/files/move` · `/api/files/copy` | Folder destination; move/copy from EntrySelector to Destination; no target merge |
 | DELETE | `/api/files?path=&recursive=true` (or `id=`) | Captured native deletion and ID retirement; explicit recursion for nonempty folders |
 | GET, POST | `/api/files/operations/{id}` · `.../cancel` | Durable state/result and safe cancellation |
 | POST, GET | `/api/files/uploads` | Create with destination or replace target selector; list persistent principal-bound sessions |
 | GET, DELETE | `/api/files/uploads/{id}` | Compact durable status or open-session abort |
-| PUT | `/api/files/uploads/{id}/parts/{number}` | Embedded durable object part or Local chunk; server SHA-256 |
-| POST | `/api/files/uploads/{id}/parts/{number}/authorize` | Bind exact digest/size and issue a five-minute same-origin COS part request (edgeone mode) |
-| PUT | `/api/files/transfer/{encoded-object-key}?…` | EO directly forwards signed bytes to COS; application always refuses this route |
-| POST | `/api/files/uploads/{id}/parts/{number}/confirm` | Verify native COS part size/ETag against bound MD5, persist receipt with checksum provenance |
-| GET | `/api/files/uploads/{id}/parts?limit=&cursor=` | Watermarked durable receipt pages |
+| PUT | `/api/files/uploads/{id}/parts/{number}` | Class C immutable numbered part; server SHA-256 |
+| GET | `/api/files/uploads/{id}/parts?limit=&cursor=` | Class C durable part receipts, watermarked pages |
+| PUT | `/api/files/transfer/{encoded-object-key}?…` | Class A same-origin edge route; the application always refuses it |
+| POST | `/api/files/downloads` | Class-scoped read grant: URL, headers, expiry, representation facts |
 | POST | `/api/files/uploads/{id}/commit` | Frozen-manifest commit; metadata or stable Operation |
 | POST | `/api/files/change-snapshots` | Complete bounded synchronous metadata baseline with committed feed checkpoint |
 | GET, DELETE | `/api/files/change-snapshots/{id}` | Immutable metadata pages or release retained snapshot |
@@ -394,7 +372,8 @@ existing separate endpoints and envelopes.
 | PATCH | `/me` | `{"name"}` names the connection this token belongs to (an app names itself after scanning) |
 | GET | `/s/<code>` | Agent instructions: a save-link code returns the save prompt; a Connect token (`eam_...`) returns that connection's prompt, live |
 
-All clients stream same-origin content or use P5 parts followed by explicit commit. Long work returns
+All clients fetch content through a read grant or same-origin streaming, and upload through a transfer-class
+session followed by explicit commit. Long work returns
 202 + Location below `/api/files/operations/{id}`; polling/cancellation uses that exact identity. Native
 uncertainty never authorizes blind re-upload. Stable service IDs are independent from temporary workflow IDs.
 Current full-path forms are intentionally retained: folder `{kind:"folder",path,parents?}`, move/copy string
@@ -410,7 +389,7 @@ https://your-host/s/abcd2345efgh2345
 ```
 
 The URL itself is the token plus the instructions: `GET` only returns a prompt and accepts no content.
-Generated save and Connect prompts call `/api/files` content or P5 session/part/commit endpoints and
+Generated save and Connect prompts call `/api/files` content or a transfer-class session/commit and
 follow durable Operations. The account page can mint as many save links as needed, show recent use,
 and revoke them at any time; a revoked
 link stops working immediately. The short code has no eam_ prefix and also works directly as a Bearer token
@@ -476,7 +455,7 @@ password sign-in: 30 per 15 minutes per IP, 10 per 15 minutes per email).
 |---|---|
 | `DATABASE_URL` | Postgres connection string |
 | `APP_SECRET` | Stable application secret independent of storage credentials |
-| `STORAGE_BACKEND` | `local`, `cos` or `s3`; configure bound roots per P1 |
+| `STORAGE_BACKEND` | `local`, `cos` or `s3`; configure one bound root per connection |
 | `FILE_COOKIE_ORIGINS` | Explicit allowed cookie mutation origins including port |
 | `FILE_COORDINATED_WRITES` | Default false; enable only after native evidence, legacy drain and root budget admission |
 | `FILE_MAX_SINGLE_PUT_BYTES` | Simple PUT/object publication policy; default 32 MiB, admitted object maximum 5 GiB |
@@ -494,7 +473,7 @@ password sign-in: 30 per 15 minutes per IP, 10 per 15 minutes per email).
 | `ADDR` / `PORT` | Listen address; `:8080` by default (`ADDR` wins) |
 | `WEB_DIR` | Frontend build output directory; when empty it finds the repo's `web/dist` |
 | `USER_QUOTA_BYTES` | Storage limit per account in bytes; 0 or empty means unlimited |
-| `UPLOAD_MULTIPART_THRESHOLD` / `UPLOAD_PART_SIZE` | Retired legacy transfer settings; not P5 geometry or publication limits |
+| `UPLOAD_MULTIPART_THRESHOLD` / `UPLOAD_PART_SIZE` | Retired legacy transfer settings; not session geometry or publication limits |
 | `SES_REGION` | Tencent Cloud SES region, `ap-guangzhou` by default |
 | `SES_FROM_EMAIL_ADDRESS` | A sender address already verified in SES; may include a display name, as in `Everything About Me <noreply@yourdomain.com>` |
 | `SES_TEMPLATE_ID` | Verification code template ID (default / English) |

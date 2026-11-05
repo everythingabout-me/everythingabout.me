@@ -3,14 +3,13 @@
 Working notes for AI agents and new teammates in this repo. The full story is in
 [README.md](README.md); the API design is in [docs/api/api.md](docs/api/api.md) and the event model in
 [docs/design/events.md](docs/design/events.md). The accepted storage/API architecture is in
-[docs/design/storage.md](docs/design/storage.md); read it and [the driver contract](docs/design/storage-driver.md)
-before changing file transfers or storage drivers. The accepted [stable identity contract](docs/design/file-identity.md)
+[docs/design/storage.md](docs/design/storage.md); read it, [the driver contract](docs/design/storage-driver.md)
+and [the transfer protocol](docs/design/transfer-protocol.md) before changing file transfers or storage drivers. The accepted [stable identity contract](docs/design/file-identity.md)
 implements IDs, canonical parent/name paths and direct ID-or-path selection. First-phase
 [changes/audit/snapshots/SSE](docs/design/file-changes.md) is implemented too. Disposable integration/browser
-tests passed; targeted race checks passed. Evidence is recorded in the [implementation plan](docs/design/storage-implementation-plan.md).
-The clean-slate [file API](docs/api/api.md) supersedes old
-route/envelope/path-identity assumptions for replacement work; the retired COS protocol is documented in
-[docs/api/legacy-api.md](docs/api/legacy-api.md). New contracts have no legacy-client compatibility requirement.
+tests passed; targeted race checks passed. The clean-slate [file API](docs/api/api.md) supersedes old
+route/envelope/path-identity assumptions for replacement work.
+New contracts have no legacy-client compatibility requirement.
 The runtime conventions below describe existing code unless the new specifications explicitly replace them.
 This file only covers what you must know before touching anything, and does not repeat the README.
 
@@ -150,7 +149,7 @@ Common commands:
 - Every request goes through `src/api/client.ts` (the single exit), which unwraps the envelope and raises
   `ApiError`; do not call `fetch` directly in a page. File calls use plain resources/Problem Details.
   Browser storage SDKs/STS are retired; integrations use the configured API origin and keep SDKs/credentials
-  server-side. Official signed COS UploadPart requests are the narrow transport exception documented below.
+  server-side. Class A signed part requests are the narrow transfer exception documented below.
 - Styling: global tokens live in `src/styles/globals.css` (warm paper feel + blue accent + automatic
   light/dark via `prefers-color-scheme`); page layouts use `*.module.css`. **No Tailwind, no CSS-in-JS.**
 - i18n: the locale is chosen once at module load from the browser language (zh / en), with no switcher. New
@@ -298,11 +297,11 @@ Variants: `Committed locally main@abc1234, not pushed` / `Not committed (tests f
 
 - Commit `.env`, secrets, `bin/`, `.gocache/`, or `web/dist/` (all gitignored).
 - Never expose signing secrets, broad STS credentials, provider download redirects or arbitrary upload origins.
-  The official COS transport is the user-approved exception to earlier no-presigning/no-provider-parameter rules:
-  the app signs an exact short-lived UploadPart request under the same API origin, EdgeOne ordinary forwarding
-  sends its bytes to COS, COS validates the signature/Content-MD5, and the app verifies native part state before
-  recording a receipt. No edge function or separate upload server is required. Self-hosting retains embedded
-  reception. See `docs/design/storage.md` and `docs/design/native-upload-deployment.md`.
+  Direct transfer is granted only as a class-scoped, single-transfer capability: class A binds one exact part
+  request, class B binds one exact provider upload session, and class C sends bytes to the application. Every
+  grant is short-lived, bound to exact geometry and recorded before it is issued, and the server still verifies
+  provider state before accepting a receipt. No edge function or separate upload server is required.
+  See `docs/design/storage.md` and `docs/design/transfer-protocol.md`.
 - Delete or rewrite an existing migration; only append.
 - Change the 5173 port or the `/api` proxy in `web/vite.config.ts` — COS CORS and the development flow depend
   on it.

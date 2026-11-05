@@ -3,8 +3,7 @@
 > Implemented and verified on disposable Postgres/client/built-SPA Chrome fixtures, 2026-11-04;
 > targeted race checks passed.
 > Canonical parent/name identity, direct ID-or-path selection and eligible Local native tree movement are
-> present. The [API](../api/api.md) defines request forms and the [implementation plan](storage-implementation-plan.md)
-> records remaining evidence. [Change facts, markers, snapshots, audit and SSE](file-changes.md) are implemented
+> present. The [API](../api/api.md) defines request forms. [Change facts, markers, snapshots, audit and SSE](file-changes.md) are implemented
 > as a separate first-phase layer; webhook delivery and asynchronous snapshot construction remain deferred.
 
 ## Identity and location
@@ -123,7 +122,7 @@ visible ID/parent tree can apply one subtree linkage change from the feed; narro
 through an immutable snapshot. These markers do not strengthen native content validators.
 
 Current ETag and upload guarantees remain those of the [driver](storage-driver.md) and
-[native transport](native-upload-deployment.md): no bucket versioning requirement, object reads not version-
+[transfer protocol](transfer-protocol.md): no bucket versioning requirement, object reads not version-
 pinned, operation-specific native conditions, exact signed EO part requests, explicit receipt provenance and
 server-only native completion. Stable IDs do not strengthen native publication conditions.
 
