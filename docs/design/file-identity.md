@@ -123,8 +123,8 @@ through an immutable snapshot. These markers do not strengthen native content va
 
 Current ETag and upload guarantees remain those of the [driver](storage-driver.md) and
 [transfer protocol](transfer-protocol.md): no bucket versioning requirement, object reads not version-
-pinned, operation-specific native conditions, exact signed EO part requests, explicit receipt provenance and
-server-only native completion. Stable IDs do not strengthen native publication conditions.
+pinned, operation-specific native conditions, length-bound class A part URLs, explicit receipt provenance and
+server-only publication in every transfer class. Stable IDs do not strengthen native publication conditions.
 
 ## Backup and acceptance
 

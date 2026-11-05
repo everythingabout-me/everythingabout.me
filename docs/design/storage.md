@@ -16,9 +16,10 @@
 The API layer owns user authentication, authorization, search/indexing, quota, transfer sessions and operation
 coordination. The current delivery targets official COS and self-hosted Local/COS; other storage adapters remain
 optional. Every control request uses one API origin, and clients receive no provider SDK, signing secret or
-broad credential. Only a direct class moves bytes outside that origin, and only through a single-transfer
-capability: a class-A signed part request binds one exact part, a class-B provider session binds one exact
-upload. Both carry no key material and no authority beyond the transfer they were issued for. Public identity is a stable service UUID; its current native location is
+broad infrastructure credential. Each storage connection selects one [transfer class](transfer-protocol.md):
+class A sends bytes between client and object store through presigned part and read URLs, class B between
+client and cloud drive through provider sessions and download links, and class C through the application.
+Public identity is a stable service UUID; its current native location is
 also directly selectable by path.
 
 All clients use `/api/files`: Web, iOS, Android, CLI and third parties. There is no browser-only file API.
@@ -26,25 +27,16 @@ Explicit Bearer authentication takes precedence; invalid Authorization never fal
 Authorization, the session cookie may authenticate, with CSRF validation on mutations. Authorization/file
 services are shared. Existing files/folders accept exactly one ID or path at the same endpoint; path callers
 need no preliminary ID lookup. Metadata includes id/parentId and path/parentPath with concealed parents
-redacted. Native/provider locators remain private; a service ID is never authorization. Destinations use
+redacted. Native/provider locators remain private outside transfer grants; a service ID is never authorization. Destinations use
 `{path}` or `{parent:{id}|{path},name}`. The [API](../api/api.md) lists retained current path shortcuts.
 There is no version path segment. Hosted origin is `https://everythingabout.me`; self-hosted origin
-is the user's domain or LAN endpoint. Each storage connection declares exactly one
-[transfer class](transfer-protocol.md), and the application checks the user, target and quota before issuing
-any grant. For class A the application signs an exact part request; the browser sends it either to a reserved
-path on the same public origin, where an edge forwards the unchanged signed query, required headers and body
-directly to the provider, or to the provider endpoint under a bucket CORS rule. For class B the application
-creates the provider upload session and the browser writes to it directly. Neither class involves an edge
-function, a separate upload server, full-file local assembly or application-server byte relay. Application
-control endpoints verify provider state, persist receipts and retain sole authority to complete/publish and
-settle the index.
-
-A backend that cannot be written to directly is a class-C connection, and reception happens inside the
-application process without a CDN or another service. It accepts the same upload-session lifecycle and writes to
-configured Local or object storage. With an object backend, parts are uploaded during reception; with Local,
-bytes remain isolated until native publication. Relay
-clients receive no native handles or general signatures. A direct class is selected by the connection and recorded on each session;
-clients do not select arbitrary storage providers or upload origins.
+is the user's domain or LAN endpoint. The application checks the user, target and quota before issuing any
+grant. In classes A and B the client moves bytes into unpublished provider state (a native multipart upload,
+a deferred drive session or a staging file) and the application never carries them; only the application's
+commit verifies provider state and publishes at the destination path. In class C the application receives
+parts and writes them to Local staging or unpublished native multipart. No class needs an edge function, a
+separate upload server or full-file local assembly, and a transfer never falls back to another class. Clients
+do not select storage providers or upload origins.
 
 ## 2. Native readable layout is a requirement
 
@@ -100,7 +92,8 @@ before returning a bounded page. Folder metadata revisions use indexed direct-ch
 Successful application mutations settle the native result and index together through the durable journal.
 Content reads, mutation capture/validation and explicit scans still access the native backend. A content read
 is addressed by the native key the index already holds: one native HEAD proves the representation, conditions
-are evaluated, and one ranged GET transfers the bytes. Content delivery never rebuilds the namespace by
+are evaluated, and one ranged GET transfers the bytes; in classes A and B the same index lookup produces a
+read grant and the client fetches the bytes from the provider itself. Content delivery never rebuilds the namespace by
 listing ancestors; when the index cannot name the file, native path resolution is the fallback and the index
 is repaired by reconcile, not by the request. External edits
 are visible after index synchronization; metadata can temporarily describe a file whose native content has
@@ -214,26 +207,23 @@ committed path merely because its final database result was lost.
 
 Prefer local streaming/range seeks, native rename, server-side copy/reflink, connection reuse, bounded
 buffers/backpressure, native multipart and measured fair scheduling across files and parts. Clients share one
-session/receipt/commit lifecycle with one declared transfer class. Provider request details remain private
-except the narrow signed request a class-A session issues to the client.
+session/commit lifecycle; the connection's transfer class decides only how bytes travel.
 
-For numbered uploads, durable parts must reach native unpublished multipart storage during the upload phase.
-Do not wait until commit to assemble a full local file and send it in a second whole-file PUT. A class-C
-receiver streams each part straight to the provider while hashing it, so no payload is retained and the
-client's send rate follows the provider's. A class-A session keeps file bytes entirely off the application and
-binds a client digest tuple before issuing authority; the provider validates the signature and digest, and the
-application checks native size and part state before a provenance-labeled receipt. Session/native-part metadata
-live in Postgres, with no
-extra receiver machine. Commit verifies coverage and current conditions, completes native multipart once and
-settles the index/result; it is not merely a database update or another full-byte transfer.
+Parts must reach unpublished native storage during the upload phase. Do not wait until commit to assemble a
+full local file and send it in a second whole-file PUT. A class-C receiver streams each part straight to the
+provider while hashing it, so no payload is retained and the client's send rate follows the provider's. A
+class-A session signs part URLs in windows, binding exact length but no content digest, so the client never
+hashes before sending; a class-B session hands the client one provider session. Session metadata lives in
+Postgres, with no extra receiver machine. Commit verifies provider state and current conditions, completes
+the native upload or provider commit once and settles the index/result; it is not merely a database update or
+another full-byte transfer.
 
 The browser runs up to eight queue tasks; failed tasks can retain open sessions, so eight is not a hard cap
 on server sessions. Running tasks send numbered parts through one global pool
 of sixteen part requests with no extra per-file cap, respecting each session's maxParallelism. A
 freed slot immediately goes to the earliest-started file's next part, so files finish in order and one slow part
-never idles a connection. Transient retries query durable receipts before replaying
-an uncertain part; acknowledged content is immutable and receipt hashes are verified against the retained File
-before reuse. The browser queue exists only in memory for the current Files page/document and survives folder
+never idles a connection. After an uncertain part request the client asks the session what the provider or
+relay holds before resending; class C receipt hashes are verified against the retained File before reuse. The browser queue exists only in memory for the current Files page/document and survives folder
 navigation. Refresh/close discards it without restoring failed tasks or requesting File reselection. Register the
 browser-native beforeunload warning while queued, waiting, uploading or finalizing tasks remain; do not rely on
 unload-time abort requests. Same-page retry, idempotency and cancellation retain their exact session/Operation
@@ -248,7 +238,7 @@ A new selection can automatically replace an abandoned `open` session without an
 owns the lock; an actual tab conflict fails inline. Missing/failed ownership never permits an unlocked abort.
 This coordinates cooperating same-origin tabs in one browser, not external clients, origins or devices, and
 supplies no server authority. Exact session/Operation checks and publication guards remain authoritative;
-see [transfer protocol](transfer-protocol.md#3-session-lifecycle) for the full lifecycle.
+see [transfer protocol](transfer-protocol.md#3-upload-lifecycle) for the full lifecycle.
 
 Readable final paths can cost an extra publish copy on S3 or require per-file copies for a folder move. These
 are accepted costs when unavoidable; never optimize them by quietly replacing the native tree with anonymous
@@ -256,9 +246,10 @@ objects. Benchmark staging-to-final copy, request overhead, gateway bandwidth, r
 at large scale. Local/S3 implementations should be validated first, while WebDAV/drive constraints remain
 explicit in the driver contract.
 
-Private CDN delivery requires authorization and revision-safe internal caching; otherwise bypass shared
-cache. Ordinary CDN service does not automatically accelerate large uploads. All optimization stays behind
-the configured origin. Active same-origin content still needs safe MIME/disposition and preview isolation.
+Class A and B reads come straight from the provider through renewable grants; class A rounds grant expiry to
+fixed windows so repeated grants stay browser-cacheable. Application-served bytes (class C content, thumbnails
+and converted previews) use private caching only with authorization and revision-safe keys; otherwise bypass
+shared cache. Active same-origin content still needs safe MIME/disposition and preview isolation.
 
 ## 7. Changes, snapshots and audit
 

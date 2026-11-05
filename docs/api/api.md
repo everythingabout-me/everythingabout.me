@@ -9,6 +9,8 @@
 > Reads, namespace mutations, resumable uploads and all media bytes use this contract. Writes stay behind
 > explicit admission: a verified root baseline and exact-connection native probe evidence are required, object
 > connections need a durable single-gateway spool, and thumbnails remain an authenticated 501 placeholder.
+> The transfer-class parts of §3, §5 and §7 (`/downloads`, `/uploads/{id}/parts/sign` and the class payloads)
+> are the target defined in [transfer-protocol.md](../design/transfer-protocol.md) and are not yet implemented.
 >
 > This file API replaces all earlier route, envelope, identity and upload decisions; no legacy client or
 > compatibility adapter is supported. Account login, Connect and event authoring remain separate APIs.
@@ -25,21 +27,17 @@
 
 Every metadata and control request uses the configured origin: hosted `https://everythingabout.me`,
 self-hosted the operator's domain or LAN endpoint. Signing secrets, broad temporary credentials and storage
-SDKs never reach clients. Bytes use that origin in class C and in a class-A edge relay; a direct class sends
-bytes to the provider through a single-transfer capability that carries no key material. Direct transfer is scoped to a storage connection, not to a deployment. Each connection declares exactly
-one transfer class and every session advertises it: class A (`presigned-parts`) for S3-compatible object
-stores, class B (`resumable-session`) for cloud drives, and class C (`relay`) for backends the application
-must write through. The class payload is opaque outside the client's transfer executor, and no deployment
-switch moves an existing connection between classes. [Transfer protocol](../design/transfer-protocol.md)
-defines the classes, their geometry and their recovery rules.
+SDKs never reach clients. Each storage connection selects one transfer class, and every upload session and
+read grant advertises it: class A (`presigned-parts`) sends bytes between the client and an object store
+through presigned requests, class B (`resumable-session`) between the client and a cloud drive through a
+provider session or download link, and class C (`relay`) through this origin. Classes A and B never carry file
+bytes through the application, and a transfer never falls back to another class. The class payload is opaque
+outside the client's transfer executor. [Transfer protocol](../design/transfer-protocol.md) defines the classes,
+their geometry, provider rules, recovery and deployment requirements.
 
-Class A supports two deployments. In the default same-origin edge relay the browser PUTs to an
-application-relative path and the edge forwards the request to the provider after removing the transfer
-prefix and setting the provider Host; the application refuses transfer traffic and ordinary byte PUTs before
-reading their bodies (`503 edgeone_route_required`), so a missing edge rule cannot silently consume
-application bandwidth. In the direct deployment the browser writes to the provider endpoint and the bucket
-carries the CORS rule described in the transfer protocol document. Uploads are uncached and no transfer path
-may redirect or fall back to application ingress.
+Class A uploads may optionally use a same-origin edge relay under `B/transfer/`; the application refuses that
+path before reading a body (`503 edgeone_route_required`), so a missing edge rule fails instead of consuming
+application bandwidth. Uploads are uncached and no byte path may redirect.
 
 **One base, `/api/files`, serves Web, iOS, Android, CLIs and third-party clients.** There is no separate
 browser route or separate ID-only resource family. ID and path select the same resources. All returned
@@ -232,14 +230,16 @@ All suffixes are below `B`:
 | POST | `/copy` | `{from:EntrySelector,to:Destination,ifSourceRevision}`; retained string path shortcuts |
 | DELETE | `?path=/Photos/a.jpg&recursive=true` or `id=f7ca1104-12f0-4bbf-8c77-41d341f7d120` in place of path | Native deletion; explicit recursion for nonempty folders |
 | GET | `/thumbnail?path=/Photos/a.jpg&width=&format=` or `id=f7ca1104-12f0-4bbf-8c77-41d341f7d120` in place of path | Authorized representation; current route remains 501 |
-| POST | `/downloads` | Issue a class-scoped read grant: URL, headers, expiry, representation facts |
+| POST | `/downloads` | Batch of read grants: URL or bearer, expiry, representation facts |
 | POST, GET | `/uploads` | Create/list this principal's resumable sessions |
 | GET | `/uploads/{uploadId}` | Compact state/progress and target path |
+| POST | `/uploads/{uploadId}/parts/sign` | Class A: sign a batch of part URLs (next window or renewal) |
 | PUT | `/uploads/{uploadId}/parts/{number}` | Class C immutable numbered part |
-| GET | `/uploads/{uploadId}/parts?limit=&cursor=` | Class C durable part receipts, ACK-order pages with a fixed watermark |
-| PUT | `/transfer/{encoded-object-key}?…` | Class A same-origin edge route; not handled by application |
-| POST | `/uploads/{uploadId}/commit` | Complete at the bound target path |
-| DELETE | `/uploads/{uploadId}` | Abort temporary upload |
+| GET | `/uploads/{uploadId}/parts?limit=&cursor=` | Class A provider part listing; class C durable receipts with a fixed watermark |
+| PUT | `/transfer/{encoded-object-key}?…` | Class A optional same-origin edge route; refused by the application |
+| GET | `/sw/…` | Service Worker path for bearer read grants; the application answers 503 |
+| POST | `/uploads/{uploadId}/commit` | Server verifies provider state and publishes at the bound target |
+| DELETE | `/uploads/{uploadId}` | Abort and discard provider state |
 | GET | `/operations/{operationId}` | Durable workflow state/result |
 | POST | `/operations/{operationId}/cancel` | Request stopping further safe steps |
 | POST | `/change-snapshots` | Synchronously capture a bounded immutable indexed baseline and checkpoint |
@@ -343,34 +343,51 @@ identified open upload session when the conflict is a resumable upload of the sa
 
 ## 5. Downloads and safe media
 
-A read costs one control round trip. `POST B/downloads` returns a class-scoped grant and the client fetches
-bytes itself:
+`POST B/downloads` takes up to 100 EntrySelectors and returns one grant per item; the client fetches bytes
+itself and does all range parallelism and retry:
+
+```http
+POST B/downloads
+Content-Type: application/json
+
+{"items":[{"id":"f7ca1104-12f0-4bbf-8c77-41d341f7d120"}],"disposition":"inline"}
+```
 
 ```json
 {
-  "class":"A",
-  "url":"https://...",
-  "headers":{},
-  "expiresAt":"2026-11-05T04:10:00Z",
-  "size":18234122311,
-  "contentType":"video/mp4",
-  "acceptRanges":true,
-  "etag":"\"...\"",
-  "conditions":["if-match","if-none-match","if-range"]
+  "items":[{
+    "id":"f7ca1104-12f0-4bbf-8c77-41d341f7d120",
+    "kind":"url",
+    "url":"https://...",
+    "headers":{},
+    "expiresAt":"2026-11-05T05:00:00Z",
+    "size":18234122311,
+    "contentType":"video/mp4",
+    "acceptRanges":true,
+    "etag":"\"...\"",
+    "conditions":["if-range"]
+  }]
 }
 ```
 
-Class A returns one presigned `GET` URL and accepts any `Range`, so the client does all range parallelism and
-retry itself. Class B returns the provider's short-lived download URL or a token-scoped media URL. Class C, and
-any client that cannot use a grant, uses `GET B/content` below. A grant is `no-store`, never carries a broad
-credential, and is never embedded in a document or shared link.
+`kind` is `url` (self-authenticating: class A presigned GET, OneDrive, Dropbox, Box, or class C `B/content`) or
+`bearer` (Google Drive: send `headers` with the request). Web media elements consume bearer grants through the
+Service Worker path `B/sw/…`, which the application itself answers only with `503 service_worker_required`.
+On 403 or after `expiresAt` the client requests a new grant and resumes from the bytes it has. Class A rounds
+`expiresAt` to a fixed window so repeated grants return the identical, cacheable URL. Grants are `no-store`.
+A bearer grant is issued only to a principal whose scope covers the token's reach; otherwise
+`403 transfer_scope_exceeded`. Per-item failures are returned as Problem objects in the item position.
 
-`conditions` lists only what the effective route enforces natively. A class that cannot enforce `If-Range`
-must not advertise it; the client then revalidates through the service rather than assuming it can detect a
-changed representation mid-transfer. The same rule governs ETag claims: `etag` is present only when the native
-route proves the §2 version guarantee.
+`conditions` lists only what the effective route enforces natively; without `if-range` the client revalidates
+through the service before resuming. `etag` is present only when the route proves the §2 version guarantee.
+Direct URLs are served from the provider's domain; class A forces `attachment` except for the safe inline media
+allowlist. See [transfer protocol §8](../design/transfer-protocol.md#8-reading) for each provider's source.
 
-### Class C and fallback delivery
+### Class C content delivery
+
+`GET B/content` streams bytes only on class C connections. On class A and B connections it returns
+`409 grant_required` without a body, and clients use `POST B/downloads`; `HEAD` still returns representation
+headers on every class.
 
 GET by ID or path returns `200` bytes, HEAD returns matching representation headers without a body. Root or
 folder content returns `409 not_a_file`. Content responses include Content-Type, correct length,
@@ -453,6 +470,9 @@ An optional Idempotency-Key plus Content-Digest makes an ambiguous small PUT ret
 metadata request; absent a digest, use GET/HEAD to resolve uncertain success rather than blindly overwriting.
 A retry body is still consumed/validated before claiming it matches a stored result. Large writes use sessions.
 
+Simple PUT is a class C route. On class A and B connections `maxSinglePutBytes` is 0 and `PUT B/content`
+returns `409 session_required` before reading the body; every write, however small, uses an upload session.
+
 ## 7. Upload sessions and transfer classes
 
 Clients use one session lifecycle — create, status, commit — and each session advertises exactly one
@@ -462,9 +482,9 @@ and their recovery rules; this section defines their API representation.
 
 Geometry is not a contract constant. `partSize`, `partCount` and `maxParallelism` are advertised per session
 from the connection's capabilities, and a client follows them exactly. Classes A and C use a server-chosen
-uniform part size with a short final part; class B uses the provider's bounds (256 KiB multiples on Google
-Drive, 320 KiB multiples up to 60 MiB on OneDrive, provider bounds on Dropbox and Box). No client negotiates
-or second-guesses them.
+uniform part size with a short final part; class B uses the provider's rules (non-final chunks in 256 KiB
+multiples on Google Drive and 320 KiB multiples on OneDrive, Box's own part size). See
+[transfer protocol §7](../design/transfer-protocol.md#7-geometry).
 
 Session lists use opaque UUID keysets. Same-path sessions are rejected while an older guard is active; the
 server does not cancel it on create. Commit returns a stable Operation until index/result settlement.
@@ -517,92 +537,95 @@ Example response (numbers are illustrative, not universal defaults):
   "maxParallelism":16,
   "receivedParts":0,
   "receivedBytes":0,
-  "expiresAt":"2026-10-31T04:00:00Z",
+  "expiresAt":"2026-11-06T04:00:00Z",
   "commitUrl":"/api/files/uploads/u_.../commit",
   "transport":{
     "kind":"presigned-parts",
-    "uploadId":"<native multipart id>",
-    "parts":[{"number":1,"size":33554432,"url":"https://...","headers":{"Content-MD5":"..."}}],
-    "partCount":544
+    "parts":[{"number":1,"size":33554432,"url":"https://...","expiresAt":"2026-11-05T05:00:00Z"}],
+    "signUrl":"/api/files/uploads/u_.../parts/sign"
   }
 }
 ```
 
-`transport` is opaque to every component except the client's transfer executor; no server-side rule branches
-on `class`. The class payload is the only field that differs between classes.
-
-Part numbers start at 1; offset is `(number-1)*partSize`; all but the final part have exactly `partSize`
-bytes. `partCount=ceil(size/partSize)`; a zero-byte session has zero parts and can commit immediately. GET
-session returns compact authoritative counters, not an unbounded part array. GET uploads lists accessible
-sessions with normal pagination for clients retaining session/source state or performing authorized recovery.
-This API capability does not restore the browser upload queue after reload.
+`transport` is opaque to every component except the client's transfer executor and is the only field that
+differs between classes. Part numbers start at 1; offset is `(number-1)*partSize`; all but the final part have
+exactly `partSize` bytes. `partCount=ceil(size/partSize)`; a zero-byte session has zero parts and can commit
+immediately. GET session returns compact authoritative counters; for class A and B the server derives them
+from the provider state. GET uploads lists accessible sessions with normal pagination for clients retaining
+session/source state or performing authorized recovery. This does not restore the browser queue after reload.
 
 ### Class payloads
 
 ```json
-{"kind":"presigned-parts","uploadId":"...","parts":[...],"partsUrl":"..."}
+{"kind":"presigned-parts","parts":[{"number":1,"size":33554432,"url":"https://...","expiresAt":"..."}],
+ "signUrl":"/api/files/uploads/u_.../parts/sign"}
 {"kind":"resumable-session","url":"https://...","chunkSize":10485760,"maxParallelism":1,
- "completion":"implicit","credential":{"scheme":"bearer","value":"...","expiresAt":"..."}}
-{"kind":"relay","url":"/api/files/uploads/u_.../parts","partSize":33554432,"maxParallelism":16}
+ "credential":{"scheme":"bearer","value":"...","expiresAt":"..."}}
+{"kind":"relay","url":"/api/files/uploads/u_.../parts"}
 ```
 
-`credential` appears only when the provider cannot be written to without one. `completion` is `implicit`
-when the final chunk completes the object and `explicit` when the provider requires separate start/finish
-calls. `parts` carries every signed part URL at open time; the request already declares `size`, so the part
-count is known before the first byte. There is no paging endpoint and no second grant flow.
+**Class A.** `parts` is the first window of signed URLs. Each URL binds PUT, object key, native upload, part
+number and exact length, and no content digest. Request more with
+`POST B/uploads/{id}/parts/sign {"numbers":[...]}` when fewer than a quarter of unsent URLs remain, and re-sign
+any part whose URL expired or returned 403; a re-signed number keeps its bound length. A client may add an
+unsigned `Content-MD5` header as a transmission check.
 
-All three classes hash parts locally. The local digest is bound into a class-A signature and is a client
-assertion everywhere else; it never requires a whole-file pass before upload. Whole-file checksum input
-remains unsupported as a precondition for a direct transfer.
+**Class B.** `url` is the provider session the server created; `credential` appears only for providers whose
+write endpoint is not self-authenticating (Dropbox, Box), and only for principals whose scope covers the
+credential's reach (otherwise `403 transfer_scope_exceeded`). Box clients also send per-part SHA-1 digests and
+report the whole-file SHA-1 with commit, computed incrementally alongside the upload.
+
+**Class C.** `url` receives numbered parts at this origin.
+
+No class requires reading the whole file before the first byte.
 
 ### Writing parts
 
-**A** issues parallel `PUT`s to the window's URLs and requests the next window when fewer than a quarter
-remain. **B** issues sequential `PUT`s to the single session URL with `Content-Range` or the provider's
-cursor equivalent; `308 Resume Incomplete` means the chunk was accepted and `416` means the range was already
-received. **C** issues parallel `PUT`s to the application, which streams them to the driver.
+**A** issues parallel PUTs to the signed URLs with no per-part acknowledgement to the application; until commit
+the session holder may resend a part, and commit freezes what the provider lists. **B** sends ordered chunks
+to the session URL with `Content-Range` or the provider's offset; `308 Resume Incomplete` means the chunk was
+accepted. **C** issues parallel PUTs to the application, which streams them to the driver.
 
-A class-A part slot is immutable once the provider holds it; a second grant for the same number with a
-different digest returns `409 part_conflict` and cannot retarget bytes. Class C uses relay
-acknowledgement rules: `Content-Digest` is optional, the service always computes SHA-256 while receiving,
-an identical replay returns the existing receipt (derived from the request), a different body returns
-`409 part_conflict`, and the receipt is durable before the slot lock is released. Status counters count
-unique acknowledged parts only; complete coverage is checked server-side and never relies on the client's
-receipt list.
+Class C acknowledgement: `Content-Digest` is optional, the service always computes SHA-256 while receiving, an
+identical replay returns the existing receipt, a different body for an acknowledged part returns
+`409 part_conflict`, and the receipt is durable before the slot lock is released. `GET B/uploads/{id}/parts`
+returns class C receipts in acknowledgement order with a fixed watermark, and for class A the provider's own
+part listing (number, size, provider ETag). Class B progress is the provider offset in GET session.
 
 The browser runs up to eight queue tasks sharing one global pool of sixteen byte requests, limited by
 `session.maxParallelism`. A freed slot goes to the earliest-started file's next part. Transient part failures
 have bounded backoff; a `429 rate_limited` answer means every receive slot is busy, so the part waits and
-retries without spending a failed attempt. Before replaying an uncertain request, query the session and
-verify its durable receipt against the retained File before skipping bytes. The browser queue lives only in
-memory for the current Files page/document and survives folder navigation; refresh/close discards it.
+retries without spending a failed attempt. After an uncertain request, the client asks the session (or part
+listing) what is held before resending. The browser queue lives only in memory for the current Files
+page/document and survives folder navigation; refresh/close discards it.
 
 The browser removes the current owner's old `eam.uploads.v1:<owner>` localStorage record without restoring or
 executing it. Discarding browser tasks does not abort or fail durable server sessions: open sessions retain
 their normal expiry/cleanup, and accepted work continues under the existing recovery contract.
 
 Browser tasks acquire ephemeral ownership for the owner and normalized target path before the first upload
-allocation, using ephemeral same-origin Web Locks scoped to the owner and normalized target path.
-A conflicting tab produces a retryable inline error without aborting the holder's session. After ownership is
-acquired, a new selection whose creation returns `operation_in_progress` inspects only the identified blocking
-session and aborts it only if it is still `open`. This flow never automatically aborts `committing`,
-`outcome_unknown` or `committed` work, and it neither supplies server authority nor proves inactivity of other
-clients, origins or devices.
+allocation, using same-origin Web Locks. A conflicting tab produces a retryable inline error without aborting the
+holder's session. After ownership is acquired, a new selection whose creation returns `operation_in_progress`
+inspects only the identified blocking session and aborts it only if it is still `open`. This flow never
+automatically aborts `committing`, `outcome_unknown` or `committed` work, and it neither supplies server
+authority nor proves inactivity of other clients, origins or devices.
 
 ### Commit
 
-Commit is server-controlled in every class; a client announces completion but never asserts it.
+Only the server publishes. Until commit, uploaded bytes are unpublished provider state and nothing is visible
+at the destination.
 
 | Class | Commit behaviour |
 |---|---|
-| A | Lists native parts, verifies exact count and length against the bound geometry, performs native completion once, then settles index/quota |
-| B | Re-reads the provider object by bound identity, verifies length and any provider digest, then settles |
-| C | Verifies the retained received bytes and publishes |
+| A | Lists native parts, verifies every number with its exact bound length, performs `CompleteMultipartUpload` once at the final key, then settles index/quota |
+| B | Verifies the provider session holds the full length, then performs the provider commit itself: OneDrive deferred-commit `POST`, Google Drive rename/move out of the staging folder, Dropbox `upload_session/finish`, Box session commit; then settles |
+| C | Verifies coverage from durable receipts and publishes |
 
-Class A does not require the client to report part ETags: the server lists them itself. That removes any need
-to expose `ETag` through CORS and keeps confirmation authority server-side. Class B's provider may already
-have finalized the object on the final write; commit then only verifies and settles, and repeating it returns
-the same result.
+The class-B commit carries the bound conflict rule: create fails on an existing name, and replacement uses the
+provider's native revision condition where one exists (Dropbox `rev`, Box ETag, OneDrive `If-Match` when
+proven); Google Drive replacement relies on the application guard. Class A clients report no ETags; if they
+supplied per-part MD5 values and the connection's ETag-equals-MD5 behaviour is admitted, the server compares
+them and labels that evidence separately from the provider-listed length.
 
 ```text
 open ──commit──> committing ──confirmed native effect + index settlement──> committed
@@ -613,40 +636,31 @@ open ──commit──> committing ──confirmed native effect + index settle
   └──timeout──> expired
 ```
 
-Commit atomically verifies exact part coverage, freezes the manifest, and transitions to committing;
-incomplete coverage returns `409 upload_incomplete` and stays open. From then on reject new part writes. It
-returns file metadata with `200` if settled, or `202 + Operation + Location + Retry-After` otherwise.
-Repeated commit returns the same settled result or operation identity. Retry only safe native steps;
-ambiguous final effects enter outcome_unknown and block conflicting mutations until resolved. Neither an
-application revision nor a final-path HEAD alone proves that older remote requests cannot still arrive.
+Commit atomically verifies exact coverage, freezes the manifest, and transitions to committing; incomplete
+coverage returns `409 upload_incomplete` and stays open. From then on the server signs no new parts and rejects
+relayed ones. It returns file metadata with `200` if settled, or `202 + Operation + Location + Retry-After`
+otherwise. Repeated commit returns the same settled result or operation identity. Only the server's own commit
+call can have an ambiguous effect; it enters outcome_unknown and blocks conflicting mutations until reconcile
+resolves it.
 
-DELETE upload aborts open sessions atomically (`204`, repeat `204`). It returns `409 commit_in_progress` for
-committing sessions and `409 already_committed` after publication; use operation cancellation for a committing
-upload. Before final native publication starts, cancellation can fence temporary writes. Once a final-path
-effect is in flight, cancellation is best effort. Never report a definite abort while the native write could
-still succeed. Temporary bytes finishing after an open abort acquire no receipt and cannot begin publication.
-Failed/aborted/expired session IDs remain tombstones for a retention window and are never reused; their
-content writes and commits return `410`.
+DELETE upload aborts open sessions atomically (`204`, repeat `204`) and discards provider state:
+`AbortMultipartUpload` for class A, the provider session or staging file for class B (an unfinished Dropbox
+session simply lapses), the staged bytes for class C. It returns `409 commit_in_progress` for committing
+sessions and `409 already_committed` after publication; use operation cancellation for a committing upload.
+Once the final commit call is in flight, cancellation is best effort and never reports a definite abort while
+the commit could still succeed. Failed/aborted/expired session IDs remain tombstones for a retention window and
+are never reused; their writes, signing and commits return `410`.
 
-### Expiry and queryability
+### Expiry
 
-The **idle** interval, never the total lifetime, is what queryability bounds. A queryable connection (class A,
-class C, and class B on OneDrive) resolves an ambiguous write by asking the provider. A connection that cannot be
-queried (class B on Google Drive and Dropbox) resolves it by waiting instead, because **idle expiry is the only
-event that proves a delayed request cannot arrive**.
-
-Prefer generous idle values. Holding a guard longer is safe — it delays reuse of that path and nothing else —
-while releasing it early would accept a write that may still land. Never size idle expiry below a normal
-transfer's gap between parts. Total lifetime is likewise long and extended by accepted progress; a large upload
-legitimately runs for hours on either kind of connection.
-
-Default idle expiry is 24 hours, extended only by accepted durable progress, with a hard seven-day maximum;
-capabilities may advertise different policy. Expiry applies only to open sessions. Committing work
-has worker leases/recovery rather than expiring because a request or token timed out. An expired provider
-credential is renewed internally; an unrecoverably lost native session fails explicitly rather than
-pretending bytes survived. Keep terminal results and idempotency records at least 24 hours after termination,
-and advertise exact retention. Revocation prevents new client actions; queued work rechecks authorization
-before publishing.
+Open sessions expire after 24 hours without activity (sign requests, status queries and relayed parts count),
+with a hard seven-day maximum, capped by the provider session's own lifetime; capabilities advertise the
+effective values. Expiry discards provider state exactly as abort does. Committing work has worker
+leases/recovery rather than expiring because a request or token timed out. An expired provider credential is
+renewed internally; an unrecoverably lost provider session fails explicitly rather than pretending bytes
+survived. Keep terminal results and idempotency records at least 24 hours after termination, and advertise
+exact retention. Revocation prevents new client actions, including signing; already issued URLs stay valid
+until their expiry and still cannot publish. Queued work rechecks authorization before publishing.
 
 ## 8. Operations, concurrency, and quota
 
@@ -744,9 +758,9 @@ application journal changes/reservations, not exact quota state across unsynchro
 |---|---|
 | 400 | invalid_request, invalid_path, invalid_selector, invalid_cursor |
 | 401 | unauthenticated |
-| 403 | forbidden (known visible resource, insufficient action permission) |
+| 403 | forbidden (known visible resource, insufficient action permission), transfer_scope_exceeded |
 | 404 | not_found (also outside visible scope) |
-| 409 | name_conflict, cursor_stale, upload_incomplete, part_conflict, baseline_required, watch_deleted, watch_access_lost, snapshot_limit, subscription_limit |
+| 409 | name_conflict, cursor_stale, upload_incomplete, part_conflict, grant_required, session_required, baseline_required, watch_deleted, watch_access_lost, snapshot_limit, subscription_limit |
 | 410 | upload_expired, upload_aborted, result_expired, cursor_expired, snapshot_expired, reset_required |
 | 411 | length_required |
 | 412 | precondition_failed, target_changed |
@@ -755,7 +769,7 @@ application journal changes/reservations, not exact quota state across unsynchro
 | 416 | range_not_satisfiable |
 | 428 | precondition_required |
 | 429 | rate_limited (Retry-After) |
-| 502 / 503 / 504 | storage_failure / temporarily_unavailable, snapshot_too_large, snapshot_incomplete, audit_unavailable, change_root_reset_required / storage_timeout |
+| 502 / 503 / 504 | storage_failure / temporarily_unavailable, edgeone_route_required, service_worker_required, snapshot_too_large, snapshot_incomplete, audit_unavailable, change_root_reset_required / storage_timeout |
 | 507 | quota_exceeded, staging_full |
 
 Retry transient requests with backoff/jitter and Retry-After. Resolve ambiguous mutations through their

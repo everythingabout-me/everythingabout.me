@@ -7,18 +7,18 @@ Tencent Cloud COS.
 Frontend and backend are split: **a Go backend (net/http) + a React frontend (Vite + React Router)**, with no
 Next.js.
 
-Current browser and Bearer upload implementation:
+File transfers follow the [transfer protocol](docs/design/transfer-protocol.md) (target design; the current
+runtime still relays bytes through the application or uses per-part COS authorize/confirm grants):
 
 ```
-Class A:    client --signed part PUT--> provider (via same-origin edge relay, or direct)
-            client --create/commit--> application API --> provider control + index
-Class B:    client --session PUT--> cloud drive (direct); client --create/commit--> application API
-Class C:    client --part PUT--> application receiver --> Local or native COS/S3
+Class A:    client --presigned part PUT / read GET--> object store (unpublished multipart)
+Class B:    client --session PUT / download link--> cloud drive (unpublished session or staging file)
+Class C:    client --part PUT / content GET--> application --> Local or native COS/S3
+All:        client --create/sign/commit/grant--> application API; only the server commit publishes
 ```
 
-Native COS/S3 parts are durable before acknowledgement. Commit seals metadata and completes native publication,
-then settles the index/result; it does not assemble and reupload the entire file. A class-C connection uses its
-own durable staging. Unknown native effects remain guarded. The browser queue lives only in memory for the current Files
+Commit verifies provider state, performs the publishing call once and settles the index/result; it does not
+assemble and reupload the entire file. Unknown native effects remain guarded. The browser queue lives only in memory for the current Files
 page/document: folder navigation preserves it, while refresh/close discards it without failed-task restoration or
 File reselection. A browser-native beforeunload warning is registered while queued, waiting, uploading or
 finalizing tasks remain.
@@ -36,9 +36,8 @@ available on admitted roots. Reads are validated but not version-pinned.
 The [architecture](docs/design/storage.md) defines two layers: a unified API consumed by every app,
 and storage drivers for local filesystems, S3/COS, cloud drives, WebDAV, and NAS. Every control request uses
 one configured origin: `https://everythingabout.me` when hosted, or the operator's domain/LAN endpoint when
-self-hosted. Bytes leave that origin only in a direct transfer class, and only through a single-transfer
-capability: class A receives an exact signed part request, class B a provider upload session. No provider SDK
-or signing secret reaches clients.
+self-hosted. Bytes leave that origin only in classes A and B, through grants scoped to one upload session or
+one file. No provider SDK or signing secret reaches clients.
 
 The [new file API](docs/api/api.md) and [driver contract](docs/design/storage-driver.md) are clean-slate
 specifications with no legacy-client compatibility requirement. The actual storage retains complete native
@@ -73,26 +72,26 @@ expiry; explicit pruning exists but is not automatically scheduled.
 | Authentication | Explicit Bearer, or session cookie; Origin + session-bound CSRF required for mutations |
 | Metadata and listing (ID/path implemented) | `GET /api/files?path=/...` or `?id=<UUID>`; same selectors for `/list` |
 | Search and principal | `GET /api/files/search`; `/api/files/me`; `/api/files/capabilities` |
-| File content (ID/path implemented) | `GET/HEAD /api/files/content?path=/...` or `?id=<UUID>`: same-origin streaming, safe single ranges |
+| File content (ID/path implemented) | `GET/HEAD /api/files/content?path=/...` or `?id=<UUID>`: same-origin streaming, safe single ranges (class C); `POST /api/files/downloads` read grants for classes A/B (target) |
 | Mutations (admitted roots) | Verified baseline and explicit capability evidence; upload/replace/folder/move/copy/delete |
 | Long operations | `.../operations/{id}` and `/cancel`: durable progress, partial effects, recovery |
-| Resumable uploads (admitted roots) | POST/GET `.../uploads`; GET/DELETE `.../uploads/{id}`; PUT `.../parts/{number}` (native object parts or durable Local parts); GET `.../parts`; POST `.../commit` (publication + index, no object-body retransmission) |
+| Resumable uploads (admitted roots) | POST/GET `.../uploads`; GET/DELETE `.../uploads/{id}`; POST `.../parts/sign` (class A); PUT `.../parts/{number}` (class C); GET `.../parts`; POST `.../commit` (server-only publication + index) |
 | Storage tree | Native reads and admitted Local writes; eligible folder rename is one native root effect |
 | Incremental state (R4/R5) | Immutable change-snapshots; changes pull with policy-bound opaque checkpoints |
 | Notifications (R5 first phase) | Durable ID/path file/folder subscriptions and bounded SSE availability events |
 | Owner audit (R4) | GET /api/audit with owner cookie; captured file access and effect attribution |
 
-CDN/regional gateways and NAS connectors are internal deployment choices. Private cache hits require
-authorization; uploads need suitable streaming ingress. Self-hosting can run in one process without a CDN.
+CDN/regional gateways and NAS connectors are internal deployment choices. Self-hosting can run in one process
+without a CDN.
 
-Every storage connection declares exactly one [transfer class](docs/design/transfer-protocol.md). Class A
-(`presigned-parts`) covers S3-compatible object stores and returns windows of signed part URLs; class B
-(`resumable-session`) covers cloud drives and returns a provider upload session; class C (`relay`) covers
-backends the application must write through. Classes A and B never carry bytes through the application, for
-reads or writes. Part geometry, read grants and concurrency bounds are advertised per session from connection
-capabilities rather than fixed by the contract; the current default is 32 MiB parts with sixteen concurrent
-requests, and class B geometry comes from the provider. Receipts label client SHA-256 assertions,
-provider-verified digests and server-computed SHA-256 distinctly.
+Each storage connection selects one [transfer class](docs/design/transfer-protocol.md) from those its driver
+supports. Class A (`presigned-parts`, COS/S3-compatible) signs part URLs in renewable windows, binding exact
+length but no digest; class B (`resumable-session`, OneDrive/Google Drive/Dropbox/Box) hands the client a provider
+session; class C (`relay`) receives bytes in the application. Classes A and B never carry file bytes through the
+application, for reads or writes, and a transfer never falls back to another class. In every class only the
+server commit publishes. Geometry is advertised per session; the default for A and C is 32 MiB parts with
+sixteen concurrent requests, and class B follows provider rules. Receipts label provider-listed lengths,
+provider digests and server-computed SHA-256 distinctly.
 
 Writes stay behind explicit admission. Configure `FILE_COORDINATED_WRITES=true` only for coordinated writers,
 validate and import the native index, then run `eam storage-admit --owner-id UUID --writers-quiesced
@@ -124,13 +123,12 @@ make build          # build web/dist, then compile bin/eam
 ./bin/eam server    # production: / serves the SPA, /api/* serves the API
 ```
 
-A class-A connection has two deployments. With the same-origin edge relay — the default for the official COS
-deployment, `FILE_UPLOAD_INGRESS=edgeone` — the edge forwards only PUT `/api/files/transfer/…` directly to the
-provider after removing the fixed prefix, preserving signed query/headers/body and setting the provider Host;
-application byte ingress fails closed so a missing rule cannot silently consume application bandwidth. Without
-the edge the browser writes to the provider endpoint and the bucket carries the CORS rule described in the
-[transfer protocol](docs/design/transfer-protocol.md#11-deployment). All control requests stay on `eam server`
-in both deployments, and no edge function or extra upload machine is required.
+A class-A connection needs a bucket CORS rule for the application origins (see
+[transfer protocol §11](docs/design/transfer-protocol.md#11-deployment)) and a signing identity limited to
+`UploadPart`/`GetObject`. Uploads may optionally go through a same-origin edge relay that forwards PUT
+`/api/files/transfer/…` to the provider unchanged; the application refuses that path, so a missing rule fails
+instead of consuming application bandwidth. All control requests stay on `eam server`, and no edge function or
+extra upload machine is required.
 
 In development the frontend runs on Vite (5173, proxying `/api` to 8080) and the backend runs on Go (8080):
 
@@ -281,11 +279,11 @@ directory with coscli first, then run `reconcile --owner you@example.com`.
 
 ### COS connection admission
 
-Clients use the application origin for every control request; bytes leave it only in a direct transfer class.
-Browser bucket CORS and STS issuance are not part of the file protocol, and provider credentials stay
-server-side. Object admission requires proven native ETag and absence conditions (no bucket versioning) plus
-coordinated-writer evidence, and a class-A connection additionally requires its bucket CORS rule. Unsupported
-image conversions use authorized raw content or placeholders.
+Clients use the application origin for every control request; bytes leave it only in classes A and B. STS
+issuance is not part of the file protocol, and provider credentials stay server-side. Object admission requires
+proven native ETag and absence conditions (no bucket versioning) plus coordinated-writer evidence. A class-A
+connection additionally requires the bucket CORS rule and a signing identity limited to `UploadPart`/`GetObject`;
+a class-C connection needs neither. Unsupported image conversions use authorized raw content or placeholders.
 
 ## Loading terabytes of data the first time
 
@@ -348,18 +346,19 @@ existing separate endpoints and envelopes.
 | GET | `/api/files/list?path=&limit=&cursor=` (or `id=`) | Indexed immediate children; owner-scoped SQL keyset pagination |
 | GET | `/api/files/search?q=&path=&kind=&mediaType=` (or `id=`) | Authorized indexed search below selected folder; scoped opaque cursors |
 | GET | `/api/files/me` · `/api/files/capabilities` | Indexed scope/usage and effective limits (id/path or visible-root default); cookie CSRF bootstrap |
-| GET, HEAD | `/api/files/content?path=` or `?id=` | Same-origin bytes and representation headers; single Range support |
-| PUT | `/api/files/content?path=` or `?id=`; create via parentId/parentPath + name | Small admitted create/conditional replace; disabled with `503 edgeone_route_required` when a class-A connection uses the edge relay |
+| GET, HEAD | `/api/files/content?path=` or `?id=` | Class C same-origin bytes; HEAD representation headers on every class; single Range support |
+| PUT | `/api/files/content?path=` or `?id=`; create via parentId/parentPath + name | Class C small admitted create/conditional replace; `409 session_required` on class A/B |
 | POST | `/api/files` · `/api/files/move` · `/api/files/copy` | Folder destination; move/copy from EntrySelector to Destination; no target merge |
 | DELETE | `/api/files?path=&recursive=true` (or `id=`) | Captured native deletion and ID retirement; explicit recursion for nonempty folders |
 | GET, POST | `/api/files/operations/{id}` · `.../cancel` | Durable state/result and safe cancellation |
 | POST, GET | `/api/files/uploads` | Create with destination or replace target selector; list persistent principal-bound sessions |
 | GET, DELETE | `/api/files/uploads/{id}` | Compact durable status or open-session abort |
+| POST | `/api/files/uploads/{id}/parts/sign` | Class A: sign a batch of part URLs (next window or renewal) |
 | PUT | `/api/files/uploads/{id}/parts/{number}` | Class C immutable numbered part; server SHA-256 |
-| GET | `/api/files/uploads/{id}/parts?limit=&cursor=` | Class C durable part receipts, watermarked pages |
-| PUT | `/api/files/transfer/{encoded-object-key}?…` | Class A same-origin edge route; the application always refuses it |
-| POST | `/api/files/downloads` | Class-scoped read grant: URL, headers, expiry, representation facts |
-| POST | `/api/files/uploads/{id}/commit` | Frozen-manifest commit; metadata or stable Operation |
+| GET | `/api/files/uploads/{id}/parts?limit=&cursor=` | Class A provider part listing; class C durable receipts |
+| PUT | `/api/files/transfer/{encoded-object-key}?…` | Optional class A same-origin edge route; the application always refuses it |
+| POST | `/api/files/downloads` | Batch read grants (URL or bearer), renewable on expiry |
+| POST | `/api/files/uploads/{id}/commit` | Server verifies provider state and publishes; metadata or stable Operation |
 | POST | `/api/files/change-snapshots` | Complete bounded synchronous metadata baseline with committed feed checkpoint |
 | GET, DELETE | `/api/files/change-snapshots/{id}` | Immutable metadata pages or release retained snapshot |
 | GET | `/api/files/changes?cursor=&limit=` | Authorized fixed-filter changes: items, nextCursor, hasMore |

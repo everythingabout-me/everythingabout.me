@@ -302,7 +302,7 @@ native author. An unchanged import emits nothing. It does not prune external del
 rename from similar bytes, track exact outside-writer quota changes or detect all same-size preserved-time
 edits. Native watcher/feed overflow, automatic reconciliation, complete outside-deletion repair, release-scale
 retention operation and webhook delivery remain separate work. The implementation preserves current COS ETag,
-EO signed-part, native upload, admitted writer and unknown-outcome limits in the [storage contract](storage.md).
+transfer-class, native upload, admitted writer and unknown-outcome limits in the [storage contract](storage.md).
 
 Code presence and disposable tests do not attest a production root admission, live provider IAM/configuration
 or a performance SLA.

@@ -6,10 +6,8 @@
 > mandatory. Stable IDs are implemented with canonical parent/name links and direct selectors; disposable
 > integration/browser tests and targeted race checks passed.
 > See [identity](file-identity.md) and [first-phase changes/audit](file-changes.md).
-> Configuration and deployment limits live in [transfer protocol](transfer-protocol.md). Every connection
-> declares exactly one transfer class, which fixes
-> how bytes reach it; local parts use durable local staging and admitted COS/S3 parts use unpublished native
-> multipart, independent of small content-PUT policy.
+> A driver declares the [transfer classes](transfer-protocol.md) it can serve and each connection selects one;
+> the transfer protocol owns byte paths, geometry, provider rules and deployment requirements.
 >
 > [Architecture](storage.md) requires original names, complete native folder structure and directly usable
 > file bytes. [The file API](../api/api.md) remains same-origin and backend-neutral. This replaces the
@@ -28,7 +26,8 @@ The service resolves IDs under owner/current path scope, binds admitted identity
 paths/evidence to the driver. Native IDs and provider keys remain private; they are not service IDs. Drivers implement real
 file operations, native authentication, naming constraints, version evidence and backend recovery. Drivers
 must enumerate their content root, including existing files, so indexing and direct migration need no data
-rewrite. They do not own a separate application database or expose provider URLs to clients.
+rewrite. They do not own a separate application database, and they expose provider URLs to clients only
+through the single-session or single-file grants of their transfer class.
 
 Application page metadata, directory listing, search and indexed usage read Postgres directly. Driver
 Stat/List/Open are used by content, actual mutations and explicit scans, not by interactive browsing.
@@ -179,6 +178,7 @@ type Descriptor struct {
     AtomicReplace bool
     NativeConditionalMutation bool
     NativeTreeMove bool
+    TransferClasses []string // subset of "presigned-parts", "resumable-session", "relay"
     Names NameRules
 }
 
@@ -296,8 +296,9 @@ can publish observed external updates, but partial enumeration never authorizes 
 Receiving bytes separately from the final native path is still valuable. A staged file is temporary, not the
 permanent representation of committed user data. The final successful file must exist at its original path.
 
-Classes A and B never hand bytes to the driver, so their writer plans and then verifies; class C stages bytes
-through the driver. Both end in the same publication state and the same ledger.
+Classes A and B never hand bytes to the driver: the client writes into unpublished provider state and the
+driver later verifies and publishes it. Class C stages bytes through the driver. Both end in the same
+publication state and the same ledger.
 
 ```go
 package storage
@@ -305,6 +306,7 @@ package storage
 import (
     "context"
     "io"
+    "time"
 )
 
 type WriteIntent struct {
@@ -338,24 +340,49 @@ type Inspection struct {
     Evidence []byte
 }
 
-// PlannedWriter is the writer for a direct class. The driver never receives the bytes; it binds
-// geometry, issues the client's transfer plan, and later confirms provider state itself.
+// PlannedWriter is the writer for classes A and B. The driver never receives the bytes; it opens
+// unpublished provider state, issues the client's grants, and later verifies and publishes it itself.
 type PlannedWriter interface {
     PlanWrite(context.Context, WriteIntent, Checkpoint) (TransferPlan, error)
+    SignParts(context.Context, WriteIntent, []byte, []int) ([]PartGrant, error) // class A windows/renewals
     InspectWrite(context.Context, WriteIntent, []byte) (Inspection, error)
     CommitWrite(context.Context, WriteIntent, []byte, Checkpoint) (MutationResult, error)
     DiscardWrite(context.Context, WriteIntent, []byte) error
 }
 
-// TransferPlan is the class payload handed to the client executor, plus the binding the driver
-// needs to confirm it later. It never contains a secret broader than this one transfer.
+// TransferPlan is the class payload handed to the client executor. Handle stays server-side.
 type TransferPlan struct {
     Class       string // "presigned-parts" | "resumable-session"
     PartSize    int64  // provider-mandated; the client does not choose
     MaxParallel int
     ExpiresAt   time.Time
-    Queryable   bool // whether InspectWrite can ask the provider what it received
-    Payload     []byte // class-specific, opaque to the service
+    Handle      []byte // native upload/session/staging identity, checkpointed before the plan is returned
+    Payload     []byte // class-specific client payload, opaque to the service
+}
+
+type PartGrant struct {
+    Number    int
+    Size      int64
+    URL       string
+    ExpiresAt time.Time
+}
+
+// ReadGranter issues direct read grants for classes A and B.
+type ReadGranter interface {
+    GrantRead(context.Context, Path, ReadGrantOptions) (ReadGrant, error)
+}
+
+type ReadGrantOptions struct {
+    MediaType   string
+    Disposition string // "attachment" or allowlisted "inline"
+}
+
+type ReadGrant struct {
+    Kind       string // "url" | "bearer"
+    URL        string
+    Headers    map[string]string
+    ExpiresAt  time.Time
+    Conditions []string // only conditions the provider enforces natively
 }
 
 // RelayWriter is the writer for class C. Only this class hands the application the bytes.
@@ -381,10 +408,11 @@ type EffectRecovery interface {
 }
 ```
 
-`PlanWrite` binds size, geometry, target conditions and expiry before the client may write anything, and its
-result is recorded under the intent fence. It never hands the service the bytes and never returns a credential
-wider than the single transfer. `CommitWrite` re-establishes the binding, asks the provider what it actually
-holds, and only then publishes; a client success response is not evidence.
+`PlanWrite` creates unpublished provider state (native multipart upload, deferred drive session, staging-folder
+file or provider upload session), checkpoints its handle under the intent fence and returns the first grants.
+It never receives the bytes. `SignParts` re-signs or extends class A part URLs for the same bound lengths.
+`InspectWrite` reports what the provider holds. `CommitWrite` re-establishes the binding, verifies full
+coverage at the provider and performs the publishing call itself; a client success response is not evidence.
 
 `Stage` (class C only) writes exact bytes to isolated temporary storage/native state, checks declared size and
 any accepted checksum, and returns only durable complete staging. Checkpoint persists native IDs, intermediate
@@ -434,38 +462,37 @@ is safe to delete: a restored database may be behind real storage, and old nativ
 
 ## 4. Transfer classes
 
-A connection declares exactly one transfer class, and the class fixes how bytes reach it. Class A
-(`presigned-parts`) serves S3-compatible object stores, class B (`resumable-session`) serves cloud drives,
-and class C (`relay`) serves backends the application must write through. [Transfer protocol](transfer-protocol.md)
-owns the class definitions, endpoint shapes, part geometry, signing rules and recovery bounds; a driver only
-supplies the parts the protocol asks for.
+A driver lists the classes it can serve in `Descriptor.TransferClasses`; the connection selects one when it is
+configured. [Transfer protocol](transfer-protocol.md) owns the class definitions, endpoint shapes, geometry,
+provider rules, signing rules and deployment requirements; a driver supplies only what the protocol asks for.
 
-A driver that claims a direct class must provide:
+A driver serving class A or B must provide `PlannedWriter` and `ReadGranter` and meet these rules:
 
-- **PlanWrite** — the class payload for one bound intent: every URL and header set the client needs, any
-  credential the provider requires, the provider-mandated part size and the parallelism bound.
-- **InspectWrite** — an authoritative answer for an ambiguous effect: native part listing, session status, or
-  an explicit "cannot be queried" that forces the connection's short expiry bound.
-- **CommitWrite** — provider-side finalization where the class requires it, followed by ordinary settlement.
+- **Unpublished until commit.** Nothing a client sends may become visible at the destination before
+  `CommitWrite`. Object stores use native multipart; OneDrive uses a deferred-commit session; Google Drive uploads
+  into the connection's staging folder and publishes by rename/move; Dropbox and Box keep the provider session
+  open until the server's finish/commit call. A provider that cannot meet this rule is not eligible for class B.
+- **Queryable.** `InspectWrite` must report what the provider actually holds (part listing, session range or
+  offset). Client writes therefore never create an ambiguous final-path effect; only `CommitWrite` can, and it
+  follows the ordinary §3 guard and recovery rules.
+- **Conflict rules at commit.** Create fails on an existing name; replacement uses the provider's native revision
+  condition where one exists, and the descriptor states honestly where it does not.
+- **Scoped grants.** Part URLs bind one part of one native upload with its exact length and no digest. Read
+  grants bind one file. A provider credential that reaches beyond one file or session is reported as such so the
+  service can refuse it to narrower principals.
 
-The staged/publish/recovery semantics of §3 are unchanged and are shared by every class. A class changes only
-how bytes arrive; it never changes what a committed file means, when a receipt is durable, or how an uncertain
-final-path effect is fenced. Drivers do not emit speculative success, own public cursor positions or deliver
-notifications.
+The staged/publish/recovery semantics of §3 are shared by every class. A class changes only how bytes arrive;
+it never changes what a committed file means or how an uncertain final-path effect is fenced. Drivers do not emit
+speculative success, own public cursor positions or deliver notifications. A connection never changes class per
+transfer: an unavailable direct route fails rather than relaying bytes.
 
-Whole-file bytes are never assembled by the application in classes A and B. When a provider cannot separate
-byte reception from safe final visibility and cannot be written to directly, the connection is class C and the
-ordinary §3 staging rules apply unchanged. A connection may not silently change class: an unavailable direct
-route fails the transfer rather than relaying its bytes.
-
-Receipts state what actually verified. A provider digest, a signature-bound length or a client assertion are
+Receipts state what actually verified. A provider digest, a provider-listed length and a client assertion are
 different evidence and must be labelled separately; never relabel a provider ETag as SHA-256 or claim a
 verification the provider did not perform.
 
-Other provider adapters remain optional future integrations. Do not introduce a universal offset/token
-abstraction merely to anticipate them, and never expose a broad credential or an arbitrary upload origin to a
-client. Signed grants can survive client cancellation or revocation until their actual expiry, and provider
-requests may outlive it; cleanup retains unresolved physical liability and final-path guards as required.
+Grants can survive client cancellation or revocation until their actual expiry, and provider requests may
+outlive it; because no grant can publish, cleanup only discards unpublished provider state and retains
+liability until that discard is confirmed.
 
 ## 5. Backend mappings and conformance
 

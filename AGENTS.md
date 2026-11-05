@@ -149,7 +149,7 @@ Common commands:
 - Every request goes through `src/api/client.ts` (the single exit), which unwraps the envelope and raises
   `ApiError`; do not call `fetch` directly in a page. File calls use plain resources/Problem Details.
   Browser storage SDKs/STS are retired; integrations use the configured API origin and keep SDKs/credentials
-  server-side. Class A signed part requests are the narrow transfer exception documented below.
+  server-side. Class A/B transfer grants are the narrow exception documented below.
 - Styling: global tokens live in `src/styles/globals.css` (warm paper feel + blue accent + automatic
   light/dark via `prefers-color-scheme`); page layouts use `*.module.css`. **No Tailwind, no CSS-in-JS.**
 - i18n: the locale is chosen once at module load from the browser language (zh / en), with no switcher. New
@@ -297,11 +297,11 @@ Variants: `Committed locally main@abc1234, not pushed` / `Not committed (tests f
 
 - Commit `.env`, secrets, `bin/`, `.gocache/`, or `web/dist/` (all gitignored).
 - Never expose signing secrets, broad STS credentials, provider download redirects or arbitrary upload origins.
-  Direct transfer is granted only as a class-scoped, single-transfer capability: class A binds one exact part
-  request, class B binds one exact provider upload session, and class C sends bytes to the application. Every
-  grant is short-lived, bound to exact geometry and recorded before it is issued, and the server still verifies
-  provider state before accepting a receipt. No edge function or separate upload server is required.
-  See `docs/design/storage.md` and `docs/design/transfer-protocol.md`.
+  Each connection selects one transfer class (A presigned parts, B cloud-drive sessions, C relay); a transfer
+  never falls back to another class. Grants are scoped to one upload session or one file, time-limited,
+  renewable and recorded before they are issued. Class A part URLs bind exact length and no digest. Clients
+  only write unpublished provider state; only the server commit publishes. A provider credential is never
+  issued to a principal whose scope is narrower than its reach. See `docs/design/transfer-protocol.md`.
 - Delete or rewrite an existing migration; only append.
 - Change the 5173 port or the `/api` proxy in `web/vite.config.ts` — COS CORS and the development flow depend
   on it.
