@@ -28,13 +28,15 @@ reconfiguration, allowed only while the connection has no open sessions, and it 
 
 1. **The application never carries file bytes in classes A and B.** Only control requests do. Derived
    representations (thumbnails, converted previews) are application output and are not covered by this rule.
-2. **Only the server publishes.** A client transfers bytes into unpublished provider state; only a server
-   commit makes them a file at the destination path, in every class and for every provider. A client success
-   response is never evidence.
+2. **Only the server publishes.** A client transfers bytes into unpublished provider state (a native multipart
+   upload, a staging file or an open provider session); only a server commit makes them a file at the
+   destination path. This holds by construction wherever the client holds only a session-scoped capability
+   (classes A and C, OneDrive, Google Drive, Box staging). On Dropbox the client holds a provider token and
+   publication by the server is a client contract (§5). A client success response is never evidence.
 3. **One ledger.** All classes converge on `open → committing → committed` with the same guards, tombstones,
    idempotency records and change facts.
-4. **Every grant is scoped to one session or one file**, bound to the exact object and length, time-limited and
-   recorded before it is issued.
+4. **Every grant is scoped to one session or one file**, time-limited and recorded before it is issued. Upload
+   grants also bind the exact part length.
 5. **No whole-file pass before upload.** No class requires the client to read the whole file before the first
    byte is sent.
 
@@ -45,7 +47,8 @@ reconfiguration, allowed only while the connection has no open sessions, and it 
 | `POST` | `B/uploads` | all | Open a session; returns the class payload |
 | `POST` | `B/uploads/{id}/parts/sign` | A | Sign a batch of part URLs (next window or renewal) |
 | `PUT` | `B/uploads/{id}/parts/{number}` | C | Send one part to the application |
-| `GET` | `B/uploads/{id}/parts` | A, C | Parts the server can confirm (provider listing for A, durable receipts for C) |
+| `GET` | `B/uploads/{id}/parts` | A | The provider's own part listing (number, size, provider ETag) |
+| `GET` | `B/uploads/{id}/parts` | C | Durable receipts in acknowledgement order with a fixed watermark |
 | `GET` | `B/uploads/{id}` | all | Authoritative state and counters |
 | `POST` | `B/uploads/{id}/commit` | all | Verify provider state and publish |
 | `DELETE` | `B/uploads/{id}` | all | Abort an open session |
@@ -112,9 +115,10 @@ maximum or rejects the session before any bytes move.
 ### Writing
 
 The client issues parallel `PUT`s up to `maxParallelism`, with no per-part acknowledgement to the
-application. It may send `Content-MD5` as an unsigned header; a provider that checks it rejects a corrupted
-part, and the server never relies on it. Until commit, the session holder may rewrite a part by sending it
-again; commit freezes whatever the provider lists.
+application. It may send `Content-MD5` as an unsigned header; a provider that checks it rejects a part
+corrupted in transit, and the server never relies on it. Until commit, anyone holding a part's URL may rewrite
+that part by sending it again; commit freezes whatever the provider lists. Part content is not otherwise
+verified against the client, which is an accepted trade-off.
 
 `GET B/uploads/{id}/parts` returns the provider's own part listing (number, size, provider ETag), so a client
 that lost track of progress resumes from what the provider actually holds.
@@ -122,26 +126,37 @@ that lost track of progress resumes from what the provider actually holds.
 ### Commit
 
 The server lists native parts, verifies that every number is present with its exact bound length, performs
-`CompleteMultipartUpload` once at the final key and settles the index and quota. The client reports no ETags.
-The receipt records "provider-listed length" as its evidence; if the client supplied per-part MD5 values and the
-connection's ETag-equals-MD5 behaviour is admitted, the server compares them and records that match separately.
+`CompleteMultipartUpload` once at the final key and settles the index and quota. The client reports no ETags,
+and the receipt records "provider-listed length" as its evidence.
 
 ## 5. Class B — cloud-drive sessions
 
-The server creates the provider upload session; the client only sends bytes; **the server always performs the
-final commit**. Providers differ only in how the server keeps that commit for itself:
+The server creates the provider upload session and the client only sends bytes. Wherever the provider allows
+it, the session targets a **staging folder** of the connection, so even a client that finishes the provider
+upload itself can only produce a staging file; the server commit then moves it to the destination. Create and
+replace follow the same path and differ only in the final move.
 
-| Provider | Session created by the server | Client writes | Server commit | Conflict / conditional replace |
-|---|---|---|---|---|
-| OneDrive | `createUploadSession` with `deferCommit: true` | Ordered `PUT`s to the pre-authenticated `uploadUrl` | Empty `POST` to `uploadUrl` | `conflictBehavior: fail` for create; replacement `If-Match` must be proven by probe |
-| Google Drive | Resumable session in the connection's staging folder, under a temporary name, initiated with the browser's `Origin` | Ordered `PUT`s to the session URI | `files.update`: rename and move into the destination folder (metadata only, file ID kept) | Drive allows duplicate names, so uniqueness rests on the index guard; no native conditional replace |
-| Dropbox | `upload_session/start` (no bytes) | `upload_session/append_v2` with the session ID and offset | `upload_session/finish` with the destination path | `mode: add`, `autorename: false` for create; `mode: update` with the observed `rev` for replace |
-| Box | `POST /files/upload_sessions` | `PUT` parts with the per-part SHA-1 `Digest` Box requires | `POST .../commit` with the part list and the whole-file SHA-1 | Box rejects name conflicts; replacement uses the file's ETag |
+| Provider | Upload target | Client writes | Server commit | Create (no replace) | Replace |
+|---|---|---|---|---|---|
+| OneDrive | `createUploadSession` for a temporary name in the staging folder | Ordered `PUT`s to the pre-authenticated `uploadUrl`; the final fragment creates the staging file | Move into the destination folder | Move with `conflictBehavior: fail` | Move with `conflictBehavior: replace` |
+| Google Drive | Resumable session in the staging folder under a temporary name, initiated with the browser's `Origin` | Ordered `PUT`s to the session URI; the final chunk creates the staging file | `files.update`: rename and move into the destination folder | Not atomic: Drive allows duplicate names, so only the application guard prevents them | Move the new file in, then delete the old one (briefly two siblings, never none) |
+| Box | `POST /files/upload_sessions` in the staging folder under a temporary name | `PUT` parts with the per-part SHA-1 `Digest` Box requires | Box session commit with the part list and the whole-file SHA-1, then move into the destination | Move; Box rejects name conflicts | Rename the old file aside, move the new one in, delete the old one |
+| Dropbox | `upload_session/start` (no bytes) | `upload_session/append_v2` with the session ID and offset | `upload_session/finish` directly at the destination path | `mode: add`, `autorename: false` | `mode: update` with the observed `rev` |
 
-Until the server commits, nothing is visible at the destination: a deferred OneDrive session, a Google file in
-the staging folder, an unfinished Dropbox session or an uncommitted Box session. An abandoned session
-therefore never leaves an unindexed file at the user's path; the expiry sweeper discards the provider session
-or the staging file.
+Dropbox chooses the destination in the `finish` call itself, so a staging folder cannot bind it, and its token
+can write anywhere in the app folder. On Dropbox, server-only publication is therefore a client contract, backed
+by the rule that such a token is only issued to a principal whose scope already covers the whole connection.
+
+Consequences, stated rather than worked around:
+
+- **Replacement through staging gives the file a new provider identity** on OneDrive, Google Drive and Box: the
+  provider's own version history, file ID and share links do not carry over. Dropbox `update` keeps them. The
+  service ID, path and contract are unaffected.
+- **Google Drive has no atomic create.** Its driver reports `AtomicCreate=false` and `GET B/capabilities`
+  reports `atomicCreate:false`; uniqueness rests on the application guard and does not hold against outside
+  writers.
+- An abandoned session leaves at most a staging file or an unfinished provider session, never a file at the
+  user's path; the expiry sweeper deletes it.
 
 Payload:
 
@@ -155,11 +170,12 @@ Payload:
 }
 ```
 
-`credential` is present only for providers whose write endpoint is not self-authenticating (Dropbox, Box).
-Such a provider token usually covers the connection's whole app folder rather than one transfer. This is an
-accepted trade-off with one hard limit: **a provider credential is never issued to a principal whose own scope
-is narrower than the area the credential can reach.** A scoped application token on such a connection gets
-`403 transfer_scope_exceeded`; serving scoped applications requires configuring the connection as class C.
+`credential` is present only for providers whose write endpoint is not self-authenticating (Dropbox, Box);
+OneDrive and Google Drive session URLs carry their own authority. Such a provider token usually covers the
+connection's whole app folder rather than one transfer. This is an accepted trade-off with one hard limit:
+**a provider credential is never issued to a principal whose own scope is narrower than the area the credential
+can reach.** A scoped application token on such a connection gets `403 transfer_scope_exceeded`; serving scoped
+applications requires configuring the connection as class C.
 
 Box needs the whole-file SHA-1 at commit. The client computes it with an incremental hasher in a sequential
 read that runs alongside the part uploads, so it never delays the first byte, and sends it with the commit
@@ -221,16 +237,17 @@ The server chooses `partSize`, `chunkSize` and `maxParallelism`; the client foll
 | C | `url` | Application-relative `GET B/content` |
 
 - **`url` grants work anywhere**, including `<img>`, `<video>` and download links.
-- **`bearer` grants cannot be used by media elements**, which cannot add headers. The web client serves them
-  through its Service Worker: the page requests a same-origin path under `/api/files/sw/`, and the Service
-  Worker forwards it to the provider with the `Authorization` header, passing `Range` through unchanged. The
-  application answers that path itself only with `503 service_worker_required` and never relays the bytes.
-  Native clients set the header directly. The scope limit of §5 applies: a bearer grant is issued only to a
-  principal whose scope covers the token's reach.
+- **`bearer` grants need the request header.** Native clients and JavaScript `fetch` set it directly, which
+  covers downloads and images (shown through a `blob:` URL). Media elements cannot add headers, so in-browser
+  streaming of Google Drive audio and video is an open question, to be settled when a Google Drive connection is
+  built. The scope limit of §5 applies: a bearer grant is issued only to a principal whose scope covers the
+  token's reach.
 - **Expiry is renewed, not avoided.** A client that receives 403 or passes `expiresAt` requests a new grant
   and continues from the bytes it already has; long downloads and video seeking keep working this way.
-- **Cacheable URLs.** For class A the server rounds `expiresAt` to a fixed window, so repeated grants within
-  that window return the identical URL and the browser cache stays effective.
+- **Cacheable URLs.** For class A the server rounds `expiresAt` up to the next window boundary, so repeated
+  grants within that window return the identical URL and the browser cache stays effective. A URL therefore
+  lives between the minimum grant lifetime and that minimum plus one window. Responses the browser cached from
+  the provider remain viewable on that device after logout; this is accepted.
 - **Conditions** list only what the route enforces natively. Without `if-range` the client revalidates
   through the service before resuming instead of assuming it would detect a changed file.
 - **Active content.** Direct URLs are served from the provider's domain, never the application origin, so they
@@ -292,7 +309,8 @@ upload instead of consuming application bandwidth.
 
 **Class B.** Register the provider application once: Box requires the application origins in its CORS
 allowlist; Google Drive sessions are initiated with the browser's `Origin`; OneDrive and Dropbox need no
-origin configuration. A Google Drive connection keeps a staging folder inside its app folder.
+origin configuration. OneDrive, Google Drive and Box connections keep a staging folder inside the app folder,
+outside the user's content root.
 
 **Class C.** Nothing beyond the application itself.
 

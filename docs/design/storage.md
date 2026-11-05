@@ -32,7 +32,7 @@ redacted. Native/provider locators remain private outside transfer grants; a ser
 There is no version path segment. Hosted origin is `https://everythingabout.me`; self-hosted origin
 is the user's domain or LAN endpoint. The application checks the user, target and quota before issuing any
 grant. In classes A and B the client moves bytes into unpublished provider state (a native multipart upload,
-a deferred drive session or a staging file) and the application never carries them; only the application's
+a staging file or an open provider session) and the application never carries them; only the application's
 commit verifies provider state and publishes at the destination path. In class C the application receives
 parts and writes them to Local staging or unpublished native multipart. No class needs an edge function, a
 separate upload server or full-file local assembly, and a transfer never falls back to another class. Clients

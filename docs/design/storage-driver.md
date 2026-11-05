@@ -408,8 +408,8 @@ type EffectRecovery interface {
 }
 ```
 
-`PlanWrite` creates unpublished provider state (native multipart upload, deferred drive session, staging-folder
-file or provider upload session), checkpoints its handle under the intent fence and returns the first grants.
+`PlanWrite` creates unpublished provider state (native multipart upload, staging-folder upload session or open
+provider upload session), checkpoints its handle under the intent fence and returns the first grants.
 It never receives the bytes. `SignParts` re-signs or extends class A part URLs for the same bound lengths.
 `InspectWrite` reports what the provider holds. `CommitWrite` re-establishes the binding, verifies full
 coverage at the provider and performs the publishing call itself; a client success response is not evidence.
@@ -469,14 +469,17 @@ provider rules, signing rules and deployment requirements; a driver supplies onl
 A driver serving class A or B must provide `PlannedWriter` and `ReadGranter` and meet these rules:
 
 - **Unpublished until commit.** Nothing a client sends may become visible at the destination before
-  `CommitWrite`. Object stores use native multipart; OneDrive uses a deferred-commit session; Google Drive uploads
-  into the connection's staging folder and publishes by rename/move; Dropbox and Box keep the provider session
-  open until the server's finish/commit call. A provider that cannot meet this rule is not eligible for class B.
+  `CommitWrite`. Object stores use native multipart. OneDrive, Google Drive and Box upload into the connection's
+  staging folder and `CommitWrite` moves the file to the destination, for create and replace alike. Dropbox keeps
+  the session open until the server's `finish`; because the client's token could finish it elsewhere, this is a
+  client contract and the driver must report it so the service issues that token only to full-scope principals.
 - **Queryable.** `InspectWrite` must report what the provider actually holds (part listing, session range or
   offset). Client writes therefore never create an ambiguous final-path effect; only `CommitWrite` can, and it
   follows the ordinary §3 guard and recovery rules.
-- **Conflict rules at commit.** Create fails on an existing name; replacement uses the provider's native revision
-  condition where one exists, and the descriptor states honestly where it does not.
+- **Conflict rules at commit.** Create fails on an existing name and replace moves over the old file. A driver
+  without an atomic no-replace move or create (Google Drive allows duplicate names) sets `AtomicCreate=false`,
+  which capabilities expose. Replacement through staging gives the file a new provider identity; the driver
+  does not try to preserve provider version history.
 - **Scoped grants.** Part URLs bind one part of one native upload with its exact length and no digest. Read
   grants bind one file. A provider credential that reaches beyond one file or session is reported as such so the
   service can refuse it to narrower principals.

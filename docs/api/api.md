@@ -235,9 +235,9 @@ All suffixes are below `B`:
 | GET | `/uploads/{uploadId}` | Compact state/progress and target path |
 | POST | `/uploads/{uploadId}/parts/sign` | Class A: sign a batch of part URLs (next window or renewal) |
 | PUT | `/uploads/{uploadId}/parts/{number}` | Class C immutable numbered part |
-| GET | `/uploads/{uploadId}/parts?limit=&cursor=` | Class A provider part listing; class C durable receipts with a fixed watermark |
+| GET | `/uploads/{uploadId}/parts?limit=&cursor=` | Class A: the provider's own part listing |
+| GET | `/uploads/{uploadId}/parts?limit=&cursor=` | Class C: durable receipts, ACK-order pages with a fixed watermark |
 | PUT | `/transfer/{encoded-object-key}?…` | Class A optional same-origin edge route; refused by the application |
-| GET | `/sw/…` | Service Worker path for bearer read grants; the application answers 503 |
 | POST | `/uploads/{uploadId}/commit` | Server verifies provider state and publishes at the bound target |
 | DELETE | `/uploads/{uploadId}` | Abort and discard provider state |
 | GET | `/operations/{operationId}` | Durable workflow state/result |
@@ -371,10 +371,12 @@ Content-Type: application/json
 ```
 
 `kind` is `url` (self-authenticating: class A presigned GET, OneDrive, Dropbox, Box, or class C `B/content`) or
-`bearer` (Google Drive: send `headers` with the request). Web media elements consume bearer grants through the
-Service Worker path `B/sw/…`, which the application itself answers only with `503 service_worker_required`.
-On 403 or after `expiresAt` the client requests a new grant and resumes from the bytes it has. Class A rounds
-`expiresAt` to a fixed window so repeated grants return the identical, cacheable URL. Grants are `no-store`.
+`bearer` (Google Drive: send `headers` with the request, which `fetch` can do but media elements cannot;
+in-browser Google Drive audio/video streaming is unresolved). A read grant binds one file, not a length. On 403
+or after `expiresAt` the client requests a new grant and resumes from the bytes it has. Class A rounds
+`expiresAt` up to a window boundary so repeated grants return the identical, cacheable URL; a URL lives up to
+one window longer than the minimum, and provider responses cached by the browser stay viewable after logout.
+Grants are `no-store`.
 A bearer grant is issued only to a principal whose scope covers the token's reach; otherwise
 `403 transfer_scope_exceeded`. Per-item failures are returned as Problem objects in the item position.
 
@@ -568,9 +570,11 @@ session/source state or performing authorized recovery. This does not restore th
 number and exact length, and no content digest. Request more with
 `POST B/uploads/{id}/parts/sign {"numbers":[...]}` when fewer than a quarter of unsent URLs remain, and re-sign
 any part whose URL expired or returned 403; a re-signed number keeps its bound length. A client may add an
-unsigned `Content-MD5` header as a transmission check.
+unsigned `Content-MD5` header as a transmission check. Until commit a part URL's holder can rewrite that part;
+this is accepted.
 
-**Class B.** `url` is the provider session the server created; `credential` appears only for providers whose
+**Class B.** `url` is the provider session the server created, targeting the connection's staging folder
+except on Dropbox; `credential` appears only for providers whose
 write endpoint is not self-authenticating (Dropbox, Box), and only for principals whose scope covers the
 credential's reach (otherwise `403 transfer_scope_exceeded`). Box clients also send per-part SHA-1 digests and
 report the whole-file SHA-1 with commit, computed incrementally alongside the upload.
@@ -618,14 +622,16 @@ at the destination.
 | Class | Commit behaviour |
 |---|---|
 | A | Lists native parts, verifies every number with its exact bound length, performs `CompleteMultipartUpload` once at the final key, then settles index/quota |
-| B | Verifies the provider session holds the full length, then performs the provider commit itself: OneDrive deferred-commit `POST`, Google Drive rename/move out of the staging folder, Dropbox `upload_session/finish`, Box session commit; then settles |
+| B | Verifies the provider holds the full length, then publishes: moves the staging file into the destination (OneDrive, Google Drive; Box after its session commit) or calls `upload_session/finish` at the destination (Dropbox); then settles |
 | C | Verifies coverage from durable receipts and publishes |
 
-The class-B commit carries the bound conflict rule: create fails on an existing name, and replacement uses the
-provider's native revision condition where one exists (Dropbox `rev`, Box ETag, OneDrive `If-Match` when
-proven); Google Drive replacement relies on the application guard. Class A clients report no ETags; if they
-supplied per-part MD5 values and the connection's ETag-equals-MD5 behaviour is admitted, the server compares
-them and labels that evidence separately from the provider-listed length.
+Create and replace use the same staging path and differ only in the final move: create fails on an existing
+name, replace moves over the old file. Google Drive has no atomic create, so its connections report
+`atomicCreate:false`. Replacement through staging gives the file a new provider identity on OneDrive, Google
+Drive and Box (provider version history and share links do not carry over); Dropbox `mode: update` with the
+observed `rev` keeps them. On Dropbox the client holds a token that could finish the session itself, so
+server-only publication there is a client contract. Class A clients report no ETags. Per-provider details are in
+[transfer protocol §5](../design/transfer-protocol.md#5-class-b--cloud-drive-sessions).
 
 ```text
 open ──commit──> committing ──confirmed native effect + index settlement──> committed
@@ -644,7 +650,7 @@ call can have an ambiguous effect; it enters outcome_unknown and blocks conflict
 resolves it.
 
 DELETE upload aborts open sessions atomically (`204`, repeat `204`) and discards provider state:
-`AbortMultipartUpload` for class A, the provider session or staging file for class B (an unfinished Dropbox
+`AbortMultipartUpload` for class A, the provider session and staging file for class B (an unfinished Dropbox
 session simply lapses), the staged bytes for class C. It returns `409 commit_in_progress` for committing
 sessions and `409 already_committed` after publication; use operation cancellation for a committing upload.
 Once the final commit call is in flight, cancellation is best effort and never reports a definite abort while
@@ -713,7 +719,8 @@ outcome handling define the actual guarantee. Retention is explicit; retrying a 
 
 Capabilities is authenticated and accepts either selector (default visible root only when both are absent),
 returning effective `read/write`,
-`range`, `thumbnails`, supported checksums, maximum file/single-PUT/part sizes, pagination limits, session
+`range`, `thumbnails`, `transferClass`, `atomicCreate` (false when only the application guard prevents duplicate
+names, as on Google Drive), supported checksums, maximum file/single-PUT/part sizes, pagination limits, session
 expiry/retention policy, `sourceModifiedAt` support, and quota/reservation information appropriate to the caller. Numbers are authoritative
 for admission but may change before a later request; new sessions bind their accepted limits. Upload responses
 provide their exact chunk layout. Never expose provider names or assume every backend has the same limits.
@@ -769,7 +776,7 @@ application journal changes/reservations, not exact quota state across unsynchro
 | 416 | range_not_satisfiable |
 | 428 | precondition_required |
 | 429 | rate_limited (Retry-After) |
-| 502 / 503 / 504 | storage_failure / temporarily_unavailable, edgeone_route_required, service_worker_required, snapshot_too_large, snapshot_incomplete, audit_unavailable, change_root_reset_required / storage_timeout |
+| 502 / 503 / 504 | storage_failure / temporarily_unavailable, edgeone_route_required, snapshot_too_large, snapshot_incomplete, audit_unavailable, change_root_reset_required / storage_timeout |
 | 507 | quota_exceeded, staging_full |
 
 Retry transient requests with backoff/jitter and Retry-After. Resolve ambiguous mutations through their
