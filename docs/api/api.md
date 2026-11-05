@@ -616,7 +616,8 @@ authority nor proves inactivity of other clients, origins or devices.
 ### Commit
 
 Only the server publishes. Until commit, uploaded bytes are unpublished provider state and nothing is visible
-at the destination.
+at the destination, except on Google Drive: its session completes the file on the final chunk, so a create is
+visible and a replace has already overwritten the old content before the server commits.
 
 | Class | Commit behaviour |
 |---|---|

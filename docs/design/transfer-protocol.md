@@ -137,7 +137,7 @@ targets the existing provider file, so the provider's own version history, file 
 | Provider | Session created by the server | Client writes | Server commit | Create (no replace) | Replace |
 |---|---|---|---|---|---|
 | OneDrive | `createUploadSession` at the destination with `deferCommit: true` | Ordered `PUT`s to the pre-authenticated `uploadUrl` | Completes the deferred session | `conflictBehavior: fail` | Session on the existing item with `If-Match` |
-| Google Drive | Resumable `files.create` or `files.update` session, initiated with the browser's `Origin` | Ordered `PUT`s to the session URI; the final chunk completes the file | Verifies and settles | Not atomic: Drive allows duplicate names, so only the application guard prevents them | `files.update` on the existing file; no native condition |
+| Google Drive | Resumable `files.create` or `files.update` session, initiated with the browser's `Origin` | Ordered `PUT`s to the session URI; the final chunk completes the file | Verifies and settles | Not atomic: Drive allows duplicate names, so only the application guard prevents them | `files.update` on the existing file; no native condition. The old content is overwritten when the final chunk lands, before commit |
 | Box | `POST /files/upload_sessions` (new file) or `/files/{id}/upload_sessions` (new version) | `PUT` parts with the per-part SHA-1 `Digest` Box requires | Session commit with the part list and the whole-file SHA-1 | Box rejects name conflicts | New version with `If-Match` on the file ETag |
 | Dropbox | `upload_session/start` (no bytes) | `upload_session/append_v2` with the session ID and offset | `upload_session/finish` at the destination | `mode: add`, `autorename: false` | `mode: update` with the observed `rev` |
 
@@ -150,8 +150,11 @@ asked for, and the sweeper indexes it at session expiry the same way reconcile i
 Abandoned sessions leave nothing on OneDrive, Box and Dropbox. On Google Drive a client that sent the final
 chunk but never committed leaves a complete file, which the sweeper indexes.
 
-Google Drive has no atomic create: its driver reports `AtomicCreate=false` and `GET B/capabilities` reports
-`atomicCreate:false`; uniqueness rests on the application guard and does not hold against outside writers.
+Duplicate sibling names are never allowed on any connection, Google Drive included: they would break exit to an
+ordinary filesystem. Drive itself permits them and has no atomic create, so its driver reports
+`AtomicCreate=false` and `GET B/capabilities` reports `atomicCreate:false`; the application guard enforces
+uniqueness for its own writes, and a duplicate created outside the application is reported as a collision,
+never indexed as a second sibling.
 
 Payload:
 
