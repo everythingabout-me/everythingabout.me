@@ -12,6 +12,9 @@ bin/
 # Local upload admission evidence and durable publication state (not a cache)
 .eam/
 
+# Machine-specific agent notes (deployment runbook for this checkout, not shared)
+AGENTS.local.md
+
 # Local environment and caches
 .env
 .env.local
