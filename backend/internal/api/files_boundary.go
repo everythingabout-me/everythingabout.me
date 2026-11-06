@@ -80,8 +80,24 @@ func filesProblem(err error) *fc.Problem {
 			return fc.NewProblem(409, "cursor_stale", "The cursor is invalid for this request.")
 		case "resource_limit":
 			return fc.NewProblem(503, "temporarily_unavailable", "The directory exceeds the configured read budget.")
+		case "upload_aborted", "upload_expired":
+			return fc.NewProblem(410, native.Code, "The upload session is no longer open.")
+		case "upload_incomplete":
+			return fc.NewProblem(409, "upload_incomplete", "The upload session is missing provider parts.")
+		case "intent_conflict":
+			return fc.NewProblem(409, "idempotency_conflict", "The session intent does not match its stored identity.")
+		case "outcome_unknown":
+			// The native effect may or may not have happened; the session identity is
+			// still the only way to settle it, so a blind retry is not offered.
+			return fc.NewProblem(503, "storage_outcome_unknown", "The storage outcome is unknown. Resume through the same session.")
+		case "closed":
+			return fc.NewProblem(503, "temporarily_unavailable", "The storage connection is closed.")
+		// These are failures of this service's own intent or configuration, not of the
+		// provider and not of the request the client sent.
+		case "invalid_intent", "invalid_config":
+			return fc.NewProblem(500, "internal_error", "The storage request was rejected as invalid.")
 		}
-		return fc.NewProblem(502, "storage_failure", "The storage read could not be completed.")
+		return fc.NewProblem(502, "storage_failure", "The storage request could not be completed.")
 	}
 	var old *httpx.Error
 	if errors.As(err, &old) {
@@ -110,6 +126,51 @@ func filesProblem(err error) *fc.Problem {
 	}
 	slog.Error("file API failure", "error", err)
 	return fc.NewProblem(500, "internal_error", "The request could not be completed.")
+}
+
+// rootCause returns the deepest wrapped error, which is where a driver or provider
+// message survives. Logs may name it; public problem bodies never do.
+func rootCause(err error) string {
+	deepest := err
+	for {
+		next := errors.Unwrap(deepest)
+		if next == nil {
+			if deepest == err {
+				return ""
+			}
+			return deepest.Error()
+		}
+		deepest = next
+	}
+}
+
+// logFilesFailure records one line per failed file request. The request id a client
+// sees, the public problem code and the private cause are logged together so a
+// reported failure can be traced back to the exact driver error.
+func (s *Server) logFilesFailure(w http.ResponseWriter, r *http.Request, audit *filechanges.Audit, err error) {
+	problem := filesProblem(err)
+	attrs := []any{
+		"request_id", w.Header().Get("X-Request-Id"),
+		"method", r.Method,
+		"path", r.URL.Path,
+		"status", problem.Status,
+		"code", problem.Code,
+		"error", err.Error(),
+	}
+	if cause := rootCause(err); cause != "" {
+		attrs = append(attrs, "cause", cause)
+	}
+	if audit != nil {
+		attrs = append(attrs, "owner_id", audit.OwnerID, "action", audit.Action)
+	}
+	switch {
+	case problem.Status >= 500:
+		slog.Error("file request failed", attrs...)
+	// Routine refusals are already visible in the request log; anything else is
+	// worth a warning because it usually means a client sent something unexpected.
+	case problem.Status >= 400 && problem.Status != 401 && problem.Status != 403 && problem.Status != 404:
+		slog.Warn("file request rejected", attrs...)
+	}
 }
 
 type filesResponseWriter struct {
@@ -280,6 +341,7 @@ func (s *Server) fileWrapWithAudit(fn fileHandler, persist filesAuditRecorder) h
 			if response.started {
 				panic(http.ErrAbortHandler)
 			}
+			s.logFilesFailure(w, r, audit, err)
 			writeFilesProblem(w, r, err)
 		}
 	}

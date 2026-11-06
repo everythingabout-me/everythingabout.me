@@ -783,11 +783,14 @@ application journal changes/reservations, not exact quota state across unsynchro
 | 416 | range_not_satisfiable |
 | 428 | precondition_required |
 | 429 | rate_limited (Retry-After) |
-| 502 / 503 / 504 | storage_failure / temporarily_unavailable, edgeone_route_required, snapshot_too_large, snapshot_incomplete, audit_unavailable, change_root_reset_required / storage_timeout |
+| 500 | internal_error (the request was rejected by this service's own inconsistent intent or configuration) |
+| 502 / 503 / 504 | storage_failure / temporarily_unavailable, storage_outcome_unknown, edgeone_route_required, snapshot_too_large, snapshot_incomplete, audit_unavailable, change_root_reset_required / storage_timeout |
 | 507 | quota_exceeded, staging_full |
 
 Retry transient requests with backoff/jitter and Retry-After. Resolve ambiguous mutations through their
-session/operation/idempotency identity rather than assuming a timeout means nothing happened.
+session/operation/idempotency identity rather than assuming a timeout means nothing happened. Every failed
+file request logs one line carrying the body's `requestId`, the problem code and the private driver cause,
+so a reported failure is traceable from the id alone; the cause is never copied into the response.
 
 ## 10. Indexed change snapshots and incremental pull
 

@@ -11,6 +11,10 @@ let identity = 0;
 export class TestApiError extends Error {
   constructor(message, status = 0, metadata = {}) { super(message); this.status = status; Object.assign(this, metadata); }
 }
+/** Mirrors FileApiError: a Problem Details failure carrying the server problem. */
+export class TestFileApiError extends TestApiError {
+  constructor(problem) { super(problem.detail, problem.status, problem); this.problem = problem; }
+}
 export function deferred() {
   let resolve, reject;
   const promise = new Promise((yes, no) => { resolve = yes; reject = no; });
@@ -177,7 +181,7 @@ export async function setup(overrides = {}, options = {}) {
   // the operation poll at 2000 and the 15 s status deadline.
   const schedule = (callback, delay, repeat) => { assert.ok([250, 500, 1000, 2000, 15000].includes(delay), `unexpected timer ${delay}`); timers.set(++timerId, { callback, delay, repeat }); return timerId; };
   const runtime = {
-    api: { me: async () => ({ id: owner }), ...overrides }, ApiError: TestApiError,
+    api: { me: async () => ({ id: owner }), ...overrides }, ApiError: TestApiError, FileApiError: TestFileApiError,
     localStorage: storage, crypto: webcrypto, window, navigator,
     setTimeout: (fn, delay) => schedule(fn, delay, false), clearTimeout: (id) => timers.delete(id),
     setInterval: (fn, delay) => schedule(fn, delay, true), clearInterval: (id) => timers.delete(id),
@@ -209,7 +213,7 @@ export async function setup(overrides = {}, options = {}) {
   const ownership = await import(ownershipURL);
   const source = queueSource
     .replace(/import \{ useCallback, useEffect, useRef, useState \} from "react";/, "const { useCallback, useEffect, useRef, useState, setTimeout, clearTimeout, setInterval, clearInterval, localStorage, crypto, window } = globalThis.__uploadHarness;")
-    .replace(/import \{ ApiError, api,[^\n]+from "\.\.\/api\/client";/, "const { ApiError, api } = globalThis.__uploadHarness;")
+    .replace(/import \{ ApiError, FileApiError, api,[^\n]+from "\.\.\/api\/client";/, "const { ApiError, FileApiError, api } = globalThis.__uploadHarness;")
     .replace('import { t } from "../i18n";', 'const t = (key) => key;')
     .replace('from "./uploadPersistence"', `from "${persistenceURL}"`)
     .replace('from "./uploadOwnership"', `from "${ownershipURL}"`);

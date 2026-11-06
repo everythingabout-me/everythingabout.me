@@ -1,6 +1,6 @@
 /** Upload tasks and File references live only in the current page. */
 import { useCallback, useEffect, useRef, useState } from "react";
-import { ApiError, api, type Item, type FileOperation, type FileUploadInput, type FileUploadPartGrant, type FileUploadSession } from "../api/client";
+import { ApiError, FileApiError, api, type FileProblem, type Item, type FileOperation, type FileUploadInput, type FileUploadPartGrant, type FileUploadSession } from "../api/client";
 import { t } from "../i18n";
 import type { UploadEntry } from "./uploadSelection";
 import { claimUploadPath } from "./uploadOwnership";
@@ -74,7 +74,16 @@ interface PartWaiter { rank: number; number: number; resolve: () => void; }
 const relative = (path: string) => path.replace(/^\/+|\/+$/g, "");
 let sequence = 0;
 function taskId(): string { return `upload-${Date.now().toString(36)}-${(++sequence).toString(36)}-${Math.random().toString(36).slice(2)}`; }
-function message(error: unknown): string { return error instanceof Error ? error.message : t("error.unknown"); }
+// A failed row must name the same identity the server logged. Without the problem
+// code and request id, "the storage read failed" cannot be matched to any backend line.
+function problemText(problem: FileProblem): string {
+  if (!problem.code) return problem.detail;
+  return `${problem.detail} (${problem.requestId ? `${problem.code} · ${problem.requestId}` : problem.code})`;
+}
+function message(error: unknown): string {
+  if (error instanceof FileApiError) return problemText(error.problem);
+  return error instanceof Error ? error.message : t("error.unknown");
+}
 function isOperation(value: Item | FileOperation): value is FileOperation { return "state" in value && "progress" in value; }
 function waitMessage(wait: DeletionWait): string {
   if (wait.statusUnavailable) return t("drive.deletionStatusUnavailable");
@@ -175,7 +184,7 @@ export function useUploadQueue(onUploaded: (task: UploadTask, item: Item) => voi
       }
       else if (task.retryRequested) {
         patch(task.id, { status: "queued", uploadId: undefined, operationId: undefined, intent: undefined, createKey: taskId(), terminalState: undefined, retryRequested: false, uploaded: false, loaded: 0 });
-      } else patch(task.id, { status: "failed", speed: 0, terminalState: task.isDir ? undefined : op.state === "failed" ? "failed" : "aborted", error: op.error?.detail ?? t("drive.uploadFailed") });
+      } else patch(task.id, { status: "failed", speed: 0, terminalState: task.isDir ? undefined : op.state === "failed" ? "failed" : "aborted", error: op.error ? problemText(op.error) : t("drive.uploadFailed") });
     } else { patch(task.id, { status: "finalizing", speed: 0 }); }
   }, [complete, patch, update]);
 

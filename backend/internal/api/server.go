@@ -344,12 +344,18 @@ func (s *Server) logger(next http.Handler) http.Handler {
 		if strings.HasPrefix(path, "/s/") {
 			path = "/s/<redacted>"
 		}
-		slog.Info("request",
+		attrs := []any{
 			"method", r.Method,
 			"path", path,
 			"status", recorder.status,
 			"duration", time.Since(started).Round(time.Millisecond).String(),
-		)
+		}
+		// The file API stamps this before its first write, so a failing request line
+		// and the failure line carry the same id.
+		if requestID := recorder.Header().Get("X-Request-Id"); requestID != "" {
+			attrs = append(attrs, "request_id", requestID)
+		}
+		slog.Info("request", attrs...)
 	})
 }
 
