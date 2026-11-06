@@ -201,7 +201,7 @@ func (f *Factory) bindHandles(cfg storage.Config, content, system *os.Root, cont
 }
 
 func (d *driver) Describe() storage.Descriptor {
-	return storage.Descriptor{RangeRead: true, Names: storage.NameRules{CaseSensitive: d.factory.options.CaseSensitive, MaxSegmentBytes: maxSegmentBytes, MaxPathBytes: maxPathBytes, MaxDepth: maxDepth}}
+	return storage.Descriptor{RangeRead: true, TransferClasses: []string{storage.TransferRelay}, Names: storage.NameRules{CaseSensitive: d.factory.options.CaseSensitive, MaxSegmentBytes: maxSegmentBytes, MaxPathBytes: maxPathBytes, MaxDepth: maxDepth}}
 }
 
 func (d *driver) Close() error {

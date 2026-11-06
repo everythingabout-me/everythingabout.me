@@ -29,6 +29,7 @@ type Client struct {
 	client        *cos.Client
 	publishClient *cos.Client
 	uploadSigner  *cos.Client
+	readSigner    *cos.Client
 	cred          tencent.Credentials
 	transport     *http.Transport
 }
@@ -59,12 +60,18 @@ func New(cfg config.COS) (*Client, error) {
 	client := cos.NewClient(&cos.BaseURL{BucketURL: bucketURL}, httpClient)
 	publishClient := cos.NewClient(&cos.BaseURL{BucketURL: bucketURL}, httpClient)
 	publishClient.Conf.RetryOpt.Count = 1
-	var uploadSigner *cos.Client
+	var uploadSigner, readSigner *cos.Client
 	if cfg.UploadSignSecretID != "" || cfg.UploadSignSecretKey != "" {
 		if cfg.UploadSignSecretID == "" || cfg.UploadSignSecretKey == "" || cfg.UploadSignSecretID == cfg.SecretID {
 			return nil, fmt.Errorf("COS upload signing requires a distinct complete UploadPart-only credential pair")
 		}
 		uploadSigner = cos.NewClient(&cos.BaseURL{BucketURL: bucketURL}, &http.Client{Timeout: 60 * time.Second, Transport: &cos.AuthorizationTransport{SecretID: cfg.UploadSignSecretID, SecretKey: cfg.UploadSignSecretKey, Transport: transport}})
+	}
+	if cfg.ReadSignSecretID != "" || cfg.ReadSignSecretKey != "" {
+		if cfg.ReadSignSecretID == "" || cfg.ReadSignSecretKey == "" || cfg.ReadSignSecretID == cfg.SecretID || cfg.ReadSignSecretID == cfg.UploadSignSecretID {
+			return nil, fmt.Errorf("COS read signing requires a distinct complete GetObject-only credential pair")
+		}
+		readSigner = cos.NewClient(&cos.BaseURL{BucketURL: bucketURL}, &http.Client{Timeout: 60 * time.Second, Transport: &cos.AuthorizationTransport{SecretID: cfg.ReadSignSecretID, SecretKey: cfg.ReadSignSecretKey, Transport: transport}})
 	}
 	return &Client{
 		bucket:        cfg.Bucket,
@@ -73,6 +80,7 @@ func New(cfg config.COS) (*Client, error) {
 		client:        client,
 		publishClient: publishClient,
 		uploadSigner:  uploadSigner,
+		readSigner:    readSigner,
 		transport:     transport,
 		cred:          tencent.Credentials{SecretID: cfg.SecretID, SecretKey: cfg.SecretKey},
 	}, nil

@@ -853,6 +853,13 @@ a.crumb:hover {
   filter: brightness(0.94);
 }
 
+.downloadError {
+  max-width: 320px;
+  margin-top: 8px;
+  color: var(--danger);
+  font-size: 13px;
+}
+
 .detailPanel {
   margin-top: 14px;
   padding: 4px 20px;

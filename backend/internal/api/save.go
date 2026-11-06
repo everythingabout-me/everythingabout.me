@@ -179,18 +179,18 @@ Access:  %s
 Scope:   %s
 Expires: %s
 
-Use Authorization: Bearer %s on application control requests and embedded uploads.
-Signed transfer requests use only their returned scoped signature and headers, as described below.
+Use Authorization: Bearer %s on application control requests and class C relayed uploads.
+Class A transfer requests use only their returned scoped provider/edge URL and headers, as described below.
 First call GET /me to confirm the connection and its current permissions.
 PATCH /me manages the Connect identity; POST /events authors events.
-Use only the configured API origin for metadata and bytes. Never use provider credentials or URLs.
+Use the configured API origin for control requests. Bytes move through the returned class grant or class C endpoint; never use provider credentials that the API did not issue.
 `, base, plain, access, scope, expires, plain)
 	if token.CanRead {
 		prompt += fmt.Sprintf(`
 GET /api/files/me confirms file access and scope.
 List the authorized folder:
   curl -H "Authorization: Bearer %s" "%s/api/files/list?path=%s"
-Read a file with GET /api/files/content?path=<URL-encoded absolute path>.
+Read a file with POST /api/files/downloads and fetch the returned grant. On class C, GET /api/files/content?path=<URL-encoded absolute path> streams bytes directly.
 `, plain, base, url.QueryEscape(root))
 	}
 	if token.CanWrite {
@@ -216,7 +216,7 @@ API: %s
 Authorization: Bearer %s
 
 First call GET /api/files/me and GET /api/files/capabilities?path=%%2F.
-Use only this API origin for metadata, content, numbered parts and Operations.
+Use this API origin for control requests, relayed/class C parts and Operations; class A part URLs may point at the provider or the optional /api/files/transfer/ relay.
 `, code, base, code) + unifiedWritePrompt(base, code, "/note.md")
 }
 
@@ -234,8 +234,8 @@ create a session with the exact file size and honor its admission result and ret
 A rejected admission grants no upload authority. Do not retry with guessed read permissions.
 
 Small content PUT is optional: use the following example only after capabilities reports
-maxSinglePutBytes > 0 and the content fits that limit. EdgeOne signed deployments report
-maxSinglePutBytes=0; use the session flow below for every file, including short text.
+maxSinglePutBytes > 0 and transferClass is "C". Class A connections report maxSinglePutBytes=0;
+use the session flow below for every file, including short text.
 Write-only connections with unavailable capabilities should use sessions as well.
 Save a short text when content PUT is enabled (create only):
   curl -X PUT -H "Authorization: Bearer %s" \
@@ -250,30 +250,40 @@ For resumable files within the advertised limits:
   Idempotency-Key: <unique-session-key>
   {"path":%q,"size":12345,"mediaType":"image/jpeg","condition":{"mode":"create"}}
 
-Use the returned id, partSize, partCount, maxParallelism and transport. Split exactly at partSize;
-the final part has the exact remainder. For transport=embedded, PUT each part with Content-Length to:
-  /api/files/uploads/{id}/parts/{number}
-For transport=cos-signed, compute the part's lowercase hexadecimal SHA-256 and base64 MD5, then POST:
-  /api/files/uploads/{id}/parts/{number}/authorize
-  {"size":<exact bytes>,"sha256":"<hex>","md5":"<base64>"}
-Use the returned method=PUT, origin-relative /api/files/transfer/ URL and exact Content-MD5/Content-Type.
-Do not add application Authorization, CSRF or cookie headers to this signed byte PUT; never replace its
-host, path or signed query, and never follow a redirect to another origin. COS verifies this narrow signature.
-POST /api/files/uploads/{id}/parts/{number}/confirm to recover an earlier native success before resending.
-On 409 part_pending, send the signed part then confirm again, including after a lost PUT reply. Only the
-application's durable confirm receipt counts as acknowledgement. checksumSource=client-sha256-cos-md5 means
-the SHA-256 is a client assertion and COS verifies MD5, not an independently server-computed SHA-256.
-Numbers start at 1; a zero-byte file has no parts. Persist the id and recover receipts with
-GET /api/files/uploads/{id}/parts. Identical-byte retries are safe; changed digests conflict.
-After every part is acknowledged:
+Use the returned id, class, partSize, partCount and maxParallelism. Split exactly at partSize;
+the final part has the exact remainder. The session class is fixed by the connection.
+
+Class A (class="A", transport.kind="presigned-parts"):
+  Each part in transport.parts has {number,size,method,url,headers}. PUT exactly that part to that URL
+  with exactly those headers; the URL binds method, object, upload number and exact length, and no digest.
+  Do not add application Authorization, CSRF or cookie headers to a signed part PUT; never change its host,
+  path or signed query; never follow a redirect. Request more or renew with:
+    POST /api/files/uploads/{id}/parts/sign
+    {"numbers":[<part numbers>]}
+  The response has the same parts shape; a re-signed number keeps its length. There is no per-part
+  application acknowledgement. After an uncertain part request, continue or re-send the same part;
+  GET /api/files/uploads/{id}/parts returns the provider's own listing (number,size,etag).
+  Do not resend after commit has started.
+
+Class C (class="C", transport.kind="relay"):
+  PUT each part with Content-Length and Authorization to
+    /api/files/uploads/{id}/parts/{number}
+  The application
+  computes SHA-256, returns a durable receipt after the bytes are safe, and an identical replay returns
+  the existing receipt. GET /api/files/uploads/{id}/parts returns receipts in acknowledgement order.
+
+Numbers start at 1; a zero-byte file has no parts. After the session reports full coverage:
   POST /api/files/uploads/{id}/commit
 Commit may return 202 with Location pointing to /api/files/operations/{operationId}.
 Poll that same-origin Operation until state is succeeded; failed, cancelled or
 outcome_unknown is not success. Resume status with GET /api/files/uploads/{id}.
 A 409 operation_in_progress may include operationId: wait for that exact Operation to
 succeed, then retry admission before sending bytes; unavailable status keeps the wait.
-Use Authorization: Bearer on application control requests, embedded parts, commit and Operation status.
-Signed /api/files/transfer/ byte requests use only the returned COS signature/query and headers.
+Use Authorization: Bearer on application control requests, relay parts, commit and Operation status.
+Class A part PUTs use only the returned provider URL and headers; the same-origin
+/api/files/transfer/ prefix is an optional edge relay selected by the deployment.
+Read content with POST /api/files/downloads and fetch the returned grant; GET /api/files/content
+serves bytes only on class C.
 Choose a unique path. When file reads are permitted, to replace deliberately read its contentRevision and use
 If-Match: "<contentRevision>" for PUT or condition.mode=replace plus contentRevision
 for a session. A write-only connection must obtain an authorized revision separately or use create-only.

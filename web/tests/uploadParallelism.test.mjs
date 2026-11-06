@@ -82,57 +82,54 @@ for (const [ordering, maxParallelism, expected] of [["any", 2, 2], ["any", 1, 1]
   });
 }
 
-test("signed sessions share the global sixteen-part pool and pass transport on every request", async (t) => {
-  const server = uploadServer();
-  const create = server.api.createUpload;
-  server.api.createUpload = async (...args) => {
-    const session = await create(...args);
-    Object.assign(server.sessions.get(session.id), { transport: "cos-signed", maxParallelism: 4 });
-    return { ...server.sessions.get(session.id) };
-  };
-  const send = server.api.uploadPart;
+test("class A sessions share the global sixteen-part pool without application parts", async (t) => {
+  const server = uploadServer(4, { class: "A", maxParallelism: 4 });
   const gate = deferred();
   let active = 0, peak = 0;
-  const modes = [];
-  server.api.uploadPart = async (...args) => {
-    modes.push(args[5]);
+  const sent = [];
+  server.api.uploadPresignedPart = async (grant, blob, signal, progress) => {
+    sent.push(grant.number);
     active++; peak = Math.max(peak, active);
-    try { await gate.promise; return await send(...args); } finally { active--; }
+    try {
+      await gate.promise;
+      const id = new URL(grant.url, "https://upload.invalid").searchParams.get("uploadId");
+      server.receipts.get(id).set(grant.number, { number: grant.number, size: blob.size });
+      progress?.({ loaded: blob.size, total: blob.size });
+    } finally { active--; }
   };
   const harness = await mount(t, server.api);
   harness.render().enqueue(["a", "b", "c", "d"].map((path) => ({ path, file: new File(["abcdefgh"], path) })), "", () => false);
-  await harness.until(() => active === 16);
+  await harness.until(() => active === 8);
   await harness.tick();
-  assert.equal(peak, 16, "never more than sixteen part requests across all files");
+  assert.equal(peak, 8, "all class A parts across four files run together");
   gate.resolve();
   await harness.until((queue) => queue.tasks.length === 4 && queue.tasks.every((task) => task.status === "completed"));
-  assert.equal(peak, 16);
-  assert.deepEqual(modes, Array(16).fill("cos-signed"));
+  assert.equal(peak, 8);
+  assert.equal(sent.length, 8);
+  assert.equal(server.calls.filter(([kind]) => kind === "part").length, 0, "class A never sends bytes to the application");
+  assert.ok(server.calls.some(([kind]) => kind === "sign"), "missing grants are signed by the application");
+  assert.equal(server.calls.filter(([kind]) => kind === "commit").length, 4);
 });
 
-test("signed part_pending confirmation retries identical bytes within the original session", async (t) => {
-  const server = uploadServer();
-  const create = server.api.createUpload;
-  server.api.createUpload = async (...args) => {
-    const session = await create(...args);
-    server.sessions.get(session.id).transport = "cos-signed";
-    return { ...server.sessions.get(session.id) };
-  };
-  const send = server.api.uploadPart;
+test("class A transient part failure checks provider state then retries the same part", async (t) => {
+  const server = uploadServer(2, { class: "A" });
+  const send = server.api.uploadPresignedPart;
   const attempts = [];
-  server.api.uploadPart = async (...args) => {
+  server.api.uploadPresignedPart = async (...args) => {
     attempts.push(args);
-    if (attempts.length === 1) throw new TestApiError("not ready", 409, { code: "part_pending" });
+    if (attempts.length === 1) throw new TestApiError("temporarily unavailable", 503);
     return send(...args);
   };
   const harness = await mount(t, server.api);
   harness.render().enqueue([entry("ab")], "", () => false);
   await harness.until(() => [...harness.timers.values()].some(({ delay }) => delay === 250));
+  assert.equal(attempts.length, 1);
+  assert.ok(server.calls.some(([kind]) => kind === "status"));
+  assert.ok(server.calls.some(([kind]) => kind === "providerParts"));
   await harness.tick(250);
   await harness.until(complete);
   assert.equal(attempts.length, 2);
-  assert.equal(attempts[0][2], attempts[1][2]);
-  assert.equal(attempts[1][5], "cos-signed");
+  assert.equal(attempts[0][0].number, attempts[1][0].number);
   assert.equal(server.sessions.size, 1);
 });
 

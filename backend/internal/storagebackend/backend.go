@@ -120,6 +120,9 @@ func New(cfg *config.Config) (*Backend, error) {
 		if max > 5<<30 {
 			return nil, fmt.Errorf("object single-PUT publication exceeds the admitted 5 GiB limit")
 		}
+		if b.cfg.Storage.TransferClass == storage.TransferPresignedParts && !admission.MultipartUploads {
+			return nil, fmt.Errorf("class A presigned-parts requires admitted multipartUploads evidence for this exact connection")
+		}
 		b.objectOptions = objectmutation.Options{Admission: admission, SpoolRoot: b.cfg.Storage.ObjectSpoolRoot, MaxPublishBytes: max}
 	}
 	if b.factory == nil {
@@ -214,7 +217,15 @@ func (b *Backend) Open(ctx context.Context, ownerID string) (storage.Driver, err
 				driver.Close()
 				return nil, err
 			}
+			if err := b.checkTransferClass(mutation); err != nil {
+				mutation.Close()
+				return nil, err
+			}
 			return mutation, nil
+		}
+		if err := b.checkTransferClass(driver); err != nil {
+			driver.Close()
+			return nil, err
 		}
 		return driver, nil
 	}
@@ -230,9 +241,32 @@ func (b *Backend) Open(ctx context.Context, ownerID string) (storage.Driver, err
 			driver.Close()
 			return nil, e
 		}
+		if e := b.checkTransferClass(mutation); e != nil {
+			mutation.Close()
+			return nil, e
+		}
 		return mutation, nil
 	}
+	if err := b.checkTransferClass(driver); err != nil {
+		driver.Close()
+		return nil, err
+	}
 	return driver, nil
+}
+
+// checkTransferClass rejects a configured class the actual admitted driver does
+// not advertise. A class is a property of the connection, never selected per request.
+func (b *Backend) checkTransferClass(driver storage.Driver) error {
+	want := b.cfg.Storage.TransferClass
+	if want == "" {
+		return nil
+	}
+	for _, class := range driver.Describe().TransferClasses {
+		if class == want {
+			return nil
+		}
+	}
+	return storage.NewError("unsupported", "", nil)
 }
 
 // Legacy provides only reads for new backends. It never adds presigning/STS or

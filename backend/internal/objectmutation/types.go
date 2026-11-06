@@ -81,17 +81,21 @@ type MultipartState struct {
 	Parts   int // parts the provider still reports when Present
 }
 
-// SignedMultipartBackend is intentionally COS-specific capability, not a generic
-// S3 compatibility claim. SignPart binds exact content MD5/length and native slot.
-type SignedMultipartBackend interface {
+// SignedPartBackend is a class A part-signing capability. It signs exact
+// lengths and never a content digest; ListParts reports what the provider holds.
+type SignedPartBackend interface {
 	SignedPartsSupported() bool
-	SignPart(context.Context, string, string, int, int64, string, time.Time) (storage.SignedPartGrant, error)
-	QueryPart(context.Context, string, string, int) (NativePartInfo, bool, error)
+	SignPart(context.Context, string, string, int, int64, time.Time) (storage.SignedPartGrant, error)
+	ListParts(context.Context, string, string, int, int) ([]storage.NativeUploadPart, bool, error)
 }
-type NativePartInfo struct {
-	Size int64
-	ETag string
+
+// ReadSignerBackend issues direct read grants with a dedicated GetObject-only
+// identity. A driver without it cannot serve class A reads.
+type ReadSignerBackend interface {
+	ReadSigningSupported() bool
+	PresignRead(context.Context, string, storage.ReadGrantOptions) (storage.ReadGrant, error)
 }
+
 type NativePart struct {
 	Number int
 	ETag   string

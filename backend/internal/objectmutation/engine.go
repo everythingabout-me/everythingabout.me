@@ -114,6 +114,12 @@ func (d *Driver) Describe() storage.Descriptor {
 	desc.NativeConditionalMutation = false
 	desc.NativeTreeMove = false
 	desc.RetainsVersions = false
+	// Class A needs both a part signer and a dedicated read signer; a driver that
+	// cannot issue one half of the contract must not advertise the class.
+	desc.TransferClasses = []string{storage.TransferRelay}
+	if d.SignedUploadSupported() && d.ReadGrantSupported() {
+		desc.TransferClasses = []string{storage.TransferPresignedParts, storage.TransferRelay}
+	}
 	desc.Names = d.StorageNameRules()
 	return desc
 }

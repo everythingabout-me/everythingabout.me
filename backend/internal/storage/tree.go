@@ -104,7 +104,10 @@ type Descriptor struct {
 	NativeConditionalMutation bool
 	NativeTreeMove            bool
 	RetainsVersions           bool
-	Names                     NameRules
+	// TransferClasses is the subset of presigned-parts, resumable-session and
+	// relay this driver can serve. The connection selects exactly one of them.
+	TransferClasses []string
+	Names           NameRules
 }
 type NameRules struct {
 	CaseSensitive   bool

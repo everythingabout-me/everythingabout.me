@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"everythingabout.me/backend/internal/filecontract"
+	"everythingabout.me/backend/internal/storage"
 )
 
 // Storage configures one connection with deterministic per-owner roots. Connection
@@ -19,8 +20,11 @@ type Storage struct {
 	MaxSinglePutBytes   int64
 	ObjectAdmissionFile string
 	ObjectSpoolRoot     string
-	Local               Local
-	S3                  S3
+	// TransferClass is the one class this connection serves: presigned-parts,
+	// resumable-session or relay. It is fixed for the connection, not per transfer.
+	TransferClass string
+	Local         Local
+	S3            S3
 }
 type Local struct {
 	ContentRoot   string
@@ -66,6 +70,20 @@ func loadStorage(getenv func(string) string) (Storage, error) {
 	}
 	s.ObjectAdmissionFile = getenv("FILE_OBJECT_ADMISSION_FILE")
 	s.ObjectSpoolRoot = getenv("FILE_OBJECT_SPOOL_ROOT")
+	s.TransferClass = getenv("FILE_TRANSFER_CLASS")
+	if s.TransferClass == "" {
+		// A connection that does not name a class keeps the previous byte path:
+		// Local and admitted object connections relay through the application.
+		s.TransferClass = storage.TransferRelay
+		if s.Backend != "local" && getenv("FILE_UPLOAD_INGRESS") == "edgeone" {
+			s.TransferClass = storage.TransferPresignedParts
+		}
+	}
+	switch s.TransferClass {
+	case storage.TransferPresignedParts, storage.TransferResumableSession, storage.TransferRelay:
+	default:
+		return s, fmt.Errorf("FILE_TRANSFER_CLASS must be presigned-parts, resumable-session or relay")
+	}
 	if s.CoordinatedWrites && s.Backend != "local" && (!filepath.IsAbs(s.ObjectAdmissionFile) || !filepath.IsAbs(s.ObjectSpoolRoot)) {
 		return s, fmt.Errorf("object writes require explicit absolute FILE_OBJECT_ADMISSION_FILE and FILE_OBJECT_SPOOL_ROOT")
 	}
@@ -96,7 +114,45 @@ func loadStorage(getenv func(string) string) (Storage, error) {
 	return s, nil
 }
 
-// BackendName also supports existing manually constructed config values in tests.
+// validateTransferClass rejects a class the selected backend cannot serve with
+// the credentials actually configured. A driver's Descriptor must still advertise
+// the class; this is the deployment-level half of the same rule.
+func (c *Config) validateTransferClass() error {
+	class := c.Storage.TransferClass
+	if class == "" {
+		class = storage.TransferRelay
+		c.Storage.TransferClass = class
+	}
+	switch class {
+	case storage.TransferRelay:
+		if c.EdgeOneUploadIngress() {
+			return fmt.Errorf("class C relay cannot use the EdgeOne class A transfer route")
+		}
+		return nil
+	case storage.TransferPresignedParts:
+		if c.BackendName() != "cos" {
+			return fmt.Errorf("class A presigned-parts currently requires the COS backend with a dedicated signing identity")
+		}
+		if !c.Storage.CoordinatedWrites {
+			return fmt.Errorf("class A presigned-parts requires FILE_COORDINATED_WRITES=true")
+		}
+		if c.COS.ReadSignSecretID == "" || c.COS.ReadSignSecretKey == "" {
+			return fmt.Errorf("class A presigned-parts requires COS_READ_SIGN_SECRET_ID and COS_READ_SIGN_SECRET_KEY limited to GetObject")
+		}
+		if c.COS.ReadSignSecretID == c.COS.SecretID {
+			return fmt.Errorf("class A read signing must use a distinct credential, not the general COS key")
+		}
+		if c.COS.UploadSignSecretID == "" || c.COS.UploadSignSecretKey == "" {
+			return fmt.Errorf("class A requires COS_UPLOAD_SIGN_SECRET_ID and COS_UPLOAD_SIGN_SECRET_KEY limited to UploadPart")
+		}
+		return nil
+	case storage.TransferResumableSession:
+		return fmt.Errorf("no storage driver advertises resumable-session yet")
+	default:
+		return fmt.Errorf("FILE_TRANSFER_CLASS must be presigned-parts, resumable-session or relay")
+	}
+}
+
 func (c *Config) BackendName() string {
 	if c.Storage.Backend == "" {
 		return "cos"
@@ -107,6 +163,9 @@ func (c *Config) BackendName() string {
 func (c *Config) ValidateStorage() error {
 	if c.Storage.CoordinatedWrites && c.BackendName() != "local" && (!filepath.IsAbs(c.Storage.ObjectAdmissionFile) || !filepath.IsAbs(c.Storage.ObjectSpoolRoot)) {
 		return fmt.Errorf("object writes require explicit absolute FILE_OBJECT_ADMISSION_FILE and FILE_OBJECT_SPOOL_ROOT")
+	}
+	if err := c.validateTransferClass(); err != nil {
+		return err
 	}
 	switch c.BackendName() {
 	case "cos":

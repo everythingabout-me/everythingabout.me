@@ -2,139 +2,323 @@ package objectmutation
 
 import (
 	"context"
-	"encoding/base64"
-	"encoding/hex"
-	"strings"
+	"errors"
+	"os"
 	"time"
 
 	"everythingabout.me/backend/internal/storage"
 )
 
+var (
+	_ storage.PlannedUploadWriter = (*Driver)(nil)
+	_ storage.ReadGranter         = (*Driver)(nil)
+)
+
+// class A: the driver opens unpublished provider state and signs exact-length
+// part URLs. It never receives bytes; the server commit seals the provider part
+// listing and performs the single publishing call.
+
 func (d *Driver) SignedUploadSupported() bool {
-	backend, ok := d.backend.(SignedMultipartBackend)
-	return ok && backend.SignedPartsSupported() && d.options.Admission.SignedMultipartParts && d.UploadMaxFileBytes() > 0
+	backend, ok := d.backend.(SignedPartBackend)
+	return ok && backend.SignedPartsSupported() && d.options.Admission.MultipartUploads && d.UploadMaxFileBytes() > 0
 }
-func validSignedPart(in storage.WriteIntent, p storage.SignedUploadPart) bool {
-	count := (in.Size + nativePartSize - 1) / nativePartSize
-	expected := nativePartSize
-	if int64(p.Number) == count {
-		expected = in.Size - int64(p.Number-1)*nativePartSize
+
+func (d *Driver) ReadGrantSupported() bool {
+	backend, ok := d.backend.(ReadSignerBackend)
+	return ok && backend.ReadSigningSupported()
+}
+
+func plannedPartWindow(partCount int) int {
+	const window = 32
+	if partCount < window {
+		return partCount
 	}
-	digest, e := base64.StdEncoding.DecodeString(p.MD5)
-	hash, herr := hex.DecodeString(p.SHA256)
-	return p.Number > 0 && int64(p.Number) <= count && p.Size == expected && e == nil && len(digest) == 16 && base64.StdEncoding.EncodeToString(digest) == p.MD5 && herr == nil && len(hash) == 32 && strings.ToLower(p.SHA256) == p.SHA256
+	return window
 }
-func (d *Driver) AuthorizePart(ctx context.Context, in storage.WriteIntent, p storage.SignedUploadPart, metadata storage.UploadMetadata, expires time.Time) (storage.SignedPartGrant, error) {
-	var grant storage.SignedPartGrant
+
+func plannedPartCount(in storage.WriteIntent) (int, error) {
+	if in.Size < 0 {
+		return 0, fail("invalid_request", in.Target)
+	}
+	return int((in.Size + nativePartSize - 1) / nativePartSize), nil
+}
+
+func (d *Driver) BeginPlannedUpload(ctx context.Context, in storage.WriteIntent, metadata storage.UploadMetadata, expires time.Time) (storage.PlannedUpload, error) {
+	var plan storage.PlannedUpload
 	if err := d.validateUploadIntent(in); err != nil {
-		return grant, err
+		return plan, err
 	}
 	if !d.SignedUploadSupported() {
-		return grant, fail("unsupported", in.Target)
+		return plan, fail("unsupported", in.Target)
 	}
-	if !validSignedPart(in, p) || !expires.After(time.Now()) || expires.After(time.Now().Add(6*time.Minute)) {
-		return grant, fail("invalid_request", in.Target)
+	if !expires.After(time.Now()) {
+		return plan, fail("invalid_request", in.Target)
+	}
+	if in.Size == 0 {
+		return storage.PlannedUpload{PartSize: nativePartSize, ExpiresAt: expires.UTC()}, nil
+	}
+	count, err := plannedPartCount(in)
+	if err != nil {
+		return plan, err
 	}
 	ctx, done, err := d.operation(ctx)
 	if err != nil {
-		return grant, err
+		return plan, err
 	}
 	defer done()
 	session, err := d.nativeAllocation(ctx, in, metadata)
 	if err != nil {
-		return grant, err
+		return plan, err
 	}
-	err = metadata.WithUploadMetadata(ctx, d.namespace, in.ID, p.Number, func(record storage.UploadMetadataRecord) error {
-		current, e := readNative[nativeSession](ctx, record, "session")
-		if e != nil {
-			return e
-		}
-		if current == nil || !sameJSON(current.Intent, in) || current.UploadID != session.UploadID || current.Phase != "receiving" {
-			return fail("upload_aborted", in.Target)
-		}
-		candidate, e := readNative[nativePartReceipt](ctx, record, partMetadataKey(p.Number))
-		if e != nil {
-			return e
-		}
-		if candidate == nil {
-			// Persist immutable content BEFORE issuing replayable bearer authority. Grants
-			// may survive browser cancellation and logout; only this exact slot is writable.
-			candidate = &nativePartReceipt{Number: p.Number, Size: p.Size, SHA256: p.SHA256, UploadID: session.UploadID, Uncertain: true, MD5: p.MD5, Signed: true}
-			if e = record.Put(ctx, partMetadataKey(p.Number), encodeNative(candidate)); e != nil {
-				return e
-			}
-		}
-		if !candidate.Signed || candidate.Number != p.Number || candidate.Size != p.Size || candidate.SHA256 != p.SHA256 || candidate.MD5 != p.MD5 || candidate.UploadID != session.UploadID {
-			return fail("part_conflict", in.Target)
-		}
-		// Renewal must not mutate confirmed Handle bytes. Uncertain is permanently true
-		// for signed authority; successful Complete is what consumes the native upload.
-		grant, e = d.backend.(SignedMultipartBackend).SignPart(ctx, d.key(in.Target, storage.File), session.UploadID, p.Number, p.Size, p.MD5, expires)
-		return e
-	})
-	return grant, err
+	numbers := make([]int, 0, plannedPartWindow(count))
+	for number := 1; number <= plannedPartWindow(count); number++ {
+		numbers = append(numbers, number)
+	}
+	parts, err := d.signPlannedParts(ctx, in, session.UploadID, numbers, expires)
+	if err != nil {
+		return plan, err
+	}
+	return storage.PlannedUpload{Handle: []byte(session.UploadID), PartSize: nativePartSize, Parts: parts, ExpiresAt: expires.UTC()}, nil
 }
-func (d *Driver) ConfirmPart(ctx context.Context, in storage.WriteIntent, number int, metadata storage.UploadMetadata, accept func(storage.UploadPart) (storage.UploadPart, error)) (storage.UploadPart, error) {
-	var result storage.UploadPart
+
+func (d *Driver) SignUploadParts(ctx context.Context, in storage.WriteIntent, numbers []int, metadata storage.UploadMetadata, expires time.Time) ([]storage.SignedPartGrant, error) {
 	if err := d.validateUploadIntent(in); err != nil {
-		return result, err
+		return nil, err
 	}
 	if !d.SignedUploadSupported() {
-		return result, fail("unsupported", in.Target)
+		return nil, fail("unsupported", in.Target)
 	}
-	count := (in.Size + nativePartSize - 1) / nativePartSize
-	if number < 1 || int64(number) > count || accept == nil {
-		return result, fail("invalid_request", in.Target)
+	if !expires.After(time.Now()) || len(numbers) == 0 || len(numbers) > 256 {
+		return nil, fail("invalid_request", in.Target)
+	}
+	count, err := plannedPartCount(in)
+	if err != nil {
+		return nil, err
+	}
+	seen := make(map[int]bool, len(numbers))
+	for _, number := range numbers {
+		if number < 1 || number > count || seen[number] {
+			return nil, fail("invalid_request", in.Target)
+		}
+		seen[number] = true
 	}
 	ctx, done, err := d.operation(ctx)
 	if err != nil {
-		return result, err
+		return nil, err
 	}
 	defer done()
-	err = metadata.WithUploadMetadata(ctx, d.namespace, in.ID, number, func(record storage.UploadMetadataRecord) error {
-		session, e := readNative[nativeSession](ctx, record, "session")
-		if e != nil {
-			return e
-		}
-		if session == nil || !sameJSON(session.Intent, in) || session.Phase != "receiving" {
-			return fail("upload_aborted", in.Target)
-		}
-		candidate, e := readNative[nativePartReceipt](ctx, record, partMetadataKey(number))
-		if e != nil {
-			return e
-		}
-		if candidate == nil || !candidate.Signed || candidate.UploadID != session.UploadID {
-			return fail("part_pending", in.Target)
-		}
-		if candidate.ETag == "" {
-			info, found, e := d.backend.(SignedMultipartBackend).QueryPart(ctx, d.key(in.Target, storage.File), session.UploadID, number)
-			if e != nil {
-				return e
-			}
-			if !found {
-				return fail("part_pending", in.Target)
-			}
-			md5bytes, e := base64.StdEncoding.DecodeString(candidate.MD5)
-			if e != nil {
-				return fail("invalid_evidence", in.Target)
-			}
-			if info.Size != candidate.Size || strings.ToLower(strings.Trim(info.ETag, "\"")) != hex.EncodeToString(md5bytes) {
-				return fail("digest_mismatch", in.Target)
-			}
-			candidate.ETag = info.ETag
-			if e = record.Put(ctx, partMetadataKey(number), encodeNative(candidate)); e != nil {
-				return e
-			}
-		}
-		result = storage.UploadPart{Number: number, Size: candidate.Size, SHA256: candidate.SHA256, Handle: string(encodeNative(candidate))}
-		accepted, e := accept(result)
-		if e != nil {
-			return e
-		}
-		if !sameJSON(accepted, result) {
-			return fail("invalid_evidence", in.Target)
-		}
+	var session *nativeSession
+	err = d.withPlannedSession(ctx, in, metadata, -1, func(current *nativeSession) error {
+		session = current
 		return nil
 	})
-	return result, err
+	if err != nil {
+		return nil, err
+	}
+	if session == nil || session.UploadID == "" {
+		return nil, fail("not_found", in.Target)
+	}
+	return d.signPlannedParts(ctx, in, session.UploadID, numbers, expires)
+}
+
+func (d *Driver) signPlannedParts(ctx context.Context, in storage.WriteIntent, uploadID string, numbers []int, expires time.Time) ([]storage.SignedPartGrant, error) {
+	backend := d.backend.(SignedPartBackend)
+	count, err := plannedPartCount(in)
+	if err != nil {
+		return nil, err
+	}
+	parts := make([]storage.SignedPartGrant, 0, len(numbers))
+	for _, number := range numbers {
+		size := nativePartSize
+		if number == count {
+			size = in.Size - int64(number-1)*nativePartSize
+		}
+		grant, err := backend.SignPart(ctx, d.key(in.Target, storage.File), uploadID, number, size, expires)
+		if err != nil {
+			return nil, err
+		}
+		if grant.Number != number || grant.Size != size || grant.URL == "" || grant.Method == "" || grant.ExpiresAt.IsZero() {
+			return nil, fail("invalid_backend_response", in.Target)
+		}
+		parts = append(parts, grant)
+	}
+	return parts, nil
+}
+
+func (d *Driver) ListUploadParts(ctx context.Context, in storage.WriteIntent, after, limit int, metadata storage.UploadMetadata) ([]storage.NativeUploadPart, bool, error) {
+	if err := d.validateUploadIntent(in); err != nil {
+		return nil, false, err
+	}
+	ctx, done, err := d.operation(ctx)
+	if err != nil {
+		return nil, false, err
+	}
+	defer done()
+	count, err := plannedPartCount(in)
+	if err != nil {
+		return nil, false, err
+	}
+	if count == 0 {
+		return nil, false, nil
+	}
+	var session *nativeSession
+	err = d.withPlannedSession(ctx, in, metadata, -1, func(current *nativeSession) error {
+		session = current
+		return nil
+	})
+	if err != nil {
+		return nil, false, err
+	}
+	if session == nil || session.UploadID == "" {
+		return nil, false, fail("not_found", in.Target)
+	}
+	if after < 0 || limit < 1 {
+		return nil, false, fail("invalid_request", in.Target)
+	}
+	backend := d.backend.(SignedPartBackend)
+	return backend.ListParts(ctx, d.key(in.Target, storage.File), session.UploadID, after, limit)
+}
+
+func (d *Driver) SealPlannedUpload(ctx context.Context, in storage.WriteIntent, metadata storage.UploadMetadata, cp storage.Checkpoint) (storage.Staged, error) {
+	if err := d.validateUploadIntent(in); err != nil {
+		return storage.Staged{}, err
+	}
+	if !d.SignedUploadSupported() && in.Size != 0 {
+		return storage.Staged{}, fail("unsupported", in.Target)
+	}
+	ctx, done, err := d.operation(ctx)
+	if err != nil {
+		return storage.Staged{}, err
+	}
+	defer done()
+	unlock, err := d.lock(ctx, "write", in.ID, false)
+	if err != nil {
+		return storage.Staged{}, err
+	}
+	defer unlock()
+	r, err := d.load("write", in.ID)
+	if err == nil {
+		if !sameJSON(r.Intent, in) || r.Native == nil {
+			return storage.Staged{}, fail("intent_conflict", in.Target)
+		}
+		if r.Phase != "ready" && r.Phase != "applied" {
+			return storage.Staged{}, fail("outcome_unknown", in.Target)
+		}
+		if err = checkpoint(ctx, cp, d.receipt(r)); err != nil {
+			return storage.Staged{}, err
+		}
+		return d.staged(r), nil
+	}
+	if !errors.Is(err, os.ErrNotExist) {
+		return storage.Staged{}, err
+	}
+	stage := &nativeStage{}
+	if in.Size > 0 {
+		if metadata == nil {
+			return storage.Staged{}, fail("invalid_config", in.Target)
+		}
+		count, e := plannedPartCount(in)
+		if e != nil {
+			return storage.Staged{}, e
+		}
+		err = metadata.WithUploadMetadata(ctx, d.namespace, in.ID, 0, func(record storage.UploadMetadataRecord) error {
+			session, e := readNative[nativeSession](ctx, record, "session")
+			if e != nil {
+				return e
+			}
+			if session == nil || !sameJSON(session.Intent, in) || session.Phase != "receiving" && session.Phase != "sealed" {
+				return fail("invalid_evidence", in.Target)
+			}
+			listed, e := d.listAllProviderParts(ctx, in, session.UploadID, count)
+			if e != nil {
+				return e
+			}
+			stage.UploadID = session.UploadID
+			stage.Parts = listed
+			session.Phase = "sealed"
+			return record.Put(ctx, "session", encodeNative(session))
+		})
+		if err != nil {
+			return storage.Staged{}, err
+		}
+	}
+	attempt, err := randomAttempt()
+	if err != nil {
+		return storage.Staged{}, err
+	}
+	r = &ledger{Kind: "write", ID: in.ID, Intent: cloneIntent(in), Attempt: attempt, Phase: "ready", ParentVersion: append([]byte(nil), in.ParentVersion...), Native: stage}
+	if err = d.save(r); err != nil {
+		return storage.Staged{}, err
+	}
+	if err = checkpoint(ctx, cp, d.receipt(r)); err != nil {
+		return storage.Staged{}, err
+	}
+	return d.staged(r), nil
+}
+
+func (d *Driver) DiscardPlannedUpload(ctx context.Context, in storage.WriteIntent, metadata storage.UploadMetadata) error {
+	return d.DiscardParts(ctx, in, metadata)
+}
+
+func (d *Driver) listAllProviderParts(ctx context.Context, in storage.WriteIntent, uploadID string, count int) ([]NativePart, error) {
+	if count == 0 {
+		return nil, nil
+	}
+	backend := d.backend.(SignedPartBackend)
+	parts := make([]NativePart, 0, count)
+	after := 0
+	for {
+		page, more, err := backend.ListParts(ctx, d.key(in.Target, storage.File), uploadID, after, 1000)
+		if err != nil {
+			return nil, err
+		}
+		if len(page) == 0 && more {
+			return nil, fail("invalid_backend_response", in.Target)
+		}
+		for _, part := range page {
+			expected := nativePartSize
+			if part.Number == count {
+				expected = in.Size - int64(part.Number-1)*nativePartSize
+			}
+			if part.Number != len(parts)+1 || part.Size != expected || part.ETag == "" {
+				return nil, fail("upload_incomplete", in.Target)
+			}
+			parts = append(parts, NativePart{Number: part.Number, ETag: part.ETag})
+			after = part.Number
+		}
+		if !more {
+			break
+		}
+	}
+	if len(parts) != count {
+		return nil, fail("upload_incomplete", in.Target)
+	}
+	return parts, nil
+}
+
+func (d *Driver) withPlannedSession(ctx context.Context, in storage.WriteIntent, metadata storage.UploadMetadata, number int, fn func(*nativeSession) error) error {
+	if metadata == nil {
+		return fail("invalid_config", in.Target)
+	}
+	return metadata.WithUploadMetadata(ctx, d.namespace, in.ID, number, func(record storage.UploadMetadataRecord) error {
+		session, err := readNative[nativeSession](ctx, record, "session")
+		if err != nil {
+			return err
+		}
+		if session != nil && !sameJSON(session.Intent, in) {
+			return fail("intent_conflict", in.Target)
+		}
+		return fn(session)
+	})
+}
+
+func (d *Driver) GrantRead(ctx context.Context, p storage.Path, options storage.ReadGrantOptions) (storage.ReadGrant, error) {
+	if err := storage.ValidatePath(p); err != nil || p == "" {
+		return storage.ReadGrant{}, fail("invalid_request", p)
+	}
+	backend, ok := d.backend.(ReadSignerBackend)
+	if !ok || !backend.ReadSigningSupported() {
+		return storage.ReadGrant{}, fail("unsupported", p)
+	}
+	return backend.PresignRead(ctx, d.key(p, storage.File), options)
 }

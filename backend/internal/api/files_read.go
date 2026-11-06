@@ -308,15 +308,17 @@ func (s *Server) handleFilesCapabilities(w http.ResponseWriter, r *http.Request,
 	if err != nil {
 		return err
 	}
+	class := s.filesTransferClass()
+	downloadsReady := class == storage.TransferRelay
+	if class == storage.TransferPresignedParts {
+		_, downloadsReady = filesUnderlyingDriver(f.Driver).(storage.ReadGranter)
+	}
 	var singlePut int64
 	checksums := []string{}
-	if ready {
+	if ready && class == storage.TransferRelay {
 		singlePut = s.cfg.Storage.MaxSinglePutBytes
 		if singlePut == 0 {
 			singlePut = 32 << 20
-		}
-		if s.cfg.ExternalUploadIngress() {
-			singlePut = 0
 		}
 		checksums = []string{"sha-256"}
 	}
@@ -325,24 +327,19 @@ func (s *Server) handleFilesCapabilities(w http.ResponseWriter, r *http.Request,
 		retention = 86400
 	}
 	uploadsReady := ready
-	if numbered, ok := f.Driver.(storage.NumberedUploadWriter); ok && numbered.UploadMaxFileBytes() == 0 {
-		uploadsReady = false
-	}
-	transport := "embedded"
-	if s.cfg.EdgeOneUploadIngress() {
-		transport = "cos-signed"
-		signed, ok := f.Driver.(storage.SignedNumberedUploadWriter)
-		if !ok || !signed.SignedUploadSupported() {
+	if class == storage.TransferPresignedParts {
+		if _, ok := filesUnderlyingDriver(f.Driver).(storage.PlannedUploadWriter); !ok {
 			uploadsReady = false
 		}
-		checksums = []string{"md5"}
+	} else if numbered, ok := f.Driver.(storage.NumberedUploadWriter); ok && numbered.UploadMaxFileBytes() == 0 {
+		uploadsReady = false
 	}
 	var partBytes, idleExpiry, maxLifetime any
 	parallelism := 0
 	if uploadsReady {
 		parallelism = filesUploadParallelism
 		partBytes, idleExpiry, maxLifetime = filesUploadPartSize, 86400, 604800
-		if native, ok := f.Driver.(fileops.NativeActions); ok {
+		if native, ok := filesUnderlyingDriver(f.Driver).(fileops.NativeActions); ok {
 			n := filesUploadMaxSize(native)
 			maxFile = &n
 		}
@@ -352,7 +349,9 @@ func (s *Server) handleFilesCapabilities(w http.ResponseWriter, r *http.Request,
 		"identity":       map[string]any{"id": true, "path": true, "uniquePaths": true},
 		"changeTracking": map[string]any{"available": true, "read": f.Principal.Token == nil || f.Principal.Token.CanChanges, "subscribe": f.Principal.Token == nil || (f.Principal.Token.CanChanges && f.Principal.Token.CanSubscribe), "delivery": []string{"sse"}, "retentionSeconds": int64(90 * 24 * 60 * 60), "subscriptionLifetimeSeconds": int64(7 * 24 * 60 * 60), "snapshotLifetimeSeconds": int64(24 * 60 * 60), "snapshotMaxEntries": 100000, "snapshotMaxBytes": int64(64 << 20), "observation": "indexed", "externalChanges": "explicit-reconcile"},
 		"path":           actual, "read": true, "write": ready, "range": d.RangeRead, "pinnedRead": d.PinnedRead, "strongContentValidators": d.PinnedRead,
-		"thumbnails": false, "uploads": uploadsReady, "uploadTransport": transport, "checksums": checksums, "sourceModifiedAt": ready && s.cfg.BackendName() == "local",
+		"transferClass": s.filesTransferClassLabel(), "transferKind": s.filesTransferKind(), "transferClasses": d.TransferClasses,
+		"atomicCreate": d.AtomicCreate, "downloads": downloadsReady,
+		"thumbnails": false, "uploads": uploadsReady, "checksums": checksums, "sourceModifiedAt": ready && s.cfg.BackendName() == "local",
 		"maxFileBytes": maxFile, "maxSinglePutBytes": singlePut, "maxPartBytes": partBytes,
 		"pagination":           map[string]any{"defaultLimit": filesDefaultLimit, "maxLimit": filesMaxLimit},
 		"names":                map[string]any{"caseSensitive": d.Names.CaseSensitive, "maxSegmentBytes": d.Names.MaxSegmentBytes, "maxPathBytes": d.Names.MaxPathBytes, "maxDepth": d.Names.MaxDepth},

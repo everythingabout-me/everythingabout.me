@@ -231,10 +231,26 @@ export interface FilePrincipal {
   csrfToken?: string;
 }
 
-export type FileUploadTransport = "embedded" | "cos-signed";
+export type FileTransferClass = "A" | "B" | "C";
+export type FileTransferKind = "presigned-parts" | "resumable-session" | "relay";
+
+export interface FileUploadPartGrant {
+  number: number;
+  size: number;
+  method: "PUT";
+  url: string;
+  headers: Record<string, string>;
+  expiresAt: string;
+}
+
+export type FileUploadTransport =
+  | { kind: "presigned-parts"; parts: FileUploadPartGrant[]; signUrl: string; expiresAt: string }
+  | { kind: "resumable-session"; url: string; chunkSize: number; maxParallelism: number; credential?: { scheme: "bearer"; value: string; expiresAt: string } }
+  | { kind: "relay"; url: string };
 
 export interface FileUploadSession {
   id: string;
+  class: FileTransferClass;
   transport?: FileUploadTransport;
   path: string;
   state: "open" | "committing" | "committed" | "outcome_unknown" | "failed" | "aborted" | "expired";
@@ -258,20 +274,38 @@ export interface FileUploadReceipt {
   number: number;
   size: number;
   sha256: string;
-  checksumSource?: "client-sha256-cos-md5";
 }
 
-export interface FileUploadAuthorization {
-  method: "PUT";
-  url: string;
-  headers: Record<string, string>;
-  expiresAt: string;
+export interface FileProviderPart {
+  number: number;
+  size: number;
+  etag: string;
 }
 
-export interface FileUploadReceipts {
-  items: FileUploadReceipt[];
+export interface FileUploadPartsPage {
+  items: (FileUploadReceipt | FileProviderPart)[];
   nextCursor: string | null;
-  watermark: number;
+  watermark?: number;
+}
+
+export interface FileDownloadGrant {
+  id?: string;
+  kind: "url" | "bearer";
+  url?: string;
+  headers?: Record<string, string>;
+  expiresAt?: string;
+  size?: number;
+  contentType?: string;
+  acceptRanges?: boolean;
+  etag?: string;
+  conditions?: string[];
+  code?: string;
+  detail?: string;
+  status?: number;
+}
+
+export interface FileDownloadGrantCollection {
+  items: FileDownloadGrant[];
 }
 
 export interface FileChangeTrackingCapabilities {
@@ -299,7 +333,11 @@ export interface FileCapabilities {
   strongContentValidators: boolean;
   thumbnails: boolean;
   uploads: boolean;
-  uploadTransport?: FileUploadTransport;
+  transferClass: FileTransferClass;
+  transferKind: FileTransferKind;
+  transferClasses: string[];
+  atomicCreate: boolean;
+  downloads: boolean;
   sourceModifiedAt: boolean;
   checksums: string[];
   maxFileBytes: number | null;
@@ -662,26 +700,32 @@ function filePost<T>(resource: string, body?: unknown, headers?: HeadersInit, si
   });
 }
 
-function signedPartTarget(grant: FileUploadAuthorization, md5: string): { url: string; headers: Record<string, string> } {
-  const prefix = "/api/files/transfer/";
-  if (grant?.method !== "PUT" || typeof grant.url !== "string" || !grant.url.startsWith(prefix)
-    || /[\\\\#\s\u0000-\u001f\u007f]/.test(grant.url) || /%(?:0[0-9a-f]|1[0-9a-f]|7f|5c)/i.test(grant.url)) throw new Error("Invalid signed upload target.");
-  const parsed = new URL(grant.url, "https://upload.invalid");
-  if (parsed.origin !== "https://upload.invalid" || !parsed.pathname.startsWith(prefix)
-    || parsed.pathname.length === prefix.length || !parsed.search || parsed.hash) throw new Error("Invalid signed upload target.");
-  if (!Number.isFinite(Date.parse(grant.expiresAt)) || Date.parse(grant.expiresAt) <= Date.now()) throw new Error("The signed upload authorization has expired.");
-  const entries = Object.entries(grant.headers ?? {});
+function presignedPartTarget(grant: FileUploadPartGrant): { url: string; headers: Record<string, string> } {
+  if (grant?.method !== "PUT" || typeof grant.url !== "string" || typeof grant.size !== "number"
+    || !Number.isSafeInteger(grant.number) || grant.number < 1 || !Number.isSafeInteger(grant.size) || grant.size < 0) {
+    throw new Error("Invalid presigned part grant.");
+  }
+  const relative = grant.url.startsWith("/");
+  if (!relative && !/^https?:\/\//i.test(grant.url)) throw new Error("Invalid presigned part target.");
+  const parsed = new URL(grant.url, window.location.origin);
+  if (parsed.username || parsed.password || parsed.hash) throw new Error("Invalid presigned part target.");
+  if (relative && !parsed.pathname.startsWith("/api/files/transfer/")) throw new Error("Invalid presigned part target.");
+  if (relative && parsed.origin !== window.location.origin) throw new Error("Invalid presigned part target.");
+  if (!parsed.search) throw new Error("Invalid presigned part target.");
+  if (!Number.isFinite(Date.parse(grant.expiresAt)) || Date.parse(grant.expiresAt) <= Date.now()) throw new Error("The presigned part has expired.");
   const headers: Record<string, string> = {};
-  for (const [name, value] of entries) {
+  for (const [name, value] of Object.entries(grant.headers ?? {})) {
     const lower = name.toLowerCase();
-    if (!["content-md5", "content-type"].includes(lower) || typeof value !== "string" || headers[lower] !== undefined) throw new Error("Invalid signed upload headers.");
+    // The browser sets Content-Length from the Blob itself; setting it manually
+    // is forbidden. Only Content-Type is an application-set header.
+    if (lower === "content-length") continue;
+    if (lower !== "content-type" || typeof value !== "string") throw new Error("Invalid presigned part headers.");
     headers[lower] = value;
   }
-  if (headers["content-md5"] !== md5 || headers["content-type"] !== "application/octet-stream") throw new Error("Invalid signed upload headers.");
-  return { url: grant.url, headers };
+  return { url: parsed.toString(), headers };
 }
 
-function sendSignedPart(target: { url: string; headers: Record<string, string> }, blob: Blob, signal?: AbortSignal,
+function sendPresignedPart(target: { url: string; headers: Record<string, string> }, blob: Blob, signal?: AbortSignal,
   onProgress?: (progress: UploadProgress) => void): Promise<void> {
   return new Promise((resolve, reject) => {
     if (signal?.aborted) { reject(new DOMException("Upload canceled", "AbortError")); return; }
@@ -695,16 +739,13 @@ function sendSignedPart(target: { url: string; headers: Record<string, string> }
     };
     const abort = () => { xhr.abort(); finish(new DOMException("Upload canceled", "AbortError")); };
     xhr.open("PUT", target.url);
-    // Same-origin cookies are still sent by browsers; EdgeOne must strip them
-    // before COS. Never attach application Authorization or CSRF to this request.
+    // A provider grant never receives application cookies or credentials.
     xhr.withCredentials = false;
     for (const [name, value] of Object.entries(target.headers)) xhr.setRequestHeader(name, value);
     xhr.upload.onprogress = (event) => {
       if (!settled && !signal?.aborted) onProgress?.({ loaded: event.loaded, total: blob.size });
     };
-    // COS returns XML/empty bodies, not application JSON receipts. Its reply is
-    // only a transport outcome; the application confirms the native part below.
-    xhr.onload = () => finish(xhr.status >= 200 && xhr.status < 300 ? undefined : new ApiError("signed part transfer failed", xhr.status));
+    xhr.onload = () => finish(xhr.status >= 200 && xhr.status < 300 ? undefined : new ApiError("presigned part transfer failed", xhr.status));
     xhr.onerror = () => finish(new ApiError("upload connection interrupted", 0));
     xhr.ontimeout = () => finish(new ApiError("upload request timed out", 0));
     xhr.onabort = () => finish(new DOMException("Upload canceled", "AbortError"));
@@ -713,39 +754,61 @@ function sendSignedPart(target: { url: string; headers: Record<string, string> }
   });
 }
 
-async function uploadSignedPart(id: string, number: number, blob: Blob, signal?: AbortSignal,
+async function uploadPresignedPart(grant: FileUploadPartGrant, blob: Blob, signal?: AbortSignal,
+  onProgress?: (progress: UploadProgress) => void): Promise<void> {
+  if (grant.size !== blob.size) throw new Error("The presigned part length changed.");
+  const target = presignedPartTarget(grant);
+  await sendPresignedPart(target, blob, signal, onProgress);
+}
+
+async function uploadRelayPart(id: string, number: number, blob: Blob, signal?: AbortSignal,
   onProgress?: (progress: UploadProgress) => void): Promise<FileUploadReceipt> {
+  const token = await fileCSRF();
   if (signal?.aborted) throw new DOMException("Upload canceled", "AbortError");
-  const { uploadDigests } = await import("./uploadDigests");
-  const digests = await uploadDigests(blob);
-  if (signal?.aborted) throw new DOMException("Upload canceled", "AbortError");
-  const part = `/uploads/${encodeURIComponent(id)}/parts/${number}`;
-  const grant = await filePost<FileUploadAuthorization>(`${part}/authorize`, { size: blob.size, ...digests }, undefined, signal);
-  const target = signedPartTarget(grant, digests.md5);
-  const confirm = async () => {
-    const receipt = await filePost<FileUploadReceipt>(`${part}/confirm`, undefined, undefined, signal);
-    if (receipt.number !== number || receipt.size !== blob.size || receipt.sha256 !== digests.sha256
-      || receipt.checksumSource !== "client-sha256-cos-md5") throw new Error("The confirmed upload part identity changed.");
-    return receipt;
-  };
-  try { return await confirm(); }
-  catch (error) {
-    if (!(error instanceof ApiError) || error.status !== 409 || error.code !== "part_pending") throw error;
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    let settled = false;
+    const finish = (error?: unknown, receipt?: FileUploadReceipt) => {
+      if (settled) return;
+      settled = true;
+      signal?.removeEventListener("abort", abort);
+      if (error) reject(error); else resolve(receipt!);
+    };
+    const abort = () => { xhr.abort(); finish(new DOMException("Upload canceled", "AbortError")); };
+    xhr.open("PUT", fileURL(`/uploads/${encodeURIComponent(id)}/parts/${number}`));
+    xhr.withCredentials = true;
+    xhr.setRequestHeader("Content-Type", "application/octet-stream");
+    xhr.setRequestHeader("X-CSRF-Token", token);
+    xhr.upload.onprogress = (event) => {
+      if (!settled && !signal?.aborted) onProgress?.({ loaded: event.loaded, total: blob.size });
+    };
+    xhr.onload = () => {
+      if (xhr.status === 401 || xhr.status === 403) forgetSession();
+      try { finish(undefined, filePayload<FileUploadReceipt>(JSON.parse(xhr.responseText), xhr.status)); }
+      catch (error) { finish(error instanceof ApiError ? error : httpError(xhr.status)); }
+    };
+    xhr.onerror = () => finish(new ApiError("upload connection interrupted", 0));
+    xhr.ontimeout = () => finish(new ApiError("upload request timed out", 0));
+    xhr.onabort = () => finish(new DOMException("Upload canceled", "AbortError"));
+    signal?.addEventListener("abort", abort, { once: true });
+    try { xhr.send(blob); } catch (error) { finish(error); }
+  });
+}
+
+async function fetchDownloadGrant(selector: FileSelector, disposition: "inline" | "attachment", signal?: AbortSignal): Promise<FileDownloadGrant> {
+  const result = await filePost<FileDownloadGrantCollection>("/downloads", { items: [typeof selector === "string" ? filePath(selector) : entrySelector(selector)], disposition }, undefined, signal);
+  const grant = result.items[0];
+  if (!grant || !grant.kind || grant.code) {
+    throw new ApiError(grant?.detail ?? "The download grant was refused.", grant?.status ?? 502, grant ?? {});
   }
-  try { await sendSignedPart(target, blob, signal, onProgress); }
-  catch (error) {
-    if (signal?.aborted) throw error;
-    // A lost COS reply may hide durable success. Always confirm before allowing
-    // a caller to obtain a new grant and replay this immutable part.
-  }
-  return confirm();
+  return grant;
 }
 
 export function isFileOperation(result: FileResource | FileOperation | void): result is FileOperation {
   return Boolean(result && "state" in result && "id" in result);
 }
 
-/** Unified resources and same-origin byte URLs. No provider locations are consumed. */
+/** Unified resources; byte access is through read grants or same-origin class C streaming. */
 export const files = {
   metadata(selector: FileSelector, signal?: AbortSignal): Promise<FileResource> {
     return fileRequest(fileURL("", entrySelector(selector)), { signal });
@@ -1084,48 +1147,66 @@ export const api = {
     return filePost("/uploads", uploadInput(input), { "Idempotency-Key": key }, signal);
   },
 
-  async uploadPart(id: string, number: number, blob: Blob, signal?: AbortSignal, onProgress?: (progress: UploadProgress) => void,
-    transport: FileUploadTransport = "embedded"): Promise<FileUploadReceipt> {
-    if (transport === "cos-signed") return uploadSignedPart(id, number, blob, signal, onProgress);
-    if (transport !== "embedded") throw new Error("Unsupported upload transport.");
-    const token = await fileCSRF();
-    if (signal?.aborted) throw new DOMException("Upload canceled", "AbortError");
-    return new Promise((resolve, reject) => {
-      const xhr = new XMLHttpRequest();
-      let settled = false;
-      const finish = (error?: unknown, receipt?: FileUploadReceipt) => {
-        if (settled) return;
-        settled = true;
-        signal?.removeEventListener("abort", abort);
-        if (error) reject(error); else resolve(receipt!);
-      };
-      const abort = () => { xhr.abort(); finish(new DOMException("Upload canceled", "AbortError")); };
-      xhr.open("PUT", fileURL(`/uploads/${encodeURIComponent(id)}/parts/${number}`));
-      xhr.withCredentials = true;
-      xhr.setRequestHeader("Content-Type", "application/octet-stream");
-      xhr.setRequestHeader("X-CSRF-Token", token);
-      xhr.upload.onprogress = (event) => {
-        if (!settled && !signal?.aborted) onProgress?.({ loaded: event.loaded, total: blob.size });
-      };
-      xhr.onload = () => {
-        if (xhr.status === 401 || xhr.status === 403) forgetSession();
-        try { finish(undefined, filePayload<FileUploadReceipt>(JSON.parse(xhr.responseText), xhr.status)); }
-        catch (error) { finish(error instanceof ApiError ? error : httpError(xhr.status)); }
-      };
-      xhr.onerror = () => finish(new ApiError("upload connection interrupted", 0));
-      xhr.ontimeout = () => finish(new ApiError("upload request timed out", 0));
-      xhr.onabort = () => finish(new DOMException("Upload canceled", "AbortError"));
-      signal?.addEventListener("abort", abort, { once: true });
-      try { xhr.send(blob); } catch (error) { finish(error); }
-    });
+  /** Class C only: one immutable part through the application, with a durable receipt. */
+  uploadPart(id: string, number: number, blob: Blob, signal?: AbortSignal, onProgress?: (progress: UploadProgress) => void): Promise<FileUploadReceipt> {
+    return uploadRelayPart(id, number, blob, signal, onProgress);
+  },
+
+  /** Class A: one signed provider part. There is no application acknowledgement. */
+  uploadPresignedPart(grant: FileUploadPartGrant, blob: Blob, signal?: AbortSignal, onProgress?: (progress: UploadProgress) => void): Promise<void> {
+    return uploadPresignedPart(grant, blob, signal, onProgress);
+  },
+
+  async signUploadParts(id: string, numbers: number[], signal?: AbortSignal): Promise<FileUploadPartGrant[]> {
+    const result = await filePost<{ parts: FileUploadPartGrant[] }>(`/uploads/${encodeURIComponent(id)}/parts/sign`, { numbers }, undefined, signal);
+    if (!Array.isArray(result.parts)) throw new Error("The signed part list is invalid.");
+    return result.parts;
   },
 
   uploadStatus(id: string, signal?: AbortSignal): Promise<FileUploadSession> {
     return fileRequest(fileURL(`/uploads/${encodeURIComponent(id)}`), { signal });
   },
 
-  uploadParts(id: string, cursor?: string, signal?: AbortSignal): Promise<FileUploadReceipts> {
+  uploadParts(id: string, cursor?: string, signal?: AbortSignal): Promise<FileUploadPartsPage> {
     return fileRequest(fileURL(`/uploads/${encodeURIComponent(id)}/parts`, { cursor }), { signal });
+  },
+
+  downloadGrants(items: FileSelector[], disposition: "inline" | "attachment" = "attachment", signal?: AbortSignal): Promise<FileDownloadGrantCollection> {
+    return filePost("/downloads", { items: items.map((item) => typeof item === "string" ? filePath(item) : entrySelector(item)), disposition }, undefined, signal);
+  },
+
+  downloadGrant(selector: FileSelector, disposition: "inline" | "attachment" = "attachment", signal?: AbortSignal): Promise<FileDownloadGrant> {
+    return fetchDownloadGrant(selector, disposition, signal);
+  },
+
+  /** Resolve one read grant into a URL a browser media element can use. */
+  async downloadURL(selector: FileSelector, disposition: "inline" | "attachment" = "inline", signal?: AbortSignal): Promise<string> {
+    const grant = await fetchDownloadGrant(selector, disposition, signal);
+    if (grant.kind === "url" && grant.url) return grant.url;
+    if (grant.kind === "bearer" && grant.url) {
+      const response = await fetch(grant.url, { headers: grant.headers ?? {}, credentials: "omit", signal });
+      if (!response.ok) throw httpError(response.status);
+      return URL.createObjectURL(await response.blob());
+    }
+    throw new Error("The read grant has no usable URL.");
+  },
+
+  /** Fetch a download grant, then hand the representation to the browser. */
+  async download(selector: FileSelector, signal?: AbortSignal): Promise<void> {
+    const grant = await fetchDownloadGrant(selector, "attachment", signal);
+    if (grant.kind === "url" && grant.url) { window.location.assign(grant.url); return; }
+    if (grant.kind === "bearer" && grant.url) {
+      const response = await fetch(grant.url, { headers: grant.headers ?? {}, credentials: "omit", signal });
+      if (!response.ok) throw httpError(response.status);
+      const url = URL.createObjectURL(await response.blob());
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = "";
+      link.click();
+      setTimeout(() => URL.revokeObjectURL(url), 60_000);
+      return;
+    }
+    throw new Error("The read grant has no usable URL.");
   },
 
   commitUpload(id: string, signal?: AbortSignal): Promise<FileResource | FileOperation> {

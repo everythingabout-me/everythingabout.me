@@ -16,7 +16,8 @@
 The API layer owns user authentication, authorization, search/indexing, quota, transfer sessions and operation
 coordination. The current delivery targets official COS and self-hosted Local/COS; other storage adapters remain
 optional. Every control request uses one API origin, and clients receive no provider SDK, signing secret or
-broad infrastructure credential. Each storage connection selects one [transfer class](transfer-protocol.md):
+broad infrastructure credential. Each storage connection selects one [transfer class](transfer-protocol.md)
+(class A and C are implemented; class B is reserved for a future cloud-drive driver):
 class A sends bytes between client and object store through presigned part and read URLs, class B between
 client and cloud drive through provider sessions and download links, and class C through the application.
 Public identity is a stable service UUID; its current native location is

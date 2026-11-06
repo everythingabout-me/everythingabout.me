@@ -88,16 +88,16 @@ func filesAuditAction(r *http.Request) string {
 		case http.MethodPut:
 			return "put"
 		}
+	case "/downloads":
+		return "download_grant"
 	case "/list", "/search", "/move", "/copy", "/thumbnail", "/me", "/capabilities", "/changes", "/subscriptions":
 		return strings.TrimPrefix(route, "/")
 	}
 	switch {
 	case route == "/uploads", strings.HasPrefix(route, "/uploads/"):
 		switch {
-		case strings.HasSuffix(route, "/authorize"):
-			return "upload_authorize"
-		case strings.HasSuffix(route, "/confirm"):
-			return "upload_confirm"
+		case strings.HasSuffix(route, "/parts/sign"):
+			return "upload_sign"
 		case strings.HasSuffix(route, "/commit"):
 			return "upload_commit"
 		case strings.Contains(route, "/parts/"):

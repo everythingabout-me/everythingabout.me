@@ -298,7 +298,10 @@ Variants: `Committed locally main@abc1234, not pushed` / `Not committed (tests f
 - Commit `.env`, secrets, `bin/`, `.gocache/`, or `web/dist/` (all gitignored).
 - Never expose signing secrets, broad STS credentials, provider download redirects or arbitrary upload origins.
   Each connection selects one transfer class (A presigned parts, B cloud-drive sessions, C relay); a transfer
-  never falls back to another class. Grants are scoped to one upload session or one file, time-limited,
+  never falls back to another class. A and C are implemented; B is configuration-reserved until a cloud-drive
+  driver exists. Class A needs separate `COS_UPLOAD_SIGN_*` (UploadPart) and `COS_READ_SIGN_*` (GetObject)
+  identities; `FILE_TRANSFER_CLASS` selects `presigned-parts` or `relay`. Grants are scoped to one upload
+  session or one file, time-limited,
   renewable and recorded before they are issued. Class A part URLs bind exact length and no digest. Clients
   never publish: class A/C by construction, class B (cloud drives) by client contract; the server commit publishes. A provider credential is never
   issued to a principal whose scope is narrower than its reach. See `docs/design/transfer-protocol.md`.

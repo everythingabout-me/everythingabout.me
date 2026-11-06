@@ -31,6 +31,9 @@ func filesContentRevision(namespace string, e storage.Entry) *string {
 }
 
 func (s *Server) handleFilesContent(w http.ResponseWriter, r *http.Request, f *fileRequest) error {
+	if r.Method != http.MethodHead && s.filesTransferClass() != storage.TransferRelay {
+		return fc.NewProblem(409, "grant_required", "This connection serves content through POST /api/files/downloads read grants.")
+	}
 	p, err := s.filesResolveQuery(r.Context(), f, r.URL.RawQuery, false)
 	if err != nil {
 		return err

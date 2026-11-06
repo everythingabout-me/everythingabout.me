@@ -3,9 +3,6 @@ package cos
 import (
 	"bytes"
 	"context"
-	"crypto/md5"
-	"encoding/base64"
-	"encoding/hex"
 	"fmt"
 	"io"
 	"net/http"
@@ -16,6 +13,7 @@ import (
 	"time"
 
 	"everythingabout.me/backend/internal/objectmutation"
+	"everythingabout.me/backend/internal/storage"
 	sdk "github.com/tencentyun/cos-go-sdk-v5"
 )
 
@@ -57,47 +55,45 @@ func verifyFixturePartSignature(r *http.Request) bool {
 	want, _ := url.ParseQuery(check.Header.Get("Authorization"))
 	return q.Get("q-ak") == "upload-fixture-id" && q.Get("q-signature") == want.Get("q-signature")
 }
-func TestMutationSignedPartRestrictsMethodPathHostQueryAndDigest(t *testing.T) {
+
+func TestMutationClassASignsLengthWithoutDigest(t *testing.T) {
 	payload := []byte("signed bytes")
-	digest := md5.Sum(payload)
-	md5value := base64.StdEncoding.EncodeToString(digest[:])
 	key := "drive/owner/ +%2F?#中文.bin"
 	_, backend, origin := mutationFixture(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !verifyFixturePartSignature(r) {
 			w.WriteHeader(403)
 			return
 		}
-		// Model the required UploadPart-only IAM policy: unsigned copy-source
-		// headers cannot turn this identity into an UploadPartCopy capability.
 		if r.Header.Get("X-Cos-Copy-Source") != "" {
 			w.WriteHeader(403)
 			return
 		}
 		body, _ := io.ReadAll(r.Body)
-		sum := md5.Sum(body)
-		if base64.StdEncoding.EncodeToString(sum[:]) != r.Header.Get("Content-MD5") {
+		if int64(len(body)) != int64(r.ContentLength) || r.URL.Path != "/"+key {
 			w.WriteHeader(400)
 			return
 		}
-		if r.URL.Path != "/"+key {
-			t.Error("decoded native name changed", r.URL.Path)
-		}
-		w.Header().Set("ETag", `"`+hex.EncodeToString(sum[:])+`"`)
+		w.Header().Set("ETag", `"provider-etag"`)
+		w.WriteHeader(200)
 	}))
-	// Dedicated signer models a CAM identity with only UploadPart permission;
-	// the native control client remains fixture-id and can never issue browser grants.
 	control := backend.(*mutationBackend)
 	control.signer = sdk.NewClient(control.client.BaseURL, &http.Client{Transport: &sdk.AuthorizationTransport{SecretID: "upload-fixture-id", SecretKey: "upload-fixture-secret"}})
-	signed := backend.(objectmutation.SignedMultipartBackend)
-	grant, err := signed.SignPart(context.Background(), key, "native-id", 3, int64(len(payload)), md5value, time.Now().Add(5*time.Minute))
+	signed := backend.(objectmutation.SignedPartBackend)
+	grant, err := signed.SignPart(context.Background(), key, "native-id", 3, int64(len(payload)), time.Now().Add(5*time.Minute))
 	if err != nil {
 		t.Fatal(err)
 	}
+	if grant.Number != 3 || grant.Size != int64(len(payload)) || grant.Headers["Content-MD5"] != "" {
+		t.Fatal("grant bound an unintended field", grant)
+	}
 	u, _ := url.Parse(grant.URL)
-	for _, name := range []string{"content-length", "content-md5", "content-type", "host"} {
+	for _, name := range []string{"content-length", "content-type", "host"} {
 		if !strings.Contains(u.Query().Get("q-header-list"), name) {
 			t.Fatal("unbound header", name, u)
 		}
+	}
+	if strings.Contains(u.Query().Get("q-header-list"), "content-md5") {
+		t.Fatal("content digest was signed")
 	}
 	if !strings.Contains(u.Query().Get("q-url-param-list"), "partnumber") || !strings.Contains(u.Query().Get("q-url-param-list"), "uploadid") {
 		t.Fatal("unbound slot", u)
@@ -107,7 +103,6 @@ func TestMutationSignedPartRestrictsMethodPathHostQueryAndDigest(t *testing.T) {
 		for k, v := range grant.Headers {
 			request.Header.Set(k, v)
 		}
-		// Go's transport derives Content-Length from the Blob-equivalent body.
 		request.Header.Set("Content-Length", strconv.Itoa(len(payload)))
 		if change != nil {
 			change(request)
@@ -128,9 +123,7 @@ func TestMutationSignedPartRestrictsMethodPathHostQueryAndDigest(t *testing.T) {
 		func(r *http.Request) { r.Method = "POST" }, func(r *http.Request) { r.URL.Path += "other"; r.URL.RawPath = "" }, func(r *http.Request) { r.Host = "different.example" },
 		func(r *http.Request) { q := r.URL.Query(); q.Set("partNumber", "4"); r.URL.RawQuery = q.Encode() },
 		func(r *http.Request) { q := r.URL.Query(); q.Set("uploadId", "other"); r.URL.RawQuery = q.Encode() },
-		func(r *http.Request) {
-			r.Header.Set("Content-MD5", base64.StdEncoding.EncodeToString(make([]byte, 16)))
-		},
+		func(r *http.Request) { r.Header.Set("Content-Type", "text/plain") },
 	}
 	for i, change := range mutations {
 		if status := send(change); status != 403 {
@@ -138,27 +131,59 @@ func TestMutationSignedPartRestrictsMethodPathHostQueryAndDigest(t *testing.T) {
 		}
 	}
 }
-func TestMutationSignedPartQueryUsesPrivateNativeEvidence(t *testing.T) {
+
+func TestMutationClassAListsProviderParts(t *testing.T) {
 	_, backend, _ := mutationFixture(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != "GET" || r.URL.Query().Get("uploadId") != "native" || r.URL.Query().Get("part-number-marker") != "2" || r.URL.Query().Get("max-parts") != "1" {
 			t.Error("wrong native query", r.URL)
 		}
 		io.WriteString(w, `<ListPartsResult><Part><PartNumber>3</PartNumber><Size>12</Size><ETag>"abc"</ETag></Part></ListPartsResult>`)
 	}))
-	part, found, err := backend.(objectmutation.SignedMultipartBackend).QueryPart(context.Background(), "key", "native", 3)
-	if err != nil || !found || part.Size != 12 || part.ETag != `"abc"` {
-		t.Fatal(part, found, err)
+	parts, more, err := backend.(objectmutation.SignedPartBackend).ListParts(context.Background(), "key", "native", 2, 1)
+	if err != nil || more || len(parts) != 1 || parts[0].Size != 12 || parts[0].ETag != `"abc"` {
+		t.Fatal(parts, more, err)
 	}
 }
 
-func TestMutationSignedPartRequiresDedicatedSigner(t *testing.T) {
+func TestMutationClassARequiresDedicatedSigners(t *testing.T) {
 	_, backend, _ := mutationFixture(t, http.HandlerFunc(func(http.ResponseWriter, *http.Request) { t.Fatal("signing must perform no request") }))
-	signed := backend.(objectmutation.SignedMultipartBackend)
+	signed := backend.(objectmutation.SignedPartBackend)
 	if signed.SignedPartsSupported() {
 		t.Fatal("broad control credential enabled browser signing")
 	}
-	_, err := signed.SignPart(context.Background(), "key", "id", 1, 4, "jXd/OF09/siBXSD3SWAm3A==", time.Now().Add(time.Minute))
+	_, err := signed.SignPart(context.Background(), "key", "id", 1, 4, time.Now().Add(time.Minute))
 	if err == nil {
 		t.Fatal("missing dedicated signer issued grant")
+	}
+	reader := backend.(objectmutation.ReadSignerBackend)
+	if reader.ReadSigningSupported() {
+		t.Fatal("broad control credential enabled read grants")
+	}
+	if _, err := reader.PresignRead(context.Background(), "key", storage.ReadGrantOptions{MediaType: "text/plain"}); err == nil {
+		t.Fatal("missing read signer issued a grant")
+	}
+}
+
+func TestMutationClassAReadGrantUsesDedicatedReadSigner(t *testing.T) {
+	_, backend, _ := mutationFixture(t, http.HandlerFunc(func(http.ResponseWriter, *http.Request) { t.Fatal("presigning must perform no request") }))
+	control := backend.(*mutationBackend)
+	control.readSigner = sdk.NewClient(control.client.BaseURL, &http.Client{Transport: &sdk.AuthorizationTransport{SecretID: "read-fixture-id", SecretKey: "read-fixture-secret"}})
+	reader := backend.(objectmutation.ReadSignerBackend)
+	if !reader.ReadSigningSupported() {
+		t.Fatal("dedicated read signer was ignored")
+	}
+	grant, err := reader.PresignRead(context.Background(), "drive/owner/a b.txt", storage.ReadGrantOptions{MediaType: "text/plain", Disposition: "inline", ExpiresAt: time.Now().Add(5 * time.Minute)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	parsed, err := url.Parse(grant.URL)
+	if err != nil || grant.Kind != "url" {
+		t.Fatal(grant, err)
+	}
+	if parsed.Query().Get("q-ak") != "read-fixture-id" {
+		t.Fatal("read grant used the control credential", parsed.Query().Get("q-ak"))
+	}
+	if parsed.Query().Get("response-content-type") != "text/plain" || !strings.Contains(parsed.Query().Get("response-content-disposition"), "filename*=") {
+		t.Fatal("read representation parameters were not signed", parsed.Query())
 	}
 }

@@ -1,3 +1,4 @@
+import { useEffect, useState } from "react";
 import {
   audioPlugin,
   imagePlugin,
@@ -35,8 +36,22 @@ const plugins = [
 export default function FilePreview({ path, name, mediaType }: { path: string; name: string; mediaType: string | null }) {
   // Render fetched bytes through plugins; only safe media receives inline disposition.
   const safeInline = /^(image\/(jpeg|png|gif|webp|avif)|audio\/|video\/)/.test(mediaType ?? "");
-  const url = api.contentURL(path, safeInline ? "inline" : "attachment");
+  const [url, setURL] = useState<string | null>(null);
+  useEffect(() => {
+    setURL(null);
+    const controller = new AbortController();
+    let created: string | null = null;
+    void api.downloadURL(path, safeInline ? "inline" : "attachment", controller.signal).then((next) => {
+      created = next;
+      if (!controller.signal.aborted) setURL(next);
+    }).catch(() => { if (!controller.signal.aborted) setURL(null); });
+    return () => {
+      controller.abort();
+      if (created?.startsWith("blob:")) URL.revokeObjectURL(created);
+    };
+  }, [path, safeInline]);
 
+  if (!url) return <div className={styles.viewer} aria-busy="true" />;
   return (
     <div className={styles.viewer}>
       <FileViewer

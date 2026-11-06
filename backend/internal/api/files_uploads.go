@@ -40,6 +40,12 @@ type fileUploadSpoolFactory func(storage.Config) (FileUploadSpool, error)
 func filesUploadID(r *http.Request) string {
 	return strings.Split(strings.TrimPrefix(r.URL.Path, "/api/files/uploads/"), "/")[0]
 }
+func filesUploadExpired(u fileops.Upload) error {
+	if u.State == "open" && !u.ExpiresAt.IsZero() && u.ExpiresAt.Before(time.Now()) {
+		return fileops.E("upload_expired", nil)
+	}
+	return nil
+}
 func filesUploadStateError(state fileops.UploadState) error {
 	switch state {
 	case "aborted":
@@ -61,19 +67,16 @@ func (s *Server) filesUploadResource(u fileops.Upload, scopes ...*fileRequest) m
 	if len(u.Operation.Result) > 0 {
 		result = json.RawMessage(u.Operation.Result)
 	}
-	transport := "embedded"
-	if s.cfg.EdgeOneUploadIngress() {
-		transport = "cos-signed"
+	resource := map[string]any{"class": s.filesTransferClassLabel(), "id": u.ID, "path": "/" + string(intent.Target), "state": u.State, "size": intent.Size, "partSize": u.PartSize, "partCount": u.PartCount, "maxParallelism": u.MaxParallelism, "ordering": "any", "nextPart": nil, "receivedParts": u.ReceivedParts, "receivedBytes": u.ReceivedBytes, "createdAt": u.CreatedAt.UTC(), "expiresAt": u.ExpiresAt.UTC(), "partsUrl": "/api/files/uploads/" + u.ID + "/parts", "commitUrl": "/api/files/uploads/" + u.ID + "/commit", "operationId": u.Operation.ID, "result": result}
+	if s.filesTransferClass() == storage.TransferPresignedParts {
+		resource["signUrl"] = "/api/files/uploads/" + u.ID + "/parts/sign"
 	}
-	return map[string]any{"transport": transport, "id": u.ID, "path": "/" + string(intent.Target), "state": u.State, "size": intent.Size, "partSize": u.PartSize, "partCount": u.PartCount, "maxParallelism": u.MaxParallelism, "ordering": "any", "nextPart": nil, "receivedParts": u.ReceivedParts, "receivedBytes": u.ReceivedBytes, "createdAt": u.CreatedAt.UTC(), "expiresAt": u.ExpiresAt.UTC(), "partsUrl": "/api/files/uploads/" + u.ID + "/parts", "commitUrl": "/api/files/uploads/" + u.ID + "/commit", "operationId": u.Operation.ID, "result": result}
+	return resource
 }
 func filesUploadReceipt(p fileops.PartReceipt) map[string]any {
-	out := map[string]any{"number": p.Number, "size": p.Size, "sha256": p.SHA256}
-	var provenance struct{ Signed bool }
-	if json.Unmarshal([]byte(p.Handle), &provenance) == nil && provenance.Signed {
-		out["checksumSource"] = "client-sha256-cos-md5"
-	}
-	return out
+	// Class C receipts carry the server-computed SHA-256. They are not a
+	// provider digest and never a client assertion.
+	return map[string]any{"number": p.Number, "size": p.Size, "sha256": p.SHA256}
 }
 func filesUploadMaxSize(native fileops.NativeActions) int64 {
 	max := int64(filesUploadMaxParts) * filesUploadPartSize
@@ -221,10 +224,9 @@ func (s *Server) handleFilesCreateUpload(w http.ResponseWriter, r *http.Request,
 	if err != nil {
 		return err
 	}
-	if s.cfg.EdgeOneUploadIngress() {
-		signed, ok := native.(storage.SignedNumberedUploadWriter)
-		if !ok || !signed.SignedUploadSupported() {
-			return fc.NewProblem(422, "unsupported_option", "Signed COS parts require explicit provider admission evidence.")
+	if s.filesTransferClass() == storage.TransferPresignedParts {
+		if _, e := s.filesPlannedWriter(native); e != nil {
+			return e
 		}
 	}
 	if numbered, ok := native.(storage.NumberedUploadWriter); ok && numbered.UploadMaxFileBytes() == 0 {
@@ -253,8 +255,19 @@ func (s *Server) handleFilesCreateUpload(w http.ResponseWriter, r *http.Request,
 		if e = s.filesMutationAuthorize(r, f, native)(r.Context(), old.Operation); e != nil {
 			return filesMutationProblem(e)
 		}
+		resource := s.filesUploadResource(old, f)
+		if filesUploadExpired(old) != nil {
+			resource["state"] = "expired"
+		}
+		if old.State == "open" && filesUploadExpired(old) == nil {
+			transport, e := s.filesUploadTransport(r.Context(), native, old)
+			if e != nil {
+				return e
+			}
+			resource["transport"] = transport
+		}
 		w.Header().Set("Location", "/api/files/uploads/"+old.ID)
-		return writeFilesJSON(w, 200, s.filesUploadResource(old, f))
+		return writeFilesJSON(w, 200, resource)
 	}
 	p, selection, selectedID, err := s.filesResolveUploadTarget(r.Context(), f, req)
 	if err != nil {
@@ -338,8 +351,14 @@ func (s *Server) handleFilesCreateUpload(w http.ResponseWriter, r *http.Request,
 	if err != nil {
 		return filesMutationProblem(err)
 	}
+	transport, err := s.filesUploadTransport(r.Context(), native, u)
+	if err != nil {
+		return err
+	}
+	resource := s.filesUploadResource(u, f)
+	resource["transport"] = transport
 	w.Header().Set("Location", "/api/files/uploads/"+u.ID)
-	return writeFilesJSON(w, 201, s.filesUploadResource(u, f))
+	return writeFilesJSON(w, 201, resource)
 }
 func (s *Server) filesUploadContext(r *http.Request, f *fileRequest) (fileops.NativeActions, fileops.Root, fileops.Actor, fileops.Upload, error) {
 	native, root, actor, err := s.fileMutationContext(r.Context(), f)
@@ -353,11 +372,33 @@ func (s *Server) filesUploadContext(r *http.Request, f *fileRequest) (fileops.Na
 	return native, root, actor, u, nil
 }
 func (s *Server) handleFilesGetUpload(w http.ResponseWriter, r *http.Request, f *fileRequest) error {
-	_, _, _, u, err := s.filesUploadContext(r, f)
+	native, _, _, u, err := s.filesUploadContext(r, f)
 	if err != nil {
 		return err
 	}
-	return writeFilesJSON(w, 200, s.filesUploadResource(u, f))
+	resource := s.filesUploadResource(u, f)
+	if filesUploadExpired(u) != nil {
+		resource["state"] = "expired"
+	}
+	if u.State == "open" && filesUploadExpired(u) == nil {
+		if s.filesTransferClass() == storage.TransferPresignedParts {
+			parts, e := s.filesPlannedParts(r.Context(), native, u)
+			if e != nil {
+				return e
+			}
+			var bytes int64
+			for _, part := range parts {
+				bytes += part.Size
+			}
+			resource["receivedParts"], resource["receivedBytes"] = len(parts), bytes
+		}
+		transport, e := s.filesUploadTransport(r.Context(), native, u)
+		if e != nil {
+			return e
+		}
+		resource["transport"] = transport
+	}
+	return writeFilesJSON(w, 200, resource)
 }
 func (s *Server) handleFilesListUploads(w http.ResponseWriter, r *http.Request, f *fileRequest) error {
 	_, root, actor, err := s.fileMutationContext(r.Context(), f)
@@ -396,11 +437,17 @@ func (s *Server) handleFilesListUploads(w http.ResponseWriter, r *http.Request, 
 	return writeFilesJSON(w, 200, map[string]any{"items": resources, "nextCursor": next})
 }
 func (s *Server) handleFilesUploadPart(w http.ResponseWriter, r *http.Request, f *fileRequest) error {
+	if s.filesTransferClass() != storage.TransferRelay {
+		return fc.NewProblem(422, "unsupported_option", "This connection uses class A presigned part URLs, not application-relayed parts.")
+	}
 	native, root, actor, u, err := s.filesUploadContext(r, f)
 	if err != nil {
 		return err
 	}
 	if err = filesUploadStateError(u.State); err != nil {
+		return filesMutationProblem(err)
+	}
+	if err = filesUploadExpired(u); err != nil {
 		return filesMutationProblem(err)
 	}
 	if u.State != "open" {
@@ -483,9 +530,12 @@ func filesUploadSpoolProblem(err error) error {
 	return filesMutationProblem(err)
 }
 func (s *Server) handleFilesUploadParts(w http.ResponseWriter, r *http.Request, f *fileRequest) error {
-	_, root, actor, u, err := s.filesUploadContext(r, f)
+	native, root, actor, u, err := s.filesUploadContext(r, f)
 	if err != nil {
 		return err
+	}
+	if s.filesTransferClass() == storage.TransferPresignedParts {
+		return s.handleFilesPlannedUploadParts(w, r, f, native, u)
 	}
 	q, err := parseFilesReadQuery(r, f.Scope, false)
 	if err != nil {
@@ -525,10 +575,73 @@ func (s *Server) handleFilesUploadParts(w http.ResponseWriter, r *http.Request, 
 	}
 	return writeFilesJSON(w, 200, map[string]any{"items": resources, "nextCursor": next, "watermark": watermark})
 }
-func (s *Server) handleFilesCommitUpload(w http.ResponseWriter, r *http.Request, f *fileRequest) error {
-	_, root, actor, u, err := s.filesUploadContext(r, f)
+func (s *Server) handleFilesPlannedUploadParts(w http.ResponseWriter, r *http.Request, f *fileRequest, native fileops.NativeActions, u fileops.Upload) error {
+	q, err := parseFilesReadQuery(r, f.Scope, false)
 	if err != nil {
 		return err
+	}
+	binding := s.filesCursorBinding(f, q, "upload-parts:"+u.ID)
+	key, err := s.filesDecodeCursor(q.Cursor, binding)
+	if err != nil {
+		return err
+	}
+	after := 0
+	if key != nil {
+		after, err = strconv.Atoi(key.Path)
+		if err != nil || after < 0 {
+			return fc.NewProblem(400, "invalid_cursor", "Invalid provider part cursor.")
+		}
+	}
+	planned, err := s.filesPlannedWriter(native)
+	if err != nil {
+		return err
+	}
+	intent, err := filesUploadIntent(u)
+	if err != nil {
+		return err
+	}
+	parts, more, err := planned.ListUploadParts(r.Context(), intent, after, q.Limit, s.filesJournal)
+	if err != nil {
+		if storage.IsCode(err, "not_found") {
+			parts, more = nil, false
+		} else {
+			return filesMutationProblem(err)
+		}
+	}
+	var next any
+	if more && len(parts) > 0 {
+		next, err = s.filesEncodeCursor(filesSortKey{Path: strconv.Itoa(parts[len(parts)-1].Number)}, binding)
+		if err != nil {
+			return err
+		}
+	}
+	items := make([]any, 0, len(parts))
+	for _, part := range parts {
+		items = append(items, map[string]any{"number": part.Number, "size": part.Size, "etag": part.ETag})
+	}
+	return writeFilesJSON(w, 200, map[string]any{"items": items, "nextCursor": next})
+}
+
+func (s *Server) handleFilesCommitUpload(w http.ResponseWriter, r *http.Request, f *fileRequest) error {
+	native, root, actor, u, err := s.filesUploadContext(r, f)
+	if err != nil {
+		return err
+	}
+	if err = filesUploadExpired(u); err != nil {
+		return filesMutationProblem(err)
+	}
+	if s.filesTransferClass() == storage.TransferPresignedParts && u.State == "open" {
+		parts, listErr := s.filesPlannedParts(r.Context(), native, u)
+		if listErr != nil {
+			return listErr
+		}
+		intent, intentErr := filesUploadIntent(u)
+		if intentErr != nil {
+			return intentErr
+		}
+		if coverageErr := filesPlannedCoverage(intent, parts); coverageErr != nil {
+			return filesMutationProblem(coverageErr)
+		}
 	}
 	u, err = s.filesJournal.FreezeUpload(r.Context(), root, actor, u.ID)
 	if err != nil {
@@ -587,6 +700,13 @@ func (s *Server) runUploadOperation(ctx context.Context, op fileops.Operation, a
 	}
 	if u.State == "open" {
 		return op, fileops.E("commit_not_started", nil)
+	}
+	if s.filesTransferClass() == storage.TransferPresignedParts {
+		planned, ok := native.(storage.PlannedUploadWriter)
+		if !ok {
+			return op, fileops.E("unsupported", nil)
+		}
+		return s.runPlannedUploadOperation(ctx, op, actor, native, planned, u, service)
 	}
 	if numbered, ok := native.(storage.NumberedUploadWriter); ok {
 		return s.runNativeUploadOperation(ctx, op, actor, native, numbered, u, service)

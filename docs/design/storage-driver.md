@@ -1,8 +1,9 @@
 # Storage driver contract
 
-> Native-tree contract. Read-only Local/COS/S3 trees, mutation/publication interfaces and an opt-in Local
-> create-only writer exist. Limited recorded COS ETag observations do not establish every operation or
-> deployment capability, so default writes stay disabled without admission. Preserving the readable tree is
+> Native-tree contract. Read-only Local/COS/S3 trees, mutation/publication interfaces, class A presigned
+> uploads/read grants and class C relay writes exist. Limited recorded COS ETag observations do not establish
+> every operation or deployment capability, so default writes stay disabled without admission. Class B has
+> interfaces and configuration but no cloud-drive driver yet. Preserving the readable tree is
 > mandatory. Stable IDs are implemented with canonical parent/name links and direct selectors; disposable
 > integration/browser tests and targeted race checks passed.
 > See [identity](file-identity.md) and [first-phase changes/audit](file-changes.md).
@@ -407,6 +408,12 @@ type EffectRecovery interface {
     InspectEffect(context.Context, EffectIntent, []byte) (Inspection, error)
 }
 ```
+
+Implementation note: the class A driver capability is `storage.PlannedUploadWriter` (`BeginPlannedUpload`,
+`SignUploadParts`, `ListUploadParts`, `SealPlannedUpload`, `DiscardPlannedUpload`). The file-operation service
+owns the single publishing call and index settlement, so the semantic separation above is preserved while the
+driver does not receive bytes. Class C uses the existing `StagedWriter`/`NumberedUploadWriter` relay path. The
+class B configuration value exists, but no cloud-drive driver implements it yet.
 
 `PlanWrite` creates the native multipart upload or provider upload session, checkpoints its handle under the intent fence and returns the first grants.
 It never receives the bytes. `SignParts` re-signs or extends class A part URLs for the same bound lengths.

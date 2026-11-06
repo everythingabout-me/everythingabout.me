@@ -406,6 +406,13 @@ function FileDetail({ file, onDelete, deleteDisabled, deleteHint }: {
   deleteDisabled: boolean;
   deleteHint?: string;
 }) {
+  const [downloadError, setDownloadError] = useState<string | null>(null);
+  useEffect(() => { setDownloadError(null); }, [file.path]);
+  const download = async () => {
+    setDownloadError(null);
+    try { await api.download(file.path); }
+    catch (error) { setDownloadError(error instanceof Error ? error.message : t("error.unknown")); }
+  };
   return (
     <>
       <p className={styles.fileMeta}>
@@ -434,15 +441,14 @@ function FileDetail({ file, onDelete, deleteDisabled, deleteHint }: {
             </span>
             <span className={styles.emptyTitle}>{t("file.unsupportedTitle")}</span>
             <span className={styles.emptyText}>{t("file.unsupportedText")}</span>
-            <a
+            <button
               className={styles.primaryLink}
-              href={api.downloadHref(file.path)}
-              target="_blank"
-              rel="noreferrer"
+              onClick={() => void download()}
             >
               <DownloadIcon size={14} />
               {t("file.download")}
-            </a>
+            </button>
+            {downloadError && <p className={styles.downloadError} role="alert">{downloadError}</p>}
           </div>
         )}
       </section>
@@ -506,6 +512,12 @@ export function FilesPage() {
   const [dragging, setDragging] = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
+  const [downloadError, setDownloadError] = useState<string | null>(null);
+  const downloadFile = async () => {
+    setDownloadError(null);
+    try { await api.download(file?.path ?? path); }
+    catch (error) { setDownloadError(error instanceof Error ? error.message : t("error.unknown")); }
+  };
   const [uploadMenuOpen, setUploadMenuOpen] = useState(false);
   const [renaming, setRenaming] = useState(false);
   const [renameName, setRenameName] = useState("");
@@ -1079,6 +1091,7 @@ export function FilesPage() {
           </aside>
         )}
         {/* The path is the title: one row, with this page's controls on the right. */}
+        {downloadError && <p className={styles.downloadError} role="alert">{downloadError}</p>}
         <div className={styles.topbar}>
           <div className={styles.pathArea}>
             {activeQuery ? (
@@ -1158,16 +1171,14 @@ export function FilesPage() {
                             </button>
                           )}
                           {!pending && file && (
-                            <a
+                            <button
                               className={styles.menuItem}
                               role="menuitem"
-                              href={api.downloadHref(file.path)}
-                              target="_blank"
-                              rel="noreferrer"
+                              onClick={() => void downloadFile()}
                             >
                               <DownloadIcon size={14} />
                               {t("file.download")}
-                            </a>
+                            </button>
                           )}
                           {!pending && (file || path !== "") && (
                             <button

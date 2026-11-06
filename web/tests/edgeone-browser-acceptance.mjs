@@ -39,9 +39,9 @@ try {
   assert.equal(new URL(request.url()).origin, config.origin);
   const headers = await request.allHeaders();
   assert.equal(headers["content-length"], String(config.size), "browser derived the exact signed part length");
-  assert.equal(headers["content-md5"], config.grant.headers["Content-MD5"]);
+  assert.equal(headers["content-md5"], undefined, "class A does not bind a content digest");
   assert.ok(headers.cookie?.includes("eam_session="), "fixture exercises EO cookie removal on the actual wire");
-  console.log(JSON.stringify({ checks: ["real Chromium XMLHttpRequest", "same-origin signed PUT", "browser-derived Content-Length", "Content-MD5", "lost response status"], size: config.size, status: result.status }));
+  console.log(JSON.stringify({ checks: ["real Chromium XMLHttpRequest", "same-origin signed PUT", "browser-derived Content-Length", "no signed digest", "lost response status"], size: config.size, status: result.status }));
 } finally {
   await browser.close();
 }

@@ -162,10 +162,51 @@ type NativeUploadWriter struct {
 	Parts []storage.UploadPart
 }
 
+// PlannedUploadWriter adapts a class A planned upload to the staged writer
+// contract. Stage seals the provider's own part listing; no bytes are received.
+type PlannedUploadWriter struct {
+	NativeActions
+	planned  storage.PlannedUploadWriter
+	metadata storage.UploadMetadata
+}
+
 var (
 	_ storage.StagedWriter        = (*NativeUploadWriter)(nil)
 	_ storage.StagedDiscardProver = (*NativeUploadWriter)(nil)
+	_ storage.StagedWriter        = (*PlannedUploadWriter)(nil)
+	_ storage.StagedDiscardProver = (*PlannedUploadWriter)(nil)
 )
+
+func NewPlannedUploadWriter(native NativeActions, planned storage.PlannedUploadWriter, metadata storage.UploadMetadata) *PlannedUploadWriter {
+	return &PlannedUploadWriter{NativeActions: native, planned: planned, metadata: metadata}
+}
+
+func (w *PlannedUploadWriter) Stage(ctx context.Context, intent storage.WriteIntent, _ io.Reader, cp storage.Checkpoint) (storage.Staged, error) {
+	return w.planned.SealPlannedUpload(ctx, intent, w.metadata, cp)
+}
+
+func (w *PlannedUploadWriter) Discard(ctx context.Context, intent storage.WriteIntent, evidence []byte) error {
+	if err := w.NativeActions.Discard(ctx, intent, evidence); err != nil {
+		return err
+	}
+	return w.planned.DiscardPlannedUpload(ctx, intent, w.metadata)
+}
+
+func (w *PlannedUploadWriter) ObserveDiscard(ctx context.Context, in storage.WriteIntent) (storage.DiscardEvidence, error) {
+	prover, ok := w.planned.(storage.DiscardProver)
+	if !ok {
+		return storage.DiscardEvidence{}, E("unsupported", nil)
+	}
+	return prover.ObserveDiscard(ctx, in, w.metadata)
+}
+
+func (w *PlannedUploadWriter) ProveDiscard(ctx context.Context, in storage.WriteIntent) (storage.DiscardEvidence, error) {
+	prover, ok := w.planned.(storage.DiscardProver)
+	if !ok {
+		return storage.DiscardEvidence{}, E("unsupported", nil)
+	}
+	return prover.ProveDiscard(ctx, in, w.metadata)
+}
 
 func NewNativeUploadWriter(native NativeActions, numbered storage.NumberedUploadWriter, metadata storage.UploadMetadata) *NativeUploadWriter {
 	return &NativeUploadWriter{NativeActions: native, numbered: numbered, metadata: metadata}

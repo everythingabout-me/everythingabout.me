@@ -4,8 +4,10 @@
 > indexing, receipts, change facts and the publication ledger are shared by every class and are defined in
 > [storage](storage.md), the [driver contract](storage-driver.md) and the [file API](../api/api.md).
 >
-> Implementation status: not yet implemented. The current runtime relays bytes through the application or,
-> for COS, issues per-part `authorize`/`confirm` grants; both are replaced by this document.
+> Implementation status: class A (`presigned-parts`) is implemented for COS with renewable signed windows and
+> provider part listing; class C (`relay`) is implemented for Local and object backends. Class B
+> (`resumable-session`) is specified and configuration-reserved, but no cloud-drive driver exists yet. The
+> legacy per-part `authorize`/`confirm` flow is removed.
 
 ## 1. Three classes
 

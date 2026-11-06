@@ -71,21 +71,25 @@ export const operation = (id, state = "running", result = null, kind = "delete")
 export const conflict = (id = "delete-1") => new TestApiError("operation in progress", 409, { code: "operation_in_progress", operationId: id });
 
 /** A durable fake server: ACK loss can change server state before throwing. */
-export function uploadServer(partSize = 2) {
+export function uploadServer(partSize = 2, options = {}) {
+  const classA = options.class === "A";
   const calls = [];
   const sessions = new Map();
   const keys = new Map();
   const receipts = new Map();
   const api = {
     me: async () => ({ id: "owner-a" }),
-    capabilities: async () => ({ sourceModifiedAt: false }),
+    capabilities: async () => ({ sourceModifiedAt: false, transferClass: "C", transferKind: "relay" }),
     mkdir: async (path) => { calls.push(["mkdir", path]); return item(path, "folder", null); },
     metadata: async (path) => { calls.push(["metadata", path]); return item(path); },
     createUpload: async (input, key) => {
       calls.push(["create", structuredClone(input), key]);
       if (keys.has(key)) return { ...sessions.get(keys.get(key)) };
       const id = `session-${sessions.size + 1}`;
-      const session = { id, path: input.path, state: "open", size: input.size, partSize, partCount: Math.ceil(input.size / partSize), maxParallelism: 2, ordering: "any", operationId: `commit-${id}`, result: null };
+      const transport = classA
+        ? { kind: "presigned-parts", parts: [], signUrl: `/api/files/uploads/${id}/parts/sign`, expiresAt: new Date(Date.now() + 3600_000).toISOString() }
+        : { kind: "relay", url: `/api/files/uploads/${id}/parts` };
+      const session = { id, class: classA ? "A" : "C", transport, path: input.path, state: "open", size: input.size, partSize, partCount: Math.ceil(input.size / partSize), maxParallelism: options.maxParallelism ?? 2, ordering: "any", operationId: `commit-${id}`, result: null };
       sessions.set(id, session); keys.set(key, id); receipts.set(id, new Map());
       return { ...session };
     },
@@ -94,13 +98,34 @@ export function uploadServer(partSize = 2) {
       if (!sessions.has(id)) throw new TestApiError("upload not found", 404, { code: "not_found" });
       return { ...sessions.get(id) };
     },
-    uploadParts: async (id, cursor) => { calls.push(["receipts", id, cursor]); return { items: [...receipts.get(id).values()], watermark: receipts.get(id).size, nextCursor: null }; },
+    uploadParts: async (id, cursor) => {
+      calls.push(classA ? ["providerParts", id, cursor] : ["receipts", id, cursor]);
+      if (classA) {
+        const items = [...receipts.get(id).values()].map((part) => ({ number: part.number, size: part.size, etag: `etag-${part.number}` }));
+        return { items, nextCursor: null };
+      }
+      return { items: [...receipts.get(id).values()], watermark: receipts.get(id).size, nextCursor: null };
+    },
+    signUploadParts: async (id, numbers) => {
+      calls.push(["sign", id, numbers]);
+      const session = sessions.get(id);
+      return numbers.map((number) => ({ number, size: number === session.partCount ? session.size - (number - 1) * partSize : partSize,
+        method: "PUT", url: `/api/files/transfer/drive/owner/file?partNumber=${number}&uploadId=${id}`,
+        headers: { "Content-Type": "application/octet-stream", "Content-Length": String(number === session.partCount ? session.size - (number - 1) * partSize : partSize) },
+        expiresAt: new Date(Date.now() + 3600_000).toISOString() }));
+    },
     uploadPart: async (id, number, blob, signal, progress) => {
       calls.push(["part", id, number, blob]);
       const receipt = { number, size: blob.size, sha256: digest(Buffer.from(await blob.arrayBuffer())) };
       receipts.get(id).set(number, receipt);
       progress?.({ loaded: blob.size, total: blob.size });
       return receipt;
+    },
+    uploadPresignedPart: async (grant, blob, signal, progress) => {
+      calls.push(["presignedPart", grant.number, blob]);
+      const id = new URL(grant.url, "https://upload.invalid").searchParams.get("uploadId");
+      receipts.get(id).set(grant.number, { number: grant.number, size: blob.size });
+      progress?.({ loaded: blob.size, total: blob.size });
     },
     commitUpload: async (id) => {
       calls.push(["commit", id]);

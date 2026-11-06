@@ -352,14 +352,20 @@ function Thumb({ media }: { media: EventMedia }) {
     setURL(null);
     if (!media.path || media.video) return;
     const controller = new AbortController();
-    void api.metadata(media.path, controller.signal).then((file) => {
+    let created: string | null = null;
+    void api.metadata(media.path, controller.signal).then(async (file) => {
       if (controller.signal.aborted) return;
       const mime = file.mediaType?.split(";", 1)[0].trim().toLowerCase();
       if (file.kind === "file" && mime && /^image\/(jpeg|png|gif|webp|avif|bmp|x-icon|vnd\.microsoft\.icon)$/.test(mime)) {
-        setURL(api.contentURL(file.path, "inline"));
+        const url = await api.downloadURL(file.path, "inline", controller.signal);
+        created = url;
+        if (!controller.signal.aborted) setURL(url);
       }
     }).catch(() => { if (!controller.signal.aborted) setFailed(true); });
-    return () => controller.abort();
+    return () => {
+      controller.abort();
+      if (created?.startsWith("blob:")) URL.revokeObjectURL(created);
+    };
   }, [media.path, media.video]);
 
   if (media.video) {

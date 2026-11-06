@@ -285,7 +285,7 @@ func (s *Server) fileWrapWithAudit(fn fileHandler, persist filesAuditRecorder) h
 	}
 }
 
-var pendingFileWorkflow = regexp.MustCompile(`^/api/files/(uploads/[^/]+(/parts(/[0-9]+(/authorize|/confirm)?)?|/commit)?|operations/[^/]+(/cancel)?)$`)
+var pendingFileWorkflow = regexp.MustCompile(`^/api/files/(uploads/[^/]+(/parts(/[0-9]+|/sign)?|/commit)?|operations/[^/]+(/cancel)?)$`)
 
 func (s *Server) filesHandler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -310,6 +310,8 @@ func (s *Server) filesHandler() http.Handler {
 			routes["GET"] = s.handleFilesContent
 			routes["HEAD"] = s.handleFilesContent
 			routes["PUT"] = s.handleFilesPut
+		case fc.Base + "/downloads":
+			routes["POST"] = s.handleFilesDownloads
 		case fc.Base + "/move":
 			routes["POST"] = s.handleFilesMove
 		case fc.Base + "/copy":
@@ -358,10 +360,8 @@ func (s *Server) filesHandler() http.Handler {
 					}
 				case strings.HasSuffix(r.URL.Path, "/commit"):
 					routes["POST"] = s.handleFilesCommitUpload
-				case strings.HasSuffix(r.URL.Path, "/authorize"):
-					routes["POST"] = s.handleFilesAuthorizeUploadPart
-				case strings.HasSuffix(r.URL.Path, "/confirm"):
-					routes["POST"] = s.handleFilesConfirmUploadPart
+				case strings.HasSuffix(r.URL.Path, "/parts/sign"):
+					routes["POST"] = s.handleFilesSignUploadParts
 				case strings.Contains(r.URL.Path, "/parts/"):
 					routes["PUT"] = s.handleFilesUploadPart
 				case strings.HasSuffix(r.URL.Path, "/parts"):

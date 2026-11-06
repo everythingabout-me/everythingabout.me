@@ -8,7 +8,7 @@ import (
 func isolatedConfigEnv(t *testing.T) {
 	t.Helper()
 	t.Setenv("EAM_ENV_FILE", filepath.Join(t.TempDir(), "missing.env"))
-	for _, key := range []string{"FILE_UPLOAD_INGRESS", "FILE_OBJECT_ADMISSION_FILE", "FILE_OBJECT_SPOOL_ROOT", "FILE_COORDINATED_WRITES", "FILE_MAX_SINGLE_PUT_BYTES", "FILE_COOKIE_ORIGINS", "APP_SECRET", "STORAGE_BACKEND", "STORAGE_CONNECTION_ID", "STORAGE_GENERATION", "LOCAL_CONTENT_ROOT", "LOCAL_SYSTEM_ROOT", "LOCAL_CASE_SENSITIVE", "S3_ENDPOINT", "S3_REGION", "S3_BUCKET", "S3_ACCESS_KEY_ID", "S3_SECRET_ACCESS_KEY", "S3_SESSION_TOKEN", "S3_PATH_STYLE", "S3_CONTENT_PREFIX", "S3_SYSTEM_PREFIX", "COS_BUCKET", "COS_REGION", "COS_SECRET_ID", "COS_SECRET_KEY", "COS_UPLOAD_SIGN_SECRET_ID", "COS_UPLOAD_SIGN_SECRET_KEY", "SES_SECRET_ID", "SES_SECRET_KEY", "SES_FROM_EMAIL_ADDRESS", "SES_TEMPLATE_ID", "APP_ENV"} {
+	for _, key := range []string{"FILE_UPLOAD_INGRESS", "FILE_TRANSFER_CLASS", "FILE_OBJECT_ADMISSION_FILE", "FILE_OBJECT_SPOOL_ROOT", "FILE_COORDINATED_WRITES", "FILE_MAX_SINGLE_PUT_BYTES", "FILE_COOKIE_ORIGINS", "APP_SECRET", "STORAGE_BACKEND", "STORAGE_CONNECTION_ID", "STORAGE_GENERATION", "LOCAL_CONTENT_ROOT", "LOCAL_SYSTEM_ROOT", "LOCAL_CASE_SENSITIVE", "S3_ENDPOINT", "S3_REGION", "S3_BUCKET", "S3_ACCESS_KEY_ID", "S3_SECRET_ACCESS_KEY", "S3_SESSION_TOKEN", "S3_PATH_STYLE", "S3_CONTENT_PREFIX", "S3_SYSTEM_PREFIX", "COS_BUCKET", "COS_REGION", "COS_SECRET_ID", "COS_SECRET_KEY", "COS_UPLOAD_SIGN_SECRET_ID", "COS_UPLOAD_SIGN_SECRET_KEY", "COS_READ_SIGN_SECRET_ID", "COS_READ_SIGN_SECRET_KEY", "SES_SECRET_ID", "SES_SECRET_KEY", "SES_FROM_EMAIL_ADDRESS", "SES_TEMPLATE_ID", "APP_ENV"} {
 		t.Setenv(key, "")
 	}
 	t.Setenv("DATABASE_URL", "postgres://unused/test")
@@ -102,5 +102,85 @@ func TestStrictBackendConfiguration(t *testing.T) {
 	}
 	if !cfg.Storage.S3.PathStyle || cfg.Storage.S3.ContentPrefix != "drive/" || cfg.Storage.S3.SystemPrefix != "__eam_system__/" {
 		t.Fatalf("unexpected S3 settings %+v", cfg.Storage.S3)
+	}
+}
+
+func TestTransferClassSelectionAndCredentials(t *testing.T) {
+	isolatedConfigEnv(t)
+	t.Setenv("STORAGE_BACKEND", "local")
+	t.Setenv("APP_SECRET", "stable-deployment-secret")
+	t.Setenv("LOCAL_CONTENT_ROOT", t.TempDir())
+	t.Setenv("LOCAL_SYSTEM_ROOT", t.TempDir())
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cfg.ValidateStorage(); err != nil || cfg.Storage.TransferClass != "relay" {
+		t.Fatalf("local default class: %s %v", cfg.Storage.TransferClass, err)
+	}
+	t.Setenv("FILE_TRANSFER_CLASS", "presigned-parts")
+	cfg, err = Load()
+	if err == nil {
+		err = cfg.ValidateStorage()
+	}
+	if err == nil {
+		t.Fatal("class A accepted on the local backend")
+	}
+	t.Setenv("FILE_TRANSFER_CLASS", "resumable-session")
+	cfg, err = Load()
+	if err == nil {
+		err = cfg.ValidateStorage()
+	}
+	if err == nil {
+		t.Fatal("class B accepted without a driver")
+	}
+}
+
+func TestClassARequiresDedicatedReadSigner(t *testing.T) {
+	isolatedConfigEnv(t)
+	t.Setenv("STORAGE_BACKEND", "cos")
+	t.Setenv("FILE_TRANSFER_CLASS", "presigned-parts")
+	t.Setenv("FILE_COORDINATED_WRITES", "true")
+	t.Setenv("FILE_OBJECT_ADMISSION_FILE", "/synthetic/admission.json")
+	t.Setenv("FILE_OBJECT_SPOOL_ROOT", "/synthetic/spool")
+	t.Setenv("COS_BUCKET", "bucket-123456")
+	t.Setenv("COS_REGION", "ap-guangzhou")
+	t.Setenv("COS_SECRET_ID", "control-id")
+	t.Setenv("COS_SECRET_KEY", "control-secret")
+	t.Setenv("COS_UPLOAD_SIGN_SECRET_ID", "upload-id")
+	t.Setenv("COS_UPLOAD_SIGN_SECRET_KEY", "upload-secret")
+	cfg, err := Load()
+	if err == nil {
+		err = cfg.ValidateStorage()
+	}
+	if err == nil {
+		t.Fatal("class A accepted without a read signer")
+	}
+	t.Setenv("COS_READ_SIGN_SECRET_ID", "read-id")
+	t.Setenv("COS_READ_SIGN_SECRET_KEY", "read-secret")
+	cfg, err = Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = cfg.ValidateStorage(); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Storage.TransferClass != "presigned-parts" {
+		t.Fatalf("unexpected class %q", cfg.Storage.TransferClass)
+	}
+	t.Setenv("COS_READ_SIGN_SECRET_ID", "control-id")
+	cfg, _ = Load()
+	if err := cfg.ValidateStorage(); err == nil {
+		t.Fatal("class A reused the control credential for reads")
+	}
+}
+
+func TestClassCRejectsEdgeRelay(t *testing.T) {
+	isolatedConfigEnv(t)
+	t.Setenv("STORAGE_BACKEND", "cos")
+	t.Setenv("FILE_TRANSFER_CLASS", "relay")
+	t.Setenv("FILE_UPLOAD_INGRESS", "edgeone")
+	if _, err := Load(); err == nil {
+		t.Fatal("class C accepted the class A edge relay")
 	}
 }

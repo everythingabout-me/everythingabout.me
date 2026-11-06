@@ -9,8 +9,9 @@
 > Reads, namespace mutations, resumable uploads and all media bytes use this contract. Writes stay behind
 > explicit admission: a verified root baseline and exact-connection native probe evidence are required, object
 > connections need a durable single-gateway spool, and thumbnails remain an authenticated 501 placeholder.
-> The transfer-class parts of §3, §5 and §7 (`/downloads`, `/uploads/{id}/parts/sign` and the class payloads)
-> are the target defined in [transfer-protocol.md](../design/transfer-protocol.md) and are not yet implemented.
+> Transfer classes A (`presigned-parts`, COS) and C (`relay`) are implemented, including `/downloads`,
+> `/uploads/{id}/parts/sign`, provider part listing and server-side class A sealing. Class B
+> (`resumable-session`) has its contract and configuration skeleton but no cloud-drive driver yet.
 >
 > This file API replaces all earlier route, envelope, identity and upload decisions; no legacy client or
 > compatibility adapter is supported. Account login, Connect and event authoring remain separate APIs.
@@ -571,7 +572,8 @@ number and exact length, and no content digest. Request more with
 `POST B/uploads/{id}/parts/sign {"numbers":[...]}` when fewer than a quarter of unsent URLs remain, and re-sign
 any part whose URL expired or returned 403; a re-signed number keeps its bound length. A client may add an
 unsigned `Content-MD5` header as a transmission check. Until commit a part URL's holder can rewrite that part;
-this is accepted.
+this is accepted. The response is `{"parts":[{"number","size","method","url","headers","expiresAt"}],"expiresAt"}`;
+re-signing a number keeps its bound length.
 
 **Class B.** `url` is the provider session the server created at the destination; `credential` appears only for providers whose
 write endpoint is not self-authenticating (Dropbox, Box), and only for principals whose scope covers the
@@ -732,6 +734,11 @@ snapshotMaxEntries, snapshotMaxBytes, observation and externalChanges. The curre
 ```json
 {
   "identity":{"id":true,"path":true,"uniquePaths":true},
+  "transferClass":"C",
+  "transferKind":"relay",
+  "transferClasses":["relay"],
+  "atomicCreate":true,
+  "downloads":true,
   "changeTracking":{
     "available":true,
     "read":true,

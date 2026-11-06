@@ -14,18 +14,16 @@ type gatewayUnreadBody struct{ reads int }
 func (b *gatewayUnreadBody) Read([]byte) (int, error) { b.reads++; return 0, io.EOF }
 func (*gatewayUnreadBody) Close() error               { return nil }
 
-func TestEdgeOneIngressApplicationNeverConsumesUploadBodies(t *testing.T) {
+func TestTransferPrefixNeverReachesApplication(t *testing.T) {
 	s := &Server{cfg: &config.Config{FileUploadIngress: "edgeone"}}
-	for _, route := range []string{"/api/files/uploads/u_test/parts/1", "/api/files/content?path=%2Ffile", "/api/files/transfer/drive/owner/file?partNumber=1&uploadId=private"} {
-		body := &gatewayUnreadBody{}
-		r := httptest.NewRequest("PUT", route, body)
-		r.ContentLength = 1 << 40
-		w := httptest.NewRecorder()
-		s.Handler().ServeHTTP(w, r)
-		uploadsHTTPProblem(t, w, 503, "edgeone_route_required")
-		if body.reads != 0 {
-			t.Fatal("application consumed misrouted upload bytes")
-		}
+	body := &gatewayUnreadBody{}
+	r := httptest.NewRequest("PUT", "/api/files/transfer/drive/owner/file?partNumber=1&uploadId=private", body)
+	r.ContentLength = 1 << 40
+	w := httptest.NewRecorder()
+	s.Handler().ServeHTTP(w, r)
+	uploadsHTTPProblem(t, w, 503, "edgeone_route_required")
+	if body.reads != 0 {
+		t.Fatal("application consumed misrouted upload bytes")
 	}
 	for _, method := range []string{"GET", "POST", "DELETE"} {
 		called := false

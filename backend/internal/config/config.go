@@ -61,6 +61,10 @@ type COS struct {
 	// They never fall back to the general mutation credentials or leave the server.
 	UploadSignSecretID  string
 	UploadSignSecretKey string
+	// Read signing credentials must allow only GetObject on the admitted root.
+	// A class A connection issues direct read grants with this identity.
+	ReadSignSecretID  string
+	ReadSignSecretKey string
 }
 
 type SES struct {
@@ -131,6 +135,8 @@ func Load() (*Config, error) {
 			Region:              os.Getenv("COS_REGION"),
 			UploadSignSecretID:  os.Getenv("COS_UPLOAD_SIGN_SECRET_ID"),
 			UploadSignSecretKey: os.Getenv("COS_UPLOAD_SIGN_SECRET_KEY"),
+			ReadSignSecretID:    os.Getenv("COS_READ_SIGN_SECRET_ID"),
+			ReadSignSecretKey:   os.Getenv("COS_READ_SIGN_SECRET_KEY"),
 		},
 		SES: SES{
 			SecretID:         os.Getenv("SES_SECRET_ID"),

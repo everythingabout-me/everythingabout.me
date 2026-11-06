@@ -347,6 +347,9 @@ func filesPutClientTarget(r *http.Request) (storage.WriteIntent, []filesReplaySe
 }
 
 func (s *Server) handleFilesPut(w http.ResponseWriter, r *http.Request, f *fileRequest) error {
+	if s.filesTransferClass() != storage.TransferRelay {
+		return fc.NewProblem(409, "session_required", "This connection publishes every write through an upload session.")
+	}
 	if !s.cfg.Storage.CoordinatedWrites {
 		return fc.NewProblem(501, "not_implemented", "Native file writes are not enabled.")
 	}

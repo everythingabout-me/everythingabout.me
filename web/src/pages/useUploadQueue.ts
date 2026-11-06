@@ -1,6 +1,6 @@
 /** Upload tasks and File references live only in the current page. */
 import { useCallback, useEffect, useRef, useState } from "react";
-import { ApiError, api, type Item, type FileOperation, type FileUploadInput, type FileUploadSession } from "../api/client";
+import { ApiError, api, type Item, type FileOperation, type FileUploadInput, type FileUploadPartGrant, type FileUploadSession } from "../api/client";
 import { t } from "../i18n";
 import type { UploadEntry } from "./uploadSelection";
 import { claimUploadPath } from "./uploadOwnership";
@@ -309,53 +309,87 @@ export function useUploadQueue(onUploaded: (task: UploadTask, item: Item) => voi
       const file = task.file;
       if (!Number.isSafeInteger(session.partSize) || session.partSize < 1 || !Number.isSafeInteger(session.partCount)
         || session.partCount !== Math.ceil(session.size / session.partSize) || !Number.isSafeInteger(session.maxParallelism)
-        || session.maxParallelism < 1 || !["any", "ascending"].includes(session.ordering)
-        || session.transport !== undefined && !["embedded", "cos-signed"].includes(session.transport)) throw new Error("Invalid upload session geometry.");
+        || session.maxParallelism < 1 || !["any", "ascending"].includes(session.ordering)) throw new Error("Invalid upload session geometry.");
+      const classA = session.class === "A";
+      if (classA && session.transport?.kind !== "presigned-parts") throw new Error("A class A session must advertise its presigned part window.");
+      if (!classA && session.class !== "C") throw new Error("Unsupported upload transfer class.");
+      if (!classA && session.transport?.kind !== "relay") throw new Error("A class C session must advertise its relay URL.");
       const parallelism = session.ordering === "ascending" ? 1 : Math.min(PART_POOL_SIZE, session.maxParallelism);
-      let verification = verified.current.get(session.id);
-      if (!verification || verification.file !== file) {
-        verification = { file, parts: new Map() };
-        verified.current.set(session.id, verification);
-      }
       const chunkFor = (number: number) => {
         const start = (number - 1) * session.partSize;
         return file.slice(start, Math.min(start + session.partSize, session.size));
       };
+      const known = new Map<number, number>();
+      let verification = verified.current.get(session.id);
+      if (!classA && (!verification || verification.file !== file)) {
+        verification = { file, parts: new Map() };
+        verified.current.set(session.id, verification);
+      }
       const verifyReceipt = async (receipt: { number: number; size: number; sha256: string }) => {
         if (!Number.isSafeInteger(receipt.number) || receipt.number < 1 || receipt.number > session.partCount) throw new Error("Invalid part receipt.");
         const chunk = chunkFor(receipt.number);
-        if (receipt.size !== chunk.size || (verification.parts.get(receipt.number) !== receipt.sha256 && await sha256(chunk) !== receipt.sha256)) throw new Error(t("drive.reselectedFileChanged"));
-        verification.parts.set(receipt.number, receipt.sha256);
+        if (receipt.size !== chunk.size || (verification!.parts.get(receipt.number) !== receipt.sha256 && await sha256(chunk) !== receipt.sha256)) throw new Error(t("drive.reselectedFileChanged"));
+        verification!.parts.set(receipt.number, receipt.sha256);
       };
-      const readReceipts = async (requestSignal: AbortSignal) => {
-        const result = new Map<number, { number: number; size: number; sha256: string }>();
+      const readParts = async (requestSignal: AbortSignal) => {
+        const result = new Map<number, number>();
         let next: string | undefined;
         let watermark: number | undefined;
         do {
           const page = await api.uploadParts(session.id, next, requestSignal);
-          if (watermark !== undefined && page.watermark !== watermark) throw new Error("The receipt watermark changed.");
+          if (!classA && watermark !== undefined && page.watermark !== watermark) throw new Error("The receipt watermark changed.");
           watermark = page.watermark;
-          for (const receipt of page.items) {
-            if (result.has(receipt.number)) throw new Error("Invalid part receipt.");
-            await verifyReceipt(receipt);
-            result.set(receipt.number, receipt);
+          for (const part of page.items) {
+            if (result.has(part.number)) throw new Error("Invalid part listing.");
+            const chunk = chunkFor(part.number);
+            if (part.size !== chunk.size) throw new Error("The provider part size changed.");
+            if (classA) {
+              if (!("etag" in part) || typeof part.etag !== "string") throw new Error("Invalid provider part listing.");
+            } else {
+              if (!("sha256" in part)) throw new Error("Invalid part receipt.");
+              await verifyReceipt(part);
+            }
+            result.set(part.number, part.size);
           }
           next = page.nextCursor ?? undefined;
         } while (next);
         return result;
       };
-      const receipts = await readReceipts(signal);
+      for (const [number, size] of await readParts(signal)) known.set(number, size);
       if (signal.aborted) return;
-      let received = [...receipts.values()].reduce((sum, receipt) => sum + receipt.size, 0);
+      let received = [...known.values()].reduce((sum, size) => sum + size, 0);
       patch(id, { loaded: received, speed: 0 });
       const missing: number[] = [];
       // Up to `parallelism` workers drain this file's missing parts; every request also
       // takes a slot from the global part pool, so the next queued part starts as soon
       // as any part anywhere finishes.
       for (let number = 1; number <= session.partCount && (session.ordering !== "ascending" || missing.length < 1); number++) {
-        if (!receipts.has(number)) missing.push(number);
+        if (!known.has(number)) missing.push(number);
       }
       if (session.ordering === "ascending" && missing.length && session.nextPart !== missing[0]) throw new Error("The next upload part changed.");
+      const grants = new Map<number, FileUploadPartGrant>();
+      if (classA && session.transport?.kind === "presigned-parts") {
+        for (const grant of session.transport.parts) grants.set(grant.number, grant);
+      }
+      let grantChain: Promise<void> = Promise.resolve();
+      const ensureGrants = (from: number): Promise<void> => {
+        const run = grantChain.then(async () => {
+          if (grants.has(from) && Date.parse(grants.get(from)!.expiresAt) > Date.now()) return;
+          const numbers: number[] = [];
+          for (let number = from; number <= session.partCount && numbers.length < 32; number++) {
+            const current = grants.get(number);
+            if (!known.has(number) && (!current || Date.parse(current.expiresAt) <= Date.now())) numbers.push(number);
+          }
+          if (!numbers.length) return;
+          for (const grant of await api.signUploadParts(session.id, numbers, signal)) {
+            if (grant.number < 1 || grant.number > session.partCount || grant.size !== chunkFor(grant.number).size) throw new Error("The signed part geometry changed.");
+            grants.set(grant.number, grant);
+          }
+        });
+        grantChain = run.catch(() => {});
+        return run;
+      };
+      if (classA && missing.length) await ensureGrants(missing[0]);
       if (missing.length) {
         const batch = new AbortController();
         const abortBatch = () => batch.abort();
@@ -397,12 +431,30 @@ export function useUploadQueue(onUploaded: (task: UploadTask, item: Item) => voi
               let busy = 0;
               while (attempt < PART_UPLOAD_ATTEMPTS) {
                 if (batch.signal.aborted) throw new DOMException("Upload canceled", "AbortError");
-                let receipt;
                 try {
-                  receipt = await api.uploadPart(session.id, number, chunk, batch.signal, (sample) => {
-                    if (batch.signal.aborted || receipts.has(number)) return;
-                    inFlight.set(number, Math.max(inFlight.get(number) ?? 0, Math.max(0, Math.min(chunk.size, sample.loaded))));
-                  }, session.transport);
+                  if (classA) {
+                    await ensureGrants(number);
+                    const grant = grants.get(number);
+                    if (!grant) throw new Error("The part grant is unavailable.");
+                    await api.uploadPresignedPart(grant, chunk, batch.signal, (sample) => {
+                      if (batch.signal.aborted || known.has(number)) return;
+                      inFlight.set(number, Math.max(inFlight.get(number) ?? 0, Math.max(0, Math.min(chunk.size, sample.loaded))));
+                    });
+                    grants.delete(number);
+                  } else {
+                    const receipt = await api.uploadPart(session.id, number, chunk, batch.signal, (sample) => {
+                      if (batch.signal.aborted || known.has(number)) return;
+                      inFlight.set(number, Math.max(inFlight.get(number) ?? 0, Math.max(0, Math.min(chunk.size, sample.loaded))));
+                    });
+                    if (receipt.number !== number) throw new Error("The part receipt identity changed.");
+                    await withVerifySlot(() => verifyReceipt(receipt));
+                    known.set(number, receipt.size);
+                  }
+                  if (batch.signal.aborted) return;
+                  if (classA) known.set(number, chunk.size);
+                  received += chunk.size;
+                  inFlight.delete(number);
+                  return;
                 } catch (error) {
                   if (batch.signal.aborted) throw error;
                   if (error instanceof ApiError && error.status === 429) {
@@ -413,27 +465,25 @@ export function useUploadQueue(onUploaded: (task: UploadTask, item: Item) => voi
                     await retryDelay(Math.min(busy, 3));
                     continue;
                   }
-                  if (!(error instanceof ApiError) || !([0, 408, 425, 500, 502, 503, 504].includes(error.status)
-                    || session.transport === "cos-signed" && error.status === 409 && error.code === "part_pending")) throw error;
+                  const transient = !(error instanceof ApiError) || [0, 403, 408, 425, 500, 502, 503, 504].includes(error.status);
+                  if (!transient) throw error;
                   // A lost ACK may already represent durable success. Inspect the
                   // original session and exact byte identity before any replay.
                   const status = await api.uploadStatus(session.id, batch.signal);
                   if (status.state !== "open") throw error;
-                  receipt = (await readReceipts(batch.signal)).get(number);
-                  if (!receipt) {
-                    if (++attempt === PART_UPLOAD_ATTEMPTS) throw error;
+                  const existing = await readParts(batch.signal);
+                  if (existing.has(number)) {
+                    if (classA) grants.delete(number);
+                    known.set(number, existing.get(number)!);
+                    received = [...known.values()].reduce((sum, size) => sum + size, 0);
                     inFlight.delete(number);
-                    await retryDelay(attempt - 1);
-                    continue;
+                    return;
                   }
+                  if (classA) grants.delete(number);
+                  if (++attempt === PART_UPLOAD_ATTEMPTS) throw error;
+                  inFlight.delete(number);
+                  await retryDelay(attempt - 1);
                 }
-                if (receipt.number !== number) throw new Error("The part receipt identity changed.");
-                await withVerifySlot(() => verifyReceipt(receipt));
-                if (batch.signal.aborted) return;
-                receipts.set(number, receipt);
-                received += receipt.size;
-                inFlight.delete(number);
-                return;
               }
             } catch (error) {
               if (failure === undefined) failure = error;
@@ -461,7 +511,7 @@ export function useUploadQueue(onUploaded: (task: UploadTask, item: Item) => voi
         if (signal.aborted) return;
         if (failure !== undefined) { patch(id, { loaded: received }); throw failure; }
         // Ascending sessions send one new part per turn; requeue for the next one.
-        if (receipts.size !== session.partCount) { patch(id, { loaded: received, status: "queued", speed: 0 }); return; }
+        if (known.size !== session.partCount) { patch(id, { loaded: received, status: "queued", speed: 0 }); return; }
       }
       patch(id, { status: "finalizing", uploaded: true, loaded: session.size, speed: 0 });
       const result = await api.commitUpload(session.id, signal);

@@ -85,3 +85,31 @@ func (s *Server) runNativeUploadOperation(ctx context.Context, op fileops.Operat
 	}
 	return op, err
 }
+
+func (s *Server) runPlannedUploadOperation(ctx context.Context, op fileops.Operation, actor fileops.Actor, native fileops.NativeActions, planned storage.PlannedUploadWriter, u fileops.Upload, service *fileops.Service) (fileops.Operation, error) {
+	writer := fileops.NewPlannedUploadWriter(native, planned, s.filesJournal)
+	var err error
+	if !op.Terminal() {
+		switch {
+		case op.Phase == fileops.Admitted && !op.CancelRequested:
+			// Stage seals the provider's part listing; the empty body is never read.
+			op, err = service.Write(ctx, op.Root, actor, op.ID, writer, bytes.NewReader(nil))
+		case op.Phase == fileops.StagedReady && op.State != fileops.Unknown:
+			op, err = service.Write(ctx, op.Root, actor, op.ID, writer, nil)
+		default:
+			op, err = service.Recover(ctx, op.Root, actor, op.ID, writer)
+		}
+	}
+	if fileops.IsCode(err, "forbidden") || fileops.IsCode(err, "target_changed") || fileops.IsCode(err, "precondition_failed") {
+		latest, e := s.filesJournal.Get(ctx, op.Root, actor, op.ID)
+		if e == nil && (latest.Phase == fileops.Admitted || latest.Phase == fileops.Receiving || latest.Phase == fileops.StagedReady) {
+			if _, e = s.filesJournal.RequestCancel(ctx, op.Root, actor, op.ID); e == nil {
+				op, err = service.Recover(ctx, op.Root, actor, op.ID, writer)
+			}
+		}
+	}
+	if err == nil && op.Terminal() {
+		err = service.Cleanup(ctx, op.Root, actor, op.ID, writer)
+	}
+	return op, err
+}

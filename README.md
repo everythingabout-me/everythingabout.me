@@ -7,8 +7,9 @@ Tencent Cloud COS.
 Frontend and backend are split: **a Go backend (net/http) + a React frontend (Vite + React Router)**, with no
 Next.js.
 
-File transfers follow the [transfer protocol](docs/design/transfer-protocol.md) (target design; the current
-runtime still relays bytes through the application or uses per-part COS authorize/confirm grants):
+File transfers follow the [transfer protocol](docs/design/transfer-protocol.md). Classes A (`presigned-parts`)
+and C (`relay`) are implemented; class B (`resumable-session`) has its contract and configuration skeleton but
+no cloud-drive driver yet:
 
 ```
 Class A:    client --presigned part PUT / read GET--> object store (unpublished multipart)
@@ -72,10 +73,10 @@ expiry; explicit pruning exists but is not automatically scheduled.
 | Authentication | Explicit Bearer, or session cookie; Origin + session-bound CSRF required for mutations |
 | Metadata and listing (ID/path implemented) | `GET /api/files?path=/...` or `?id=<UUID>`; same selectors for `/list` |
 | Search and principal | `GET /api/files/search`; `/api/files/me`; `/api/files/capabilities` |
-| File content (ID/path implemented) | `GET/HEAD /api/files/content?path=/...` or `?id=<UUID>`: same-origin streaming, safe single ranges (class C); `POST /api/files/downloads` read grants for classes A/B (target) |
+| File content (ID/path implemented) | `GET/HEAD /api/files/content?path=/...` or `?id=<UUID>`: class C same-origin streaming, safe single ranges; `POST /api/files/downloads` issues class A direct read grants. HEAD works on every class |
 | Mutations (admitted roots) | Verified baseline and explicit capability evidence; upload/replace/folder/move/copy/delete |
 | Long operations | `.../operations/{id}` and `/cancel`: durable progress, partial effects, recovery |
-| Resumable uploads (admitted roots) | POST/GET `.../uploads`; GET/DELETE `.../uploads/{id}`; POST `.../parts/sign` (class A); PUT `.../parts/{number}` (class C); GET `.../parts`; POST `.../commit` (server-only publication + index) |
+| Uploads (admitted roots) | POST/GET `.../uploads`; GET/DELETE `.../uploads/{id}`; POST `.../parts/sign` (class A); PUT `.../parts/{number}` (class C); GET `.../parts` (class A provider listing or class C receipts); POST `.../commit` (server-only publication + index) |
 | Storage tree | Native reads and admitted Local writes; eligible folder rename is one native root effect |
 | Incremental state (R4/R5) | Immutable change-snapshots; changes pull with policy-bound opaque checkpoints |
 | Notifications (R5 first phase) | Durable ID/path file/folder subscriptions and bounded SSE availability events |
@@ -85,13 +86,14 @@ CDN/regional gateways and NAS connectors are internal deployment choices. Self-h
 without a CDN.
 
 Each storage connection selects one [transfer class](docs/design/transfer-protocol.md) from those its driver
-supports. Class A (`presigned-parts`, COS/S3-compatible) signs part URLs in renewable windows, binding exact
-length but no digest; class B (`resumable-session`, OneDrive/Google Drive/Dropbox/Box) hands the client a provider
-session; class C (`relay`) receives bytes in the application. Classes A and B never carry file bytes through the
-application, for reads or writes, and a transfer never falls back to another class. In every class only the
-server commit publishes. Geometry is advertised per session; the default for A and C is 32 MiB parts with
-sixteen concurrent requests, and class B follows provider rules. Receipts label provider-listed lengths,
-provider digests and server-computed SHA-256 distinctly.
+supports. Class A (`presigned-parts`, COS today) signs part URLs in renewable windows, binding exact length but
+no digest, and issues direct read grants with a separate GetObject-only identity; class B
+(`resumable-session`, OneDrive/Google Drive/Dropbox/Box) is defined but has no driver yet; class C (`relay`)
+receives bytes in the application and serves content through the same origin. Classes A and B never carry file
+bytes through the application, for reads or writes, and a transfer never falls back to another class. In every
+class only the server commit publishes. Geometry is advertised per session; the default for A and C is 32 MiB
+parts with sixteen concurrent requests, and class B follows provider rules. Receipts label provider-listed
+lengths, provider digests and server-computed SHA-256 distinctly.
 
 Writes stay behind explicit admission. Configure `FILE_COORDINATED_WRITES=true` only for coordinated writers,
 validate and import the native index, then run `eam storage-admit --owner-id UUID --writers-quiesced
@@ -124,10 +126,12 @@ make build          # build web/dist, then compile bin/eam
 ```
 
 A class-A connection needs a bucket CORS rule for the application origins (see
-[transfer protocol §11](docs/design/transfer-protocol.md#11-deployment)) and a signing identity limited to
-`UploadPart`/`GetObject`. Uploads may optionally go through a same-origin edge relay that forwards PUT
-`/api/files/transfer/…` to the provider unchanged; the application refuses that path, so a missing rule fails
-instead of consuming application bandwidth. All control requests stay on `eam server`, and no edge function or
+[transfer protocol §11](docs/design/transfer-protocol.md#11-deployment)) plus two dedicated signing identities:
+`COS_UPLOAD_SIGN_*` limited to `UploadPart` and `COS_READ_SIGN_*` limited to `GetObject`. Uploads may
+optionally go through a same-origin edge relay that forwards PUT `/api/files/transfer/…` to the provider
+unchanged; the application refuses that path, so a missing rule fails instead of consuming application
+bandwidth. `FILE_TRANSFER_CLASS` selects `presigned-parts` or `relay`; class B is rejected until a cloud-drive
+driver advertises it. All control requests stay on `eam server`, and no edge function or
 extra upload machine is required.
 
 In development the frontend runs on Vite (5173, proxying `/api` to 8080) and the backend runs on Go (8080):
@@ -282,8 +286,8 @@ directory with coscli first, then run `reconcile --owner you@example.com`.
 Clients use the application origin for every control request; bytes leave it only in classes A and B. STS
 issuance is not part of the file protocol, and provider credentials stay server-side. Object admission requires
 proven native ETag and absence conditions (no bucket versioning) plus coordinated-writer evidence. A class-A
-connection additionally requires the bucket CORS rule and a signing identity limited to `UploadPart`/`GetObject`;
-a class-C connection needs neither. Unsupported image conversions use authorized raw content or placeholders.
+connection additionally requires the bucket CORS rule and two dedicated signing identities, one limited to
+`UploadPart` and one limited to `GetObject`; a class-C connection needs neither. Unsupported image conversions use authorized raw content or placeholders.
 
 ## Loading terabytes of data the first time
 
@@ -457,9 +461,13 @@ password sign-in: 30 per 15 minutes per IP, 10 per 15 minutes per email).
 | `STORAGE_BACKEND` | `local`, `cos` or `s3`; configure one bound root per connection |
 | `FILE_COOKIE_ORIGINS` | Explicit allowed cookie mutation origins including port |
 | `FILE_COORDINATED_WRITES` | Default false; enable only after native evidence, legacy drain and root budget admission |
-| `FILE_MAX_SINGLE_PUT_BYTES` | Simple PUT/object publication policy; default 32 MiB, admitted object maximum 5 GiB |
+| `FILE_TRANSFER_CLASS` | `presigned-parts` (class A) or `relay` (class C); class B is reserved until a cloud-drive driver exists |
+| `FILE_UPLOAD_INGRESS` | `embedded` for direct provider class A URLs, or `edgeone` for the optional same-origin class A edge relay |
+| `FILE_MAX_SINGLE_PUT_BYTES` | Simple PUT/object publication policy on class C; default 32 MiB, admitted object maximum 5 GiB |
 | `FILE_OBJECT_ADMISSION_FILE` / `FILE_OBJECT_SPOOL_ROOT` | Exact-connection capability evidence and durable shared object spool |
-| `COS_SECRET_ID` / `COS_SECRET_KEY` | Server-side keys; never give them to the frontend |
+| `COS_SECRET_ID` / `COS_SECRET_KEY` | Server-side control keys; never give them to the frontend |
+| `COS_UPLOAD_SIGN_SECRET_ID` / `COS_UPLOAD_SIGN_SECRET_KEY` | Class A only: dedicated identity limited to `UploadPart` |
+| `COS_READ_SIGN_SECRET_ID` / `COS_READ_SIGN_SECRET_KEY` | Class A only: dedicated identity limited to `GetObject` |
 | `COS_BUCKET` / `COS_REGION` | The bucket must include the APPID |
 | `APP_ENV` | `development` (default) or `production`; decides Secure cookies and the behavior when SES is not configured |
 | `SESSION_TTL_DAYS` | Session lifetime, 30 days by default |

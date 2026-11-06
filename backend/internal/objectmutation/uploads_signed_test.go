@@ -1,12 +1,7 @@
 package objectmutation
 
 import (
-	"bytes"
 	"context"
-	"crypto/md5"
-	"crypto/sha256"
-	"encoding/base64"
-	"encoding/hex"
 	"testing"
 	"time"
 
@@ -15,24 +10,52 @@ import (
 
 type signedTestBackend struct {
 	*nativeTestBackend
-	nativeInfo            NativePartInfo
-	exists                bool
-	signCalls, queryCalls int
+	signCalls, listCalls int
+	signFail             bool
 }
 
 func (b *signedTestBackend) SignedPartsSupported() bool { return true }
 
-func (b *signedTestBackend) SignPart(_ context.Context, key, id string, n int, size int64, md5 string, expires time.Time) (storage.SignedPartGrant, error) {
+func (b *signedTestBackend) SignPart(_ context.Context, key, id string, n int, size int64, expires time.Time) (storage.SignedPartGrant, error) {
 	b.signCalls++
-	return storage.SignedPartGrant{Method: "PUT", URL: "https://bucket.example/" + key + "?partNumber=1&uploadId=" + id, Headers: map[string]string{"Content-MD5": md5, "Content-Type": "application/octet-stream"}, ExpiresAt: expires}, nil
+	if b.signFail {
+		return storage.SignedPartGrant{}, storage.NewError("storage_failure", storage.Path(key), nil)
+	}
+	return storage.SignedPartGrant{Number: n, Size: size, Method: "PUT", URL: "https://bucket.example/" + key, Headers: map[string]string{"Content-Length": "4", "Content-Type": "application/octet-stream"}, ExpiresAt: expires}, nil
 }
-func (b *signedTestBackend) QueryPart(context.Context, string, string, int) (NativePartInfo, bool, error) {
-	b.queryCalls++
-	return b.nativeInfo, b.exists, nil
+
+func (b *signedTestBackend) ListParts(_ context.Context, key, _ string, after, limit int) ([]storage.NativeUploadPart, bool, error) {
+	b.listCalls++
+	parts := make([]storage.NativeUploadPart, 0, len(b.parts))
+	for n := after + 1; n <= len(b.parts); n++ {
+		data, ok := b.parts[n]
+		if !ok {
+			return nil, false, nil
+		}
+		parts = append(parts, storage.NativeUploadPart{Number: n, Size: int64(len(data)), ETag: "tag-" + itoa(n)})
+		if len(parts) >= limit {
+			return parts, n < len(b.parts), nil
+		}
+	}
+	return parts, false, nil
 }
+
+func itoa(n int) string {
+	if n == 0 {
+		return "0"
+	}
+	var b [20]byte
+	i := len(b)
+	for n > 0 {
+		i--
+		b[i] = byte('0' + n%10)
+		n /= 10
+	}
+	return string(b[i:])
+}
+
 func signedFixture(t *testing.T) (*Driver, *signedTestBackend, *memoryUploadMetadata) {
 	_, base, binding, options := nativeFixture(t)
-	options.Admission.SignedMultipartParts = true
 	backend := &signedTestBackend{nativeTestBackend: base}
 	driver, err := New(&fakeTree{backend: base.fakeBackend, root: binding.ContentRoot}, binding, backend, options)
 	if err != nil {
@@ -41,53 +64,22 @@ func signedFixture(t *testing.T) (*Driver, *signedTestBackend, *memoryUploadMeta
 	t.Cleanup(func() { driver.Close() })
 	return driver, backend, &memoryUploadMetadata{}
 }
-func signedInput(data []byte) storage.SignedUploadPart {
-	sha := sha256.Sum256(data)
-	m := md5.Sum(data)
-	return storage.SignedUploadPart{Number: 1, Size: int64(len(data)), SHA256: hex.EncodeToString(sha[:]), MD5: base64.StdEncoding.EncodeToString(m[:])}
-}
-func TestSignedNativeGrantConfirmAndStableReplay(t *testing.T) {
+
+func TestPlannedUploadSignsWithoutReceivingOrDigesting(t *testing.T) {
 	d, b, metadata := signedFixture(t)
 	ctx := context.Background()
-	data := []byte("data")
-	in := nativeIntent(t, d, "signed", 4)
-	p := signedInput(data)
-	grant, err := d.AuthorizePart(ctx, in, p, metadata, time.Now().Add(5*time.Minute))
-	if err != nil || grant.Method != "PUT" {
-		t.Fatal(grant, err)
+	in := nativeIntent(t, d, "planned", 4)
+	expires := time.Now().Add(10 * time.Minute)
+	plan, err := d.BeginPlannedUpload(ctx, in, metadata, expires)
+	if err != nil || len(plan.Parts) != 1 || plan.Parts[0].Size != 4 || len(plan.Parts[0].Headers) != 2 {
+		t.Fatal(plan, err)
 	}
-	if b.partCalls != 0 {
-		t.Fatal("authorization sent bytes")
+	if b.partCalls != 0 || b.puts != 0 {
+		t.Fatal("class A plan moved bytes")
 	}
-	_, err = d.ConfirmPart(ctx, in, 1, metadata, keepPart)
-	requireCode(t, err, "part_pending")
-	// Client claims are insufficient: ListParts must return the bound exact MD5 and size.
-	b.exists = true
-	b.nativeInfo = NativePartInfo{Size: 4, ETag: `"wrong"`}
-	_, err = d.ConfirmPart(ctx, in, 1, metadata, keepPart)
-	requireCode(t, err, "digest_mismatch")
-	m := md5.Sum(data)
-	b.nativeInfo.ETag = `"` + hex.EncodeToString(m[:]) + `"`
-	part, err := d.ConfirmPart(ctx, in, 1, metadata, keepPart)
-	if err != nil {
-		t.Fatal(err)
-	}
-	oldHandle := part.Handle
-	if _, err = d.AuthorizePart(ctx, in, p, metadata, time.Now().Add(5*time.Minute)); err != nil {
-		t.Fatal(err)
-	}
-	replay, err := d.ConfirmPart(ctx, in, 1, metadata, keepPart)
-	if err != nil || replay.Handle != oldHandle {
-		t.Fatal("renewal changed immutable receipt", err)
-	}
-	changed := signedInput([]byte("evil"))
-	_, err = d.AuthorizePart(ctx, in, changed, metadata, time.Now().Add(5*time.Minute))
-	requireCode(t, err, "part_conflict")
-	_, err = d.ReceivePart(ctx, in, storage.UploadPart{Number: 1, Size: 4}, bytes.NewReader(data), metadata, keepPart)
-	requireCode(t, err, "part_conflict")
-	// Pretend COS stored the bytes: commit must seal receipts without receiving them.
-	b.parts = map[int][]byte{1: data}
-	stage, err := d.SealStage(ctx, in, []storage.UploadPart{part}, metadata, cpOK)
+	// Pretend the provider holds the part; commit seals the provider listing.
+	b.parts = map[int][]byte{1: []byte("data")}
+	stage, err := d.SealPlannedUpload(ctx, in, metadata, cpOK)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -98,61 +90,49 @@ func TestSignedNativeGrantConfirmAndStableReplay(t *testing.T) {
 	if b.partCalls != 0 || b.puts != 0 || b.completeCalls != 1 {
 		t.Fatal("application relayed bytes", b.partCalls, b.puts, b.completeCalls)
 	}
-	if err = d.Discard(ctx, in, result.Evidence); err != nil {
-		t.Fatal(err)
-	}
-	if err = d.DiscardParts(ctx, in, metadata); err != nil {
-		t.Fatal(err)
-	}
-}
-func TestSignedNativeAbortReleasesIssuedAuthorityLiability(t *testing.T) {
-	d, b, metadata := signedFixture(t)
-	ctx := context.Background()
-	in := nativeIntent(t, d, "aborted-signed", 4)
-	if _, err := d.AuthorizePart(ctx, in, signedInput([]byte("data")), metadata, time.Now().Add(5*time.Minute)); err != nil {
-		t.Fatal(err)
-	}
-	if err := d.Discard(ctx, in, nil); err != nil {
-		t.Fatal(err)
-	}
-	if err := d.DiscardParts(ctx, in, metadata); err != nil {
-		t.Fatalf("definite abort must release issued authority: %v", err)
-	}
-	_, err := d.AuthorizePart(ctx, in, signedInput([]byte("data")), metadata, time.Now().Add(5*time.Minute))
-	requireCode(t, err, "upload_aborted")
-	_, err = d.ConfirmPart(ctx, in, 1, metadata, keepPart)
-	requireCode(t, err, "upload_aborted")
-	if b.completeCalls != 0 || b.abortCalls != 1 {
-		t.Fatal("issued authority was incorrectly published")
-	}
-}
-func TestSignedNativePartsRequireSeparateAdmission(t *testing.T) {
-	d, _, _ := signedFixture(t)
-	d.options.Admission.SignedMultipartParts = false
-	if d.SignedUploadSupported() {
-		t.Fatal("missing proof enabled signing")
-	}
-	if d.UploadMaxFileBytes() == 0 {
-		t.Fatal("signed proof disabled embedded native multipart")
-	}
-	_, err := d.AuthorizePart(context.Background(), nativeIntent(t, d, "unproved", 4), signedInput([]byte("data")), &memoryUploadMetadata{}, time.Now().Add(5*time.Minute))
-	requireCode(t, err, "unsupported")
 }
 
-func TestSignedNativePartGeometryAndChecksumValidation(t *testing.T) {
+func TestPlannedUploadRejectsIncompleteProviderListing(t *testing.T) {
 	d, b, metadata := signedFixture(t)
 	ctx := context.Background()
-	in := nativeIntent(t, d, "invalid-signed", 4)
-	for _, change := range []func(*storage.SignedUploadPart){
-		func(p *storage.SignedUploadPart) { p.Size = 3 }, func(p *storage.SignedUploadPart) { p.Number = 2 },
-		func(p *storage.SignedUploadPart) { p.MD5 = "invalid" }, func(p *storage.SignedUploadPart) { p.SHA256 = "AA" },
-	} {
-		p := signedInput([]byte("data"))
-		change(&p)
-		_, err := d.AuthorizePart(ctx, in, p, metadata, time.Now().Add(5*time.Minute))
-		requireCode(t, err, "invalid_request")
+	in := nativeIntent(t, d, "incomplete", 4)
+	if _, err := d.BeginPlannedUpload(ctx, in, metadata, time.Now().Add(10*time.Minute)); err != nil {
+		t.Fatal(err)
 	}
-	if b.beginCalls != 0 || b.signCalls != 0 {
-		t.Fatal("invalid digest issued native authority")
+	b.parts = map[int][]byte{1: []byte("dat")}
+	_, err := d.SealPlannedUpload(ctx, in, metadata, cpOK)
+	requireCode(t, err, "upload_incomplete")
+	if b.completeCalls != 0 {
+		t.Fatal("incomplete listing published")
 	}
+}
+
+func TestPlannedUploadRenewalKeepsBoundLengths(t *testing.T) {
+	d, b, metadata := signedFixture(t)
+	ctx := context.Background()
+	in := nativeIntent(t, d, "renew", nativePartSize+4)
+	if _, err := d.BeginPlannedUpload(ctx, in, metadata, time.Now().Add(10*time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	grants, err := d.SignUploadParts(ctx, in, []int{1, 2}, metadata, time.Now().Add(10*time.Minute))
+	if err != nil || len(grants) != 2 || grants[0].Size != nativePartSize || grants[1].Size != 4 {
+		t.Fatal(grants, err)
+	}
+	_, err = d.SignUploadParts(ctx, in, []int{3}, metadata, time.Now().Add(10*time.Minute))
+	requireCode(t, err, "invalid_request")
+	_, err = d.SignUploadParts(ctx, in, []int{1, 1}, metadata, time.Now().Add(10*time.Minute))
+	requireCode(t, err, "invalid_request")
+	if b.signCalls < 3 {
+		t.Fatal("renewal did not sign the same bound lengths")
+	}
+}
+
+func TestPlannedUploadRequiresProviderEvidence(t *testing.T) {
+	d, _, _ := signedFixture(t)
+	d.options.Admission.MultipartUploads = false
+	if d.SignedUploadSupported() {
+		t.Fatal("missing native multipart evidence enabled class A")
+	}
+	_, err := d.BeginPlannedUpload(context.Background(), nativeIntent(t, d, "unproved", 4), &memoryUploadMetadata{}, time.Now().Add(time.Minute))
+	requireCode(t, err, "unsupported")
 }

@@ -102,7 +102,7 @@ func validateRoot(root string) (string, error) {
 }
 func NewSecret() ([]byte, error) { b := make([]byte, 32); _, err := rand.Read(b); return b, err }
 func (t *Tree) Describe() storage.Descriptor {
-	return storage.Descriptor{RangeRead: true, Names: storage.NameRules{CaseSensitive: true, MaxPathBytes: 1024}}
+	return storage.Descriptor{RangeRead: true, TransferClasses: []string{storage.TransferRelay}, Names: storage.NameRules{CaseSensitive: true, MaxPathBytes: 1024}}
 }
 func (t *Tree) Close() error { t.cancel(); return nil }
 func (t *Tree) operation(ctx context.Context) (context.Context, func(), error) {

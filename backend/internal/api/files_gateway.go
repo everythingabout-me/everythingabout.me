@@ -49,10 +49,6 @@ func (s *Server) fileIngressHandler(next http.Handler) http.Handler {
 			writeFilesProblem(w, r, fc.NewProblem(503, "edgeone_route_required", "The signed transfer route must be forwarded by EdgeOne directly to COS."))
 			return
 		}
-		if s.cfg != nil && s.cfg.EdgeOneUploadIngress() && r.Method == http.MethodPut && (r.URL.Path == fc.Base+"/content" || uploadGatewayPartPath.MatchString(r.URL.Path)) {
-			writeFilesProblem(w, r, fc.NewProblem(503, "edgeone_route_required", "Use the upload session's signed transfer request; application byte ingress is disabled."))
-			return
-		}
 		next.ServeHTTP(w, r)
 	})
 }
