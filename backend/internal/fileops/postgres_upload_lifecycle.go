@@ -24,7 +24,21 @@ func expireLoadedUpload(ctx context.Context, tx pgx.Tx, u *Upload) error {
 	return terminateOpenUpload(ctx, tx, u, UploadExpired, now)
 }
 
+// FreezeUpload freezes a session whose part coverage is proven by durable application
+// receipts. It is the class C transition: every part passed through this application.
 func (p *Postgres) FreezeUpload(ctx context.Context, root Root, actor Actor, id string) (Upload, error) {
+	return p.freezeUpload(ctx, root, actor, id, false)
+}
+
+// FreezeProviderListed freezes a class A session, whose parts never pass through this
+// application and therefore have no receipts. Coverage was read from the provider's own
+// part listing by the caller; sealing re-lists that state before the single publication,
+// so this transition is never the only evidence a part exists.
+func (p *Postgres) FreezeProviderListed(ctx context.Context, root Root, actor Actor, id string) (Upload, error) {
+	return p.freezeUpload(ctx, root, actor, id, true)
+}
+
+func (p *Postgres) freezeUpload(ctx context.Context, root Root, actor Actor, id string, providerListed bool) (Upload, error) {
 	var u Upload
 	if err := validateRoot(root); err != nil {
 		return u, err
@@ -52,14 +66,16 @@ func (p *Postgres) FreezeUpload(ctx context.Context, root Root, actor Actor, id 
 		if err != nil {
 			return err
 		}
-		var count, bad int64
-		var size int64
-		err = tx.QueryRow(ctx, `select count(*),coalesce(sum(size),0),count(*) filter(where number<1 or number>$3 or size<>case when number=$3 then $4::bigint-($3::bigint-1)*$5::bigint else $5::bigint end) from file_upload_parts where operation_id=$1 and owner_id=$2`, id, root.OwnerID, u.PartCount, w.Size, u.PartSize).Scan(&count, &size, &bad)
-		if err != nil {
-			return err
-		}
-		if count != int64(u.PartCount) || size != w.Size || bad != 0 || u.ReceivedParts != u.PartCount || u.ReceivedBytes != w.Size {
-			return E("upload_incomplete", nil)
+		if !providerListed {
+			var count, bad int64
+			var size int64
+			err = tx.QueryRow(ctx, `select count(*),coalesce(sum(size),0),count(*) filter(where number<1 or number>$3 or size<>case when number=$3 then $4::bigint-($3::bigint-1)*$5::bigint else $5::bigint end) from file_upload_parts where operation_id=$1 and owner_id=$2`, id, root.OwnerID, u.PartCount, w.Size, u.PartSize).Scan(&count, &size, &bad)
+			if err != nil {
+				return err
+			}
+			if count != int64(u.PartCount) || size != w.Size || bad != 0 || u.ReceivedParts != u.PartCount || u.ReceivedBytes != w.Size {
+				return E("upload_incomplete", nil)
+			}
 		}
 		// Claim is fenced until this state change commits. No receipt can be inserted
 		// concurrently because receipt, abort, expiry and freeze share the owner lock.

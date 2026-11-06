@@ -13,11 +13,15 @@ import (
 
 const filesPartSignLimit = 256
 
+// filesUploadIntent decodes the intent a session was created from. The session
+// identity is the operation ID: class A keys its native multipart allocation and
+// durable metadata by it, and a driver refuses an intent without one.
 func filesUploadIntent(u fileops.Upload) (storage.WriteIntent, error) {
 	var intent storage.WriteIntent
 	if err := json.Unmarshal(u.Operation.Intent, &intent); err != nil {
 		return intent, fc.NewProblem(503, "temporarily_unavailable", "The upload intent is unavailable.")
 	}
+	intent.ID = u.ID
 	return intent, nil
 }
 

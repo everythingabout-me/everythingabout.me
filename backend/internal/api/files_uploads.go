@@ -643,7 +643,13 @@ func (s *Server) handleFilesCommitUpload(w http.ResponseWriter, r *http.Request,
 			return filesMutationProblem(coverageErr)
 		}
 	}
-	u, err = s.filesJournal.FreezeUpload(r.Context(), root, actor, u.ID)
+	if s.filesTransferClass() == storage.TransferPresignedParts {
+		// Class A parts never pass through this application, so coverage is the
+		// provider listing verified above rather than application receipts.
+		u, err = s.filesJournal.FreezeProviderListed(r.Context(), root, actor, u.ID)
+	} else {
+		u, err = s.filesJournal.FreezeUpload(r.Context(), root, actor, u.ID)
+	}
 	if err != nil {
 		return filesMutationProblem(err)
 	}

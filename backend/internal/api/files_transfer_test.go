@@ -67,10 +67,12 @@ func TestUploadIntentRejectsMalformedStoredJSON(t *testing.T) {
 
 type plannedTestWriter struct {
 	fileops.NativeActions
-	plan storage.PlannedUpload
+	plan   storage.PlannedUpload
+	intent storage.WriteIntent
 }
 
-func (w *plannedTestWriter) BeginPlannedUpload(context.Context, storage.WriteIntent, storage.UploadMetadata, time.Time) (storage.PlannedUpload, error) {
+func (w *plannedTestWriter) BeginPlannedUpload(_ context.Context, in storage.WriteIntent, _ storage.UploadMetadata, _ time.Time) (storage.PlannedUpload, error) {
+	w.intent = in
 	return w.plan, nil
 }
 func (w *plannedTestWriter) SignUploadParts(context.Context, storage.WriteIntent, []int, storage.UploadMetadata, time.Time) ([]storage.SignedPartGrant, error) {
@@ -112,6 +114,26 @@ func TestUploadTransportForClassAAndC(t *testing.T) {
 	payload = transport.(map[string]any)
 	if payload["kind"] != storage.TransferRelay || !strings.HasSuffix(payload["url"].(string), "/uploads/u_1/parts") {
 		t.Fatalf("unexpected relay transport %+v", payload)
+	}
+}
+
+// The class A driver keys its native multipart allocation and durable metadata by
+// WriteIntent.ID, and rejects an intent without one. Losing the session identity
+// between the journal and the driver fails session creation and every part call.
+func TestClassAUploadTransportCarriesTheSessionIdentity(t *testing.T) {
+	stored, _ := json.Marshal(storage.WriteIntent{Target: "a", Size: 4})
+	u := fileops.Upload{ID: "u_identity", PartSize: filesUploadPartSize, ExpiresAt: time.Now().Add(24 * time.Hour), Operation: fileops.Operation{Intent: stored}}
+	writer := &plannedTestWriter{plan: storage.PlannedUpload{PartSize: filesUploadPartSize, ExpiresAt: time.Now().Add(time.Hour)}}
+	s := &Server{cfg: &config.Config{Storage: config.Storage{TransferClass: storage.TransferPresignedParts}}}
+	if _, err := s.filesUploadTransport(context.Background(), writer, u); err != nil {
+		t.Fatal(err)
+	}
+	if writer.intent.ID != u.ID {
+		t.Fatalf("driver received intent ID %q, want the session id %q", writer.intent.ID, u.ID)
+	}
+	intent, err := filesUploadIntent(u)
+	if err != nil || intent.ID != u.ID || intent.Target != "a" {
+		t.Fatalf("decoded intent = %+v, %v", intent, err)
 	}
 }
 
