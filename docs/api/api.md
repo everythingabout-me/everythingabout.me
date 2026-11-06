@@ -488,8 +488,10 @@ transfer class. The class is fixed by the storage connection; a client never cho
 provider. [Transfer protocol](../design/transfer-protocol.md) defines the three classes, their geometry
 and their recovery rules; this section defines their API representation.
 
-Geometry is not a contract constant. `partSize`, `partCount` and `maxParallelism` are advertised per session
-from the connection's capabilities, and a client follows them exactly. Classes A and C use a server-chosen
+Geometry is not a contract constant. `partSize` and `partCount` are advertised per session from the
+connection's capabilities, and a client follows them exactly. The server publishes no per-session parallelism:
+it admits concurrent part bodies with one process-wide pool, so how many parts a client sends at once is its
+own scheduling decision. Classes A and C use a server-chosen
 uniform part size with a short final part; class B uses the provider's rules (non-final chunks in 256 KiB
 multiples on Google Drive and 320 KiB multiples on OneDrive, Box's own part size). See
 [transfer protocol §7](../design/transfer-protocol.md#7-geometry).
@@ -540,16 +542,15 @@ Example response (numbers are illustrative, not universal defaults):
   "state":"open",
   "class":"A",
   "size":18234122311,
-  "partSize":33554432,
-  "partCount":544,
-  "maxParallelism":16,
+  "partSize":16777216,
+  "partCount":1087,
   "receivedParts":0,
   "receivedBytes":0,
   "expiresAt":"2026-11-06T04:00:00Z",
   "commitUrl":"/api/files/uploads/u_.../commit",
   "transport":{
     "kind":"presigned-parts",
-    "parts":[{"number":1,"size":33554432,"url":"https://...","expiresAt":"2026-11-05T05:00:00Z"}],
+    "parts":[{"number":1,"size":16777216,"url":"https://...","expiresAt":"2026-11-05T05:00:00Z"}],
     "signUrl":"/api/files/uploads/u_.../parts/sign"
   }
 }
@@ -565,9 +566,9 @@ session/source state or performing authorized recovery. This does not restore th
 ### Class payloads
 
 ```json
-{"kind":"presigned-parts","parts":[{"number":1,"size":33554432,"url":"https://...","expiresAt":"..."}],
+{"kind":"presigned-parts","parts":[{"number":1,"size":16777216,"url":"https://...","expiresAt":"..."}],
  "signUrl":"/api/files/uploads/u_.../parts/sign"}
-{"kind":"resumable-session","url":"https://...","chunkSize":10485760,"maxParallelism":1,
+{"kind":"resumable-session","url":"https://...","chunkSize":10485760,
  "credential":{"scheme":"bearer","value":"...","expiresAt":"..."}}
 {"kind":"relay","url":"/api/files/uploads/u_.../parts"}
 ```
@@ -598,15 +599,15 @@ accepted. **C** issues parallel PUTs to the application, which streams them to t
 
 Class C acknowledgement: `Content-Digest` is optional, the service always computes SHA-256 while receiving, an
 identical replay returns the existing receipt, a different body for an acknowledged part returns
-`409 part_conflict`, and the receipt is durable before the slot lock is released. `GET B/uploads/{id}/parts`
+`409 part_conflict`, and the receipt is durable before the receiver acknowledges. `GET B/uploads/{id}/parts`
 returns class C receipts in acknowledgement order with a fixed watermark, and for class A the provider's own
 part listing (number, size, provider ETag). Class B progress is the provider offset in GET session.
 
-The browser runs up to eight queue tasks sharing one global pool of sixteen byte requests, limited by
-`session.maxParallelism`. A freed slot goes to the earliest-started file's next part. Transient part failures
-have bounded backoff; a `429 rate_limited` answer means every receive slot is busy, so the part waits and
-retries without spending a failed attempt. After an uncertain request, the client asks the session (or part
-listing) what is held before resending. The browser queue lives only in memory for the current Files
+The browser starts every queued task and shares one global pool of eight byte requests across them; the
+server publishes no per-session limit, so that pool is the only client-side bound. A freed slot goes to the
+earliest-started file's next part. Transient part failures have bounded backoff; a `429 rate_limited` answer
+means a bounded receiver queue is full, so the part waits and retries without spending a failed attempt.
+After an uncertain request, the client asks the session (or part listing) what is held before resending. The browser queue lives only in memory for the current Files
 page/document and survives folder navigation; refresh/close discards it.
 
 The browser removes the current owner's old `eam.uploads.v1:<owner>` localStorage record without restoring or

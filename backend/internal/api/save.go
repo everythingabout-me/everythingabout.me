@@ -250,7 +250,7 @@ For resumable files within the advertised limits:
   Idempotency-Key: <unique-session-key>
   {"path":%q,"size":12345,"mediaType":"image/jpeg","condition":{"mode":"create"}}
 
-Use the returned id, class, partSize, partCount and maxParallelism. Split exactly at partSize;
+Use the returned id, class, partSize and partCount. Split exactly at partSize;
 the final part has the exact remainder. The session class is fixed by the connection.
 
 Class A (class="A", transport.kind="presigned-parts"):

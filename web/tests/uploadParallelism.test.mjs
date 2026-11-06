@@ -9,8 +9,6 @@ const parts = (server) => server.calls.filter(([kind]) => kind === "part");
 
 test("combined progress includes every active part exactly once as ACKs arrive out of order", async (t) => {
   const server = uploadServer(4);
-  const create = server.api.createUpload;
-  server.api.createUpload = async (...args) => ({ ...await create(...args), maxParallelism: 4 });
   const send = server.api.uploadPart;
   const pending = new Map();
   server.api.uploadPart = async (...args) => {
@@ -56,10 +54,10 @@ test("combined progress includes every active part exactly once as ACKs arrive o
   assert.equal(server.calls.filter(([kind]) => kind === "commit").length, 1);
 });
 
-for (const [ordering, maxParallelism, expected] of [["any", 2, 2], ["any", 1, 1], ["ascending", 4, 1]]) {
-  test(`${ordering} ordering honors the session part limit ${maxParallelism}`, async (t) => {
+for (const [ordering, expected] of [["any", 5], ["ascending", 1]]) {
+  test(`${ordering} ordering sends ${expected === 1 ? "one part at a time" : "every missing part at once"}`, async (t) => {
     const server = uploadServer();
-    const configure = (session) => ({ ...session, ordering, maxParallelism,
+    const configure = (session) => ({ ...session, ordering,
       nextPart: ordering === "ascending" ? server.receipts.get(session.id).size + 1 : null });
     const create = server.api.createUpload;
     server.api.createUpload = async (...args) => configure(await create(...args));
@@ -82,8 +80,8 @@ for (const [ordering, maxParallelism, expected] of [["any", 2, 2], ["any", 1, 1]
   });
 }
 
-test("class A sessions share the global sixteen-part pool without application parts", async (t) => {
-  const server = uploadServer(4, { class: "A", maxParallelism: 4 });
+test("class A sessions share the global eight-part pool without application parts", async (t) => {
+  const server = uploadServer(4, { class: "A" });
   const gate = deferred();
   let active = 0, peak = 0;
   const sent = [];
@@ -220,8 +218,6 @@ test("a conflicting receipt after an ambiguous ACK never resends or commits", as
 
 test("cancel aborts every parallel request and a pending retry delay", async (t) => {
   const server = uploadServer();
-  const create = server.api.createUpload;
-  server.api.createUpload = async (...args) => ({ ...await create(...args), maxParallelism: 4 });
   const signals = [];
   let attempts = 0;
   server.api.uploadPart = (id, number, blob, signal) => {

@@ -245,7 +245,7 @@ export interface FileUploadPartGrant {
 
 export type FileUploadTransport =
   | { kind: "presigned-parts"; parts: FileUploadPartGrant[]; signUrl: string; expiresAt: string }
-  | { kind: "resumable-session"; url: string; chunkSize: number; maxParallelism: number; credential?: { scheme: "bearer"; value: string; expiresAt: string } }
+  | { kind: "resumable-session"; url: string; chunkSize: number; credential?: { scheme: "bearer"; value: string; expiresAt: string } }
   | { kind: "relay"; url: string };
 
 export interface FileUploadSession {
@@ -257,7 +257,6 @@ export interface FileUploadSession {
   size: number;
   partSize: number;
   partCount: number;
-  maxParallelism: number;
   ordering: "any" | "ascending";
   nextPart: number | null;
   receivedParts: number;
@@ -348,7 +347,6 @@ export interface FileCapabilities {
   sessionExpirySeconds: number | null;
   sessionMaxLifetimeSeconds: number | null;
   maxUploadParts: number;
-  maxUploadParallelism: number;
   terminalRetentionSeconds: number | null;
   quota: FileQuota | null;
   reservations: FileReservations | null;

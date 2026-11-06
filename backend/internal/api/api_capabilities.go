@@ -7,7 +7,7 @@ import (
 	"everythingabout.me/backend/internal/httpx"
 )
 
-// handleAPICapabilities exposes the server's limits so clients need not copy 32 MiB / 64 MiB
+// handleAPICapabilities exposes the server's limits so clients need not copy 16 MiB / 64 MiB
 // into their own source. No auth, and no user information at all.
 func (s *Server) handleAPICapabilities(w http.ResponseWriter, r *http.Request) error {
 	threshold := s.cfg.MultipartThreshold

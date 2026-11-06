@@ -29,9 +29,8 @@ const (
 // UploadOptions describes fixed ingress geometry and the original public intent.
 // ClientIntent excludes captured native parent/version evidence from replay identity.
 type UploadOptions struct {
-	PartSize       int64
-	MaxParallelism int
-	ClientIntent   storage.WriteIntent
+	PartSize     int64
+	ClientIntent storage.WriteIntent
 }
 
 type Upload struct {
@@ -39,7 +38,6 @@ type Upload struct {
 	Operation       Operation
 	PartSize        int64
 	PartCount       int
-	MaxParallelism  int
 	State           UploadState
 	ReceivedParts   int
 	ReceivedBytes   int64

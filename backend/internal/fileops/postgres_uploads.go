@@ -30,7 +30,7 @@ func readUpload(ctx context.Context, tx pgx.Tx, root Root, actor Actor, id strin
 		return u, err
 	}
 	u.ID, u.Operation = id, op
-	err = tx.QueryRow(ctx, `select part_size,part_count,max_parallelism,state,received_parts,received_bytes,created_at,expires_at,chunks_cleaned_at from file_uploads where operation_id=$1 and owner_id=$2 for update`, id, root.OwnerID).Scan(&u.PartSize, &u.PartCount, &u.MaxParallelism, &u.State, &u.ReceivedParts, &u.ReceivedBytes, &u.CreatedAt, &u.ExpiresAt, &u.ChunksCleanedAt)
+	err = tx.QueryRow(ctx, `select part_size,part_count,state,received_parts,received_bytes,created_at,expires_at,chunks_cleaned_at from file_uploads where operation_id=$1 and owner_id=$2 for update`, id, root.OwnerID).Scan(&u.PartSize, &u.PartCount, &u.State, &u.ReceivedParts, &u.ReceivedBytes, &u.CreatedAt, &u.ExpiresAt, &u.ChunksCleanedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Upload{}, E("not_found", nil)
 	}
@@ -98,7 +98,7 @@ func (p *Postgres) CreateUpload(ctx context.Context, input BeginRequest, options
 		return u, false, err
 	}
 	var w storage.WriteIntent
-	if json.Unmarshal(input.Intent, &w) != nil || input.Kind != "upload_commit" || options.MaxParallelism < 1 || options.MaxParallelism > 1000 || len(input.Manifest) != 0 {
+	if json.Unmarshal(input.Intent, &w) != nil || input.Kind != "upload_commit" || len(input.Manifest) != 0 {
 		return u, false, E("invalid_request", nil)
 	}
 	actual, err := clientUploadFingerprint(w)
@@ -135,12 +135,12 @@ func (p *Postgres) CreateUpload(ctx context.Context, input BeginRequest, options
 		if err != nil {
 			return err
 		}
-		u = Upload{ID: op.ID, Operation: op, PartSize: options.PartSize, PartCount: count, MaxParallelism: options.MaxParallelism, State: UploadOpen, CreatedAt: op.CreatedAt, ExpiresAt: op.CreatedAt.Add(24 * time.Hour)}
+		u = Upload{ID: op.ID, Operation: op, PartSize: options.PartSize, PartCount: count, State: UploadOpen, CreatedAt: op.CreatedAt, ExpiresAt: op.CreatedAt.Add(24 * time.Hour)}
 		var dbKey any
 		if key != "" {
 			dbKey = key
 		}
-		_, err = tx.Exec(ctx, `insert into file_uploads(operation_id,owner_id,principal_id,idempotency_key,client_fingerprint,comparison_path,part_size,part_count,max_parallelism,state,created_at,expires_at) values($1,$2,$3,$4,$5,$6,$7,$8,$9,'open',$10,$11)`, u.ID, req.Root.OwnerID, req.Actor.ID, dbKey, fingerprint, comparePath(req.Root, w.Target), u.PartSize, u.PartCount, u.MaxParallelism, u.CreatedAt, u.ExpiresAt)
+		_, err = tx.Exec(ctx, `insert into file_uploads(operation_id,owner_id,principal_id,idempotency_key,client_fingerprint,comparison_path,part_size,part_count,state,created_at,expires_at) values($1,$2,$3,$4,$5,$6,$7,$8,'open',$9,$10)`, u.ID, req.Root.OwnerID, req.Actor.ID, dbKey, fingerprint, comparePath(req.Root, w.Target), u.PartSize, u.PartCount, u.CreatedAt, u.ExpiresAt)
 		return err
 	})
 	return u, replay, err

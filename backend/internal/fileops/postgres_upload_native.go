@@ -15,13 +15,6 @@ import (
 
 var nativeMetadataPermits sync.Map // *pgxpool.Pool -> chan struct{}
 
-// UploadPartSlots is the receiver's per-upload limit on concurrent part body
-// requests. A session advertises exactly this value as maxParallelism, so the
-// advertised geometry and this admission must never diverge: a client that
-// fills maxParallelism would otherwise race for slots the receiver rejects with
-// rate_limited and spend a transfer attempt on its own backpressure.
-const UploadPartSlots = 16
-
 // WithUploadMetadata holds session or part locks on one dedicated connection.
 // A receiver uses at most one connection while reading/uploading a part; the
 // receipt callback uses a separate short transaction. No DB transaction spans I/O.
@@ -29,10 +22,11 @@ func (p *Postgres) WithUploadMetadata(ctx context.Context, binding, id string, n
 	if binding == "" || id == "" || number < -1 || number > 10000 || fn == nil {
 		return E("invalid_request", nil)
 	}
-	// Every admitted holder may call back into a short receipt transaction. At
-	// least half the pool remains available even across reconstructed journals,
-	// so MaxConns must stay at least twice UploadPartSlots or receivers queue
-	// below the parallelism their sessions advertise.
+	// This permit pool is the receiver's only bound on concurrent part bodies, and
+	// it is process-wide rather than per session: a client may open as many parts
+	// as it likes, and the extra ones wait here. Every admitted holder may call
+	// back into a short receipt transaction, so at most half the pool is admitted
+	// and the other half stays free even across reconstructed journals.
 	capacity := int(p.pool.Config().MaxConns) / 2
 	if capacity < 1 {
 		return E("invalid_config", nil)
@@ -100,22 +94,6 @@ func (p *Postgres) WithUploadMetadata(ctx context.Context, binding, id string, n
 	prefix := "native-upload:" + id + ":" + binding
 	if _, err = take(prefix+":session", true, number != 0); err != nil {
 		return err
-	}
-	if number > 0 {
-		admitted := false
-		for slot := 0; slot < UploadPartSlots; slot++ {
-			ok, e := take(fmt.Sprintf("%s:slot:%d", prefix, slot), false, false)
-			if e != nil {
-				return e
-			}
-			if ok {
-				admitted = true
-				break
-			}
-		}
-		if !admitted {
-			return storage.NewError("upload_busy", "", nil)
-		}
 	}
 	if _, err = take(fmt.Sprintf("%s:part:%d", prefix, number), true, false); err != nil {
 		return err

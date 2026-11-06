@@ -63,9 +63,8 @@ envelope is the same for every class:
   "class": "A",
   "state": "open",
   "size": 18234122311,
-  "partSize": 33554432,
-  "partCount": 544,
-  "maxParallelism": 16,
+  "partSize": 16777216,
+  "partCount": 1087,
   "expiresAt": "2026-11-06T04:00:00Z",
   "commitUrl": "/api/files/uploads/u_.../commit",
   "transport": { }
@@ -87,7 +86,7 @@ signed part URLs; further windows and renewals come from one batch endpoint:
 {
   "kind": "presigned-parts",
   "parts": [
-    { "number": 1, "size": 33554432, "url": "https://...", "expiresAt": "2026-11-05T05:00:00Z" }
+    { "number": 1, "size": 16777216, "url": "https://...", "expiresAt": "2026-11-05T05:00:00Z" }
   ],
   "signUrl": "/api/files/uploads/u_.../parts/sign"
 }
@@ -102,8 +101,8 @@ Content-Type: application/json
 
 - Each URL binds `PUT`, the exact object key, `uploadId`, `partNumber` and the exact part length
   (`Content-Length`). It binds **no content digest**, so the client never hashes before sending.
-- The server chooses the window size: enough parts to keep `maxParallelism` busy for several minutes, and the
-  whole file when it is small. The client asks for the next window when fewer than a quarter of its unsent URLs
+- The server chooses the window size: enough parts to keep the client busy for several minutes, and the whole
+  file when it is small. The client asks for the next window when fewer than a quarter of its unsent URLs
   remain, and re-signs any part whose URL expired or was rejected with 403. Signing the same number again
   returns a fresh URL for the same bound length; it cannot change the part's size or object.
 - URLs live about one hour. A leaked URL can write only one part of an unpublished upload owned by that
@@ -115,9 +114,9 @@ maximum or rejects the session before any bytes move.
 
 ### Writing
 
-The client issues parallel `PUT`s up to `maxParallelism`, with no per-part acknowledgement to the
-application. It may send `Content-MD5` as an unsigned header; a provider that checks it rejects a part
-corrupted in transit, and the server never relies on it. Until commit, anyone holding a part's URL may rewrite
+The client issues parallel `PUT`s at its own pace, with no per-part acknowledgement to the application. It
+may send `Content-MD5` as an unsigned header; a provider that checks it rejects a part corrupted in transit,
+and the server never relies on it. Until commit, anyone holding a part's URL may rewrite
 that part by sending it again; commit freezes whatever the provider lists. Part content is not otherwise
 verified against the client, which is an accepted trade-off.
 
@@ -165,7 +164,6 @@ Payload:
   "kind": "resumable-session",
   "url": "https://...",
   "chunkSize": 10485760,
-  "maxParallelism": 1,
   "credential": { "scheme": "bearer", "value": "...", "expiresAt": "..." }
 }
 ```
@@ -187,7 +185,7 @@ request; Box verifies it.
 { "kind": "relay", "url": "/api/files/uploads/u_.../parts" }
 ```
 
-The client `PUT`s numbered parts to the application, in parallel up to `maxParallelism`. The application
+The client `PUT`s numbered parts to the application, in parallel at its own pace. The application
 streams each part to the backend (unpublished native multipart for object stores, isolated staging for Local)
 while computing SHA-256, and acknowledges only after the bytes and a durable receipt exist. An identical
 replay returns the existing receipt; a different body for an acknowledged part returns `409 part_conflict`.
@@ -195,16 +193,18 @@ Commit verifies coverage from the receipts and publishes.
 
 ## 7. Geometry
 
-The server chooses `partSize`, `chunkSize` and `maxParallelism`; the client follows them exactly.
+The server chooses `partSize` and `chunkSize`; the client follows them exactly. How many parts a client sends
+at once is its own decision: the receiver admits part bodies with one process-wide pool and publishes no
+per-session number.
 
 | Route | Part size | Non-final parts | Final part | Parallelism |
 |---|---|---|---|---|
-| A | server-chosen, default 32 MiB | exactly `partSize`, ≥ 5 MiB | any size | up to 16 |
+| A | server-chosen, default 16 MiB | exactly `partSize`, ≥ 5 MiB | any size | client-chosen |
 | B — OneDrive | ≤ 60 MiB, recommended 5–10 MiB | multiple of 320 KiB | any size | 1 (ordered) |
 | B — Google Drive | server-chosen | multiple of 256 KiB | any size | 1 (ordered) |
 | B — Dropbox | server-chosen, ≤ 150 MB per call | any | any size | 1 (offset-ordered) |
 | B — Box | dictated by Box in the session | exactly Box's part size | any size | parallel |
-| C | server-chosen, default 32 MiB | exactly `partSize` | any size | up to 16 |
+| C | server-chosen, default 16 MiB | exactly `partSize` | any size | client-chosen, receiver-bound |
 
 ## 8. Reading
 

@@ -43,7 +43,7 @@ var benchPartSize = func() int64 {
 	if n, err := strconv.ParseInt(os.Getenv("EAM_STORAGE_BENCH_PART_SIZE"), 10, 64); err == nil && n > 0 {
 		return n
 	}
-	return 32 << 20
+	return 16 << 20
 }()
 
 // benchMetadata is an in-memory UploadMetadata with the documented fencing:
@@ -434,7 +434,7 @@ func benchUpload(ctx context.Context, driver storage.Driver, in storage.WriteInt
 		res.partTimes = make([]time.Duration, count)
 		var mu sync.Mutex
 		var wg sync.WaitGroup
-		sem := make(chan struct{}, 4) // maxParallelism per file
+		sem := make(chan struct{}, 4) // client-chosen parts per file
 		for n := 1; n <= count; n++ {
 			wg.Add(1)
 			sem <- struct{}{}

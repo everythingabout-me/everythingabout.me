@@ -25,7 +25,7 @@ File reselection. A browser-native beforeunload warning is registered while queu
 finalizing tasks remain.
 Durable server sessions and accepted Operations continue under their existing recovery/expiry rules. Clients
 that retain session identity and source bytes can use the resumable API independently of this browser behavior.
-Parts from up to eight files share one global pool of sixteen concurrent requests; one file may use all sixteen.
+Every queued file starts at once and their parts share one global pool of eight concurrent requests; one file may use all eight.
 See [transfer protocol](docs/design/transfer-protocol.md) for the exact boundaries.
 Object connections need no bucket versioning: revisions use current-object ETags and operation-specific
 conditions. COS ignores PUT If-Match, so admitted replacement rechecks ETag under gateway coordination;
@@ -93,8 +93,8 @@ no digest, and issues direct read grants with a separate GetObject-only identity
 (`resumable-session`, OneDrive/Google Drive/Dropbox/Box) is defined but has no driver yet; class C (`relay`)
 receives bytes in the application and serves content through the same origin. Classes A and B never carry file
 bytes through the application, for reads or writes, and a transfer never falls back to another class. In every
-class only the server commit publishes. Geometry is advertised per session; the default for A and C is 32 MiB
-parts with sixteen concurrent requests, and class B follows provider rules. Receipts label provider-listed
+class only the server commit publishes. Geometry is advertised per session; the default for A and C is 16 MiB
+parts with eight concurrent requests, and class B follows provider rules. Receipts label provider-listed
 lengths, provider digests and server-computed SHA-256 distinctly.
 
 Writes stay behind explicit admission. Configure `FILE_COORDINATED_WRITES=true` only for coordinated writers,

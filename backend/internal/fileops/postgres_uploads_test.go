@@ -19,7 +19,7 @@ func uploadRequest(r Root, a Actor, target storage.Path, size int64, key string)
 	captured.ParentPath = "folder"
 	captured.ParentVersion = []byte("captured-parent")
 	intent, _ := json.Marshal(captured)
-	return BeginRequest{Root: r, Actor: a, Kind: "upload_commit", IdempotencyKey: key, Intent: intent, Reservation: ReservationRequest{NewBytes: size, PhysicalBytes: 2*size + 16}}, UploadOptions{PartSize: 4, MaxParallelism: 4, ClientIntent: client}
+	return BeginRequest{Root: r, Actor: a, Kind: "upload_commit", IdempotencyKey: key, Intent: intent, Reservation: ReservationRequest{NewBytes: size, PhysicalBytes: 2*size + 16}}, UploadOptions{PartSize: 4, ClientIntent: client}
 }
 func mustUpload(t *testing.T, p *Postgres, r Root, a Actor, target storage.Path, size int64, key string) Upload {
 	t.Helper()

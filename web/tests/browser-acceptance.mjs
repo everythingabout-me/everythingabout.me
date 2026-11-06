@@ -68,7 +68,6 @@ try {
   const interrupted = await (await context.request.get(`${config.url}/api/files/uploads/${interruptedSession}`)).json();
   assert.equal(interrupted.partSize, uploadPartBytes);
   assert.equal(interrupted.partCount, 2);
-  assert.ok(interrupted.maxParallelism >= 2);
   let firstPartDurable = false;
   for (let i = 0; i < 200 && !firstPartDurable; i++) {
     const response = await context.request.get(`${config.url}/api/files/uploads/${interruptedSession}/parts`);

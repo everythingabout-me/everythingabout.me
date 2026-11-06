@@ -51,7 +51,7 @@ func uploadFailureFixture(t *testing.T, f *fileWorkerFixture) (*Server, fileops.
 	intent.Conditions = storage.Conditions{Absent: true}
 	intent.ParentVersion = parent.Version
 	encoded, _ := json.Marshal(intent)
-	upload, _, err := f.journal.CreateUpload(f.ctx, fileops.BeginRequest{Root: root, Actor: actor, Kind: "upload_commit", Intent: encoded, Reservation: fileops.ReservationRequest{NewBytes: 4, PhysicalBytes: 24}}, fileops.UploadOptions{PartSize: 4, MaxParallelism: 4, ClientIntent: client})
+	upload, _, err := f.journal.CreateUpload(f.ctx, fileops.BeginRequest{Root: root, Actor: actor, Kind: "upload_commit", Intent: encoded, Reservation: fileops.ReservationRequest{NewBytes: 4, PhysicalBytes: 24}}, fileops.UploadOptions{PartSize: 4, ClientIntent: client})
 	if err != nil {
 		t.Fatal(err)
 	}

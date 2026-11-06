@@ -78,12 +78,12 @@ for (const release of ["unmount", "cancel", "complete"]) {
     let firstSignal;
     server.api.uploadStatus = async (id) => {
       server.calls.push(["status", id]);
-      return { ...server.sessions.get(id), maxParallelism: 1 };
+      return { ...server.sessions.get(id) };
     };
     server.api.createUpload = async (...args) => {
       const active = [...server.sessions.values()].find((session) => session.path === args[0].path && session.state === "open");
       if (active && !server.keys.has(args[1])) { server.calls.push(["blocked-create", active.id]); throw conflict(active.id); }
-      return { ...await create(...args), maxParallelism: 1 };
+      return { ...await create(...args) };
     };
     server.api.uploadPart = async (...args) => {
       if (args[0] === "session-1" && args[1] === 2) { firstSignal = args[3]; await gate.promise; }

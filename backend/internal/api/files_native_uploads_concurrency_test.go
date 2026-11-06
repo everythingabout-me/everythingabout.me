@@ -89,7 +89,7 @@ func TestFilesNativeUploadsPostgresRequireMultipartAdmission(t *testing.T) {
 	server.SetStorageFactory(backend)
 	f.server = server
 	caps := uploadsHTTPJSON(t, f.request(t, "GET", "/capabilities", "/", nil, nil), 200)
-	if caps["uploads"] != false || caps["maxUploadParallelism"] != float64(0) {
+	if caps["uploads"] != false || caps["maxUploadParallelism"] != nil {
 		t.Fatalf("unproven native upload advertised: %v", caps)
 	}
 	body, _ := json.Marshal(map[string]any{"path": "/unproven", "size": 4})

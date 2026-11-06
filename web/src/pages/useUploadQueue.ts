@@ -6,14 +6,13 @@ import type { UploadEntry } from "./uploadSelection";
 import { claimUploadPath } from "./uploadOwnership";
 import { pendingFileOperation, setUploadOwner, settleFileOperation } from "./uploadPersistence";
 
-// Files that may hold an open session at once. Byte transfer is limited separately
-// by one global part pool so a slow part never idles a connection.
-const MAX_PARALLEL_UPLOADS = 8;
 // Part requests in flight across every file. A part is long enough that even a slow
-// stream keeps its connection busy, so throughput is roughly this count times the
-// per-stream rate: sixteen reaches the measured link ceiling, and more only costs
-// payload memory. Sessions cap a single file at their own maxParallelism.
-const PART_POOL_SIZE = 16;
+// stream keeps its connection busy, so eight 16 MiB parts already hold 128 MiB in
+// flight; more only costs payload memory. This pool is the only bound on byte
+// concurrency: the server admits part bodies with one process-wide pool and does
+// not tell clients how many to send, so the queue starts every task and lets this
+// pool schedule the rest.
+const PART_POOL_SIZE = 8;
 const PART_UPLOAD_ATTEMPTS = 3;
 const PART_RETRY_DELAY_MS = 250;
 // A 429 means every receive slot is busy, which is the receiver asking this part to
@@ -95,7 +94,7 @@ async function sha256(blob: Blob): Promise<string> {
   return [...new Uint8Array(bytes)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 // Verifying a receipt reads the whole part into one ArrayBuffer for SubtleCrypto, so
-// a full batch of 32 MiB parts would hold hundreds of MiB at once. Verification is
+// a full batch of 16 MiB parts would hold well over a hundred MiB at once. Verification is
 // CPU work on bytes that are already durable, never a reason to widen the link, so
 // it runs in a small queue instead of one buffer per in-flight part.
 const VERIFY_SLOTS = 2;
@@ -120,7 +119,6 @@ export function useUploadQueue(onUploaded: (task: UploadTask, item: Item) => voi
   const running = useRef(new Map<string, Runtime>());
   const pumpRef = useRef<() => void>(() => {});
   const finishRef = useRef(onUploaded);
-  const cursor = useRef("");
   const verified = useRef(new Map<string, { file: File; parts: Map<number, string> }>());
   const pollBusy = useRef(false);
   const deadlines = useRef(new Set<ReturnType<typeof setTimeout>>());
@@ -317,13 +315,13 @@ export function useUploadQueue(onUploaded: (task: UploadTask, item: Item) => voi
       if (task.file.size !== session.size) throw new Error("The selected file has a different size.");
       const file = task.file;
       if (!Number.isSafeInteger(session.partSize) || session.partSize < 1 || !Number.isSafeInteger(session.partCount)
-        || session.partCount !== Math.ceil(session.size / session.partSize) || !Number.isSafeInteger(session.maxParallelism)
-        || session.maxParallelism < 1 || !["any", "ascending"].includes(session.ordering)) throw new Error("Invalid upload session geometry.");
+        || session.partCount !== Math.ceil(session.size / session.partSize)
+        || !["any", "ascending"].includes(session.ordering)) throw new Error("Invalid upload session geometry.");
       const classA = session.class === "A";
       if (classA && session.transport?.kind !== "presigned-parts") throw new Error("A class A session must advertise its presigned part window.");
       if (!classA && session.class !== "C") throw new Error("Unsupported upload transfer class.");
       if (!classA && session.transport?.kind !== "relay") throw new Error("A class C session must advertise its relay URL.");
-      const parallelism = session.ordering === "ascending" ? 1 : Math.min(PART_POOL_SIZE, session.maxParallelism);
+      const parallelism = session.ordering === "ascending" ? 1 : PART_POOL_SIZE;
       const chunkFor = (number: number) => {
         const start = (number - 1) * session.partSize;
         return file.slice(start, Math.min(start + session.partSize, session.size));
@@ -541,15 +539,16 @@ export function useUploadQueue(onUploaded: (task: UploadTask, item: Item) => voi
   }, [acquirePart, applyOperation, complete, patch, releasePart]);
   const pump = useCallback(() => {
     if (!ready.current || !mounted.current) return;
-    while (running.current.size < MAX_PARALLEL_UPLOADS) {
-      const eligible = tasksRef.current.filter((task) => task.status === "queued" && !task.cancelRequested && !running.current.has(task.id)
-        && !tasksRef.current.some((parent) => parent.isDir && parent.status !== "completed" && task.path.startsWith(`${parent.path}/`)));
-      if (!eligible.length) break;
-      const ordered = tasksRef.current;
-      const at = ordered.findIndex((task) => task.id === cursor.current);
-      const eligibleIds = new Set(eligible.map((task) => task.id));
-      const next = [...ordered.slice(at + 1), ...ordered.slice(0, at + 1)].find((task) => eligibleIds.has(task.id))!;
-      cursor.current = next.id;
+    // Start every eligible task. No task count gates the queue: the global part pool
+    // decides how many parts are actually in flight, and the server does not publish
+    // a per-session number to respect. A child waits only for its unfinished
+    // directory task, which calls pump again when it settles.
+    const ordered = tasksRef.current;
+    // Prefixes of unfinished directory tasks; their children must wait for them.
+    const blocked = ordered.filter((task) => task.isDir && task.status !== "completed").map((task) => `${task.path}/`);
+    for (const next of ordered) {
+      if (next.status !== "queued" || next.cancelRequested || running.current.has(next.id)) continue;
+      if (blocked.some((prefix) => next.path.startsWith(prefix))) continue;
       // Pool priority follows the order files first start, kept across retries/turns.
       if (!ranks.current.has(next.id)) ranks.current.set(next.id, nextRank.current++);
       const runtime = { controller: new AbortController() };

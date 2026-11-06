@@ -17,13 +17,14 @@ import (
 
 var _ storage.DiscardProver = (*Driver)(nil)
 
-const nativePartSize int64 = 32 << 20
+const nativePartSize int64 = 16 << 20
 const nativeMaxParts = 10000
 
-// Bounded independently of users/sessions. A part body is streamed straight to the
-// provider, so a slot bounds a concurrent request rather than a retained payload.
-// Two full per-upload admissions (fileops.UploadPartSlots each) may be in flight
-// at once; independent receivers need no shared filesystem.
+// A second, provider-side bound on concurrent part bodies. The effective limit is
+// the receiver's metadata permit pool (half of MaxConns); this channel keeps a
+// receiver that reaches a provider without that gate from opening unbounded
+// streams. A part body is streamed straight to the provider, so a slot bounds a
+// concurrent request rather than a retained payload.
 var nativeReceiveSlots = make(chan struct{}, 32)
 
 type nativeSession struct {

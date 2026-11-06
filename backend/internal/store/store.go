@@ -20,10 +20,9 @@ func Open(ctx context.Context, databaseURL string) (*DB, error) {
 		return nil, err
 	}
 	// A part receiver holds one connection for the whole native part transfer
-	// (seconds per 32 MiB part), and fileops admits up to UploadPartSlots of them
-	// per upload while keeping half the pool free for receipt transactions and
-	// ordinary requests. Sizing the pool below twice that admission would throttle
-	// receivers silently, below the parallelism their sessions advertise.
+	// (seconds per 16 MiB part), and fileops admits at most half the pool to those
+	// receivers so the other half stays free for receipt transactions and ordinary
+	// requests. Sizing the pool down would silently throttle every upload.
 	cfg.MaxConns = 40
 	cfg.MaxConnIdleTime = 30 * time.Second
 

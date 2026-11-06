@@ -19,14 +19,8 @@ import (
 	"everythingabout.me/backend/internal/uploadspool"
 )
 
-const filesUploadPartSize int64 = 32 << 20
+const filesUploadPartSize int64 = 16 << 20
 const filesUploadMaxParts = 10000
-
-// filesUploadParallelism is what every session advertises as maxParallelism, so
-// it must equal the receiver's admission rather than a separate wish. Sizing it
-// by hand above the receiver made clients race for rejected slots; sizing it
-// below measured throughput left the transfer starving.
-const filesUploadParallelism = fileops.UploadPartSlots
 
 // FileUploadSpool stores private durable chunks independently of final publication.
 type FileUploadSpool interface {
@@ -67,7 +61,7 @@ func (s *Server) filesUploadResource(u fileops.Upload, scopes ...*fileRequest) m
 	if len(u.Operation.Result) > 0 {
 		result = json.RawMessage(u.Operation.Result)
 	}
-	resource := map[string]any{"class": s.filesTransferClassLabel(), "id": u.ID, "path": "/" + string(intent.Target), "state": u.State, "size": intent.Size, "partSize": u.PartSize, "partCount": u.PartCount, "maxParallelism": u.MaxParallelism, "ordering": "any", "nextPart": nil, "receivedParts": u.ReceivedParts, "receivedBytes": u.ReceivedBytes, "createdAt": u.CreatedAt.UTC(), "expiresAt": u.ExpiresAt.UTC(), "partsUrl": "/api/files/uploads/" + u.ID + "/parts", "commitUrl": "/api/files/uploads/" + u.ID + "/commit", "operationId": u.Operation.ID, "result": result}
+	resource := map[string]any{"class": s.filesTransferClassLabel(), "id": u.ID, "path": "/" + string(intent.Target), "state": u.State, "size": intent.Size, "partSize": u.PartSize, "partCount": u.PartCount, "ordering": "any", "nextPart": nil, "receivedParts": u.ReceivedParts, "receivedBytes": u.ReceivedBytes, "createdAt": u.CreatedAt.UTC(), "expiresAt": u.ExpiresAt.UTC(), "partsUrl": "/api/files/uploads/" + u.ID + "/parts", "commitUrl": "/api/files/uploads/" + u.ID + "/commit", "operationId": u.Operation.ID, "result": result}
 	if s.filesTransferClass() == storage.TransferPresignedParts {
 		resource["signUrl"] = "/api/files/uploads/" + u.ID + "/parts/sign"
 	}
@@ -335,19 +329,18 @@ func (s *Server) handleFilesCreateUpload(w http.ResponseWriter, r *http.Request,
 	if err != nil {
 		return filesMutationProblem(err)
 	}
-	// Native parts coexist with final publication; Local chunks coexist with its
-	// assembled stage. Both reserve bounded concurrent receive headroom.
-	if _, ok := native.(storage.NumberedUploadWriter); !ok {
-		physical += intent.Size
-	}
-	physical += filesUploadParallelism * min(intent.Size, filesUploadPartSize)
+	// Unpublished parts coexist with the final publication, and Local chunks coexist
+	// with their assembled stage, so reserve one file's worth of headroom. This is
+	// deliberately independent of how many part bodies a client keeps in flight: the
+	// receiver admits those with one process-wide pool, not a per-session number.
+	physical += intent.Size
 	reservation := fileops.ReservationRequest{NewBytes: intent.Size, OldBytes: oldBytes, PhysicalBytes: physical}
 	if oldBytes > 0 {
 		reservation.CreditPath = intent.Target
 		reservation.CreditVersion = intent.Conditions.ExpectedVersion
 	}
 	encoded, _ := json.Marshal(intent)
-	u, _, err := s.filesJournal.CreateUpload(r.Context(), fileops.BeginRequest{Root: root, Actor: actor, Kind: "upload_commit", IdempotencyKey: key, Intent: encoded, Guards: []fileops.Guard{{Path: intent.Target}}, Reservation: reservation}, fileops.UploadOptions{PartSize: filesUploadPartSize, MaxParallelism: filesUploadParallelism, ClientIntent: client})
+	u, _, err := s.filesJournal.CreateUpload(r.Context(), fileops.BeginRequest{Root: root, Actor: actor, Kind: "upload_commit", IdempotencyKey: key, Intent: encoded, Guards: []fileops.Guard{{Path: intent.Target}}, Reservation: reservation}, fileops.UploadOptions{PartSize: filesUploadPartSize, ClientIntent: client})
 	if err != nil {
 		return filesMutationProblem(err)
 	}
@@ -508,8 +501,6 @@ func (s *Server) handleFilesUploadPart(w http.ResponseWriter, r *http.Request, f
 }
 func filesUploadSpoolProblem(err error) error {
 	switch {
-	case storage.IsCode(err, "upload_busy"):
-		return fc.NewProblem(429, "rate_limited", "The upload receiver has reached its concurrent request limit.")
 	case storage.IsCode(err, "upload_aborted"):
 		return fc.NewProblem(410, "upload_aborted", "The upload no longer accepts bytes.")
 	case storage.IsCode(err, "part_conflict"):

@@ -93,7 +93,7 @@ export function uploadServer(partSize = 2, options = {}) {
       const transport = classA
         ? { kind: "presigned-parts", parts: [], signUrl: `/api/files/uploads/${id}/parts/sign`, expiresAt: new Date(Date.now() + 3600_000).toISOString() }
         : { kind: "relay", url: `/api/files/uploads/${id}/parts` };
-      const session = { id, class: classA ? "A" : "C", transport, path: input.path, state: "open", size: input.size, partSize, partCount: Math.ceil(input.size / partSize), maxParallelism: options.maxParallelism ?? 2, ordering: "any", operationId: `commit-${id}`, result: null };
+      const session = { id, class: classA ? "A" : "C", transport, path: input.path, state: "open", size: input.size, partSize, partCount: Math.ceil(input.size / partSize), ordering: "any", operationId: `commit-${id}`, result: null };
       sessions.set(id, session); keys.set(key, id); receipts.set(id, new Map());
       return { ...session };
     },

@@ -219,11 +219,11 @@ Postgres, with no extra receiver machine. Commit verifies provider state and cur
 the native upload or provider commit once and settles the index/result; it is not merely a database update or
 another full-byte transfer.
 
-The browser runs up to eight queue tasks; failed tasks can retain open sessions, so eight is not a hard cap
-on server sessions. Running tasks send numbered parts through one global pool
-of sixteen part requests with no extra per-file cap, respecting each session's maxParallelism. A
-freed slot immediately goes to the earliest-started file's next part, so files finish in order and one slow part
-never idles a connection. After an uncertain part request the client asks the session what the provider or
+The browser starts every queued task, so a large batch opens its sessions immediately. Started tasks send
+numbered parts through one global pool of eight part requests with no per-file cap; the receiver admits
+part bodies process-wide, so no session publishes a parallelism for clients to respect. A freed slot
+immediately goes to the earliest-started file's next part, so files finish in order and one slow part never
+idles a connection. After an uncertain part request the client asks the session what the provider or
 relay holds before resending; class C receipt hashes are verified against the retained File before reuse. The browser queue exists only in memory for the current Files page/document and survives folder
 navigation. Refresh/close discards it without restoring failed tasks or requesting File reselection. Register the
 browser-native beforeunload warning while queued, waiting, uploading or finalizing tasks remain; do not rely on

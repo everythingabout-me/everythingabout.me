@@ -335,9 +335,7 @@ func (s *Server) handleFilesCapabilities(w http.ResponseWriter, r *http.Request,
 		uploadsReady = false
 	}
 	var partBytes, idleExpiry, maxLifetime any
-	parallelism := 0
 	if uploadsReady {
-		parallelism = filesUploadParallelism
 		partBytes, idleExpiry, maxLifetime = filesUploadPartSize, 86400, 604800
 		if native, ok := filesUnderlyingDriver(f.Driver).(fileops.NativeActions); ok {
 			n := filesUploadMaxSize(native)
@@ -355,7 +353,7 @@ func (s *Server) handleFilesCapabilities(w http.ResponseWriter, r *http.Request,
 		"maxFileBytes": maxFile, "maxSinglePutBytes": singlePut, "maxPartBytes": partBytes,
 		"pagination":           map[string]any{"defaultLimit": filesDefaultLimit, "maxLimit": filesMaxLimit},
 		"names":                map[string]any{"caseSensitive": d.Names.CaseSensitive, "maxSegmentBytes": d.Names.MaxSegmentBytes, "maxPathBytes": d.Names.MaxPathBytes, "maxDepth": d.Names.MaxDepth},
-		"sessionExpirySeconds": idleExpiry, "sessionMaxLifetimeSeconds": maxLifetime, "maxUploadParts": filesUploadMaxParts, "maxUploadParallelism": parallelism, "terminalRetentionSeconds": retention, "quota": quota, "reservations": reservations,
+		"sessionExpirySeconds": idleExpiry, "sessionMaxLifetimeSeconds": maxLifetime, "maxUploadParts": filesUploadMaxParts, "terminalRetentionSeconds": retention, "quota": quota, "reservations": reservations,
 	})
 }
 
