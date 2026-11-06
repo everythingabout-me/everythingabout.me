@@ -629,7 +629,7 @@ Class B sessions are created at the destination with the conflict rule set up fr
 existing name, and replace targets the existing provider file with its native revision condition where one
 exists (OneDrive and Box `If-Match`, Dropbox `rev`), keeping the provider's version history. Google Drive has no
 atomic create (`atomicCreate:false`) and no conditional replace. Server-only publication in class B is a client
-contract: a file that appears without a commit is indexed by the sweeper at session expiry. Class A clients
+contract: a file that appears without a commit is treated exactly as if someone had put the file into the drive directly: ordinary reconcile picks it up, and a duplicate name is reported as a collision. Class A clients
 report no ETags. Per-provider details are in
 [transfer protocol §5](../design/transfer-protocol.md#5-class-b--cloud-drive-sessions).
 

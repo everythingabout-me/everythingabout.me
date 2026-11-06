@@ -471,7 +471,7 @@ A driver serving class A or B must provide `PlannedWriter` and `ReadGranter` and
   publishes. Class B sessions are created at the destination and the server completes them (OneDrive deferred
   commit, Box commit, Dropbox finish; Google Drive completes on the final chunk). Because the client holds what
   could also complete a class-B session, server-only publication there is a client contract; a file that
-  appears without a commit is indexed at session expiry like any outside change.
+  appears without a commit is treated as an outside change and picked up by ordinary reconcile.
 - **Queryable.** `InspectWrite` must report what the provider actually holds (part listing, session range or
   offset). Client writes therefore never create an ambiguous final-path effect; only `CommitWrite` can, and it
   follows the ordinary §3 guard and recovery rules.

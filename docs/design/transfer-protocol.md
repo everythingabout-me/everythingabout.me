@@ -144,11 +144,11 @@ targets the existing provider file, so the provider's own version history, file 
 Except on Google Drive, nothing is visible until the server commits. Server-only publication in class B is a
 client contract rather than a construction: the session URL or provider token in the client's hands could also
 finish the upload. It is backed by two rules. Provider tokens go only to principals whose scope already covers
-the whole connection (below). A file that appears without a server commit is a complete upload the principal
-asked for, and the sweeper indexes it at session expiry the same way reconcile indexes any outside change.
+the whole connection (below). A file that appears without a server commit is treated
+exactly as if someone had put the file into the drive directly: ordinary reconcile picks it up, and a duplicate name is reported as a collision.
 
 Abandoned sessions leave nothing on OneDrive, Box and Dropbox. On Google Drive a client that sent the final
-chunk but never committed leaves a complete file, which the sweeper indexes.
+chunk but never committed leaves a complete file, which is handled the same way.
 
 Duplicate sibling names are never allowed on any connection, Google Drive included: they would break exit to an
 ordinary filesystem. Drive itself permits them and has no atomic create, so its driver reports
