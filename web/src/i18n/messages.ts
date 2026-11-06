@@ -297,6 +297,11 @@ const en = {
   "account.password.removed": "Password removed. Use email codes to sign in from now on.",
   "account.password.currentRequired": "Enter your current password first",
 
+  "legal.privacy": "Privacy Policy",
+  "legal.terms": "Terms of Service",
+  "legal.updated": "Last updated {date}",
+  "legal.backHome": "Back to the app",
+
   "meta.description": "A personal data foundation",
   "meta.accountTitle": "Account · Everything About Me",
   "meta.loginCodeTitle": "Sign in · Everything About Me",
@@ -602,6 +607,11 @@ const zh: Record<MessageKey, string> = {
   "account.password.setDone": "密码已设置，打开 /login?mode=password 即可用密码登录。",
   "account.password.removed": "密码已移除，之后请用邮箱验证码登录。",
   "account.password.currentRequired": "请先填写当前密码",
+
+  "legal.privacy": "隐私政策",
+  "legal.terms": "服务条款",
+  "legal.updated": "最后更新：{date}",
+  "legal.backHome": "返回应用",
 
   "meta.description": "个人数据基座",
   "meta.accountTitle": "账户 · Everything About Me",

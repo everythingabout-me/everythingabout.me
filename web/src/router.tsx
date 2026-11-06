@@ -11,6 +11,7 @@ import { AuthLayout } from "./layouts/AuthLayout";
 import { AccountPage } from "./pages/AccountPage";
 import { ConnectPage } from "./pages/ConnectPage";
 import { FilesPage } from "./pages/FilesPage";
+import { LegalPage } from "./pages/LegalPage";
 import { StreamPage } from "./pages/StreamPage";
 import { LoginPage } from "./pages/LoginPage";
 import { LoadingFallback } from "./pages/LoadingFallback";
@@ -90,6 +91,18 @@ export const router = createBrowserRouter([
         throw error;
       }
     },
+    ...pageBoundary,
+  },
+  // Public legal pages: Google OAuth branding, app stores and payment providers all need a
+  // policy and terms URL that anyone can open without an account.
+  {
+    path: "/privacy",
+    element: <LegalPage documentKey="privacy" />,
+    ...pageBoundary,
+  },
+  {
+    path: "/terms",
+    element: <LegalPage documentKey="terms" />,
     ...pageBoundary,
   },
   {

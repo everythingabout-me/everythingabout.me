@@ -815,3 +815,31 @@
     white-space: normal;
   }
 }
+
+/* ---------- Legal links ---------- */
+
+/*
+ * The sign-in page is the one screen every visitor sees before they have an account, so it is
+ * where the privacy policy and terms have to be reachable — Google's OAuth review looks for
+ * exactly that.
+ */
+.legal {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 0 24px 32px;
+  font-size: 12px;
+  color: var(--text-3);
+}
+
+.legal a {
+  color: var(--text-3);
+  transition: color 0.14s ease;
+}
+
+.legal a:hover {
+  color: var(--text);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}

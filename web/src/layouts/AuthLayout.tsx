@@ -15,6 +15,11 @@ export function AuthLayout() {
       <main className={styles.main}>
         <Outlet />
       </main>
+      <footer className={styles.legal}>
+        <Link to="/privacy">{t("legal.privacy")}</Link>
+        <span aria-hidden="true">·</span>
+        <Link to="/terms">{t("legal.terms")}</Link>
+      </footer>
     </div>
   );
 }
