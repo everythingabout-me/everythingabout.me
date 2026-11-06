@@ -24,13 +24,13 @@ func TestUploadIngressDefaultsAndValidation(t *testing.T) {
 	if _, err = Load(); err == nil {
 		t.Fatal("edgeone ingress accepted without isolated part signing credentials")
 	}
-	t.Setenv("COS_UPLOAD_SIGN_SECRET_ID", "upload-only-id")
-	t.Setenv("COS_UPLOAD_SIGN_SECRET_KEY", "upload-only-secret")
+	t.Setenv("COS_SIGN_SECRET_ID", "sign-only-id")
+	t.Setenv("COS_SIGN_SECRET_KEY", "sign-only-secret")
 	cfg, err = Load()
 	if err != nil || !cfg.EdgeOneUploadIngress() || !cfg.ExternalUploadIngress() {
 		t.Fatalf("explicit edgeone ingress: %v", err)
 	}
-	t.Setenv("COS_SECRET_ID", "upload-only-id")
+	t.Setenv("COS_SECRET_ID", "sign-only-id")
 	if _, err = Load(); err == nil {
 		t.Fatal("edgeone signer reused general storage credentials")
 	}

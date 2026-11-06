@@ -136,14 +136,11 @@ func (c *Config) validateTransferClass() error {
 		if !c.Storage.CoordinatedWrites {
 			return fmt.Errorf("class A presigned-parts requires FILE_COORDINATED_WRITES=true")
 		}
-		if c.COS.ReadSignSecretID == "" || c.COS.ReadSignSecretKey == "" {
-			return fmt.Errorf("class A presigned-parts requires COS_READ_SIGN_SECRET_ID and COS_READ_SIGN_SECRET_KEY limited to GetObject")
+		if c.COS.SignSecretID == "" || c.COS.SignSecretKey == "" {
+			return fmt.Errorf("class A presigned-parts requires COS_SIGN_SECRET_ID and COS_SIGN_SECRET_KEY limited to UploadPart and GetObject")
 		}
-		if c.COS.ReadSignSecretID == c.COS.SecretID {
-			return fmt.Errorf("class A read signing must use a distinct credential, not the general COS key")
-		}
-		if c.COS.UploadSignSecretID == "" || c.COS.UploadSignSecretKey == "" {
-			return fmt.Errorf("class A requires COS_UPLOAD_SIGN_SECRET_ID and COS_UPLOAD_SIGN_SECRET_KEY limited to UploadPart")
+		if c.COS.SignSecretID == c.COS.SecretID {
+			return fmt.Errorf("class A signing must use a distinct credential, not the general COS key")
 		}
 		return nil
 	case storage.TransferResumableSession:

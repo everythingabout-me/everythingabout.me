@@ -24,8 +24,8 @@ func (c *Config) ValidateUploadIngress() error {
 		if !c.Storage.CoordinatedWrites || c.BackendName() != "cos" {
 			return fmt.Errorf("edgeone upload ingress requires admitted COS coordinated writes")
 		}
-		if c.COS.UploadSignSecretID == "" || c.COS.UploadSignSecretKey == "" || c.COS.UploadSignSecretID == c.COS.SecretID {
-			return fmt.Errorf("edgeone ingress requires separate COS_UPLOAD_SIGN_SECRET_ID and COS_UPLOAD_SIGN_SECRET_KEY limited to UploadPart")
+		if c.COS.SignSecretID == "" || c.COS.SignSecretKey == "" || c.COS.SignSecretID == c.COS.SecretID {
+			return fmt.Errorf("edgeone ingress requires a distinct COS_SIGN_SECRET_ID and COS_SIGN_SECRET_KEY limited to UploadPart and GetObject")
 		}
 		return nil
 	default:

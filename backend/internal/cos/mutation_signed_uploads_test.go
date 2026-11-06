@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"everythingabout.me/backend/internal/config"
 	"everythingabout.me/backend/internal/objectmutation"
 	"everythingabout.me/backend/internal/storage"
 	sdk "github.com/tencentyun/cos-go-sdk-v5"
@@ -164,13 +165,13 @@ func TestMutationClassARequiresDedicatedSigners(t *testing.T) {
 	}
 }
 
-func TestMutationClassAReadGrantUsesDedicatedReadSigner(t *testing.T) {
+func TestMutationClassAReadGrantUsesTheSigningIdentity(t *testing.T) {
 	_, backend, _ := mutationFixture(t, http.HandlerFunc(func(http.ResponseWriter, *http.Request) { t.Fatal("presigning must perform no request") }))
 	control := backend.(*mutationBackend)
-	control.readSigner = sdk.NewClient(control.client.BaseURL, &http.Client{Transport: &sdk.AuthorizationTransport{SecretID: "read-fixture-id", SecretKey: "read-fixture-secret"}})
+	control.signer = sdk.NewClient(control.client.BaseURL, &http.Client{Transport: &sdk.AuthorizationTransport{SecretID: "sign-fixture-id", SecretKey: "sign-fixture-secret"}})
 	reader := backend.(objectmutation.ReadSignerBackend)
 	if !reader.ReadSigningSupported() {
-		t.Fatal("dedicated read signer was ignored")
+		t.Fatal("signing identity was ignored")
 	}
 	grant, err := reader.PresignRead(context.Background(), "drive/owner/a b.txt", storage.ReadGrantOptions{MediaType: "text/plain", Disposition: "inline", ExpiresAt: time.Now().Add(5 * time.Minute)})
 	if err != nil {
@@ -180,10 +181,30 @@ func TestMutationClassAReadGrantUsesDedicatedReadSigner(t *testing.T) {
 	if err != nil || grant.Kind != "url" {
 		t.Fatal(grant, err)
 	}
-	if parsed.Query().Get("q-ak") != "read-fixture-id" {
+	if parsed.Query().Get("q-ak") != "sign-fixture-id" {
 		t.Fatal("read grant used the control credential", parsed.Query().Get("q-ak"))
 	}
 	if parsed.Query().Get("response-content-type") != "text/plain" || !strings.Contains(parsed.Query().Get("response-content-disposition"), "filename*=") {
 		t.Fatal("read representation parameters were not signed", parsed.Query())
+	}
+}
+
+func TestNewSingleSignerServesPartsAndReads(t *testing.T) {
+	client, err := New(config.COS{SecretID: "control-id", SecretKey: "control-secret", Bucket: "bucket-123456", Region: "ap-guangzhou", SignSecretID: "sign-id", SignSecretKey: "sign-secret"})
+	if err != nil || client.signer == nil {
+		t.Fatalf("single signer was not constructed: %v", err)
+	}
+	backend, err := client.MutationBackend()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !backend.(objectmutation.SignedPartBackend).SignedPartsSupported() {
+		t.Fatal("single signer did not enable part grants")
+	}
+	if !backend.(objectmutation.ReadSignerBackend).ReadSigningSupported() {
+		t.Fatal("single signer did not enable read grants")
+	}
+	if _, err := New(config.COS{SecretID: "control-id", SecretKey: "control-secret", Bucket: "bucket-123456", Region: "ap-guangzhou", SignSecretID: "control-id", SignSecretKey: "other"}); err == nil {
+		t.Fatal("control credential was accepted as the signer")
 	}
 }

@@ -8,7 +8,7 @@ import (
 func isolatedConfigEnv(t *testing.T) {
 	t.Helper()
 	t.Setenv("EAM_ENV_FILE", filepath.Join(t.TempDir(), "missing.env"))
-	for _, key := range []string{"FILE_UPLOAD_INGRESS", "FILE_TRANSFER_CLASS", "FILE_OBJECT_ADMISSION_FILE", "FILE_OBJECT_SPOOL_ROOT", "FILE_COORDINATED_WRITES", "FILE_MAX_SINGLE_PUT_BYTES", "FILE_COOKIE_ORIGINS", "APP_SECRET", "STORAGE_BACKEND", "STORAGE_CONNECTION_ID", "STORAGE_GENERATION", "LOCAL_CONTENT_ROOT", "LOCAL_SYSTEM_ROOT", "LOCAL_CASE_SENSITIVE", "S3_ENDPOINT", "S3_REGION", "S3_BUCKET", "S3_ACCESS_KEY_ID", "S3_SECRET_ACCESS_KEY", "S3_SESSION_TOKEN", "S3_PATH_STYLE", "S3_CONTENT_PREFIX", "S3_SYSTEM_PREFIX", "COS_BUCKET", "COS_REGION", "COS_SECRET_ID", "COS_SECRET_KEY", "COS_UPLOAD_SIGN_SECRET_ID", "COS_UPLOAD_SIGN_SECRET_KEY", "COS_READ_SIGN_SECRET_ID", "COS_READ_SIGN_SECRET_KEY", "SES_SECRET_ID", "SES_SECRET_KEY", "SES_FROM_EMAIL_ADDRESS", "SES_TEMPLATE_ID", "APP_ENV"} {
+	for _, key := range []string{"FILE_UPLOAD_INGRESS", "FILE_TRANSFER_CLASS", "FILE_OBJECT_ADMISSION_FILE", "FILE_OBJECT_SPOOL_ROOT", "FILE_COORDINATED_WRITES", "FILE_MAX_SINGLE_PUT_BYTES", "FILE_COOKIE_ORIGINS", "APP_SECRET", "STORAGE_BACKEND", "STORAGE_CONNECTION_ID", "STORAGE_GENERATION", "LOCAL_CONTENT_ROOT", "LOCAL_SYSTEM_ROOT", "LOCAL_CASE_SENSITIVE", "S3_ENDPOINT", "S3_REGION", "S3_BUCKET", "S3_ACCESS_KEY_ID", "S3_SECRET_ACCESS_KEY", "S3_SESSION_TOKEN", "S3_PATH_STYLE", "S3_CONTENT_PREFIX", "S3_SYSTEM_PREFIX", "COS_BUCKET", "COS_REGION", "COS_SECRET_ID", "COS_SECRET_KEY", "COS_SIGN_SECRET_ID", "COS_SIGN_SECRET_KEY", "SES_SECRET_ID", "SES_SECRET_KEY", "SES_FROM_EMAIL_ADDRESS", "SES_TEMPLATE_ID", "APP_ENV"} {
 		t.Setenv(key, "")
 	}
 	t.Setenv("DATABASE_URL", "postgres://unused/test")
@@ -136,7 +136,7 @@ func TestTransferClassSelectionAndCredentials(t *testing.T) {
 	}
 }
 
-func TestClassARequiresDedicatedReadSigner(t *testing.T) {
+func TestClassARequiresDedicatedSigner(t *testing.T) {
 	isolatedConfigEnv(t)
 	t.Setenv("STORAGE_BACKEND", "cos")
 	t.Setenv("FILE_TRANSFER_CLASS", "presigned-parts")
@@ -147,17 +147,15 @@ func TestClassARequiresDedicatedReadSigner(t *testing.T) {
 	t.Setenv("COS_REGION", "ap-guangzhou")
 	t.Setenv("COS_SECRET_ID", "control-id")
 	t.Setenv("COS_SECRET_KEY", "control-secret")
-	t.Setenv("COS_UPLOAD_SIGN_SECRET_ID", "upload-id")
-	t.Setenv("COS_UPLOAD_SIGN_SECRET_KEY", "upload-secret")
 	cfg, err := Load()
 	if err == nil {
 		err = cfg.ValidateStorage()
 	}
 	if err == nil {
-		t.Fatal("class A accepted without a read signer")
+		t.Fatal("class A accepted without a signing identity")
 	}
-	t.Setenv("COS_READ_SIGN_SECRET_ID", "read-id")
-	t.Setenv("COS_READ_SIGN_SECRET_KEY", "read-secret")
+	t.Setenv("COS_SIGN_SECRET_ID", "sign-id")
+	t.Setenv("COS_SIGN_SECRET_KEY", "sign-secret")
 	cfg, err = Load()
 	if err != nil {
 		t.Fatal(err)
@@ -168,10 +166,10 @@ func TestClassARequiresDedicatedReadSigner(t *testing.T) {
 	if cfg.Storage.TransferClass != "presigned-parts" {
 		t.Fatalf("unexpected class %q", cfg.Storage.TransferClass)
 	}
-	t.Setenv("COS_READ_SIGN_SECRET_ID", "control-id")
+	t.Setenv("COS_SIGN_SECRET_ID", "control-id")
 	cfg, _ = Load()
 	if err := cfg.ValidateStorage(); err == nil {
-		t.Fatal("class A reused the control credential for reads")
+		t.Fatal("class A reused the control credential for signing")
 	}
 }
 

@@ -69,11 +69,11 @@ func (b *mutationBackend) ListParts(ctx context.Context, key, id string, after, 
 	return parts, result.IsTruncated, nil
 }
 
-func (b *mutationBackend) ReadSigningSupported() bool { return b.readSigner != nil }
+func (b *mutationBackend) ReadSigningSupported() bool { return b.signer != nil }
 
 func (b *mutationBackend) PresignRead(ctx context.Context, key string, options storage.ReadGrantOptions) (storage.ReadGrant, error) {
 	var out storage.ReadGrant
-	if b.readSigner == nil {
+	if b.signer == nil {
 		return out, storage.NewError("unsupported", storage.Path(key), nil)
 	}
 	expires := options.ExpiresAt
@@ -99,7 +99,7 @@ func (b *mutationBackend) PresignRead(ctx context.Context, key string, options s
 	query := url.Values{}
 	query.Set("response-content-type", mediaType)
 	query.Set("response-content-disposition", disposition+"; filename*=UTF-8''"+url.PathEscape(filename))
-	signed, err := b.readSigner.Object.GetPresignedURL3(ctx, http.MethodGet, key, duration, &sdk.PresignedURLOptions{Query: &query})
+	signed, err := b.signer.Object.GetPresignedURL3(ctx, http.MethodGet, key, duration, &sdk.PresignedURLOptions{Query: &query})
 	if err != nil {
 		return out, err
 	}

@@ -28,8 +28,7 @@ type Client struct {
 	appID         string
 	client        *cos.Client
 	publishClient *cos.Client
-	uploadSigner  *cos.Client
-	readSigner    *cos.Client
+	signer        *cos.Client
 	cred          tencent.Credentials
 	transport     *http.Transport
 }
@@ -60,18 +59,12 @@ func New(cfg config.COS) (*Client, error) {
 	client := cos.NewClient(&cos.BaseURL{BucketURL: bucketURL}, httpClient)
 	publishClient := cos.NewClient(&cos.BaseURL{BucketURL: bucketURL}, httpClient)
 	publishClient.Conf.RetryOpt.Count = 1
-	var uploadSigner, readSigner *cos.Client
-	if cfg.UploadSignSecretID != "" || cfg.UploadSignSecretKey != "" {
-		if cfg.UploadSignSecretID == "" || cfg.UploadSignSecretKey == "" || cfg.UploadSignSecretID == cfg.SecretID {
-			return nil, fmt.Errorf("COS upload signing requires a distinct complete UploadPart-only credential pair")
+	var signer *cos.Client
+	if cfg.SignSecretID != "" || cfg.SignSecretKey != "" {
+		if cfg.SignSecretID == "" || cfg.SignSecretKey == "" || cfg.SignSecretID == cfg.SecretID {
+			return nil, fmt.Errorf("COS signing requires one distinct complete credential pair limited to UploadPart and GetObject")
 		}
-		uploadSigner = cos.NewClient(&cos.BaseURL{BucketURL: bucketURL}, &http.Client{Timeout: 60 * time.Second, Transport: &cos.AuthorizationTransport{SecretID: cfg.UploadSignSecretID, SecretKey: cfg.UploadSignSecretKey, Transport: transport}})
-	}
-	if cfg.ReadSignSecretID != "" || cfg.ReadSignSecretKey != "" {
-		if cfg.ReadSignSecretID == "" || cfg.ReadSignSecretKey == "" || cfg.ReadSignSecretID == cfg.SecretID || cfg.ReadSignSecretID == cfg.UploadSignSecretID {
-			return nil, fmt.Errorf("COS read signing requires a distinct complete GetObject-only credential pair")
-		}
-		readSigner = cos.NewClient(&cos.BaseURL{BucketURL: bucketURL}, &http.Client{Timeout: 60 * time.Second, Transport: &cos.AuthorizationTransport{SecretID: cfg.ReadSignSecretID, SecretKey: cfg.ReadSignSecretKey, Transport: transport}})
+		signer = cos.NewClient(&cos.BaseURL{BucketURL: bucketURL}, &http.Client{Timeout: 60 * time.Second, Transport: &cos.AuthorizationTransport{SecretID: cfg.SignSecretID, SecretKey: cfg.SignSecretKey, Transport: transport}})
 	}
 	return &Client{
 		bucket:        cfg.Bucket,
@@ -79,8 +72,7 @@ func New(cfg config.COS) (*Client, error) {
 		appID:         config.COSAppID(cfg.Bucket),
 		client:        client,
 		publishClient: publishClient,
-		uploadSigner:  uploadSigner,
-		readSigner:    readSigner,
+		signer:        signer,
 		transport:     transport,
 		cred:          tencent.Credentials{SecretID: cfg.SecretID, SecretKey: cfg.SecretKey},
 	}, nil

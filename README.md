@@ -126,8 +126,8 @@ make build          # build web/dist, then compile bin/eam
 ```
 
 A class-A connection needs a bucket CORS rule for the application origins (see
-[transfer protocol §11](docs/design/transfer-protocol.md#11-deployment)) plus two dedicated signing identities:
-`COS_UPLOAD_SIGN_*` limited to `UploadPart` and `COS_READ_SIGN_*` limited to `GetObject`. Uploads may
+[transfer protocol §11](docs/design/transfer-protocol.md#11-deployment)) plus one dedicated signing identity:
+`COS_SIGN_*` limited to `UploadPart` and `GetObject` on the admitted root. Uploads may
 optionally go through a same-origin edge relay that forwards PUT `/api/files/transfer/…` to the provider
 unchanged; the application refuses that path, so a missing rule fails instead of consuming application
 bandwidth. `FILE_TRANSFER_CLASS` selects `presigned-parts` or `relay`; class B is rejected until a cloud-drive
@@ -286,8 +286,8 @@ directory with coscli first, then run `reconcile --owner you@example.com`.
 Clients use the application origin for every control request; bytes leave it only in classes A and B. STS
 issuance is not part of the file protocol, and provider credentials stay server-side. Object admission requires
 proven native ETag and absence conditions (no bucket versioning) plus coordinated-writer evidence. A class-A
-connection additionally requires the bucket CORS rule and two dedicated signing identities, one limited to
-`UploadPart` and one limited to `GetObject`; a class-C connection needs neither. Unsupported image conversions use authorized raw content or placeholders.
+connection additionally requires the bucket CORS rule and one dedicated signing identity limited to
+`UploadPart` and `GetObject`; a class-C connection needs neither. Unsupported image conversions use authorized raw content or placeholders.
 
 ## Loading terabytes of data the first time
 
@@ -466,8 +466,7 @@ password sign-in: 30 per 15 minutes per IP, 10 per 15 minutes per email).
 | `FILE_MAX_SINGLE_PUT_BYTES` | Simple PUT/object publication policy on class C; default 32 MiB, admitted object maximum 5 GiB |
 | `FILE_OBJECT_ADMISSION_FILE` / `FILE_OBJECT_SPOOL_ROOT` | Exact-connection capability evidence and durable shared object spool |
 | `COS_SECRET_ID` / `COS_SECRET_KEY` | Server-side control keys; never give them to the frontend |
-| `COS_UPLOAD_SIGN_SECRET_ID` / `COS_UPLOAD_SIGN_SECRET_KEY` | Class A only: dedicated identity limited to `UploadPart` |
-| `COS_READ_SIGN_SECRET_ID` / `COS_READ_SIGN_SECRET_KEY` | Class A only: dedicated identity limited to `GetObject` |
+| `COS_SIGN_SECRET_ID` / `COS_SIGN_SECRET_KEY` | Class A only: one dedicated identity limited to `UploadPart` + `GetObject` |
 | `COS_BUCKET` / `COS_REGION` | The bucket must include the APPID |
 | `APP_ENV` | `development` (default) or `production`; decides Secure cookies and the behavior when SES is not configured |
 | `SESSION_TTL_DAYS` | Session lifetime, 30 days by default |
