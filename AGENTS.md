@@ -299,8 +299,8 @@ Variants: `Committed locally main@abc1234, not pushed` / `Not committed (tests f
 - Never expose signing secrets, broad STS credentials, provider download redirects or arbitrary upload origins.
   Each connection selects one transfer class (A presigned parts, B cloud-drive sessions, C relay); a transfer
   never falls back to another class. A and C are implemented; B is configuration-reserved until a cloud-drive
-  driver exists. Class A needs one dedicated `COS_SIGN_*` identity limited to UploadPart and GetObject;
-  `FILE_TRANSFER_CLASS` selects `presigned-parts` or `relay`. Grants are scoped to one upload
+  driver exists. Class A signs part and read URLs with the configured `COS_SECRET_*` credential, which
+  remains server-side; `FILE_TRANSFER_CLASS` selects `presigned-parts` or `relay`. Grants are scoped to one upload
   session or one file, time-limited,
   renewable and recorded before they are issued. Class A part URLs bind exact length and no digest. Clients
   never publish: class A/C by construction, class B (cloud drives) by client contract; the server commit publishes. A provider credential is never

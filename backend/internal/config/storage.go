@@ -131,16 +131,10 @@ func (c *Config) validateTransferClass() error {
 		return nil
 	case storage.TransferPresignedParts:
 		if c.BackendName() != "cos" {
-			return fmt.Errorf("class A presigned-parts currently requires the COS backend with a dedicated signing identity")
+			return fmt.Errorf("class A presigned-parts currently requires the COS backend")
 		}
 		if !c.Storage.CoordinatedWrites {
 			return fmt.Errorf("class A presigned-parts requires FILE_COORDINATED_WRITES=true")
-		}
-		if c.COS.SignSecretID == "" || c.COS.SignSecretKey == "" {
-			return fmt.Errorf("class A presigned-parts requires COS_SIGN_SECRET_ID and COS_SIGN_SECRET_KEY limited to UploadPart and GetObject")
-		}
-		if c.COS.SignSecretID == c.COS.SecretID {
-			return fmt.Errorf("class A signing must use a distinct credential, not the general COS key")
 		}
 		return nil
 	case storage.TransferResumableSession:

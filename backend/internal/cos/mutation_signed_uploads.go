@@ -17,12 +17,13 @@ import (
 var _ objectmutation.SignedPartBackend = (*mutationBackend)(nil)
 var _ objectmutation.ReadSignerBackend = (*mutationBackend)(nil)
 
-// SignedPartsSupported never falls back to the broadly privileged mutation signer.
-func (b *mutationBackend) SignedPartsSupported() bool { return b.signer != nil }
+// SignedPartsSupported reports the native multipart capability; class A signs with
+// the configured COS credential, which never leaves the server.
+func (b *mutationBackend) SignedPartsSupported() bool { return b.client != nil }
 
 func (b *mutationBackend) SignPart(ctx context.Context, key, id string, number int, size int64, expires time.Time) (storage.SignedPartGrant, error) {
 	var out storage.SignedPartGrant
-	if !b.SignedPartsSupported() {
+	if b.client == nil {
 		return out, storage.NewError("unsupported", storage.Path(key), nil)
 	}
 	query := url.Values{"partNumber": {strconv.Itoa(number)}, "uploadId": {id}}
@@ -33,7 +34,7 @@ func (b *mutationBackend) SignPart(ctx context.Context, key, id string, number i
 	if duration <= 0 || duration > time.Hour {
 		return out, storage.NewError("invalid_request", storage.Path(key), nil)
 	}
-	signed, err := b.signer.Object.GetPresignedURL2(ctx, http.MethodPut, key, duration, &sdk.PresignedURLOptions{Query: &query, Header: &headers}, true)
+	signed, err := b.client.Object.GetPresignedURL2(ctx, http.MethodPut, key, duration, &sdk.PresignedURLOptions{Query: &query, Header: &headers}, true)
 	if err != nil {
 		return out, err
 	}
@@ -69,11 +70,11 @@ func (b *mutationBackend) ListParts(ctx context.Context, key, id string, after, 
 	return parts, result.IsTruncated, nil
 }
 
-func (b *mutationBackend) ReadSigningSupported() bool { return b.signer != nil }
+func (b *mutationBackend) ReadSigningSupported() bool { return b.client != nil }
 
 func (b *mutationBackend) PresignRead(ctx context.Context, key string, options storage.ReadGrantOptions) (storage.ReadGrant, error) {
 	var out storage.ReadGrant
-	if b.signer == nil {
+	if b.client == nil {
 		return out, storage.NewError("unsupported", storage.Path(key), nil)
 	}
 	expires := options.ExpiresAt
@@ -99,7 +100,7 @@ func (b *mutationBackend) PresignRead(ctx context.Context, key string, options s
 	query := url.Values{}
 	query.Set("response-content-type", mediaType)
 	query.Set("response-content-disposition", disposition+"; filename*=UTF-8''"+url.PathEscape(filename))
-	signed, err := b.signer.Object.GetPresignedURL3(ctx, http.MethodGet, key, duration, &sdk.PresignedURLOptions{Query: &query})
+	signed, err := b.client.Object.GetPresignedURL3(ctx, http.MethodGet, key, duration, &sdk.PresignedURLOptions{Query: &query})
 	if err != nil {
 		return out, err
 	}

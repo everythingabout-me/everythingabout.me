@@ -293,8 +293,8 @@ Sign a header only when its value is deterministic and the client sends it exact
 - A signed `Content-Length` requires a fixed-length `Blob`/`File` body; a `ReadableStream` body is sent
   chunked and fails the signature.
 - Content digests are never signed. A digest the client sends is an unsigned integrity hint.
-- Sign with one dedicated provider identity whose policy allows only `UploadPart` and `GetObject` on the
-  admitted root. Never sign with a credential that can complete, delete or list.
+- Sign with the configured COS credential; its secret never leaves the server. A presigned URL binds one
+  part or one file and never grants completion, deletion or listing.
 
 ## 11. Deployment
 

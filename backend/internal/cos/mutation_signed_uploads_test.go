@@ -12,7 +12,6 @@ import (
 	"testing"
 	"time"
 
-	"everythingabout.me/backend/internal/config"
 	"everythingabout.me/backend/internal/objectmutation"
 	"everythingabout.me/backend/internal/storage"
 	sdk "github.com/tencentyun/cos-go-sdk-v5"
@@ -52,9 +51,9 @@ func verifyFixturePartSignature(r *http.Request) bool {
 	if time.Now().Before(a) || time.Now().After(b) {
 		return false
 	}
-	sdk.AddAuthorizationHeader("upload-fixture-id", "upload-fixture-secret", "", check, &sdk.AuthTime{SignStartTime: a, SignEndTime: b, KeyStartTime: c, KeyEndTime: d})
+	sdk.AddAuthorizationHeader("fixture-id", "fixture-secret", "", check, &sdk.AuthTime{SignStartTime: a, SignEndTime: b, KeyStartTime: c, KeyEndTime: d})
 	want, _ := url.ParseQuery(check.Header.Get("Authorization"))
-	return q.Get("q-ak") == "upload-fixture-id" && q.Get("q-signature") == want.Get("q-signature")
+	return q.Get("q-ak") == "fixture-id" && q.Get("q-signature") == want.Get("q-signature")
 }
 
 func TestMutationClassASignsLengthWithoutDigest(t *testing.T) {
@@ -77,8 +76,6 @@ func TestMutationClassASignsLengthWithoutDigest(t *testing.T) {
 		w.Header().Set("ETag", `"provider-etag"`)
 		w.WriteHeader(200)
 	}))
-	control := backend.(*mutationBackend)
-	control.signer = sdk.NewClient(control.client.BaseURL, &http.Client{Transport: &sdk.AuthorizationTransport{SecretID: "upload-fixture-id", SecretKey: "upload-fixture-secret"}})
 	signed := backend.(objectmutation.SignedPartBackend)
 	grant, err := signed.SignPart(context.Background(), key, "native-id", 3, int64(len(payload)), time.Now().Add(5*time.Minute))
 	if err != nil {
@@ -146,32 +143,29 @@ func TestMutationClassAListsProviderParts(t *testing.T) {
 	}
 }
 
-func TestMutationClassARequiresDedicatedSigners(t *testing.T) {
+func TestMutationClassAUsesControlCredentials(t *testing.T) {
 	_, backend, _ := mutationFixture(t, http.HandlerFunc(func(http.ResponseWriter, *http.Request) { t.Fatal("signing must perform no request") }))
 	signed := backend.(objectmutation.SignedPartBackend)
-	if signed.SignedPartsSupported() {
-		t.Fatal("broad control credential enabled browser signing")
+	if !signed.SignedPartsSupported() {
+		t.Fatal("control credential did not enable part grants")
 	}
-	_, err := signed.SignPart(context.Background(), "key", "id", 1, 4, time.Now().Add(time.Minute))
-	if err == nil {
-		t.Fatal("missing dedicated signer issued grant")
+	if _, err := signed.SignPart(context.Background(), "key", "id", 1, 4, time.Now().Add(time.Minute)); err != nil {
+		t.Fatalf("part grant failed: %v", err)
 	}
 	reader := backend.(objectmutation.ReadSignerBackend)
-	if reader.ReadSigningSupported() {
-		t.Fatal("broad control credential enabled read grants")
+	if !reader.ReadSigningSupported() {
+		t.Fatal("control credential did not enable read grants")
 	}
-	if _, err := reader.PresignRead(context.Background(), "key", storage.ReadGrantOptions{MediaType: "text/plain"}); err == nil {
-		t.Fatal("missing read signer issued a grant")
+	if _, err := reader.PresignRead(context.Background(), "key", storage.ReadGrantOptions{MediaType: "text/plain"}); err != nil {
+		t.Fatalf("read grant failed: %v", err)
 	}
 }
 
-func TestMutationClassAReadGrantUsesTheSigningIdentity(t *testing.T) {
+func TestMutationClassAReadGrantUsesControlCredentials(t *testing.T) {
 	_, backend, _ := mutationFixture(t, http.HandlerFunc(func(http.ResponseWriter, *http.Request) { t.Fatal("presigning must perform no request") }))
-	control := backend.(*mutationBackend)
-	control.signer = sdk.NewClient(control.client.BaseURL, &http.Client{Transport: &sdk.AuthorizationTransport{SecretID: "sign-fixture-id", SecretKey: "sign-fixture-secret"}})
 	reader := backend.(objectmutation.ReadSignerBackend)
 	if !reader.ReadSigningSupported() {
-		t.Fatal("signing identity was ignored")
+		t.Fatal("control credential did not enable read grants")
 	}
 	grant, err := reader.PresignRead(context.Background(), "drive/owner/a b.txt", storage.ReadGrantOptions{MediaType: "text/plain", Disposition: "inline", ExpiresAt: time.Now().Add(5 * time.Minute)})
 	if err != nil {
@@ -181,30 +175,10 @@ func TestMutationClassAReadGrantUsesTheSigningIdentity(t *testing.T) {
 	if err != nil || grant.Kind != "url" {
 		t.Fatal(grant, err)
 	}
-	if parsed.Query().Get("q-ak") != "sign-fixture-id" {
-		t.Fatal("read grant used the control credential", parsed.Query().Get("q-ak"))
+	if parsed.Query().Get("q-ak") != "fixture-id" {
+		t.Fatal("read grant used a different credential", parsed.Query().Get("q-ak"))
 	}
 	if parsed.Query().Get("response-content-type") != "text/plain" || !strings.Contains(parsed.Query().Get("response-content-disposition"), "filename*=") {
 		t.Fatal("read representation parameters were not signed", parsed.Query())
-	}
-}
-
-func TestNewSingleSignerServesPartsAndReads(t *testing.T) {
-	client, err := New(config.COS{SecretID: "control-id", SecretKey: "control-secret", Bucket: "bucket-123456", Region: "ap-guangzhou", SignSecretID: "sign-id", SignSecretKey: "sign-secret"})
-	if err != nil || client.signer == nil {
-		t.Fatalf("single signer was not constructed: %v", err)
-	}
-	backend, err := client.MutationBackend()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !backend.(objectmutation.SignedPartBackend).SignedPartsSupported() {
-		t.Fatal("single signer did not enable part grants")
-	}
-	if !backend.(objectmutation.ReadSignerBackend).ReadSigningSupported() {
-		t.Fatal("single signer did not enable read grants")
-	}
-	if _, err := New(config.COS{SecretID: "control-id", SecretKey: "control-secret", Bucket: "bucket-123456", Region: "ap-guangzhou", SignSecretID: "control-id", SignSecretKey: "other"}); err == nil {
-		t.Fatal("control credential was accepted as the signer")
 	}
 }

@@ -28,7 +28,6 @@ type Client struct {
 	appID         string
 	client        *cos.Client
 	publishClient *cos.Client
-	signer        *cos.Client
 	cred          tencent.Credentials
 	transport     *http.Transport
 }
@@ -59,20 +58,12 @@ func New(cfg config.COS) (*Client, error) {
 	client := cos.NewClient(&cos.BaseURL{BucketURL: bucketURL}, httpClient)
 	publishClient := cos.NewClient(&cos.BaseURL{BucketURL: bucketURL}, httpClient)
 	publishClient.Conf.RetryOpt.Count = 1
-	var signer *cos.Client
-	if cfg.SignSecretID != "" || cfg.SignSecretKey != "" {
-		if cfg.SignSecretID == "" || cfg.SignSecretKey == "" || cfg.SignSecretID == cfg.SecretID {
-			return nil, fmt.Errorf("COS signing requires one distinct complete credential pair limited to UploadPart and GetObject")
-		}
-		signer = cos.NewClient(&cos.BaseURL{BucketURL: bucketURL}, &http.Client{Timeout: 60 * time.Second, Transport: &cos.AuthorizationTransport{SecretID: cfg.SignSecretID, SecretKey: cfg.SignSecretKey, Transport: transport}})
-	}
 	return &Client{
 		bucket:        cfg.Bucket,
 		region:        cfg.Region,
 		appID:         config.COSAppID(cfg.Bucket),
 		client:        client,
 		publishClient: publishClient,
-		signer:        signer,
 		transport:     transport,
 		cred:          tencent.Credentials{SecretID: cfg.SecretID, SecretKey: cfg.SecretKey},
 	}, nil

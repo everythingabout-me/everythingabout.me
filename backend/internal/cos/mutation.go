@@ -17,7 +17,6 @@ import (
 
 type mutationBackend struct {
 	client *sdk.Client
-	signer *sdk.Client
 }
 
 var _ objectmutation.Backend = (*mutationBackend)(nil)
@@ -36,7 +35,7 @@ func (c *Client) MutationBackend() (objectmutation.Backend, error) {
 	client.Conf.RetryOpt.Count = 1
 	client.Conf.RetryOpt.Interval = 0
 	client.Conf.RetryOpt.AutoSwitchHost = false
-	return &mutationBackend{client: client, signer: c.signer}, nil
+	return &mutationBackend{client: client}, nil
 }
 
 type mutationTransport struct{ base http.RoundTripper }
