@@ -55,6 +55,35 @@ type Put struct {
 	ExpectedETag string // optional real native condition; never Stat-then-write fallback
 }
 
+// Copy is one provider-side copy request. SourceETag binds the exact source
+// version and Absent refuses to replace an existing target, so the request needs
+// no Stat-then-write shim. Metadata carries the intent marker that lets recovery
+// attribute its own effect after a lost reply.
+type Copy struct {
+	Source, Target string
+	SourceETag     string
+	Size           int64
+	MediaType      string
+	Metadata       map[string]string
+	Absent         bool
+	ExpectedETag   string
+}
+
+// CopyBackend copies one object inside the provider without streaming its bytes
+// through the gateway. It must bind the source version and refuse an existing
+// target through native conditions; it must never fall back to a read/put pair.
+type CopyBackend interface {
+	CopyObject(context.Context, Copy) (Object, error)
+}
+
+// PartCopyBackend copies numbered ranges of one source object provider-side for
+// objects above the provider's single-request copy limit. Completion remains one
+// conditional request, and AbortMultipart discards the unpublished parts.
+type PartCopyBackend interface {
+	MultipartBackend
+	CopyPart(ctx context.Context, key, uploadID string, number int, source, sourceETag string, offset, length int64) (string, error)
+}
+
 // Backend executes exactly ONE SDK attempt per mutating request, with redirects
 // and replay disabled. A successful result means the sole native request has a
 // complete terminal response; ambiguous errors never get an automatic replay.

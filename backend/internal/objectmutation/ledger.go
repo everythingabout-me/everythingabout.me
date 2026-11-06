@@ -30,6 +30,9 @@ type ledger struct {
 	Result        *storage.MutationResult
 	MetadataReady bool
 	Native        *nativeStage
+	// Provider marks a copy performed inside the storage provider, which has no
+	// spool payload and resolves a lost reply from the target's intent marker.
+	Provider bool
 }
 type receipt struct {
 	Format                            int
@@ -277,9 +280,21 @@ func (d *Driver) inspect(ctx context.Context, kind, id string, in *storage.Write
 		result := cloneResult(*r.Result)
 		return storage.Inspection{State: storage.Applied, Result: &result, Evidence: d.receipt(r)}, nil
 	case "publishing", "unknown":
+		if r.Provider {
+			resolved, ok, err := d.resolveCopied(ctx, r)
+			if err != nil {
+				return storage.Inspection{}, err
+			}
+			if ok {
+				return storage.Inspection{State: storage.Applied, Result: resolved, Evidence: d.receipt(r)}, nil
+			}
+			if r.Phase == "not_applied" {
+				return storage.Inspection{State: storage.NotApplied, Evidence: d.receipt(r)}, nil
+			}
+		}
 		return storage.Inspection{State: storage.OutcomeUnknown, Evidence: d.receipt(r)}, nil
 	case "ready":
-		if r.Native == nil {
+		if r.Native == nil && !r.Provider {
 			file, err := d.verifiedSpool(ctx, r)
 			if err != nil {
 				return storage.Inspection{}, err
@@ -428,6 +443,15 @@ func (d *Driver) Copy(ctx context.Context, in storage.MoveRequest, cp storage.Ch
 	if err != nil {
 		return storage.MutationResult{}, err
 	}
+	if copier, ok := d.backend.(CopyBackend); ok {
+		return d.copyProvider(ctx, in, etag, cp, copier)
+	}
+	return d.copyRelay(ctx, in, etag, cp)
+}
+
+// copyRelay streams the source through the private spool and publishes a single
+// PUT. It stays the fallback for backends without a provider-side copy.
+func (d *Driver) copyRelay(ctx context.Context, in storage.MoveRequest, etag string, cp storage.Checkpoint) (storage.MutationResult, error) {
 	intent := storage.WriteIntent{ID: in.ID, Target: in.Target, Conditions: in.TargetConditions, MediaType: "application/octet-stream"}
 	effect := storage.EffectIntent{ID: in.ID, Action: "copy", Source: in.Source, Target: in.Target, Conditions: in.TargetConditions, SourceVersion: bytes.Clone(in.SourceVersion)}
 	ctx, done, err := d.operation(ctx)
@@ -494,6 +518,253 @@ func (d *Driver) Copy(ctx context.Context, in storage.MoveRequest, cp storage.Ch
 		err = d.removeKnownData(r)
 	}
 	return result, err
+}
+
+// singleCopyLimit is the largest object one provider copy request moves: COS and
+// S3 both document 5 GiB for PutObject - Copy. Larger objects use numbered part
+// copies, which completion still publishes with one conditional request.
+const singleCopyLimit int64 = 5 << 30
+
+// copyPartBytes keeps every part below the provider's 5 GiB part limit and a
+// 5 TiB object below the 10,000-part maximum.
+const copyPartBytes int64 = 512 << 20
+
+// copyProvider copies through the provider itself, so no source or target bytes
+// cross the gateway. The ledger records the intent before the request; a lost
+// reply is resolved from the intent marker this exact request wrote, never by
+// replaying the copy.
+func (d *Driver) copyProvider(ctx context.Context, in storage.MoveRequest, sourceETag string, cp storage.Checkpoint, copier CopyBackend) (storage.MutationResult, error) {
+	effect := storage.EffectIntent{ID: in.ID, Action: "copy", Source: in.Source, Target: in.Target, Conditions: in.TargetConditions, SourceVersion: bytes.Clone(in.SourceVersion)}
+	ctx, done, err := d.operation(ctx)
+	if err != nil {
+		return storage.MutationResult{}, err
+	}
+	defer done()
+	unlock, err := d.lock(ctx, "copy", in.ID, false)
+	if err != nil {
+		return storage.MutationResult{}, err
+	}
+	defer unlock()
+	r, err := d.load("copy", in.ID)
+	if err == nil {
+		if !sameJSON(r.Effect, &effect) {
+			return storage.MutationResult{}, fail("intent_conflict", in.Target)
+		}
+		if r.Phase == "applied" {
+			if r.Result == nil {
+				return storage.MutationResult{}, fail("invalid_evidence", in.Target)
+			}
+			if err := d.refreshApplied(ctx, r); err != nil {
+				return storage.MutationResult{}, err
+			}
+			return cloneResult(*r.Result), nil
+		}
+		if r.Phase == "publishing" || r.Phase == "unknown" {
+			if resolved, ok, err := d.resolveCopied(ctx, r); err != nil {
+				return storage.MutationResult{}, err
+			} else if ok {
+				return cloneResult(*resolved), nil
+			}
+			return storage.MutationResult{}, fail("outcome_unknown", in.Target)
+		}
+	} else if errors.Is(err, os.ErrNotExist) {
+		r = &ledger{Kind: "copy", ID: in.ID, Effect: &effect, Phase: "new"}
+	} else {
+		return storage.MutationResult{}, err
+	}
+	source, err := d.Stat(ctx, in.Source)
+	if err != nil {
+		return storage.MutationResult{}, err
+	}
+	if source.Kind != storage.File || !bytes.Equal(source.Version, in.SourceVersion) {
+		return storage.MutationResult{}, fail("changed", in.Source)
+	}
+	if _, ok := d.backend.(PartCopyBackend); source.Size > singleCopyLimit && (!ok || !d.options.Admission.MultipartUploads) {
+		// Deterministic refusal: no native request is issued, so the intent is never
+		// published and the coordinator may report it without a recovery cycle.
+		return storage.MutationResult{}, &storage.NoFinalEffect{Cause: fail("too_large", in.Source)}
+	}
+	intent := storage.WriteIntent{ID: in.ID, Target: in.Target, Conditions: in.TargetConditions, Size: source.Size, MediaType: source.MediaType}
+	if err = validateRecoveryIntent(intent); err != nil {
+		return storage.MutationResult{}, err
+	}
+	parent, err := d.Stat(ctx, parentPath(in.Target))
+	if err != nil {
+		return storage.MutationResult{}, &storage.NoFinalEffect{Cause: err}
+	}
+	if parent.Kind != storage.Folder {
+		return storage.MutationResult{}, &storage.NoFinalEffect{Cause: fail("parent_missing", in.Target)}
+	}
+	r.Intent = cloneIntent(intent)
+	r.ParentVersion = bytes.Clone(parent.Version)
+	r.Provider, r.Attempt, r.Native = true, "", nil
+	r.Phase = "ready"
+	if err = d.save(r); err != nil {
+		return storage.MutationResult{}, err
+	}
+	if err = checkpoint(ctx, cp, d.receipt(r)); err != nil {
+		return storage.MutationResult{}, err
+	}
+	if err = ctx.Err(); err != nil {
+		r.Phase = "not_applied"
+		return storage.MutationResult{}, errors.Join(&storage.NoFinalEffect{Cause: err}, d.save(r))
+	}
+	// A delayed checkpoint can let the parent or the target change. Revalidate the
+	// indexed view, then let the native condition refuse an occupied target.
+	parent, err = d.Stat(ctx, parentPath(in.Target))
+	if err == nil && !bytes.Equal(parent.Version, r.ParentVersion) {
+		err = fail("changed", in.Target)
+	}
+	if err == nil {
+		err = d.checkTarget(ctx, r)
+	}
+	if err != nil {
+		r.Phase = "not_applied"
+		return storage.MutationResult{}, errors.Join(&storage.NoFinalEffect{Cause: err}, d.save(r))
+	}
+	r.Phase = "publishing"
+	if err = d.save(r); err != nil {
+		return storage.MutationResult{}, err
+	}
+	if err = checkpoint(ctx, cp, d.receipt(r)); err != nil {
+		return storage.MutationResult{}, err
+	}
+	obj, err := d.nativeCopy(ctx, r, source, sourceETag, copier)
+	if err != nil {
+		if storage.IsCode(err, "precondition_failed") || storage.IsCode(err, "name_conflict") || storage.IsCode(err, "not_found") || storage.IsCode(err, "changed") {
+			// The provider proved no final effect, but a failed completion can leave
+			// part copies unpublished; discard them before the intent is sealed.
+			if r.Native != nil && r.Native.UploadID != "" {
+				if multipart, ok := d.backend.(MultipartBackend); ok {
+					_ = multipart.AbortMultipart(context.WithoutCancel(ctx), d.key(r.Intent.Target, storage.File), r.Native.UploadID)
+				}
+			}
+			r.Phase = "not_applied"
+			r.Native = nil
+			return storage.MutationResult{}, errors.Join(err, d.save(r))
+		}
+		return storage.MutationResult{}, err
+	}
+	e, err := d.objectEntry(in.Target, storage.File, obj)
+	if err != nil {
+		return storage.MutationResult{}, err
+	}
+	if e.Size != intent.Size {
+		return storage.MutationResult{}, fail("invalid_backend_response", e.Path)
+	}
+	r.Phase = "applied"
+	r.Native = nil
+	result := storage.MutationResult{Entry: &e, Evidence: d.receipt(r)}
+	r.Result = &result
+	if err = d.save(r); err != nil {
+		return storage.MutationResult{}, err
+	}
+	if err = d.refreshApplied(ctx, r); err != nil {
+		return storage.MutationResult{}, err
+	}
+	return cloneResult(*r.Result), checkpoint(ctx, cp, d.receipt(r))
+}
+
+func (d *Driver) nativeCopy(ctx context.Context, r *ledger, source storage.Entry, sourceETag string, copier CopyBackend) (Object, error) {
+	request := Copy{
+		Source:       d.key(r.Effect.Source, storage.File),
+		Target:       d.key(r.Intent.Target, storage.File),
+		SourceETag:   sourceETag,
+		Size:         r.Intent.Size,
+		MediaType:    r.Intent.MediaType,
+		Metadata:     map[string]string{"eam-intent": r.ID},
+		Absent:       r.Intent.Conditions.Absent,
+		ExpectedETag: r.ExpectedETag,
+	}
+	if source.Size <= singleCopyLimit {
+		return copier.CopyObject(ctx, request)
+	}
+	// Part copies finish with one conditional completion, which only an admitted
+	// multipart connection has proven.
+	parts, ok := d.backend.(PartCopyBackend)
+	if !ok || !d.options.Admission.MultipartUploads {
+		return Object{}, fail("too_large", r.Intent.Target)
+	}
+	return d.copyParts(ctx, r, request, parts)
+}
+
+// copyParts copies numbered provider-side ranges. Nothing is visible until one
+// conditional completion, so a failure discards the unpublished session and
+// reports no final effect; a failed completion stays ambiguous for recovery.
+func (d *Driver) copyParts(ctx context.Context, r *ledger, request Copy, parts PartCopyBackend) (Object, error) {
+	uploadID, err := parts.BeginMultipart(ctx, Put{Key: request.Target, Size: request.Size, MediaType: request.MediaType, Metadata: request.Metadata})
+	if err != nil {
+		return Object{}, err
+	}
+	r.Native = &nativeStage{UploadID: uploadID}
+	if err = d.save(r); err != nil {
+		_ = parts.AbortMultipart(context.WithoutCancel(ctx), request.Target, uploadID)
+		return Object{}, err
+	}
+	var done []NativePart
+	for offset, number := int64(0), 1; offset < request.Size; number++ {
+		length := min(copyPartBytes, request.Size-offset)
+		tag, err := parts.CopyPart(ctx, request.Target, uploadID, number, request.Source, request.SourceETag, offset, length)
+		if err != nil {
+			if abortErr := parts.AbortMultipart(context.WithoutCancel(ctx), request.Target, uploadID); abortErr == nil {
+				r.Native = nil
+				_ = d.save(r)
+				return Object{}, &storage.NoFinalEffect{Cause: err}
+			}
+			return Object{}, err
+		}
+		done = append(done, NativePart{Number: number, ETag: tag})
+		offset += length
+	}
+	obj, err := parts.CompleteMultipart(ctx, Put{Key: request.Target, Size: request.Size, MediaType: request.MediaType, Metadata: request.Metadata, Absent: request.Absent}, uploadID, done)
+	if err != nil {
+		return Object{}, err
+	}
+	r.Native = nil
+	if err = d.save(r); err != nil {
+		return Object{}, err
+	}
+	return obj, nil
+}
+
+// resolveCopied attributes a provider-side copy whose reply was lost. The
+// target's intent metadata is written by this exact conditional request, so it
+// proves the publish; a missing target proves nothing was published, and an
+// uncompleted part-copy session is discarded before the copy may be retried.
+func (d *Driver) resolveCopied(ctx context.Context, r *ledger) (*storage.MutationResult, bool, error) {
+	obj, err := d.backend.Head(ctx, d.key(r.Intent.Target, storage.File))
+	if storage.IsCode(err, "not_found") {
+		if r.Native != nil && r.Native.UploadID != "" {
+			multipart, ok := d.backend.(MultipartBackend)
+			if !ok {
+				return nil, false, nil
+			}
+			if abortErr := multipart.AbortMultipart(context.WithoutCancel(ctx), d.key(r.Intent.Target, storage.File), r.Native.UploadID); abortErr != nil {
+				return nil, false, nil
+			}
+		}
+		r.Native = nil
+		r.Phase = "not_applied"
+		return nil, false, d.save(r)
+	}
+	if err != nil {
+		return nil, false, err
+	}
+	if obj.Metadata["eam-intent"] != r.ID || obj.Size != r.Intent.Size {
+		return nil, false, nil
+	}
+	e, err := d.objectEntry(r.Intent.Target, storage.File, obj)
+	if err != nil {
+		return nil, false, err
+	}
+	r.Native = nil
+	r.Phase = "applied"
+	result := storage.MutationResult{Entry: &e, Evidence: d.receipt(r)}
+	r.Result = &result
+	if err = d.save(r); err != nil {
+		return nil, false, err
+	}
+	return &result, true, nil
 }
 func (d *Driver) Remove(ctx context.Context, in storage.Mutation, cp storage.Checkpoint) (storage.MutationResult, error) {
 	if in.Path == "" || storage.ValidatePath(in.Path) != nil || in.Conditions.Absent {

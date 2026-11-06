@@ -31,6 +31,12 @@ func filesMutationProblem(err error) error {
 	}
 	var e *fileops.Error
 	if errors.As(err, &e) {
+		// A copy that never started keeps its storage cause: the object exceeds what
+		// this connection can copy in one conditional request.
+		var tooLarge *storage.Error
+		if e.Code == "native_not_applied" && errors.As(err, &tooLarge) && tooLarge.Code == "too_large" {
+			return fc.NewProblem(413, "file_too_large", "The file exceeds the copy limit for this connection.")
+		}
 		status, code := 409, e.Code
 		switch e.Code {
 		case "forbidden":
@@ -81,6 +87,8 @@ func filesMutationProblem(err error) error {
 			return fc.NewProblem(412, "target_changed", "The captured native path changed.")
 		case "name_conflict":
 			return fc.NewProblem(409, "name_conflict", "The destination already exists.")
+		case "too_large":
+			return fc.NewProblem(413, "file_too_large", "The file exceeds the copy limit for this connection.")
 		}
 	}
 	return err

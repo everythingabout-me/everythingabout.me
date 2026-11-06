@@ -16,6 +16,7 @@ import {
   ChevronDownIcon,
   ChevronRightIcon,
   CloseIcon,
+  CopyIcon,
   DownloadIcon,
   FileIcon,
   FolderIcon,
@@ -27,6 +28,7 @@ import {
   UploadIcon,
 } from "../components/icons";
 import { canPreviewFile } from "../components/preview/supported";
+import { TransferDialog, type TransferMode } from "../components/TransferDialog";
 import { filesHref, filesRoutePath } from "../filesPath";
 import { resultsText, t } from "../i18n";
 import { formatRelativeTime } from "../i18n/format";
@@ -523,6 +525,7 @@ export function FilesPage() {
   const [renameName, setRenameName] = useState("");
   const [renameJob, setRenameJob] = useState<FileOperation | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<Item | null>(null);
+  const [transfer, setTransfer] = useState<{ mode: TransferMode; item: Item } | null>(null);
   const [deletionJobs, setDeletionJobs] = useState<{ operation: FileOperation; path: string }[]>([]);
   const [deletionStatusError, setDeletionStatusError] = useState(false);
   const deletionRequest = useRef(0);
@@ -631,6 +634,31 @@ export function FilesPage() {
       }
     },
     [navigate, rememberPanelHeight],
+  );
+
+  /** Move or copy one entry into a folder chosen in the dialog. A move changes the current URL. */
+  const applyTransfer = useCallback(
+    async (mode: TransferMode, item: Item, destination: string) => {
+      const target = destination === "/" ? `/${item.name}` : `${destination}/${item.name}`;
+      const result = mode === "move"
+        ? await api.move(item.path, target, item.revision)
+        : await api.copy(item.path, target, item.revision);
+      if (isFileOperation(result) && result.state !== "succeeded") {
+        if (result.state === "failed" || result.state === "cancelled") {
+          throw new Error(result.error?.detail || t("drive.transferFailed"));
+        }
+        try {
+          await waitForOperation(result);
+        } catch (caught) {
+          throw caught instanceof Error ? caught : new Error(t("drive.transferFailed"));
+        }
+      }
+      setTransfer(null);
+      showToast(t(mode === "move" ? "drive.moved" : "drive.copied", { name: item.name }));
+      if (mode === "move") navigate(filesHref(target), { replace: true });
+      else void load(path);
+    },
+    [load, navigate, path, showToast],
   );
 
   // The path is the URL (/files/Photos/2024), so back/forward and direct visits open the right place.
@@ -1191,6 +1219,34 @@ export function FilesPage() {
                               {t("drive.rename")}
                             </button>
                           )}
+                          {!pending && current && path !== "" && (
+                            <>
+                              <button
+                                className={styles.menuItem}
+                                role="menuitem"
+                                disabled={Boolean(renameJob)}
+                                onClick={() => {
+                                  setMenuOpen(false);
+                                  setTransfer({ mode: "move", item: current });
+                                }}
+                              >
+                                <FolderIcon size={14} />
+                                {t("drive.moveTo")}
+                              </button>
+                              <button
+                                className={styles.menuItem}
+                                role="menuitem"
+                                disabled={Boolean(renameJob)}
+                                onClick={() => {
+                                  setMenuOpen(false);
+                                  setTransfer({ mode: "copy", item: current });
+                                }}
+                              >
+                                <CopyIcon size={14} />
+                                {t("drive.copyTo")}
+                              </button>
+                            </>
+                          )}
                           {!pending && !loadError && current?.kind === "folder" && path !== "" && (
                             <button
                               className={`${styles.menuItem} ${styles.deleteBtn}`}
@@ -1472,6 +1528,16 @@ export function FilesPage() {
             <span>{t("drive.dropToUpload", { target: currentName })}</span>
           </div>
         </div>
+      )}
+
+      {transfer && (
+        <TransferDialog
+          key={`${transfer.mode}:${transfer.item.path}`}
+          mode={transfer.mode}
+          item={transfer.item}
+          onCancel={() => setTransfer(null)}
+          onConfirm={(destination) => applyTransfer(transfer.mode, transfer.item, destination)}
+        />
       )}
 
       {deleteTarget && (

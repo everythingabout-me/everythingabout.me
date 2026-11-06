@@ -308,15 +308,20 @@ completed move. Retained string `from`/`to` values mean full paths and may indep
 object forms. Rename is a move within the same parent. `ifRevision` is required (`428` if absent).
 Successful same-owner moves retain the selected ID and all descendant IDs. No target replacement or
 implicit folder merging: a collision returns `409`. Same owner only; moving into oneself/descendants is
-invalid. The actual native file/folder must move before success is reported. Prefer native rename; S3
-folder moves require per-entry copy/verify/delete. Journal source versions, destination identities and
+invalid. The actual native file/folder must move before success is reported. Prefer native rename; object
+stores move one entry by a provider-side copy and delete, so no content crosses the service. A single copy
+request covers objects up to 5 GiB; larger objects use provider-side part copies whose completion is one
+conditional request, so the entry still appears atomically. Folder moves remain per-entry copy/verify/delete.
+Journal source versions, destination identities and
 per-entry outcomes, coordinate conflicting mutations, then reconcile the index. There is no transaction
 spanning Postgres and the backend, and no universal atomic whole-folder move.
 
 Copies accept `{from:EntrySelector,to:Destination,ifSourceRevision}`, with the same retained string path
 shortcuts. Source revision is required. Every copied file/folder receives a fresh ID, including descendants.
-Copy is recursive by definition for folders and never merges/replaces an existing target. The service
-records a finite source manifest and available native versions after verifying authorization. A consistent
+Copy is recursive by definition for folders and never merges/replaces an existing target. Each file is
+copied inside the provider with the same bounded semantics as move: one conditional request, part copies
+above 5 GiB, and a connection that cannot copy that large returns `413 file_too_large` rather than relaying
+bytes. The service records a finite source manifest and available native versions after verifying authorization. A consistent
 manifest needs coordinated writers or backend snapshots; a folder revision alone is not a subtree snapshot.
 Every successful destination is a normal readable file. Prefer provider-side copy/reflink, otherwise stream
 bytes. Whole-tree copy can be partially visible and can fail partially; report progress and conflicts. Logical

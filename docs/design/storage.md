@@ -241,10 +241,12 @@ This coordinates cooperating same-origin tabs in one browser, not external clien
 supplies no server authority. Exact session/Operation checks and publication guards remain authoritative;
 see [transfer protocol](transfer-protocol.md#3-upload-lifecycle) for the full lifecycle.
 
-Readable final paths can cost an extra publish copy on S3 or require per-file copies for a folder move. These
-are accepted costs when unavoidable; never optimize them by quietly replacing the native tree with anonymous
-objects. Benchmark staging-to-final copy, request overhead, gateway bandwidth, retry bytes and directory moves
-at large scale. Local/S3 implementations should be validated first, while WebDAV/drive constraints remain
+Readable final paths can cost an extra publish copy on S3 or require per-file copies for a folder move. An
+admitted object backend copies inside the provider instead, through one conditional request or conditional
+part copies above the provider's 5 GiB single-copy limit, so no source or destination bytes traverse the
+service and a large object is never rejected by the single-PUT cap. These are accepted costs when unavoidable;
+never optimize them by quietly replacing the native tree with anonymous objects. Benchmark staging-to-final
+copy, request overhead, gateway bandwidth, retry bytes and directory moves at large scale. Local/S3 implementations should be validated first, while WebDAV/drive constraints remain
 explicit in the driver contract.
 
 Class A and B reads come straight from the provider through renewable grants; class A rounds grant expiry to

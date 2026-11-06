@@ -44,8 +44,10 @@ The [new file API](docs/api/api.md) and [driver contract](docs/design/storage-dr
 specifications with no legacy-client compatibility requirement. The actual storage retains complete native
 folders, original accepted filenames and raw file contents below the user root. Users can leave through
 ordinary filesystem tools, rclone or provider tools without the database or an Everything export. Postgres
-indexes that tree and adds application metadata. Native directory operations are preferred; S3 folder moves
-may still require per-file copy/delete. Durable journals reconcile backend changes and index updates.
+indexes that tree and adds application metadata. Native directory operations are preferred; object-store
+folder moves still cost one provider-side copy/delete per file, but the bytes never pass through the service
+(a single conditional copy, or conditional part copies above 5 GiB). Durable journals reconcile backend
+changes and index updates.
 Page metadata, folder listings, search and indexed usage read Postgres directly, without synchronous COS/storage
 lookups. Content and mutations still access real storage; external edits appear after index synchronization.
 Existing reconcile/import is additive and does not prune externally deleted entries.

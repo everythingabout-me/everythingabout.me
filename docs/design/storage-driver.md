@@ -145,7 +145,18 @@ type NativeMover interface {
 type NativeCopier interface {
     Copy(context.Context, MoveRequest, Checkpoint) (MutationResult, error)
 }
+```
 
+`Copy` must not stream source bytes through the gateway when the driver can copy
+inside the provider. A provider-side copy binds the exact source revision with a
+native condition, refuses an occupied target natively, records an intent marker
+that attributes a lost reply, and publishes an object above the provider's
+single-request limit (5 GiB on COS and S3) through conditional part copies whose
+completion stays one request. A driver without that capability may relay through
+private staging only below the configured single-PUT limit; the service never
+degrades a large copy into a read/put pair it cannot fence.
+
+```go
 type Checkpoint func(context.Context, []byte) error
 
 type Driver interface {
@@ -507,7 +518,7 @@ liability until that discard is confirmed.
 | Backend | Native readable representation | Main effects/constraints |
 |---|---|---|
 | Local filesystem | Ordinary relative folders/files | Stage in same filesystem; atomic rename/no-replace where supported; fsync file and containing directories; root/symlink isolation; cross-volume moves need fallback |
-| S3/COS | Original path keys below owner prefix; standard empty-folder markers | Single-object publish can be atomic; verify conditional finalization support per operation; folder move is paginated copy/verify/delete, not metadata-only |
+| S3/COS | Original path keys below owner prefix; standard empty-folder markers | Single-object publish can be atomic; provider-side copy (one conditional request, or conditional part copies above 5 GiB) keeps bytes inside the provider; folder move is still per-entry copy/verify/delete, not metadata-only |
 | WebDAV | Native folders and original names | Stream to temp then native MOVE if its semantics suffice; plain final PUT can expose partial data; ETags/atomic conditions vary |
 | Cloud drive | Real folders/names, native IDs used internally | Duplicate names and unsupported characters require checks; native move/replace/version guarantees vary; upload sessions/credentials expire independently |
 | NAS/Synology | Native filesystem, WebDAV, or vendor API tree | Prefer native rename and LAN byte path; connector cannot invent remote atomicity |

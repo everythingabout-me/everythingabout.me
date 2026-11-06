@@ -321,9 +321,11 @@ Variants: `Committed locally main@abc1234, not pushed` / `Not committed (tests f
   filenames containing `+` return 403).
 - macOS filenames are NFD; without normalization you get "two files with the same name". `paths.Normalize`
   converts to NFC.
-- Flat object directory moves copy/verify/delete entries and can be slow at TB scale. Eligible Local native
-  folder moves relink one root; growing/deeper destinations use finite fallback. Outside tool moves followed
-  by additive reconcile do not automatically preserve public IDs or prune old rows.
+- Flat object directory moves copy/verify/delete every entry. Each entry copy stays inside the provider (one
+  conditional request, or part copies above 5 GiB), so no bytes cross the service, but a large tree still costs
+  one request pair per file. Eligible Local native folder moves relink one root; growing/deeper destinations use
+  finite fallback. Outside tool moves followed by additive reconcile do not automatically preserve public IDs or
+  prune old rows.
 - Changing the email address requires two verification codes, for **both the current and the new address**;
   a session alone cannot do it.
 - The timeline does not refresh immediately after a move / copy: wait for the sweeper or call
