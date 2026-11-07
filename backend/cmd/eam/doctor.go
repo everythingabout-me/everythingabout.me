@@ -94,6 +94,13 @@ func runDoctor(args []string) error {
 		checkNativeStorage(ctx, cfg, checks, *ownerID, *writeTest)
 	}
 
+	fmt.Println("\nstorage roots")
+	rootDB := db
+	if dbErr != nil {
+		rootDB = nil
+	}
+	checkStorageRoots(ctx, cfg, rootDB, checks)
+
 	if checks.failed == 0 {
 		fmt.Print("\nAll checks passed.\n\n")
 		return nil
@@ -134,6 +141,28 @@ func checkNativeStorage(ctx context.Context, cfg *config.Config, checks *doctor,
 		return
 	}
 	checks.ok("native root and child listing", fmt.Sprintf(" %d sampled children; read-only", len(page.Entries)))
+}
+
+// checkStorageRoots surfaces at `eam doctor` time what the server refuses to start
+// with: admission evidence that belongs to another connection, and owner roots that
+// no longer match the tree the current configuration selects.
+func checkStorageRoots(ctx context.Context, cfg *config.Config, db *store.DB, checks *doctor) {
+	backend, err := storagebackend.New(cfg)
+	if err != nil {
+		checks.bad("configuration and admission evidence", err, "probe this exact connection; evidence recorded against another bucket or region does not apply")
+		return
+	}
+	defer backend.Close()
+	checks.ok("configuration and admission evidence", "")
+	if db == nil {
+		checks.warn("owner roots not compared: database unavailable")
+		return
+	}
+	if err := validateStorageRoots(ctx, db, backend); err != nil {
+		checks.bad("owner roots match the database index", err, "do not start the server: this connection selects a different native tree")
+		return
+	}
+	checks.ok("owner roots match the database index", "")
 }
 
 func checkDatabase(ctx context.Context, db *store.DB, checks *doctor) {

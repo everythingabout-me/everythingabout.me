@@ -45,6 +45,13 @@ func runServer(args []string) error {
 	}
 	defer backend.Close()
 
+	// Refuse to serve a tree the index does not describe. Everything this catches
+	// would otherwise appear as files that list but do not resolve and writes that
+	// fail with root_conflict somewhere inside a request.
+	if err := validateStorageRoots(ctx, db, backend); err != nil {
+		return err
+	}
+
 	apiServer := api.New(cfg, db, backend.Legacy(), webui.New(cfg.WebDir))
 	apiServer.SetStorageFactory(backend)
 	server := &http.Server{

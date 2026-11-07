@@ -2,12 +2,16 @@ package storagebackend
 
 import (
 	"context"
+	"encoding/json"
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 
 	"everythingabout.me/backend/internal/config"
+	"everythingabout.me/backend/internal/objectmutation"
 	"everythingabout.me/backend/internal/storage"
 )
 
@@ -125,5 +129,70 @@ func TestRootBindingIdentityExcludesCredentials(t *testing.T) {
 	}
 	if first.ContentRoot != "drive/owner/" || first.SystemRoot != "__eam_system__/owner/" {
 		t.Fatalf("existing native layout changed: %+v", first)
+	}
+}
+
+// Admission is measured evidence, so it describes exactly one connection. The
+// failure an operator sees after moving a bucket must name both sides; a bare
+// "invalid_config" cost an afternoon of debugging once.
+func TestNewReportsAdmissionEvidenceFromAnotherConnection(t *testing.T) {
+	dir := t.TempDir()
+	evidence := filepath.Join(dir, "admission.json")
+	admission := objectmutation.Admission{
+		ConnectionID:      "default",
+		Endpoint:          "https://old-bucket-1250000000.cos.ap-hongkong.myqcloud.com",
+		Bucket:            "old-bucket-1250000000",
+		Region:            "ap-hongkong",
+		CheckedAt:         time.Now().UTC(),
+		ProbeReference:    "live-probe",
+		AtomicPublish:     true,
+		ConditionalCreate: true,
+		SingleGateway:     true,
+	}
+	write := func(a objectmutation.Admission) {
+		data, err := json.Marshal(a)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(evidence, data, 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cfg := &config.Config{
+		Storage: config.Storage{
+			Backend:             "cos",
+			ConnectionID:        "default",
+			Generation:          1,
+			CoordinatedWrites:   true,
+			ObjectAdmissionFile: evidence,
+			ObjectSpoolRoot:     dir,
+			TransferClass:       storage.TransferRelay,
+		},
+		COS: config.COS{SecretID: "id", SecretKey: "key", Bucket: "new-bucket-1250000000", Region: "ap-beijing"},
+	}
+
+	write(admission)
+	_, err := New(cfg)
+	if err == nil {
+		t.Fatal("evidence from another bucket was accepted")
+	}
+	if !storage.IsCode(err, "invalid_config") {
+		t.Fatalf("mismatch lost its error code: %v", err)
+	}
+	for _, fragment := range []string{"old-bucket-1250000000", "ap-hongkong", "new-bucket-1250000000", "ap-beijing", evidence} {
+		if !strings.Contains(err.Error(), fragment) {
+			t.Fatalf("mismatch message omits %q:\n%v", fragment, err)
+		}
+	}
+
+	admission.Endpoint = "https://new-bucket-1250000000.cos.ap-beijing.myqcloud.com"
+	admission.Bucket, admission.Region = "new-bucket-1250000000", "ap-beijing"
+	write(admission)
+	backend, err := New(cfg)
+	if err != nil {
+		t.Fatalf("matching evidence rejected: %v", err)
+	}
+	if err := backend.Close(); err != nil {
+		t.Fatal(err)
 	}
 }

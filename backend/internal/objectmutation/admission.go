@@ -2,6 +2,7 @@ package objectmutation
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -11,30 +12,43 @@ import (
 	"everythingabout.me/backend/internal/storage"
 )
 
+// invalidAdmission reports a configuration failure that is safe to show an
+// operator: the message body is application-authored, so it carries the file and
+// the offending field while storage.Error keeps hiding provider responses.
+func invalidAdmission(format string, args ...any) error {
+	return fmt.Errorf(format+": %w", append(args, storage.NewError("invalid_config", "", nil))...)
+}
+
 // LoadAdmission consumes explicit operator-owned probe evidence. It does not
 // manufacture capability support or load ordinary provider credentials.
 func LoadAdmission(path string) (Admission, error) {
 	var a Admission
 	if !filepath.IsAbs(path) {
-		return a, storage.NewError("invalid_config", "", nil)
+		return a, invalidAdmission("object admission evidence path %q must be absolute", path)
 	}
 	f, err := os.Open(path)
 	if err != nil {
-		return a, storage.NewError("invalid_config", "", err)
+		return a, invalidAdmission("read object admission evidence %q: %v", path, err)
 	}
 	defer f.Close()
 	info, err := f.Stat()
-	if err != nil || !info.Mode().IsRegular() || info.Size() > 1<<20 {
-		return a, storage.NewError("invalid_config", "", err)
+	if err != nil {
+		return a, invalidAdmission("read object admission evidence %q: %v", path, err)
+	}
+	if !info.Mode().IsRegular() || info.Size() > 1<<20 {
+		return a, invalidAdmission("object admission evidence %q must be a regular file of at most 1 MiB", path)
 	}
 	d := json.NewDecoder(io.LimitReader(f, (1<<20)+1))
 	d.DisallowUnknownFields()
 	if err = d.Decode(&a); err != nil {
-		return a, storage.NewError("invalid_config", "", err)
+		return a, invalidAdmission("parse object admission evidence %q: %v", path, err)
 	}
 	var extra any
 	if err = d.Decode(&extra); err != io.EOF {
-		return a, storage.NewError("invalid_config", "", err)
+		if err == nil {
+			return a, invalidAdmission("parse object admission evidence %q: unexpected trailing data", path)
+		}
+		return a, invalidAdmission("parse object admission evidence %q: %v", path, err)
 	}
 	if err = ValidateAdmission(a); err != nil {
 		return a, err
@@ -42,8 +56,37 @@ func LoadAdmission(path string) (Admission, error) {
 	return a, nil
 }
 func ValidateAdmission(a Admission) error {
-	if strings.TrimSpace(a.ConnectionID) == "" || a.Endpoint == "" || a.Bucket == "" || a.Region == "" || a.CheckedAt.IsZero() || a.CheckedAt.After(time.Now().Add(5*time.Minute)) || strings.TrimSpace(a.ProbeReference) == "" || !a.AtomicPublish || !a.ConditionalCreate || !a.SingleGateway {
-		return storage.NewError("invalid_config", "", nil)
+	var problems []string
+	if strings.TrimSpace(a.ConnectionID) == "" {
+		problems = append(problems, "connectionId")
+	}
+	if a.Endpoint == "" {
+		problems = append(problems, "endpoint")
+	}
+	if a.Bucket == "" {
+		problems = append(problems, "bucket")
+	}
+	if a.Region == "" {
+		problems = append(problems, "region")
+	}
+	if a.CheckedAt.IsZero() {
+		problems = append(problems, "checkedAt")
+	} else if a.CheckedAt.After(time.Now().Add(5 * time.Minute)) {
+		problems = append(problems, "checkedAt must not be in the future")
+	}
+	if strings.TrimSpace(a.ProbeReference) == "" {
+		problems = append(problems, "probeReference")
+	}
+	for _, capability := range []struct {
+		name   string
+		vetoed bool
+	}{{"atomicPublish", !a.AtomicPublish}, {"conditionalCreate", !a.ConditionalCreate}, {"singleGateway", !a.SingleGateway}} {
+		if capability.vetoed {
+			problems = append(problems, capability.name+" is false")
+		}
+	}
+	if len(problems) > 0 {
+		return invalidAdmission("object admission evidence is incomplete: %s", strings.Join(problems, ", "))
 	}
 	return nil
 }

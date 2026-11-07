@@ -108,10 +108,14 @@ func New(cfg *config.Config) (*Backend, error) {
 			endpoint = fmt.Sprintf("https://%s.cos.%s.myqcloud.com", bucket, region)
 		}
 		if !admission.Matches(b.cfg.Storage.ConnectionID, endpoint, bucket, region) {
-			return nil, storage.NewError("invalid_config", "", nil)
+			// Capability evidence is measured, so it only describes the connection it
+			// was taken on. Say which two connections disagree instead of failing with
+			// a bare code: this is the error an operator sees after moving a bucket.
+			return nil, fmt.Errorf("object admission evidence %s was recorded for bucket %q in %q, but this connection is bucket %q in %q: %w",
+				b.cfg.Storage.ObjectAdmissionFile, admission.Bucket, admission.Region, bucket, region, storage.NewError("invalid_config", "", nil))
 		}
 		if !filepath.IsAbs(b.cfg.Storage.ObjectSpoolRoot) {
-			return nil, storage.NewError("invalid_config", "", nil)
+			return nil, fmt.Errorf("object writes require an absolute FILE_OBJECT_SPOOL_ROOT, got %q: %w", b.cfg.Storage.ObjectSpoolRoot, storage.NewError("invalid_config", "", nil))
 		}
 		max := b.cfg.Storage.MaxSinglePutBytes
 		if max == 0 {

@@ -125,7 +125,15 @@ type Error struct {
 	Cause error
 }
 
-func (e *Error) Error() string { return "storage " + e.Code + ": " + string(e.Path) }
+// Error deliberately omits Cause: provider response bodies are never surfaced to
+// clients, so callers that want operator-facing detail must add it themselves
+// (see the admission errors in storagebackend).
+func (e *Error) Error() string {
+	if e.Path == "" {
+		return "storage " + e.Code
+	}
+	return "storage " + e.Code + ": " + string(e.Path)
+}
 func (e *Error) Unwrap() error { return e.Cause }
 func NewError(code string, path Path, cause error) error {
 	return &Error{Code: code, Path: path, Cause: cause}

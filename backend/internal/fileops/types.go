@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"time"
 
 	"everythingabout.me/backend/internal/storage"
@@ -21,6 +22,15 @@ type Root struct {
 	CaseSensitive   bool
 	RetainsVersions bool // native delete/replace retains previous object generations
 }
+
+// Namespace is the native-tree identity a change stream and its content
+// generations are bound to. It covers the connection digest, generation and both
+// roots, so a bucket, region, prefix or generation change produces a new
+// namespace instead of silently continuing an old one.
+func (r Root) Namespace() string {
+	return fmt.Sprintf("%s:%s:%d:%s:%s", r.OwnerID, r.ConnectionID, r.Generation, r.ContentRoot, r.SystemRoot)
+}
+
 type Actor struct {
 	Label         string `json:",omitempty"`
 	Kind          string `json:",omitempty"`

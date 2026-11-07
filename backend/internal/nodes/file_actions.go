@@ -314,9 +314,7 @@ func commitFileAction(ctx context.Context, tx pgx.Tx, op fileops.Operation, nati
 	return json.Marshal(metadata)
 }
 
-func fileRootNamespace(root fileops.Root) string {
-	return fmt.Sprintf("%s:%s:%d:%s:%s", root.OwnerID, root.ConnectionID, root.Generation, root.ContentRoot, root.SystemRoot)
-}
+func fileRootNamespace(root fileops.Root) string { return root.Namespace() }
 
 func actualEntryKey(root fileops.Root, entry storage.Entry) string {
 	if entry.Kind == storage.Folder {
