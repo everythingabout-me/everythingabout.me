@@ -10,6 +10,10 @@
   border-radius: 10px;
   background: var(--surface);
   box-shadow: var(--shadow-soft);
+  /* Empty states center their children; the notice reads left-aligned like prose. */
+  width: 100%;
+  max-width: 560px;
+  text-align: left;
 }
 
 .copy {
