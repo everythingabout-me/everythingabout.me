@@ -290,21 +290,45 @@ func (t *Tree) Stat(ctx context.Context, path storage.Path) (storage.Entry, erro
 		return storage.Entry{}, err
 	}
 	defer done()
-	entry, err := t.resolve(ctx, path)
+	if err := t.check(ctx, path); err != nil {
+		return storage.Entry{}, err
+	}
+	if path == "" {
+		return storage.Entry{Path: "", Kind: storage.Folder, NativeRef: []byte(t.root)}, nil
+	}
+	// One listing of the parent settles this path: its kind, its exact spelling and
+	// any sibling collision are all decided there. Walking from the root turned one
+	// observation into one request per path segment, which made every deep read and
+	// every action step pay for the depth. A file still needs its own HEAD, because
+	// a listing never establishes a revision.
+	parent := parentPathOf(path)
+	children, err := t.children(ctx, parent)
 	if err != nil {
 		return storage.Entry{}, err
 	}
-	if entry.Kind == storage.Folder {
-		return entry, nil
+	for _, entry := range children {
+		if entry.Path != path {
+			continue
+		}
+		if entry.Kind == storage.Folder {
+			return entry, nil
+		}
+		obj, err := t.backend.Head(ctx, t.key(path))
+		if err != nil {
+			return storage.Entry{}, err
+		}
+		if obj.Size < 0 {
+			return storage.Entry{}, fail("invalid_backend_response", path)
+		}
+		return t.entry(path, obj), nil
 	}
-	obj, err := t.backend.Head(ctx, t.key(path))
-	if err != nil {
-		return storage.Entry{}, err
+	return storage.Entry{}, fail("not_found", path)
+}
+func parentPathOf(p storage.Path) storage.Path {
+	if index := strings.LastIndexByte(string(p), '/'); index >= 0 {
+		return p[:index]
 	}
-	if obj.Size < 0 {
-		return storage.Entry{}, fail("invalid_backend_response", path)
-	}
-	return t.entry(path, obj), nil
+	return ""
 }
 func (t *Tree) entry(path storage.Path, obj Object) storage.Entry {
 	return storage.Entry{Path: path, Kind: storage.File, NativeRef: []byte(t.key(path)), Revision: versionToken(obj.VersionID), Size: obj.Size, ModifiedAt: obj.ModifiedAt, MediaType: obj.MediaType}

@@ -195,19 +195,41 @@ func (d *Driver) Stat(ctx context.Context, p storage.Path) (storage.Entry, error
 	if err = storage.ValidatePath(p); err != nil {
 		return storage.Entry{}, err
 	}
+	if p == "" {
+		e, err := d.tree.Stat(ctx, p)
+		if err != nil {
+			return storage.Entry{}, err
+		}
+		return d.rootEntry(e), nil
+	}
+	// Byte-exact HEADs settle both real kinds, so nothing lists an ancestor. A
+	// folder that was created here has its own marker object (key + "/"), and a
+	// folder that has one is the common case in this tree, so it is asked first;
+	// a file costs the missed marker probe. The ETag from either HEAD is the
+	// revision a conditional effect compares — the one thing a listing may not
+	// establish.
+	marker, markerErr := d.backend.Head(ctx, d.key(p, storage.Folder))
+	if markerErr == nil {
+		return d.objectEntry(p, storage.Folder, marker)
+	}
+	if !storage.IsCode(markerErr, "not_found") {
+		return storage.Entry{}, markerErr
+	}
+	obj, headErr := d.backend.Head(ctx, d.key(p, storage.File))
+	if headErr == nil {
+		return d.objectEntry(p, storage.File, obj)
+	}
+	if !storage.IsCode(headErr, "not_found") {
+		return storage.Entry{}, headErr
+	}
 	e, err := d.tree.Stat(ctx, p)
 	if err != nil {
 		return storage.Entry{}, err
 	}
-	if e.Path != p {
+	if e.Path != p || e.Kind != storage.Folder {
 		return storage.Entry{}, fail("invalid_backend_response", p)
 	}
-	if p == "" {
-		return d.rootEntry(e), nil
-	}
-	if e.Kind != storage.File && e.Kind != storage.Folder {
-		return storage.Entry{}, fail("invalid_backend_response", p)
-	}
+	// A folder marker is a real object, so it still carries a revision.
 	return d.observe(ctx, e)
 }
 

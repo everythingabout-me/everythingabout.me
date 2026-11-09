@@ -257,6 +257,14 @@ Reference equality is byte-exact: a key from an older root generation, or one wh
 path cannot reproduce byte for byte, deliberately falls back to path-addressed traversal instead of guessing
 that two spellings denote the same object.
 
+Path-addressed `Stat` stays constant-cost: an object-store adapter settles one path with at most three
+byte-exact probes — the folder marker key (`key + "/"`), the file key, and one parent listing for a prefix
+folder that has no marker — and never walks the ancestor chain. Depth is a property of the tree, not of the
+cost of observing one entry; a manifest rewrite that re-observes every captured identity before and after
+each entry would otherwise pay the depth again for every step. The consequence is explicit: a path whose
+ancestors include a file is not rejected during observation. Keeping the index free of that shape is the
+index's job, and an outside writer that produces it is a reconciliation finding, not a read error.
+
 Callers order the calls as observation → condition → transfer, so a 304 or a HEAD costs one native request and
 nothing is opened. `OpenReference` transfers exactly the requested range once; it must not open a full object
 and discard it to reposition. Because native object reads are validated but not version-pinned, the returned
