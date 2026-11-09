@@ -159,6 +159,9 @@ export async function setup(overrides = {}, options = {}) {
   const navigator = { locks };
   const slots = [], effects = [], timers = new Map(), completed = [], listeners = new Map();
   let timerId = 0, cursor = 0, mounted = true;
+  // Every published task-list state is one render of the whole page. Counting them makes
+  // "selecting a folder must not publish once per file" an assertion instead of a hope.
+  let stateUpdates = 0;
   const window = {
     confirm,
     addEventListener(type, listener) {
@@ -178,9 +181,9 @@ export async function setup(overrides = {}, options = {}) {
     return event;
   };
   const same = (a, b) => a && b && a.length === b.length && a.every((value, i) => Object.is(value, b[i]));
-  // Only the queue's documented waits may be scheduled: part retries 250/500, receiver-busy backoff up to 2000,
-  // the operation poll at 2000 and the 15 s status deadline.
-  const schedule = (callback, delay, repeat) => { assert.ok([250, 500, 1000, 2000, 15000].includes(delay), `unexpected timer ${delay}`); timers.set(++timerId, { callback, delay, repeat }); return timerId; };
+  // Only the queue's documented waits may be scheduled: the page publish cadence at 100, part retries 250/500,
+  // receiver-busy backoff up to 2000, the operation poll at 2000 and the 15 s status deadline.
+  const schedule = (callback, delay, repeat) => { assert.ok([100, 250, 500, 1000, 2000, 15000].includes(delay), `unexpected timer ${delay}`); timers.set(++timerId, { callback, delay, repeat }); return timerId; };
   const runtime = {
     api: { me: async () => ({ id: owner }), ...overrides }, ApiError: TestApiError, FileApiError: TestFileApiError,
     localStorage: storage, crypto: webcrypto, window, navigator,
@@ -190,7 +193,7 @@ export async function setup(overrides = {}, options = {}) {
     useState: (initial) => {
       const at = cursor++;
       if (!(at in slots)) slots[at] = initial;
-      return [slots[at], (value) => { slots[at] = typeof value === "function" ? value(slots[at]) : value; }];
+      return [slots[at], (value) => { stateUpdates++; slots[at] = typeof value === "function" ? value(slots[at]) : value; }];
     },
     useCallback: (callback, deps) => {
       const at = cursor++;
@@ -229,8 +232,22 @@ export async function setup(overrides = {}, options = {}) {
     if (mounted) while (effects.length) effects.shift()();
     return queue;
   };
+  // A published state is the page's next paint. One settle is one paint: it drains the
+  // queue's pending work and then lets the coalesced publication fire exactly once, so a
+  // test counts paints the way the browser does instead of one per task change.
+  let paints = 0;
+  const paint = () => {
+    for (const [id, timer] of [...timers]) {
+      if (timer.delay !== 100 || timer.repeat) continue;
+      timers.delete(id);
+      paints += 1;
+      timer.callback();
+    }
+  };
   const settle = async () => {
     for (let i = 0; i < 25; i++) await new Promise((resolve) => setImmediate(resolve));
+    paint();
+    await new Promise((resolve) => setImmediate(resolve));
     return render();
   };
   const until = async (predicate, label = "expected queue state") => {
@@ -250,5 +267,5 @@ export async function setup(overrides = {}, options = {}) {
     for (const slot of slots) slot?.cleanup?.();
   };
   render();
-  return { render, settle, until, tick, timers, storage, locks, ownership, completed, persistence, listeners, dispatchBeforeUnload, unmount };
+  return { render, settle, until, tick, timers, storage, locks, ownership, completed, persistence, listeners, dispatchBeforeUnload, unmount, updates: () => stateUpdates, paints: () => paints };
 }

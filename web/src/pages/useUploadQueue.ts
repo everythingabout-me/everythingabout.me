@@ -10,9 +10,21 @@ import { pendingFileOperation, setUploadOwner, settleFileOperation } from "./upl
 // stream keeps its connection busy, so eight 16 MiB parts already hold 128 MiB in
 // flight; more only costs payload memory. This pool is the only bound on byte
 // concurrency: the server admits part bodies with one process-wide pool and does
-// not tell clients how many to send, so the queue starts every task and lets this
-// pool schedule the rest.
+// not tell clients how many to send, so tasks share this pool instead of each
+// respecting its own budget.
 const PART_POOL_SIZE = 8;
+// Tasks allowed to be running at all: claiming a path, allocating the session, moving
+// parts and committing. Eight matches the part pool, so a wave of small files cannot
+// open hundreds of upload sessions for bytes that can only stream eight at a time.
+// This bounds handshakes and outstanding requests, not payload: a large file still
+// gets its parts from the same eight-slot pool.
+const START_POOL_SIZE = 8;
+// The page is published at most this often. A file changes state several times, and
+// every publication re-derives the row projection over the whole selection, so a
+// 20k-file folder would publish ~100k times and never leave the main thread. Task
+// state stays authoritative in the ref; the screen catches up ten times a second,
+// which is faster than the eye separates, and gestures publish immediately.
+const PUBLISH_INTERVAL_MS = 100;
 const PART_UPLOAD_ATTEMPTS = 3;
 const PART_RETRY_DELAY_MS = 250;
 // A 429 means every receive slot is busy, which is the receiver asking this part to
@@ -126,8 +138,20 @@ async function withVerifySlot<T>(run: () => Promise<T>): Promise<T> {
   }
 }
 export function useUploadQueue(onUploaded: (task: UploadTask, item: Item) => void): UploadQueue {
-  const [tasks, setTasks] = useState<UploadTask[]>([]);
-  const tasksRef = useRef<UploadTask[]>([]);
+  // Task state is authoritative here, in a Map, and reaches React as a snapshot on a
+  // cadence. One file performs several updates (queued, started, allocated, parts,
+  // committed); publishing each of them re-derives the row projection over every task
+  // and re-renders the page, so a 20k-file folder would publish ~100k times. The map also
+  // keeps one update O(1) instead of rebuilding the whole task array per change.
+  const tasks = useRef(new Map<string, UploadTask>());
+  // Ids waiting for a start slot, in selection order.
+  const pending = useRef(new Set<string>());
+  // Directory tasks that have not completed. A task under one of them must wait, and
+  // answering "is an ancestor still a pending directory" by scanning every task would
+  // make each start O(tasks).
+  const openDirs = useRef(new Set<string>());
+  const [published, setPublished] = useState<UploadTask[]>([]);
+  const flushTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const owner = useRef("");
   const pathClaims = useRef(new Map<string, () => void>());
   const mounted = useRef(true);
@@ -163,33 +187,76 @@ export function useUploadQueue(onUploaded: (task: UploadTask, item: Item) => voi
     const at = pool.waiters.findIndex((other) => other.rank > rank || other.rank === rank && other.number > number);
     pool.waiters.splice(at < 0 ? pool.waiters.length : at, 0, waiter);
   }), []);
-  const update = useCallback((mutate: (current: UploadTask[]) => UploadTask[]) => {
+  const publish = useCallback(() => {
     if (!mounted.current) return;
-    const next = mutate(tasksRef.current);
-    tasksRef.current = next;
-    // A selected tree holds one path claim per file it has started. Looking each claim up
-    // in the whole task list made every update O(claims × tasks), which freezes the page
-    // once a folder upload has thousands of files in flight; settle them by identity.
-    if (pathClaims.current.size) {
-      const open = new Set(next.filter((task) => task.status !== "completed").map((task) => task.id));
-      for (const [id, release] of pathClaims.current) {
-        if (!open.has(id)) { release(); pathClaims.current.delete(id); }
-      }
+    if (flushTimer.current !== undefined) {
+      clearTimeout(flushTimer.current);
+      deadlines.current.delete(flushTimer.current);
+      flushTimer.current = undefined;
     }
-    setTasks(next);
+    setPublished([...tasks.current.values()]);
+  }, []);
+  const schedulePublish = useCallback(() => {
+    if (!mounted.current || flushTimer.current !== undefined) return;
+    const timer = setTimeout(() => {
+      deadlines.current.delete(timer);
+      flushTimer.current = undefined;
+      if (mounted.current) setPublished([...tasks.current.values()]);
+    }, PUBLISH_INTERVAL_MS);
+    flushTimer.current = timer;
+    deadlines.current.add(timer);
+  }, []);
+  // The start queue and the pending-directory index are derived from a task's status, so
+  // they are updated in the same place, never by scanning the task list.
+  const track = useCallback((task: UploadTask) => {
+    if (task.status === "queued") pending.current.add(task.id);
+    else pending.current.delete(task.id);
+    if (task.isDir) {
+      if (task.status === "completed") openDirs.current.delete(task.path);
+      else openDirs.current.add(task.path);
+    }
+  }, []);
+  const releaseClaim = useCallback((id: string) => {
+    const release = pathClaims.current.get(id);
+    if (!release) return;
+    pathClaims.current.delete(id);
+    release();
   }, []);
   const patch = useCallback((id: string, changes: Partial<UploadTask>) => {
-    update((current) => current.map((task) => task.id === id ? { ...task, ...changes } : task));
-  }, [update]);
+    const current = tasks.current.get(id);
+    if (!current) return;
+    const next = { ...current, ...changes };
+    tasks.current.set(id, next);
+    track(next);
+    schedulePublish();
+  }, [schedulePublish, track]);
+  const insert = useCallback((added: UploadTask[]) => {
+    for (const task of added) { tasks.current.set(task.id, task); track(task); }
+    schedulePublish();
+  }, [schedulePublish, track]);
+  const remove = useCallback((ids: string[]) => {
+    for (const id of ids) {
+      const task = tasks.current.get(id);
+      if (!task) continue;
+      tasks.current.delete(id);
+      pending.current.delete(id);
+      if (task.isDir) openDirs.current.delete(task.path);
+      releaseClaim(id);
+    }
+    schedulePublish();
+  }, [releaseClaim, schedulePublish]);
   const complete = useCallback((task: UploadTask, item: Item) => {
-    if (!mounted.current || !tasksRef.current.some((entry) => entry.id === task.id)) return;
+    if (!mounted.current || !tasks.current.has(task.id)) return;
     if (task.uploadId) verified.current.delete(task.uploadId);
     if (task.cancelRequested) {
       // Cancellation after publication cannot undo a committed native file.
-      update((current) => current.filter((entry) => entry.id !== task.id));
-    } else { patch(task.id, { status: "completed", loaded: task.size, file: null, speed: 0, error: undefined }); }
+      remove([task.id]);
+    } else {
+      patch(task.id, { status: "completed", loaded: task.size, file: null, speed: 0, error: undefined });
+      releaseClaim(task.id);
+    }
     finishRef.current(task, item);
-  }, [patch, update]);
+  }, [patch, releaseClaim, remove]);
   const applyOperation = useCallback((task: UploadTask, op: FileOperation) => {
     if (op.id !== task.operationId) throw new Error("The operation identity changed.");
     if (op.state === "succeeded") {
@@ -198,18 +265,18 @@ export function useUploadQueue(onUploaded: (task: UploadTask, item: Item) => voi
     } else if (op.state === "failed" || op.state === "cancelled") {
       if (task.cancelRequested) {
         if (task.uploadId) verified.current.delete(task.uploadId);
-        update((current) => current.filter((entry) => entry.id !== task.id));
+        remove([task.id]);
       }
       else if (task.retryRequested) {
         patch(task.id, { status: "queued", uploadId: undefined, operationId: undefined, intent: undefined, createKey: taskId(), terminalState: undefined, retryRequested: false, uploaded: false, loaded: 0 });
       } else patch(task.id, { status: "failed", speed: 0, terminalState: task.isDir ? undefined : op.state === "failed" ? "failed" : "aborted", error: op.error ? problemText(op.error) : t("drive.uploadFailed") });
     } else { patch(task.id, { status: "finalizing", speed: 0 }); }
-  }, [complete, patch, update]);
+  }, [complete, patch, remove]);
 
   const run = useCallback(async (id: string, runtime: Runtime) => {
     const signal = runtime.controller.signal;
     try {
-      let task = tasksRef.current.find((entry) => entry.id === id);
+      let task = tasks.current.get(id);
       if (!task) return;
       if (task.waitingFor) { patch(id, { status: "waiting" }); return; }
       const deletion = pendingFileOperation(task.path);
@@ -318,7 +385,7 @@ export function useUploadQueue(onUploaded: (task: UploadTask, item: Item) => voi
         patch(id, { uploadId: session.id, allocationRejected: false });
       }
       if (signal.aborted) return;
-      task = tasksRef.current.find((entry) => entry.id === id)!;
+      task = tasks.current.get(id)!;
       if (session.state === "committed") { if (!session.result) throw new Error("The upload result is incomplete."); complete(task, session.result); return; }
       if (session.state === "committing" || session.state === "outcome_unknown") {
         patch(id, { operationId: session.operationId, status: "finalizing", uploaded: true }); return;
@@ -549,7 +616,7 @@ export function useUploadQueue(onUploaded: (task: UploadTask, item: Item) => voi
     } catch (error) {
       if (runtime.controller.signal.aborted) return;
       if (error instanceof ApiError && error.code === "operation_in_progress" && error.operationId) {
-        const task = tasksRef.current.find((entry) => entry.id === id);
+        const task = tasks.current.get(id);
         const waitingFor: DeletionWait = { operationId: error.operationId, path: task?.path ?? "", state: "running" };
         patch(id, { status: "waiting", waitingFor, waitMessage: waitMessage(waitingFor), speed: 0 });
       } else { patch(id, { status: "failed", error: message(error), speed: 0 }); }
@@ -560,43 +627,47 @@ export function useUploadQueue(onUploaded: (task: UploadTask, item: Item) => voi
   }, [acquirePart, applyOperation, complete, patch, releasePart]);
   const pump = useCallback(() => {
     if (!ready.current || !mounted.current) return;
-    // Start every eligible task. No task count gates the queue: the global part pool
-    // decides how many parts are actually in flight, and the server does not publish
-    // a per-session number to respect. A child waits only for its unfinished
-    // directory task, which calls pump again when it settles.
-    const ordered = tasksRef.current;
-    // Unfinished directories; their children wait for them. A selected tree holds
-    // thousands of each, so a task asks about its own ancestors (a handful of set
-    // lookups) instead of testing every directory prefix against every task: the
-    // quadratic scan survives one folder, and freezes a 20k-file upload.
-    const pendingDirs = new Set<string>();
-    for (const task of ordered) {
-      if (task.isDir && task.status !== "completed") pendingDirs.add(task.path);
-    }
+    // Start at most START_POOL_SIZE tasks at once. The part pool still decides how many
+    // bytes are in flight and the server still does not publish a per-session number to
+    // respect; this window bounds the *handshakes* instead. Starting all 20k tasks of a
+    // folder selection at once opened 20k upload sessions and 20k pending requests for a
+    // queue that can only stream eight parts, and left the browser holding every one.
+    // A child waits only for its unfinished directory task, which starts this again when
+    // it settles.
     const blockedBy = (path: string): boolean => {
       let slash = path.lastIndexOf("/");
       while (slash > 0) {
         path = path.slice(0, slash);
-        if (pendingDirs.has(path)) return true;
+        if (openDirs.current.has(path)) return true;
         slash = path.lastIndexOf("/");
       }
       return false;
     };
-    for (const next of ordered) {
-      if (next.status !== "queued" || next.cancelRequested || running.current.has(next.id)) continue;
-      if (blockedBy(next.path)) continue;
-      // Pool priority follows the order files first start, kept across retries/turns.
-      if (!ranks.current.has(next.id)) ranks.current.set(next.id, nextRank.current++);
-      const runtime = { controller: new AbortController() };
-      running.current.set(next.id, runtime);
-      patch(next.id, { status: "uploading", error: undefined });
-      void run(next.id, runtime);
+    const starts: UploadTask[] = [];
+    for (const id of pending.current) {
+      if (running.current.size + starts.length >= START_POOL_SIZE) break;
+      const task = tasks.current.get(id);
+      if (!task || task.status !== "queued" || task.cancelRequested || running.current.has(id)) {
+        pending.current.delete(id);
+        continue;
+      }
+      if (blockedBy(task.path)) continue;
+      starts.push(task);
     }
+    if (!starts.length) return;
+    for (const task of starts) {
+      pending.current.delete(task.id);
+      // Pool priority follows the order files first start, kept across retries/turns.
+      if (!ranks.current.has(task.id)) ranks.current.set(task.id, nextRank.current++);
+      running.current.set(task.id, { controller: new AbortController() });
+      patch(task.id, { status: "uploading", error: undefined });
+    }
+    for (const task of starts) void run(task.id, running.current.get(task.id)!);
   }, [patch, run]);
   pumpRef.current = pump;
   const cancel = useCallback((id: string) => {
-    const root = tasksRef.current.find((task) => task.id === id);
-    const targets = tasksRef.current.filter((task) => task.id === id || root?.isDir && task.path.startsWith(`${root.path}/`));
+    const root = tasks.current.get(id);
+    const targets = [...tasks.current.values()].filter((task) => task.id === id || root?.isDir && task.path.startsWith(`${root.path}/`));
     for (const task of targets) {
       running.current.get(task.id)?.controller.abort();
       patch(task.id, { cancelRequested: true, status: "finalizing", speed: 0 });
@@ -620,7 +691,7 @@ export function useUploadQueue(onUploaded: (task: UploadTask, item: Item) => voi
               }
               if (["aborted", "expired", "failed"].includes(session.state)) {
                 verified.current.delete(uploadId);
-                update((current) => current.filter((entry) => entry.id !== task.id)); return;
+                remove([task.id]); return;
               }
               operationId = session.operationId;
             }
@@ -636,26 +707,37 @@ export function useUploadQueue(onUploaded: (task: UploadTask, item: Item) => voi
             applyOperation({ ...task, uploadId, operationId, cancelRequested: true }, result);
           } else {
             if (uploadId) verified.current.delete(uploadId);
-            update((current) => current.filter((entry) => entry.id !== task.id));
+            remove([task.id]);
           }
         } catch (error) { patch(task.id, { status: "failed", error: message(error) }); }
         finally { pumpRef.current(); }
       })();
     }
-  }, [applyOperation, complete, patch, update]);
+    // Cancelling is a gesture: the rows must answer now, not on the next publish tick.
+    publish();
+  }, [applyOperation, complete, patch, publish, remove]);
   const retry = useCallback((id: string) => {
-    const task = tasksRef.current.find((entry) => entry.id === id);
+    const task = tasks.current.get(id);
     if (task?.cancelRequested) { cancel(id); return; }
     patch(id, { status: "queued", error: undefined, speed: 0, retryRequested: true,
       ...(task?.terminalState ? { uploadId: undefined, operationId: undefined, intent: undefined, createKey: taskId(), terminalState: undefined, uploaded: false, loaded: 0 } : {}) });
+    publish();
     pumpRef.current();
-  }, [cancel, patch]);
+  }, [cancel, patch, publish]);
   const enqueue = useCallback((entries: UploadEntry[], dir: string, exists: (path: string) => boolean) => {
     // A selected tree keeps only the folders that stay empty: every other folder is
     // created by the upload that first needs it, inside that upload's request.
+    //
+    // A 20k-file selection must cost one pass and one published state. Looking the
+    // destination up in the whole task list per entry and appending one task per state
+    // update made the selection quadratic: 20k entries published 40k list states, each
+    // holding another copy of the growing array, and the renderer died of it.
+    const taken = new Map<string, UploadTask>();
+    for (const task of tasks.current.values()) if (task.status !== "completed") taken.set(task.path, task);
+    const added: UploadTask[] = [];
     for (const entry of foldersWithoutFiles(entries)) {
       const path = relative(dir ? `${dir}/${entry.path}` : entry.path);
-      const old = tasksRef.current.find((task) => task.path === path && task.status !== "completed");
+      const old = taken.get(path);
       if (old) {
         if (entry.file && !old.isDir && !old.cancelRequested && (!old.file || old.status === "failed")) {
           if (entry.file.size !== old.size) { patch(old.id, { error: t("drive.reselectedFileChanged") }); continue; }
@@ -667,11 +749,16 @@ export function useUploadQueue(onUploaded: (task: UploadTask, item: Item) => voi
       const overwrite = !!entry.file && exists(path);
       if (overwrite && !window.confirm(t("drive.overwriteConfirm", { name: entry.path }))) continue;
       const id = taskId();
-      update((current) => [...current, { id, file: entry.file, isDir: !entry.file, name: entry.path, dir: relative(dir), path, size: entry.file?.size ?? 0, modifiedAt: entry.file?.lastModified,
-        overwrite, parents: !!entry.file && path.includes("/"), status: "queued", loaded: 0, speed: 0, uploaded: false, createKey: id }]);
+      const task: UploadTask = { id, file: entry.file, isDir: !entry.file, name: entry.path, dir: relative(dir), path, size: entry.file?.size ?? 0, modifiedAt: entry.file?.lastModified,
+        overwrite, parents: !!entry.file && path.includes("/"), status: "queued", loaded: 0, speed: 0, uploaded: false, createKey: id };
+      added.push(task);
+      taken.set(path, task);
     }
+    if (added.length) insert(added);
+    // The user just picked the files; publish the rows before the first network hop.
+    publish();
     pumpRef.current();
-  }, [patch, update]);
+  }, [insert, patch, publish]);
   useEffect(() => {
     mounted.current = true;
     const controller = new AbortController();
@@ -686,7 +773,7 @@ export function useUploadQueue(onUploaded: (task: UploadTask, item: Item) => voi
     }).catch(() => { /* Authentication failures keep queued bytes unsent. */ });
     const timer = setInterval(() => {
       if (pollBusy.current || !mounted.current) return;
-      const candidates = tasksRef.current.filter((task) => task.waitingFor || task.operationId && task.status === "finalizing");
+      const candidates = [...tasks.current.values()].filter((task) => task.waitingFor || task.operationId && task.status === "finalizing");
       if (!candidates.length) return;
       pollBusy.current = true;
       void (async () => {
@@ -703,7 +790,7 @@ export function useUploadQueue(onUploaded: (task: UploadTask, item: Item) => voi
               catch (error) { results.set(id, error instanceof Error ? error : new Error(message(error))); }
               finally { clearTimeout(deadline); deadlines.current.delete(deadline); controller.signal.removeEventListener("abort", abort); }
             }
-            if (!mounted.current || !tasksRef.current.some((entry) => entry.id === task.id)) continue;
+            if (!mounted.current || !tasks.current.has(task.id)) continue;
             const result = results.get(id)!;
             if (task.waitingFor) {
               if (result instanceof Error || result.id !== id) {
@@ -722,6 +809,7 @@ export function useUploadQueue(onUploaded: (task: UploadTask, item: Item) => voi
     }, 2000);
     return () => {
       mounted.current = false; ready.current = false; controller.abort(); clearInterval(timer);
+      if (flushTimer.current !== undefined) { clearTimeout(flushTimer.current); deadlines.current.delete(flushTimer.current); flushTimer.current = undefined; }
       // Progress tickers are intervals, so they need clearInterval even though they
       // share the deadline set with timeouts.
       for (const deadline of deadlines.current) { clearTimeout(deadline); clearInterval(deadline); }
@@ -731,8 +819,8 @@ export function useUploadQueue(onUploaded: (task: UploadTask, item: Item) => voi
       for (const release of pathClaims.current.values()) release();
       pathClaims.current.clear();
     };
-  }, [applyOperation, patch, update]);
-  const hasActiveUploads = tasks.some((task) => ["queued", "waiting", "uploading", "finalizing"].includes(task.status));
+  }, [applyOperation, patch, publish, remove]);
+  const hasActiveUploads = published.some((task) => ["queued", "waiting", "uploading", "finalizing"].includes(task.status));
   useEffect(() => {
     if (!hasActiveUploads) return;
     const beforeUnload = (event: BeforeUnloadEvent) => {
@@ -742,5 +830,5 @@ export function useUploadQueue(onUploaded: (task: UploadTask, item: Item) => voi
     window.addEventListener("beforeunload", beforeUnload);
     return () => window.removeEventListener("beforeunload", beforeUnload);
   }, [hasActiveUploads]);
-  return { tasks, hasActiveUploads, enqueue, cancel, retry };
+  return { tasks: published, hasActiveUploads, enqueue, cancel, retry };
 }
