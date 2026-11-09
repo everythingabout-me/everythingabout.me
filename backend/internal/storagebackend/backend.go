@@ -30,9 +30,33 @@ type Backend struct {
 	closed        bool
 	objectBackend objectmutation.Backend
 	objectOptions objectmutation.Options
+	// objectProblem explains why coordinated object writes are unavailable. It is
+	// only set by NewForServing, which keeps serving when measured capability is
+	// missing instead of refusing to start.
+	objectProblem error
 }
 
-func New(cfg *config.Config) (*Backend, error) {
+// New constructs a backend that refuses to run with unproven object-write
+// capability. Maintenance commands use it so a partially working process can
+// never be mistaken for an admitted one.
+func New(cfg *config.Config) (*Backend, error) { return newBackend(cfg, false) }
+
+// NewForServing is New for the long-running server: a missing or stale admission
+// record disables coordinated object writes and is reported, but the process still
+// serves reads. Storage decides what is true; the admission record only decides
+// whether this process may publish.
+func NewForServing(cfg *config.Config) (*Backend, error) { return newBackend(cfg, true) }
+
+// ObjectWritesProblem reports why coordinated object writes are disabled. Nil
+// means the configured connection is admitted.
+func (b *Backend) ObjectWritesProblem() error {
+	if b == nil {
+		return nil
+	}
+	return b.objectProblem
+}
+
+func newBackend(cfg *config.Config, tolerateUnprovenWrites bool) (*Backend, error) {
 	if cfg == nil {
 		return nil, fmt.Errorf("storage configuration is required")
 	}
@@ -97,37 +121,26 @@ func New(cfg *config.Config) (*Backend, error) {
 		return nil, err
 	}
 	if b.objectBackend != nil {
-		admission, e := objectmutation.LoadAdmission(b.cfg.Storage.ObjectAdmissionFile)
-		if e != nil {
-			return nil, e
+		admission, problem := b.loadAdmission()
+		switch {
+		case problem != nil && !tolerateUnprovenWrites:
+			return nil, problem
+		case problem != nil:
+			b.objectProblem = problem
+			b.objectBackend = nil
+		default:
+			if !filepath.IsAbs(b.cfg.Storage.ObjectSpoolRoot) {
+				return nil, fmt.Errorf("object writes require an absolute FILE_OBJECT_SPOOL_ROOT, got %q: %w", b.cfg.Storage.ObjectSpoolRoot, storage.NewError("invalid_config", "", nil))
+			}
+			max := b.cfg.Storage.MaxSinglePutBytes
+			if max == 0 {
+				max = 32 << 20
+			}
+			if max > 5<<30 {
+				return nil, fmt.Errorf("object single-PUT publication exceeds the admitted 5 GiB limit")
+			}
+			b.objectOptions = objectmutation.Options{Admission: admission, SpoolRoot: b.cfg.Storage.ObjectSpoolRoot, MaxPublishBytes: max}
 		}
-		endpoint, bucket, region := b.cfg.Storage.S3.Endpoint, b.cfg.Storage.S3.Bucket, b.cfg.Storage.S3.Region
-		if b.cfg.BackendName() == "cos" {
-			bucket = b.cfg.COS.Bucket
-			region = b.cfg.COS.Region
-			endpoint = fmt.Sprintf("https://%s.cos.%s.myqcloud.com", bucket, region)
-		}
-		if !admission.Matches(b.cfg.Storage.ConnectionID, endpoint, bucket, region) {
-			// Capability evidence is measured, so it only describes the connection it
-			// was taken on. Say which two connections disagree instead of failing with
-			// a bare code: this is the error an operator sees after moving a bucket.
-			return nil, fmt.Errorf("object admission evidence %s was recorded for bucket %q in %q, but this connection is bucket %q in %q: %w",
-				b.cfg.Storage.ObjectAdmissionFile, admission.Bucket, admission.Region, bucket, region, storage.NewError("invalid_config", "", nil))
-		}
-		if !filepath.IsAbs(b.cfg.Storage.ObjectSpoolRoot) {
-			return nil, fmt.Errorf("object writes require an absolute FILE_OBJECT_SPOOL_ROOT, got %q: %w", b.cfg.Storage.ObjectSpoolRoot, storage.NewError("invalid_config", "", nil))
-		}
-		max := b.cfg.Storage.MaxSinglePutBytes
-		if max == 0 {
-			max = 32 << 20
-		}
-		if max > 5<<30 {
-			return nil, fmt.Errorf("object single-PUT publication exceeds the admitted 5 GiB limit")
-		}
-		if b.cfg.Storage.TransferClass == storage.TransferPresignedParts && !admission.MultipartUploads {
-			return nil, fmt.Errorf("class A presigned-parts requires admitted multipartUploads evidence for this exact connection")
-		}
-		b.objectOptions = objectmutation.Options{Admission: admission, SpoolRoot: b.cfg.Storage.ObjectSpoolRoot, MaxPublishBytes: max}
 	}
 	if b.factory == nil {
 		return nil, fmt.Errorf("unsupported storage backend")
@@ -136,6 +149,30 @@ func New(cfg *config.Config) (*Backend, error) {
 		b.legacy = &readOnlyLegacy{backend: b}
 	}
 	return b, nil
+}
+
+// loadAdmission resolves the measured evidence for this exact connection. Evidence
+// is a measurement of one endpoint, so a bucket, region or endpoint change makes it
+// inapplicable rather than merely old.
+func (b *Backend) loadAdmission() (objectmutation.Admission, error) {
+	admission, err := objectmutation.LoadAdmission(b.cfg.Storage.ObjectAdmissionFile)
+	if err != nil {
+		return admission, err
+	}
+	endpoint, bucket, region := b.cfg.Storage.S3.Endpoint, b.cfg.Storage.S3.Bucket, b.cfg.Storage.S3.Region
+	if b.cfg.BackendName() == "cos" {
+		bucket = b.cfg.COS.Bucket
+		region = b.cfg.COS.Region
+		endpoint = fmt.Sprintf("https://%s.cos.%s.myqcloud.com", bucket, region)
+	}
+	if !admission.Matches(b.cfg.Storage.ConnectionID, endpoint, bucket, region) {
+		return admission, fmt.Errorf("object admission evidence %s was recorded for bucket %q in %q, but this connection is bucket %q in %q: %w",
+			b.cfg.Storage.ObjectAdmissionFile, admission.Bucket, admission.Region, bucket, region, storage.NewError("invalid_config", "", nil))
+	}
+	if b.cfg.Storage.TransferClass == storage.TransferPresignedParts && !admission.MultipartUploads {
+		return admission, fmt.Errorf("class A presigned-parts requires admitted multipartUploads evidence for this exact connection")
+	}
+	return admission, nil
 }
 
 func validateObjectPrefixes(content, system string) error {

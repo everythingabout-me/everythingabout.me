@@ -147,19 +147,23 @@ func checkNativeStorage(ctx context.Context, cfg *config.Config, checks *doctor,
 // with: admission evidence that belongs to another connection, and owner roots that
 // no longer match the tree the current configuration selects.
 func checkStorageRoots(ctx context.Context, cfg *config.Config, db *store.DB, checks *doctor) {
-	backend, err := storagebackend.New(cfg)
+	backend, err := storagebackend.NewForServing(cfg)
 	if err != nil {
-		checks.bad("configuration and admission evidence", err, "probe this exact connection; evidence recorded against another bucket or region does not apply")
+		checks.bad("storage configuration", err, "fix the configuration before starting the server")
 		return
 	}
 	defer backend.Close()
-	checks.ok("configuration and admission evidence", "")
+	if problem := backend.ObjectWritesProblem(); problem != nil {
+		checks.warn("object writes disabled: " + problem.Error())
+	} else {
+		checks.ok("configuration and admission evidence", "")
+	}
 	if db == nil {
 		checks.warn("owner roots not compared: database unavailable")
 		return
 	}
-	if err := validateStorageRoots(ctx, db, backend); err != nil {
-		checks.bad("owner roots match the database index", err, "do not start the server: this connection selects a different native tree")
+	if err := inspectStorageRoots(ctx, db, backend); err != nil {
+		checks.warn(err.Error() + " (the server adopts the configured tree at startup)")
 		return
 	}
 	checks.ok("owner roots match the database index", "")

@@ -1,133 +1,193 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"testing"
+
+	"everythingabout.me/backend/internal/fileops"
 )
 
-func rootFixture(owner, connection string) rootIdentity {
-	return rootIdentity{
-		OwnerID:      owner,
-		ConnectionID: connection,
-		Generation:   1,
-		ContentRoot:  "drive/" + owner + "/",
-		SystemRoot:   "__eam_system__/" + owner + "/",
+// fakeRootStore keeps the adoption path testable without a database: the derived
+// view is exactly this pair of maps.
+type fakeRootStore struct {
+	budgets    map[string]fileops.Root
+	heads      map[string]string
+	busy       map[string]bool
+	adopted    map[string]fileops.Root
+	resets     []string
+	adoptErr   error
+	resetErr   error
+	budgetsErr error
+}
+
+func newFakeRootStore() *fakeRootStore {
+	return &fakeRootStore{budgets: map[string]fileops.Root{}, heads: map[string]string{}, busy: map[string]bool{}, adopted: map[string]fileops.Root{}}
+}
+
+func (f *fakeRootStore) Budgets(context.Context) (map[string]fileops.Root, error) {
+	if f.budgetsErr != nil {
+		return nil, f.budgetsErr
+	}
+	return f.budgets, nil
+}
+
+func (f *fakeRootStore) ChangeNamespaces(context.Context) (map[string]string, error) {
+	return f.heads, nil
+}
+
+func (f *fakeRootStore) AdoptBinding(_ context.Context, owner string, binding fileops.Root) error {
+	if f.adoptErr != nil {
+		return f.adoptErr
+	}
+	f.adopted[owner] = binding
+	return nil
+}
+
+func (f *fakeRootStore) ResetChangeRoot(_ context.Context, owner, namespace string) (bool, error) {
+	if f.resetErr != nil {
+		return false, f.resetErr
+	}
+	if f.busy[owner] {
+		return false, nil
+	}
+	f.resets = append(f.resets, owner+"="+namespace)
+	return true, nil
+}
+
+func storedRoot(owner, connection string) fileops.Root {
+	return fileops.Root{
+		OwnerID:         owner,
+		ConnectionID:    connection,
+		Generation:      1,
+		ContentRoot:     "drive/" + owner + "/",
+		SystemRoot:      "__eam_system__/" + owner + "/",
+		CaseSensitive:   true,
+		RetainsVersions: false,
 	}
 }
 
-func expectedFrom(identities map[string]rootIdentity) func(string) (rootIdentity, error) {
-	return func(owner string) (rootIdentity, error) {
-		identity, ok := identities[owner]
-		if !ok {
-			return rootIdentity{}, fmt.Errorf("no fixture for %s", owner)
+func expectedRoot(owner, connection string) func(string) (fileops.Root, error) {
+	return func(requested string) (fileops.Root, error) {
+		if requested != owner {
+			return fileops.Root{}, fmt.Errorf("unexpected owner %s", requested)
 		}
-		return identity, nil
+		return storedRoot(owner, connection), nil
 	}
 }
 
-func TestCompareRootBindingsAcceptsMatchingTree(t *testing.T) {
+// The configured tree wins. A bucket, region, prefix or generation change rewrites
+// the stale binding instead of refusing to start.
+func TestAdoptRootsFollowsTheConfiguredTree(t *testing.T) {
 	owner := "11111111-1111-1111-1111-111111111111"
-	want := rootFixture(owner, "default:aaaa")
-	if err := compareRootBindings(
-		map[string]rootIdentity{owner: want},
-		map[string]string{owner: want.namespace()},
-		expectedFrom(map[string]rootIdentity{owner: want}),
-	); err != nil {
-		t.Fatalf("identical root rejected: %v", err)
+	store := newFakeRootStore()
+	store.budgets[owner] = storedRoot(owner, "default:old")
+	store.heads[owner] = storedRoot(owner, "default:old").Namespace()
+
+	if err := adoptRoots(context.Background(), store, expectedRoot(owner, "default:new")); err != nil {
+		t.Fatal(err)
 	}
-	if err := compareRootBindings(nil, nil, expectedFrom(nil)); err != nil {
-		t.Fatalf("empty deployment rejected: %v", err)
+	adopted, ok := store.adopted[owner]
+	if !ok {
+		t.Fatal("stale binding was not adopted")
+	}
+	if adopted.ConnectionID != "default:new" {
+		t.Fatalf("adopted connection = %q, want the configured one", adopted.ConnectionID)
+	}
+	// Driver-derived flags must survive: dropping them would make the next
+	// comparison see a different tree shape.
+	if !adopted.CaseSensitive || adopted.RetainsVersions {
+		t.Fatalf("driver flags were lost: %+v", adopted)
+	}
+	if len(store.resets) != 1 || store.resets[0] != owner+"="+storedRoot(owner, "default:new").Namespace() {
+		t.Fatalf("change stream was not reset onto the new tree: %v", store.resets)
 	}
 }
 
-func TestCompareRootBindingsReportsBothConnections(t *testing.T) {
-	owner := "11111111-1111-1111-1111-111111111111"
-	stored := rootFixture(owner, "default:old")
-	want := rootFixture(owner, "default:new")
-	err := compareRootBindings(
-		map[string]rootIdentity{owner: stored},
-		map[string]string{owner: stored.namespace()},
-		expectedFrom(map[string]rootIdentity{owner: want}),
-	)
-	if err == nil {
-		t.Fatal("changed connection admitted")
-	}
-	for _, fragment := range []string{owner, "file_budgets", "default:old", "default:new", "root_conflict"} {
-		if !strings.Contains(err.Error(), fragment) {
-			t.Fatalf("mismatch message omits %q:\n%s", fragment, err)
-		}
-	}
-	// The change stream is a separate observable failure, and it is worth naming.
-	if !strings.Contains(err.Error(), "file_change_heads") {
-		t.Fatalf("stale change namespace not reported:\n%s", err)
-	}
-}
-
-func TestCompareRootBindingsChecksChangeStreamWithMatchingBudget(t *testing.T) {
+func TestAdoptRootsLeavesAMatchingTreeAlone(t *testing.T) {
 	owner := "22222222-2222-2222-2222-222222222222"
-	want := rootFixture(owner, "default:aaaa")
-	stale := rootFixture(owner, "default:bbbb")
-	err := compareRootBindings(
-		map[string]rootIdentity{owner: want},
-		map[string]string{owner: stale.namespace()},
-		expectedFrom(map[string]rootIdentity{owner: want}),
-	)
-	if err == nil {
-		t.Fatal("stale change namespace admitted while the budget matched")
+	store := newFakeRootStore()
+	store.budgets[owner] = storedRoot(owner, "default:same")
+	store.heads[owner] = storedRoot(owner, "default:same").Namespace()
+
+	if err := adoptRoots(context.Background(), store, expectedRoot(owner, "default:same")); err != nil {
+		t.Fatal(err)
 	}
-	if !strings.Contains(err.Error(), "file_change_heads") {
-		t.Fatalf("stale change namespace not reported:\n%s", err)
-	}
-	// The budget matched, so it must not be blamed for this failure.
-	if strings.Contains(err.Error(), "file_budgets:") {
-		t.Fatalf("matching budget reported as mismatched:\n%s", err)
+	if len(store.adopted) != 0 || len(store.resets) != 0 {
+		t.Fatalf("matching tree was rewritten: adopted=%v resets=%v", store.adopted, store.resets)
 	}
 }
 
-func TestCompareRootBindingsCoversOwnersWithoutBudget(t *testing.T) {
+// A change stream with pending work cannot be reset. That is a warning, not a
+// startup failure: the process keeps serving and the old namespace stays.
+func TestAdoptRootsToleratesBusyChangeStream(t *testing.T) {
 	owner := "33333333-3333-3333-3333-333333333333"
-	want := rootFixture(owner, "default:aaaa")
-	err := compareRootBindings(
-		nil,
-		map[string]string{owner: rootFixture(owner, "default:cccc").namespace()},
-		expectedFrom(map[string]rootIdentity{owner: want}),
-	)
-	if err == nil || !strings.Contains(err.Error(), owner) {
-		t.Fatalf("change-only owner not validated: %v", err)
+	store := newFakeRootStore()
+	store.budgets[owner] = storedRoot(owner, "default:old")
+	store.heads[owner] = storedRoot(owner, "default:old").Namespace()
+	store.busy[owner] = true
+
+	if err := adoptRoots(context.Background(), store, expectedRoot(owner, "default:new")); err != nil {
+		t.Fatalf("busy root failed the startup path: %v", err)
+	}
+	if len(store.resets) != 0 {
+		t.Fatalf("busy change stream reported as reset: %v", store.resets)
+	}
+	if _, ok := store.adopted[owner]; !ok {
+		t.Fatal("budget adoption was skipped because the change stream was busy")
 	}
 }
 
-func TestCompareRootBindingsReportsUnbindableOwner(t *testing.T) {
-	owner := "44444444-4444-4444-4444-444444444444"
-	err := compareRootBindings(
-		map[string]rootIdentity{owner: rootFixture(owner, "default:aaaa")},
-		nil,
-		func(string) (rootIdentity, error) { return rootIdentity{}, fmt.Errorf("bad owner id") },
-	)
-	if err == nil || !strings.Contains(err.Error(), "cannot bind") || !strings.Contains(err.Error(), "bad owner id") {
-		t.Fatalf("unbindable owner not reported: %v", err)
+func TestAdoptRootsSkipsUnbindableOwnerAndKeepsGoing(t *testing.T) {
+	first := "44444444-4444-4444-4444-444444444444"
+	second := "55555555-5555-5555-5555-555555555555"
+	store := newFakeRootStore()
+	store.budgets[first] = storedRoot(first, "default:old")
+	store.budgets[second] = storedRoot(second, "default:old")
+
+	expected := func(owner string) (fileops.Root, error) {
+		if owner == first {
+			return fileops.Root{}, fmt.Errorf("invalid owner id")
+		}
+		return storedRoot(owner, "default:new"), nil
+	}
+	if err := adoptRoots(context.Background(), store, expected); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := store.adopted[first]; ok {
+		t.Fatal("unbindable owner was adopted anyway")
+	}
+	if _, ok := store.adopted[second]; !ok {
+		t.Fatal("one unbindable owner stopped adoption for the rest")
 	}
 }
 
-func TestCompareRootBindingsReportsEveryOwnerSortedByID(t *testing.T) {
-	first := "55555555-5555-5555-5555-555555555555"
-	second := "66666666-6666-6666-6666-666666666666"
-	err := compareRootBindings(
-		map[string]rootIdentity{
-			second: rootFixture(second, "default:old"),
-			first:  rootFixture(first, "default:old"),
-		},
-		nil,
-		expectedFrom(map[string]rootIdentity{
-			first:  rootFixture(first, "default:new"),
-			second: rootFixture(second, "default:new"),
-		}),
-	)
-	if err == nil {
-		t.Fatal("multiple mismatches accepted")
+func TestAdoptRootsReportsDatabaseFailure(t *testing.T) {
+	owner := "66666666-6666-6666-6666-666666666666"
+	store := newFakeRootStore()
+	store.budgets[owner] = storedRoot(owner, "default:old")
+	store.adoptErr = fmt.Errorf("connection reset")
+
+	err := adoptRoots(context.Background(), store, expectedRoot(owner, "default:new"))
+	if err == nil || !strings.Contains(err.Error(), "connection reset") {
+		t.Fatalf("database failure was swallowed: %v", err)
 	}
-	if strings.Index(err.Error(), first) > strings.Index(err.Error(), second) {
-		t.Fatalf("owners not reported in stable order:\n%s", err)
+}
+
+func TestRootProblemsReportsBothSides(t *testing.T) {
+	owner := "77777777-7777-7777-7777-777777777777"
+	budgets := map[string]fileops.Root{owner: storedRoot(owner, "default:old")}
+	heads := map[string]string{owner: storedRoot(owner, "default:old").Namespace()}
+
+	problems := rootProblems(budgets, heads, expectedRoot(owner, "default:new"))
+	joined := strings.Join(problems, "\n")
+	for _, fragment := range []string{owner, "file_budgets", "file_change_heads", "default:old", "default:new"} {
+		if !strings.Contains(joined, fragment) {
+			t.Fatalf("report omits %q:\n%s", fragment, joined)
+		}
+	}
+	if len(rootProblems(map[string]fileops.Root{owner: storedRoot(owner, "default:same")}, map[string]string{owner: storedRoot(owner, "default:same").Namespace()}, expectedRoot(owner, "default:same"))) != 0 {
+		t.Fatal("matching tree reported as a problem")
 	}
 }

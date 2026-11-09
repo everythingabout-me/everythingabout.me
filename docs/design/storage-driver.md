@@ -37,7 +37,9 @@ lag external changes. See the [indexed browsing decision](storage.md#3-storage-f
 
 The interfaces below are intended Go declarations. Root bindings can be cheap views over shared pooled
 clients; do not allocate a separate HTTP pool permanently for every user. Configuration generation identifies
-the actual backend/root; credential rotation alone need not change that identity. Use typed options per adapter
+the actual backend/root; credential rotation alone need not change that identity. Capability evidence describes
+exactly one connection, so a bucket, region or endpoint change invalidates it: the server re-probes the newly
+configured connection and records the result rather than carrying the old measurement across. Use typed options per adapter
 at construction, validate them there, and never construct provider clients in an HTTP handler.
 
 ## 2. File and folder interfaces

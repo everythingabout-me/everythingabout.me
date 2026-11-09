@@ -39,16 +39,25 @@ func runServer(args []string) error {
 	}
 	defer db.Close()
 
-	backend, err := storagebackend.New(cfg)
+	// Refresh measured write capability for this exact connection. Evidence cannot
+	// be carried across a bucket or region change, and re-running the probe here
+	// keeps configuration in charge instead of making an operator redo it by hand.
+	if err := storagebackend.EnsureAdmission(ctx, cfg); err != nil {
+		slog.Warn("object admission probe failed; coordinated object writes stay disabled", "error", err)
+	}
+	backend, err := storagebackend.NewForServing(cfg)
 	if err != nil {
 		return fmt.Errorf("failed to initialize storage backend: %w", err)
 	}
 	defer backend.Close()
+	if problem := backend.ObjectWritesProblem(); problem != nil {
+		slog.Warn("coordinated object writes are disabled", "reason", problem)
+	}
 
-	// Refuse to serve a tree the index does not describe. Everything this catches
-	// would otherwise appear as files that list but do not resolve and writes that
-	// fail with root_conflict somewhere inside a request.
-	if err := validateStorageRoots(ctx, db, backend); err != nil {
+	// The configured tree wins: when it changed, adopt it and invalidate the derived
+	// view instead of refusing to start. This is a constant number of statements per
+	// changed owner, with no native enumeration.
+	if err := adoptStorageRoots(ctx, db, backend); err != nil {
 		return err
 	}
 

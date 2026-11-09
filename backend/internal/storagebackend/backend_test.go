@@ -185,6 +185,22 @@ func TestNewReportsAdmissionEvidenceFromAnotherConnection(t *testing.T) {
 		}
 	}
 
+	// The long-running server keeps serving reads with object writes disabled
+	// instead of refusing to start: the configured tree is what it must serve.
+	serving, err := NewForServing(cfg)
+	if err != nil {
+		t.Fatalf("serving mode rejected stale evidence: %v", err)
+	}
+	if serving.ObjectWritesProblem() == nil {
+		if err := serving.Close(); err != nil {
+			t.Fatal(err)
+		}
+		t.Fatal("disabled object writes were not reported")
+	}
+	if err := serving.Close(); err != nil {
+		t.Fatal(err)
+	}
+
 	admission.Endpoint = "https://new-bucket-1250000000.cos.ap-beijing.myqcloud.com"
 	admission.Bucket, admission.Region = "new-bucket-1250000000", "ap-beijing"
 	write(admission)
