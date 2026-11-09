@@ -73,6 +73,15 @@ Common commands:
 - Handlers all use `func(http.ResponseWriter, *http.Request) error` and are wrapped with `s.wrap` (web) or
   `s.api` (public API). Business errors use `httpx.Error` (`httpx.BadRequest(...)` etc.), which maps to a
   status code plus `{ok:false,error}`.
+- **An error must carry its cause.** A bare code, an empty detail, or "see the server log" hands the next
+  person a debugging session instead of an answer — `storage invalid_config:` with an empty path cost hours
+  on a bucket move that only needed `evidence is for ap-hongkong, configured is ap-beijing`. Say which
+  file/field/owner/connection disagreed, what was expected and what was found, and the one command that
+  resolves it. Keep provider response bodies out of client-visible text, and remember that the request id
+  and the log line accompany the message; they do not replace it.
+- **Do not bound request-scoped work with a wall clock.** Bound the work itself (entry/page limits, a
+  per-request provider timeout) and let the request context be the only deadline. A timer on top produces a
+  failure the response cannot explain, and it fires exactly when the library is large enough to matter.
 - The current runtime uses `{ok:true,data}` / `{ok:false,error}` (`internal/httpx`). The replacement file API
   uses plain JSON resources and Problem Details as specified in `docs/api/api.md`.
 - **Everything in this repo is written in English** — comments, docs, SQL comments, Makefile and scripts,
@@ -113,9 +122,12 @@ Common commands:
   consumer progress. Webhooks are deferred. GET /api/audit requires owner cookie, not app permissions.
   Default change-row expiry is 90 days; file-changes-prune removes only expired contiguous feed rows and
   retains dedup receipts. No automatic scheduler is wired; file audit currently remains indefinitely.
-- Migration 032 binds the change stream's root namespace on first use only. Reject later mismatches, never
-  auto-rebind. After DB restore/mapping rebuild or each rebind (including A → B → A), stop writers/settle work
-  and use file-changes-reset --owner-id UUID --writers-quiesced [--dry-run]. Pending guards/nonterminal
+- Migration 032 binds the change stream's root namespace on first use only. Configuration selects the root: a
+  bucket, region, prefix or generation change is adopted at startup (re-probe write capability, rebind the owner
+  budget, rotate the change-stream namespace, log all three), because the native tree is authoritative and the
+  index is a derived view. A mismatch appearing while running still rejects access, never rebinds silently.
+  After DB restore/mapping rebuild, stop writers/settle work and use file-changes-reset --owner-id UUID
+  --writers-quiesced [--dry-run]. Pending guards/nonterminal
   Operations block reset. It rotates epoch/floor=head, expires snapshots/subscriptions and clears markers;
   it never changes file IDs/native bytes or drops effect receipts. Same-namespace restore still needs reset.
   Producers call BindRoot with shared root protection before index locks, then the short head after index/quota.
