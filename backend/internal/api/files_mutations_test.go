@@ -111,9 +111,12 @@ func TestFilesMutationProblemsAndPUTUnknownLocation(t *testing.T) {
 }
 
 func TestFilesGuardConflictPreservesOperationID(t *testing.T) {
-	err := filesMutationProblem(&fileops.Error{Code: "operation_in_progress", OperationID: "guard-operation"})
+	err := filesMutationProblem(&fileops.Error{Code: "operation_in_progress", OperationID: "guard-operation", OperationKind: "upload_commit"})
 	var p *fc.Problem
 	if !errors.As(err, &p) || p.Status != 409 || p.OperationID != "guard-operation" {
 		t.Fatalf("guard conflict lost recoverable identity: %v", err)
+	}
+	if !strings.Contains(p.Detail, "unfinished upload") || !strings.Contains(p.Detail, "guard-operation") {
+		t.Fatalf("guard conflict detail names neither the cause nor the operation: %q", p.Detail)
 	}
 }

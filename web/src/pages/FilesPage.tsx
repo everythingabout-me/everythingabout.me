@@ -34,6 +34,7 @@ import { filesHref, filesRoutePath } from "../filesPath";
 import { resultsText, t } from "../i18n";
 import { formatRelativeTime } from "../i18n/format";
 import { useUploadQueue, type UploadStatus, type UploadTask } from "./useUploadQueue";
+import { resolveDeleteBlocker } from "./deleteBlocker";
 import { droppedUploadEntries, filesToUploadEntries } from "./uploadSelection";
 import { buildUploadRows, isUploadDirectory, type UploadRowEntry } from "./uploadRows";
 import { pendingFileOperations, setUploadOwner, settleFileOperation, subscribeFileOperations, trackFileOperation } from "./uploadPersistence";
@@ -61,6 +62,29 @@ function compareNames(a: string, b: string): number {
 function compareItems(a: Item, b: Item): number {
   if (a.kind !== b.kind) return a.kind === "folder" ? -1 : 1;
   return compareNames(a.name, b.name);
+}
+
+/** A delete stops retrying after many conflicting operations, so a live war cannot spin forever. */
+const DELETE_BLOCKER_ATTEMPTS = 32;
+
+/**
+ * Aborts the session named in a 409, then reports whether the delete should try again.
+ * `cancelled` means the guard is gone; `retry` means a concurrent commit already settled it.
+ */
+async function cancelDeleteBlocker(blocker: { id: string; name: string }): Promise<"cancelled" | "retry"> {
+  try {
+    await api.abortUpload(blocker.id);
+    return "cancelled";
+  } catch (error) {
+    if (!(error instanceof ApiError)) throw error;
+    if (error.status === 401) throw error;
+    if (error.status === 403) throw new Error(t("drive.deleteBlockedByUpload", { name: blocker.name }));
+    // A concurrent commit may have settled the session first; only a session that is
+    // still open continues to hold the path guard.
+    const current = await api.uploadStatus(blocker.id).catch(() => null);
+    if (!current || current.state !== "open") return "retry";
+    throw new Error(t("drive.deleteBlockedByUpload", { name: blocker.name }));
+  }
 }
 
 async function waitForOperation(
@@ -973,12 +997,31 @@ export function FilesPage() {
     if (hasUnfinishedUploads(target.path)) throw new Error(t("drive.deleteUploadBlocked"));
     deleting.current = true;
     try {
-      const operation = await api.deletePath(target.path, target.kind === "folder", target.revision);
+      let operation: FileOperation | void;
+      let cancelledUploads = 0;
+      for (let attempt = 0; ; attempt++) {
+        try {
+          operation = await api.deletePath(target.path, target.kind === "folder", target.revision);
+          break;
+        } catch (error) {
+          if (!(error instanceof ApiError) || error.code !== "operation_in_progress"
+            || !error.operationId || attempt >= DELETE_BLOCKER_ATTEMPTS) throw error;
+          const blocker = await resolveDeleteBlocker(api, error.operationId, filePath(target.path));
+          if (blocker.resolution === "retry") continue;
+          if (blocker.resolution === "blocked") {
+            throw new Error(blocker.reason === "upload"
+              ? t("drive.deleteBlockedByUpload", { name: blocker.name })
+              : t("drive.deleteBlockedByOther"));
+          }
+          if (await cancelDeleteBlocker(blocker) === "retry") continue;
+          cancelledUploads += 1;
+        }
+      }
       deletionRequest.current += 1;
       // The accepted delete is already the user's final answer; only the native purge
       // is still running, and it is tracked only so a failure can be reported.
       if (operation && operation.state !== "succeeded") trackFileOperation(operation, target.path);
-      showToast(t("drive.deleted", { name: target.name }));
+      showToast(t(cancelledUploads > 0 ? "drive.deletedWithCancelledUploads" : "drive.deleted", { name: target.name }));
       setDeletionStatusError(false);
       // Drop the row before the listing round trip; the reload then confirms it.
       setItems((current) => current.filter((item) => target.kind === "folder"
@@ -993,15 +1036,6 @@ export function FilesPage() {
         reloadView.current();
       }
     } catch (error) {
-      if (error instanceof ApiError && error.operationId) {
-        const operation: FileOperation = {
-          id: error.operationId, kind: "delete", state: "outcome_unknown",
-          progress: { completed: 0, total: null, unit: "entries" }, result: null, error: null,
-          cancelRequested: false, createdAt: new Date().toISOString(), finishedAt: null,
-        };
-        trackFileOperation(operation, target.path);
-        void refreshDeletions();
-      }
       if (error instanceof ApiError && error.status === 401) {
         navigate("/login", { replace: true });
       }

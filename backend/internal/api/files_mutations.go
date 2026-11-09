@@ -72,7 +72,27 @@ func filesMutationProblem(err error) error {
 		}
 		problem := fc.NewProblem(status, code, "The file operation could not complete: "+code+".")
 		if code == "operation_in_progress" {
+			// The blocking operation is part of the cause: the client can wait for that exact
+			// Operation or cancel it, while a bare code leaves nothing to act on.
 			problem.OperationID = e.OperationID
+			held := "an unfinished operation"
+			switch e.OperationKind {
+			case "upload_commit":
+				held = "an unfinished upload"
+			case "delete":
+				held = "an unfinished delete"
+			case "move":
+				held = "an unfinished move"
+			case "copy":
+				held = "an unfinished copy"
+			case "mkdir":
+				held = "an unfinished folder creation"
+			}
+			problem.Detail = "The path is still held by " + held
+			if e.OperationID != "" {
+				problem.Detail += " (operation " + e.OperationID + ")"
+			}
+			problem.Detail += "; wait for it to finish or cancel it."
 		}
 		return problem
 	}

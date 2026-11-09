@@ -54,7 +54,7 @@ type ManifestEntry struct {
 	Action           string
 	Source           storage.Path
 	Target           storage.Path
-	SourceRevision    []byte
+	SourceRevision   []byte
 	SourceEntry      *storage.Entry
 	TargetConditions storage.Conditions
 	Size             int64
@@ -215,6 +215,9 @@ type Error struct {
 	Cause error
 	// OperationID identifies the existing owner-scoped guard, never a bypass of its read authorization.
 	OperationID string
+	// OperationKind names that guard's action (upload_commit, delete, move, copy, mkdir) so a
+	// refusal can say what is holding the path instead of only which code it is.
+	OperationKind string
 }
 
 func (e *Error) Error() string           { return "file operation " + e.Code }

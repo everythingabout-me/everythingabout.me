@@ -282,7 +282,7 @@ func (p *Postgres) beginTx(ctx context.Context, tx pgx.Tx, req BeginRequest, fin
 		if err != nil {
 			return err
 		}
-		conflictID := ""
+		conflictID, conflictKind := "", ""
 		for rows.Next() {
 			var g Guard
 			var kind, operationID string
@@ -298,7 +298,7 @@ func (p *Postgres) beginTx(ctx context.Context, tx pgx.Tx, req BeginRequest, fin
 					want.Subtree = true
 				}
 				if conflictID == "" && guardConflict(req.Root, g, want) {
-					conflictID = operationID
+					conflictID, conflictKind = operationID, kind
 				}
 			}
 		}
@@ -308,7 +308,7 @@ func (p *Postgres) beginTx(ctx context.Context, tx pgx.Tx, req BeginRequest, fin
 			return err
 		}
 		if conflictID != "" {
-			return &Error{Code: "operation_in_progress", OperationID: conflictID}
+			return &Error{Code: "operation_in_progress", OperationID: conflictID, OperationKind: conflictKind}
 		}
 		if !budgetFits(u.LogicalBytes, u.LogicalReserved, reserve, u.LogicalLimit) {
 			return E("quota_exceeded", nil)

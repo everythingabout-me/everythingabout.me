@@ -350,7 +350,18 @@ Uncertain effects retain guards. See [identity settlement](../design/file-identi
 Mutations fence only the native paths they observe or mutate, so an open upload session elsewhere in the
 drive never blocks an unrelated rename, copy or delete. A genuinely overlapping path returns
 `409 operation_in_progress` with the blocking `operationId`; wait for that exact Operation, or abort the
-identified open upload session when the conflict is a resumable upload of the same target.
+identified open upload session when the conflict is a resumable upload of the same target. The Problem detail
+names the holding action (upload, delete, move, copy or folder creation) and the blocking operation id, so a
+refusal is actionable without a log lookup.
+
+A recursive delete may extend that resolution to an `open` upload session anywhere inside the deleted
+subtree: the delete would discard the same bytes anyway, and refusing a single Delete click merely because an
+earlier upload was abandoned (closed tab, failed part, a retry nobody clicked) reports a conflict the user
+cannot act on. The browser client aborts such a session and retries, and reports the cancellation with the
+completed deletion. A session whose commit has already started, or that belongs to another principal, is not
+cancelled; it keeps blocking, and the client should name it rather than show the raw code. The abort remains
+an ordinary authorized upload abort, so a narrower token cannot use a delete to cancel work outside its
+scope.
 
 ## 5. Downloads and safe media
 
