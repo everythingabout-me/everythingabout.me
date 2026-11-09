@@ -20,6 +20,27 @@ Accounts, the folder tree, attributes, and events live in Postgres; file bytes l
 Go backend (standard library `net/http`) + React SPA (Vite + React Router), frontend and backend split,
 no Next.js.
 
+## Contracts carry their reasons
+
+Every contract here — an API shape, an identity rule, an ordering, a "must"/"never", a storage
+invariant — states **why it exists**: the failure it prevents, the cost it imposes, and what would
+justify revisiting it. A rule whose reason is not written down is not a contract, it is folklore:
+the next person cannot tell whether it still holds, so they either obey it blindly or break it blindly.
+
+When you add or change a contract, write the reason next to it (design doc, code comment, migration
+header, or the error message itself) in the same change. When you propose something a contract
+forbids, argue with the reason, not the sentence: if the facts that justified it changed, or its cost
+now outweighs what it protects, change the contract and its reason together. "The contract says so"
+is not an argument; "the contract says so because X, and X still holds here" is. A reason that no
+longer matches the code is worse than none, because it makes an obsolete rule look settled.
+
+Existing contracts without a stated reason are debt: when a change touches one, either find the
+reason and record it, or treat it as negotiable until someone can. Worked example from this repo: a
+folder must exist before a file may be created into it (`409 parent_missing`) because identity is
+parent/name and an empty folder needs a native marker object. That reason — not the status code — is
+what a proposal for implicit ancestor folders has to answer, and what decides whether the marker
+stays worth its cost.
+
 ## Running it
 
 Prerequisites: Go 1.26+, Node 20.19+, Postgres. Local development also needs a COS bucket and a Tencent
@@ -193,7 +214,9 @@ Common commands:
    in `web/src/api/client.ts`.
 4. If you changed the schema: append a migration under `sql/` and confirm `make migrate` is re-runnable.
 5. If you added UI copy: add both the `en` and `zh` versions.
-6. Commit messages use Conventional Commits with an English summary, for example
+6. If you added or changed a contract, write its reason where the contract lives, and update the reason when
+   you update the rule ([Contracts carry their reasons](#contracts-carry-their-reasons)).
+7. Commit messages use Conventional Commits with an English summary, for example
    `fix(cos): encode STS policy resource per path segment so uploads with + stop 403ing`.
 
 ## Git workflow
