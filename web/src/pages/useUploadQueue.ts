@@ -151,9 +151,13 @@ export function useUploadQueue(onUploaded: (task: UploadTask, item: Item) => voi
     if (!mounted.current) return;
     const next = mutate(tasksRef.current);
     tasksRef.current = next;
-    for (const [id, release] of pathClaims.current) {
-      if (!next.some((task) => task.id === id && task.status !== "completed")) {
-        release(); pathClaims.current.delete(id);
+    // A selected tree holds one path claim per file it has started. Looking each claim up
+    // in the whole task list made every update O(claims × tasks), which freezes the page
+    // once a folder upload has thousands of files in flight; settle them by identity.
+    if (pathClaims.current.size) {
+      const open = new Set(next.filter((task) => task.status !== "completed").map((task) => task.id));
+      for (const [id, release] of pathClaims.current) {
+        if (!open.has(id)) { release(); pathClaims.current.delete(id); }
       }
     }
     setTasks(next);
@@ -544,11 +548,26 @@ export function useUploadQueue(onUploaded: (task: UploadTask, item: Item) => voi
     // a per-session number to respect. A child waits only for its unfinished
     // directory task, which calls pump again when it settles.
     const ordered = tasksRef.current;
-    // Prefixes of unfinished directory tasks; their children must wait for them.
-    const blocked = ordered.filter((task) => task.isDir && task.status !== "completed").map((task) => `${task.path}/`);
+    // Unfinished directories; their children wait for them. A selected tree holds
+    // thousands of each, so a task asks about its own ancestors (a handful of set
+    // lookups) instead of testing every directory prefix against every task: the
+    // quadratic scan survives one folder, and freezes a 20k-file upload.
+    const pendingDirs = new Set<string>();
+    for (const task of ordered) {
+      if (task.isDir && task.status !== "completed") pendingDirs.add(task.path);
+    }
+    const blockedBy = (path: string): boolean => {
+      let slash = path.lastIndexOf("/");
+      while (slash > 0) {
+        path = path.slice(0, slash);
+        if (pendingDirs.has(path)) return true;
+        slash = path.lastIndexOf("/");
+      }
+      return false;
+    };
     for (const next of ordered) {
       if (next.status !== "queued" || next.cancelRequested || running.current.has(next.id)) continue;
-      if (blocked.some((prefix) => next.path.startsWith(prefix))) continue;
+      if (blockedBy(next.path)) continue;
       // Pool priority follows the order files first start, kept across retries/turns.
       if (!ranks.current.has(next.id)) ranks.current.set(next.id, nextRank.current++);
       const runtime = { controller: new AbortController() };
