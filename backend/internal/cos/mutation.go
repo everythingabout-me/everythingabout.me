@@ -27,12 +27,16 @@ func (c *Client) MutationBackend() (objectmutation.Backend, error) {
 	if c == nil || c.client == nil || c.client.BaseURL == nil || c.client.BaseURL.BucketURL == nil || c.bucket == "" || c.cred.SecretID == "" || c.cred.SecretKey == "" || c.transport == nil {
 		return nil, storage.NewError("invalid_config", "", nil)
 	}
+	native := c.native
+	if native == nil {
+		native = c.transport
+	}
 	base := *c.client.BaseURL
 	token := ""
 	if credentials := c.client.GetCredential(); credentials != nil && credentials.SecretID == c.cred.SecretID && credentials.SecretKey == c.cred.SecretKey {
 		token = credentials.SessionToken
 	}
-	client := sdk.NewClient(&base, &http.Client{Timeout: 60 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }, Transport: &sdk.AuthorizationTransport{SecretID: c.cred.SecretID, SecretKey: c.cred.SecretKey, SessionToken: token, Transport: mutationTransport{c.transport}}})
+	client := sdk.NewClient(&base, &http.Client{Timeout: 60 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }, Transport: &sdk.AuthorizationTransport{SecretID: c.cred.SecretID, SecretKey: c.cred.SecretKey, SessionToken: token, Transport: mutationTransport{native}}})
 	client.Conf.RetryOpt.Count = 1
 	client.Conf.RetryOpt.Interval = 0
 	client.Conf.RetryOpt.AutoSwitchHost = false

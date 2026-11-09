@@ -8,9 +8,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -23,6 +25,7 @@ import (
 )
 
 type Client struct {
+	native        http.RoundTripper
 	bucket        string
 	region        string
 	appID         string
@@ -82,8 +85,12 @@ func New(cfg config.COS) (*Client, error) {
 		ResponseHeaderTimeout: metadataBudget,
 		ExpectContinueTimeout: time.Second,
 	}
+	var native http.RoundTripper = transport
+	if os.Getenv("COS_TRACE") == "1" {
+		native = &traceTransport{next: transport}
+	}
 	httpClient := &http.Client{
-		Transport: &cos.AuthorizationTransport{SecretID: cfg.SecretID, SecretKey: cfg.SecretKey, Transport: transport},
+		Transport: &cos.AuthorizationTransport{SecretID: cfg.SecretID, SecretKey: cfg.SecretKey, Transport: native},
 	}
 	client := cos.NewClient(&cos.BaseURL{BucketURL: bucketURL}, httpClient)
 	publishClient := cos.NewClient(&cos.BaseURL{BucketURL: bucketURL}, httpClient)
@@ -95,8 +102,26 @@ func New(cfg config.COS) (*Client, error) {
 		client:        client,
 		publishClient: publishClient,
 		transport:     transport,
+		native:        native,
 		cred:          tencent.Credentials{SecretID: cfg.SecretID, SecretKey: cfg.SecretKey},
 	}, nil
+}
+
+// traceTransport answers "how many provider requests does this action cost" without
+// patching the driver: COS_TRACE=1 logs one line per request. The request count is
+// part of a driver's cost (see docs/design/storage-driver.md), and measuring it by
+// editing this file each time is how a regression gets missed.
+type traceTransport struct{ next http.RoundTripper }
+
+func (t *traceTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+	started := time.Now()
+	resp, err := t.next.RoundTrip(r)
+	status := 0
+	if resp != nil {
+		status = resp.StatusCode
+	}
+	slog.Info("cos request", "method", r.Method, "path", r.URL.Path, "status", status, "duration", time.Since(started).Round(time.Millisecond).String())
+	return resp, err
 }
 
 func (c *Client) Head(ctx context.Context, key string) (*storage.ObjectInfo, error) {
