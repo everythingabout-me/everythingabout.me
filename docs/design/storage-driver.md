@@ -511,6 +511,22 @@ release that guard. Native generation conditions covering every delayed request 
 otherwise require proof of quiescence or explicit operator recovery. This applies equally to delayed Move,
 Copy and Remove requests. Unsupported automatic recovery must never be represented as a safe rollback.
 
+### What one folder create costs, and why
+
+A measured `Mkdir` against the COS driver spends about fifteen provider requests: nine `HEAD`s
+(three of them after the write), six listings (five of the same parent), and one conditional
+`PUT`. That is not all redundancy. The pre-effect check, the durable checkpoint and the revalidation
+after it are three different claims ("the parent is still the one I bound", "this operation may
+now publish", "the parent and target are still what I admitted"), and each must be made against
+the provider by the step that relies on it; a confirmation after the write is what proves the
+revision the index records. Merging those across the checkpoint would remove the property the
+journal exists to provide.
+
+What is not deliberate is observing the same path twice inside one phase. Removing that is safe
+and is where the cost should come down (target: under six requests); removing the observations
+around the checkpoint is not, and a driver that did it would have to say so and explain which
+guarantee it gave up.
+
 Native success followed by index failure leaves real changed files. Recover/index that result from the journal,
 return the same recorded client outcome, and settle quota; do not delete a final file just because its database
 acknowledgement is missing. After any final effect starts, cancellation is best effort until a definite outcome.
