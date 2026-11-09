@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"sort"
 	"strconv"
+	"sync"
+	"sync/atomic"
 	"testing"
 
 	"everythingabout.me/backend/internal/storage"
@@ -25,6 +27,7 @@ type actionNative struct {
 	receipts    map[string]storage.Inspection
 	calls       []storage.EffectIntent
 	serial      int
+	statMu      sync.Mutex
 	beforeStat  func(storage.Path)
 	afterEffect func(storage.EffectIntent)
 	failAt      int
@@ -59,8 +62,12 @@ func (n *actionNative) Describe() storage.Descriptor {
 }
 func (n *actionNative) Close() error { return nil }
 func (n *actionNative) Stat(_ context.Context, p storage.Path) (storage.Entry, error) {
+	// Observations run concurrently, so the hook must not be entered twice at once:
+	// tests use it to count or to mutate the fake from inside a single step.
 	if n.beforeStat != nil {
+		n.statMu.Lock()
 		n.beforeStat(p)
+		n.statMu.Unlock()
 	}
 	e, ok := n.entries[p]
 	if !ok {
@@ -353,6 +360,42 @@ func TestActionsPostgres(t *testing.T) {
 					}
 				}
 			})
+		}
+	})
+	t.Run("move proves its destinations once instead of once per delete", func(t *testing.T) {
+		p, r, actor := seedOwner(t, pool, provenBaseline(4, 4, 100, 100))
+		n := newActionNative(r)
+		n.put("src", storage.Folder, "")
+		n.put("src/sub", storage.Folder, "")
+		names := []string{"a", "b", "c", "d"}
+		for _, name := range names {
+			n.put(storage.Path("src/sub/"+name), storage.File, name)
+		}
+		var copied atomic.Bool
+		observed := map[storage.Path]int{}
+		n.beforeStat = func(path storage.Path) {
+			if copied.Load() {
+				observed[path]++
+			}
+		}
+		n.afterEffect = func(i storage.EffectIntent) {
+			if i.Target == "dst/sub/d" {
+				copied.Store(true)
+			}
+		}
+		a := actionCoordinator(t, p, nil)
+		op := prepareAction(t, a, ActionRequest{Root: r, Actor: actor, Kind: "move", From: "src", To: "dst", IfRevision: "rev"}, n)
+		out := runAction(t, a, op, actor, n)
+		if out.State != Succeeded {
+			t.Fatal(out.State, string(out.Problem))
+		}
+		// After every copy has applied, each destination is re-read once: one proof of
+		// the whole set before the first removal. Re-reading the set before every delete
+		// made a move quadratic in the number of files.
+		for _, name := range names {
+			if got := observed[storage.Path("dst/sub/"+name)]; got != 1 {
+				t.Fatalf("%s observed %d times after copying, want 1", name, got)
+			}
 		}
 	})
 	t.Run("delete never rescans external additions and reports charged partial", func(t *testing.T) {

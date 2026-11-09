@@ -9,6 +9,7 @@ import (
 	"path"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"everythingabout.me/backend/internal/storage"
@@ -534,16 +535,23 @@ func comparePathFromNative(native NativeActions, p storage.Path) string {
 	return comparePath(Root{CaseSensitive: native.StorageNameRules().CaseSensitive}, p)
 }
 func validateCapture(ctx context.Context, req ActionRequest, native NativeActions, b actionBinding, manifest []ManifestEntry) error {
+	// Re-read every captured identity and every future target at once: one capture
+	// of a deep folder otherwise spends a round trip per path, one after another.
+	checks := make([]nativeCheck, 0, len(b.Anchors)+len(b.Sources)+1+len(manifest))
 	for _, old := range append(append([]storage.Entry(nil), b.Anchors...), b.Sources...) {
-		e, err := observe(ctx, native, old.Path)
-		if err != nil || !sameNative(old, e) {
-			return E("target_changed", err)
-		}
+		checks = append(checks, nativeCheck{expected: old})
 	}
 	if b.Existing != nil {
-		e, err := observe(ctx, native, b.Existing.Path)
-		if err != nil || !sameNative(*b.Existing, e) {
-			return E("target_changed", err)
+		checks = append(checks, nativeCheck{expected: *b.Existing})
+	}
+	for _, entry := range manifest {
+		if entry.Target != "" {
+			checks = append(checks, nativeCheck{expected: storage.Entry{Path: entry.Target}, absent: true})
+		}
+	}
+	for _, result := range observeChecks(ctx, native, checks) {
+		if result.err != nil {
+			return result.err
 		}
 	}
 	if len(b.Sources) > 0 && b.Strategy != nativeTreeMoveStrategy {
@@ -554,15 +562,6 @@ func validateCapture(ctx context.Context, req ActionRequest, native NativeAction
 		for i := range current {
 			if !sameNative(current[i], b.Sources[i]) {
 				return E("target_changed", nil)
-			}
-		}
-	}
-	for _, entry := range manifest {
-		if entry.Target != "" {
-			if _, err := native.Stat(ctx, entry.Target); err == nil {
-				return E("target_changed", nil)
-			} else if !storage.IsCode(err, "not_found") {
-				return err
 			}
 		}
 	}
@@ -630,6 +629,7 @@ func (a *Actions) Run(ctx context.Context, root Root, actor Actor, id string, na
 		}
 	}
 	if op.Phase != NativeApplied && cause == nil {
+		destinationsVerified := false
 		for _, entry := range op.Entries {
 			if entry.State != "pending" {
 				continue
@@ -648,6 +648,15 @@ func (a *Actions) Run(ctx context.Context, root Root, actor Actor, id string, na
 			if err = validateActionStep(ctx, native, req, binding, op, entry); err != nil {
 				cause = err
 				break
+			}
+			if req.Kind == "move" && entry.Action == "delete" && !destinationsVerified {
+				// One proof of the whole destination set, immediately before the first
+				// removal. Recovery restarts run it again from the saved manifest.
+				if err = verifyMoveDestinations(ctx, native, op); err != nil {
+					cause = err
+					break
+				}
+				destinationsVerified = true
 			}
 			op, err = a.service.ApplyEntry(ctx, root, actor, id, entry.Number, native, func(work context.Context, intent storage.EffectIntent, save storage.Checkpoint) (storage.MutationResult, error) {
 				// Repeat identity checks after the durable entry start and immediately before
@@ -735,18 +744,105 @@ func executeAction(ctx context.Context, native NativeActions, intent storage.Eff
 		return storage.MutationResult{}, E("invalid_intent", nil)
 	}
 }
+
+// A captured identity that an immutable intent still depends on.
+type nativeCheck struct {
+	expected     storage.Entry
+	version      []byte
+	tolerateGone bool
+	// absent states the opposite requirement: the path must not exist yet.
+	absent bool
+}
+
+type checkResult struct {
+	err  error
+	gone bool
+}
+
+// observeConcurrency bounds how many identities one step re-observes at once.
+// Native observations are independent reads, so a step that needs its ancestors,
+// its source and its destination costs one round trip instead of one per path.
+const observeConcurrency = 6
+
+// observeChecks re-reads every captured identity. A deep tree makes each read
+// itself a few native round trips, which is why they run concurrently; the
+// results stay indexed so the first failure in capture order is the one reported.
+func observeChecks(ctx context.Context, native NativeActions, checks []nativeCheck) []checkResult {
+	results := make([]checkResult, len(checks))
+	if len(checks) == 0 {
+		return results
+	}
+	slots := make(chan struct{}, observeConcurrency)
+	var wg sync.WaitGroup
+	for i := range checks {
+		slots <- struct{}{}
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			defer func() { <-slots }()
+			check := checks[i]
+			if check.absent {
+				if _, err := native.Stat(ctx, check.expected.Path); err == nil {
+					results[i] = checkResult{err: E("target_changed", nil)}
+				} else if !storage.IsCode(err, "not_found") {
+					results[i] = checkResult{err: err}
+				}
+				return
+			}
+			current, err := observe(ctx, native, check.expected.Path)
+			if err != nil {
+				if check.tolerateGone && implicitFolderGone(check.expected, err) {
+					results[i] = checkResult{gone: true}
+					return
+				}
+				results[i] = checkResult{err: E("target_changed", err)}
+				return
+			}
+			if !sameNative(check.expected, current) || (len(check.version) > 0 && !bytes.Equal(current.Version, check.version)) {
+				results[i] = checkResult{err: E("target_changed", nil)}
+			}
+		}(i)
+	}
+	wg.Wait()
+	return results
+}
+
+// verifyMoveDestinations proves every captured destination still matches the
+// native result recorded for it. A move runs this once, before its first source
+// is removed; the removals that follow cannot change a destination, so repeating
+// the sweep before every delete would cost one request per file per file.
+func verifyMoveDestinations(ctx context.Context, native NativeActions, op Operation) error {
+	checks := make([]nativeCheck, 0, len(op.Entries))
+	for _, effect := range op.Entries {
+		if effect.Action == "delete" {
+			continue
+		}
+		if effect.State != "applied" {
+			return E("recovery_required", nil)
+		}
+		var result storage.MutationResult
+		if json.Unmarshal(effect.Result, &result) != nil || result.Entry == nil {
+			return E("invalid_native_result", nil)
+		}
+		checks = append(checks, nativeCheck{expected: *result.Entry})
+	}
+	for _, result := range observeChecks(ctx, native, checks) {
+		if result.err != nil {
+			return result.err
+		}
+	}
+	return nil
+}
+
 func validateActionStep(ctx context.Context, native NativeActions, req ActionRequest, b actionBinding, op Operation, entry EntryEffect) error {
 	if b.Strategy == nativeTreeMoveStrategy && !native.Describe().NativeTreeMove {
 		return E("unsupported", nil)
 	}
+	tolerant := entry.Action == "delete"
+	checks := make([]nativeCheck, 0, len(b.Anchors)+len(b.Sources)+1)
+	stop := -1
 	for _, old := range b.Anchors {
-		current, err := observe(ctx, native, old.Path)
-		if entry.Action == "delete" && implicitFolderGone(old, err) {
-			continue
-		}
-		if err != nil || !sameNative(old, current) {
-			return E("target_changed", err)
-		}
+		checks = append(checks, nativeCheck{expected: old, tolerateGone: tolerant})
 	}
 	// Every destination parent is either an immutable captured ancestor or the
 	// result identity of a mkdir already applied by this manifest.
@@ -764,10 +860,7 @@ func validateActionStep(ctx context.Context, native NativeActions, req ActionReq
 				if json.Unmarshal(effect.Result, &result) != nil || result.Entry == nil {
 					return E("invalid_native_result", nil)
 				}
-				current, err := observe(ctx, native, p)
-				if err != nil || !sameNative(*result.Entry, current) {
-					return E("target_changed", err)
-				}
+				checks = append(checks, nativeCheck{expected: *result.Entry})
 				found = true
 			}
 		}
@@ -776,43 +869,40 @@ func validateActionStep(ctx context.Context, native NativeActions, req ActionReq
 		}
 	}
 	if entry.Source != "" {
+		if entry.SourceEntry == nil {
+			return E("target_changed", nil)
+		}
 		for _, ancestor := range b.Sources {
 			if ancestor.Kind != storage.Folder || ancestor.Path == entry.Source || !within(string(entry.Source), string(ancestor.Path)) {
 				continue
 			}
-			current, err := observe(ctx, native, ancestor.Path)
-			if implicitFolderGone(ancestor, err) {
-				continue
-			}
-			if err != nil || !sameNative(ancestor, current) {
-				return E("target_changed", err)
-			}
+			checks = append(checks, nativeCheck{expected: ancestor, tolerateGone: true})
 		}
-		current, err := observe(ctx, native, entry.Source)
-		if entry.SourceEntry != nil && entry.Action == "delete" && implicitFolderGone(*entry.SourceEntry, err) {
+		// A source that vanished is tolerated only for a removal, and then it also
+		// ends the step: nothing below a vanished folder can be removed again.
+		if tolerant {
+			stop = len(checks)
+		}
+		checks = append(checks, nativeCheck{expected: *entry.SourceEntry, version: entry.SourceVersion, tolerateGone: tolerant})
+	}
+	for i, result := range observeChecks(ctx, native, checks) {
+		if i == stop && result.gone {
 			return nil
 		}
-		if err != nil || entry.SourceEntry == nil || !sameNative(*entry.SourceEntry, current) || !bytes.Equal(current.Version, entry.SourceVersion) {
-			return E("target_changed", err)
+		if result.err != nil {
+			return result.err
 		}
 	}
 	if req.Kind == "move" && entry.Action == "delete" {
 		// No captured source may be removed until every captured destination has
-		// applied, and the entire destination set still matches the proven result.
+		// applied. Their native identity is proven once per run, before the first
+		// delete: the deletes that follow cannot touch a destination.
 		for _, effect := range op.Entries {
 			if effect.Action == "delete" {
 				continue
 			}
 			if effect.State != "applied" {
 				return E("recovery_required", nil)
-			}
-			var result storage.MutationResult
-			if json.Unmarshal(effect.Result, &result) != nil || result.Entry == nil {
-				return E("invalid_native_result", nil)
-			}
-			current, err := observe(ctx, native, effect.Target)
-			if err != nil || !sameNative(*result.Entry, current) {
-				return E("target_changed", err)
 			}
 		}
 	}
