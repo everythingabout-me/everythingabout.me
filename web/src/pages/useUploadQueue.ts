@@ -74,6 +74,20 @@ interface Runtime { controller: AbortController; }
 interface PartWaiter { rank: number; number: number; resolve: () => void; }
 const relative = (path: string) => path.replace(/^\/+|\/+$/g, "");
 let sequence = 0;
+// The only thing the queue asks capabilities for is whether this connection can
+// carry a source modification time — a service-wide flag, not a per-folder one.
+// Asking per file costs one request per file, which for a 23k-file folder is
+// 23k requests that never change their answer.
+let sourceModifiedAtSupport: Promise<boolean> | undefined;
+function supportsSourceModifiedAt(parent: string): Promise<boolean> {
+  sourceModifiedAtSupport ??= api.capabilities(parent)
+    .then((capabilities) => !!capabilities.sourceModifiedAt, (error) => {
+      sourceModifiedAtSupport = undefined;
+      throw error;
+    });
+  return sourceModifiedAtSupport;
+}
+
 function taskId(): string { return `upload-${Date.now().toString(36)}-${(++sequence).toString(36)}-${Math.random().toString(36).slice(2)}`; }
 // A failed row must name the same identity the server logged. Without the problem
 // code and request id, "the storage read failed" cannot be matched to any backend line.
@@ -251,11 +265,11 @@ export function useUploadQueue(onUploaded: (task: UploadTask, item: Item) => voi
           }
           const slash = task.path.lastIndexOf("/");
           const parent = slash < 0 ? "/" : task.path.slice(0, slash);
-          const capabilities = await api.capabilities(parent);
+          const sourceModifiedAt = await supportsSourceModifiedAt(parent);
           if (signal.aborted) return;
           intent = { path: task.path, size: task.size, mediaType: task.file?.type || "application/octet-stream", condition,
             ...(task.parents && condition.mode === "create" ? { parents: true as const } : {}),
-            ...(capabilities.sourceModifiedAt && task.modifiedAt !== undefined ? { sourceModifiedAt: new Date(task.modifiedAt).toISOString() } : {}) };
+            ...(sourceModifiedAt && task.modifiedAt !== undefined ? { sourceModifiedAt: new Date(task.modifiedAt).toISOString() } : {}) };
           // Retain the exact intent/key in memory before allocation, including a lost create ACK.
           patch(id, { intent });
         }
