@@ -37,6 +37,24 @@ export function filesToUploadEntries(files: File[] | FileList | null): UploadEnt
   return collector.entries;
 }
 
+/**
+ * A folder that will contain a file needs no mkdir of its own: the upload creates
+ * the missing chain inside its own request (`parents`), which is one round trip
+ * per file instead of one per directory. Only folders with no file in them (or no
+ * selected descendant at all) still have to be created explicitly.
+ */
+export function foldersWithoutFiles(entries: UploadEntry[]): UploadEntry[] {
+  const withFile = new Set<string>();
+  for (const entry of entries) {
+    if (entry.file === null) continue;
+    const segments = entry.path.split("/");
+    for (let index = 1; index < segments.length; index += 1) {
+      withFile.add(segments.slice(0, index).join("/"));
+    }
+  }
+  return entries.filter((entry) => entry.file !== null || !withFile.has(entry.path));
+}
+
 export async function droppedUploadEntries(transfer: DataTransfer): Promise<UploadEntry[]> {
   type Source = { entry: FileSystemEntry } | { file: File };
   const sources: Source[] = [];

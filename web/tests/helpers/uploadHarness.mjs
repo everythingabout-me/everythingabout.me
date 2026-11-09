@@ -6,6 +6,7 @@ import { transformWithOxc } from "vite";
 const queueSource = await readFile(new URL("../../src/pages/useUploadQueue.ts", import.meta.url), "utf8");
 const persistenceSource = await readFile(new URL("../../src/pages/uploadPersistence.ts", import.meta.url), "utf8");
 const ownershipSource = await readFile(new URL("../../src/pages/uploadOwnership.ts", import.meta.url), "utf8");
+const selectionSource = await readFile(new URL("../../src/pages/uploadSelection.ts", import.meta.url), "utf8");
 const moduleURL = (code) => `data:text/javascript;base64,${Buffer.from(code).toString("base64")}`;
 let identity = 0;
 export class TestApiError extends Error {
@@ -211,12 +212,15 @@ export async function setup(overrides = {}, options = {}) {
   const ownershipCode = (await transformWithOxc(`const { navigator } = globalThis.__uploadHarness;\n${ownershipSource}\n// harness ${unique}`, "uploadOwnership.ts")).code;
   const ownershipURL = moduleURL(ownershipCode);
   const ownership = await import(ownershipURL);
+  const selectionCode = (await transformWithOxc(`${selectionSource}\n// harness ${unique}`, "uploadSelection.ts")).code;
+  const selectionURL = moduleURL(selectionCode);
   const source = queueSource
     .replace(/import \{ useCallback, useEffect, useRef, useState \} from "react";/, "const { useCallback, useEffect, useRef, useState, setTimeout, clearTimeout, setInterval, clearInterval, localStorage, crypto, window } = globalThis.__uploadHarness;")
     .replace(/import \{ ApiError, FileApiError, api,[^\n]+from "\.\.\/api\/client";/, "const { ApiError, FileApiError, api } = globalThis.__uploadHarness;")
     .replace('import { t } from "../i18n";', 'const t = (key) => key;')
     .replace('from "./uploadPersistence"', `from "${persistenceURL}"`)
-    .replace('from "./uploadOwnership"', `from "${ownershipURL}"`);
+    .replace('from "./uploadOwnership"', `from "${ownershipURL}"`)
+    .replace('from "./uploadSelection"', `from "${selectionURL}"`);
   const { code } = await transformWithOxc(`${source}\n// harness ${unique}`, "useUploadQueue.ts");
   const { useUploadQueue } = await import(moduleURL(code));
   const render = () => {

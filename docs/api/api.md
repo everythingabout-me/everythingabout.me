@@ -527,6 +527,15 @@ Idempotency-Key: mobile-upload-001
 }
 ```
 
+`parents:true` (create mode, full-path destination) creates the destination's missing ancestor folders
+as part of this request. Each created folder gets a fresh ID, its native marker object and the same
+change facts and audit an explicit `mkdir` would produce. The reason: importing a selected tree
+otherwise costs one mkdir round trip per directory before the first file may start, and a client that
+cannot start for minutes looks stuck. Only *who* sends that mkdir moves — the ordering rule does not:
+the parent row and marker exist before the upload binds the parent revision it observed, so a
+concurrent move/recreate of that parent still returns `412 target_changed`. Without `parents` a missing
+parent is still `409 parent_missing`, and a destination whose parent is a file is still `409 not_a_folder`.
+
 Create mode (default) accepts `destination:Destination` and forbids `target`. For example,
 `destination:{"parent":{"id":"14baf74e-feb7-47b4-acf1-c4d3146eea91"},"name":"a.mp4"}` creates under an existing folder.
 Replace mode requires `target:EntrySelector`, `condition:{"mode":"replace","contentRevision":"cr_observed"}`,

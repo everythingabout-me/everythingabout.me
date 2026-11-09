@@ -94,6 +94,10 @@ type filesCreateUploadRequest struct {
 		Mode            string `json:"mode"`
 		ContentRevision string `json:"contentRevision"`
 	} `json:"condition"`
+	// Parents creates the missing ancestor folders of a full-path destination as
+	// part of this request. The folder rows are the same mkdir a client could send;
+	// this only saves a round trip per folder when a whole tree is imported.
+	Parents bool `json:"parents"`
 }
 
 func filesUploadClientTarget(req filesCreateUploadRequest) (storage.WriteIntent, []filesReplaySelection, error) {
@@ -161,6 +165,77 @@ func (s *Server) filesResolveUploadTarget(ctx context.Context, f *fileRequest, r
 		return p, filesSelectorSelection(target), target.ID, err
 	default:
 		return "", "", "", fc.NewProblem(400, "invalid_request", "The upload condition is invalid.")
+	}
+}
+
+// filesEnsureParents materializes the folders above an upload destination that asked
+// for missing parents. It runs the same mkdir action a client would have sent, so
+// identity, change facts and audit stay identical; only the round trip moves from the
+// client into this request.
+//
+// The chain is known from the destination path, so nothing is guessed: the outermost
+// missing level is created first, and a level a concurrent upload created first is
+// adopted — mkdir is idempotent and the conflicting operation's guard is the wait.
+func (s *Server) filesEnsureParents(ctx context.Context, r *http.Request, f *fileRequest, native fileops.NativeActions, root fileops.Root, actor fileops.Actor, target storage.Path) error {
+	if target == "" {
+		return nil
+	}
+	entry, err := native.Stat(ctx, target)
+	if err == nil {
+		if entry.Kind != storage.Folder {
+			return fc.NewProblem(409, "not_a_folder", "A file occupies the destination parent.")
+		}
+		return nil
+	}
+	if !storage.IsCode(err, "not_found") {
+		return filesMutationProblem(err)
+	}
+	parent := storage.Path("")
+	if i := strings.LastIndexByte(string(target), '/'); i > 0 {
+		parent = target[:i]
+	}
+	if parent != "" {
+		if err = s.filesEnsureParents(ctx, r, f, native, root, actor, parent); err != nil {
+			return err
+		}
+	}
+	actions, err := s.filesActions(r, f, native)
+	if err != nil {
+		return err
+	}
+	request := fileops.ActionRequest{
+		Root: root, Actor: actor, Kind: "mkdir", To: target,
+		Selection: "path:path:" + string(target), IdempotencyKey: randomFilesKey(),
+	}
+	for attempt := 0; ; attempt++ {
+		op, _, e := actions.Prepare(ctx, request, native)
+		if e == nil && !op.Terminal() {
+			op, e = actions.Run(ctx, root, actor, op.ID, native)
+		}
+		if e == nil {
+			if op.State != fileops.Succeeded {
+				return filesOperationFailure(op)
+			}
+			return nil
+		}
+		if fileops.IsCode(e, "name_conflict") {
+			if current, statErr := native.Stat(ctx, target); statErr == nil && current.Kind == storage.Folder {
+				return nil
+			}
+		}
+		if fileops.IsCode(e, "operation_in_progress") && attempt < 20 {
+			if current, statErr := native.Stat(ctx, target); statErr == nil && current.Kind == storage.Folder {
+				return nil
+			}
+			select {
+			case <-ctx.Done():
+				return filesMutationProblem(ctx.Err())
+			case <-time.After(100 * time.Millisecond):
+			}
+			request.IdempotencyKey = randomFilesKey()
+			continue
+		}
+		return filesMutationProblem(e)
 	}
 }
 
@@ -273,21 +348,18 @@ func (s *Server) handleFilesCreateUpload(w http.ResponseWriter, r *http.Request,
 	if err = f.RequireWrite(p); err != nil {
 		return err
 	}
-	entryID, parentID, err := s.filesBindMutationSelection(r.Context(), f, p, selection, selectedID)
-	if err != nil {
-		return err
-	}
-	if condition.Mode == fc.PutCreate {
-		entryID = ""
-	}
-	client.Target, client.EntryID, client.ParentID = storage.Path(p.Relative()), entryID, parentID
-	intent := client
 	parentName := path.Dir(p.Relative())
 	if parentName == "." {
 		parentName = ""
 	}
-	intent.ParentPath = storage.Path(parentName)
-	parent, err := native.Stat(r.Context(), intent.ParentPath)
+	parentPath := storage.Path(parentName)
+	parent, err := native.Stat(r.Context(), parentPath)
+	if storage.IsCode(err, "not_found") && req.Parents && condition.Mode == fc.PutCreate {
+		if err = s.filesEnsureParents(r.Context(), r, f, native, root, actor, parentPath); err != nil {
+			return err
+		}
+		parent, err = native.Stat(r.Context(), parentPath)
+	}
 	if storage.IsCode(err, "not_found") {
 		return fc.NewProblem(409, "parent_missing", "The destination parent does not exist.")
 	}
@@ -297,6 +369,16 @@ func (s *Server) handleFilesCreateUpload(w http.ResponseWriter, r *http.Request,
 	if parent.Kind != storage.Folder {
 		return fc.NewProblem(409, "not_a_folder", "The destination parent is not a folder.")
 	}
+	entryID, parentID, err := s.filesBindMutationSelection(r.Context(), f, p, selection, selectedID)
+	if err != nil {
+		return err
+	}
+	if condition.Mode == fc.PutCreate {
+		entryID = ""
+	}
+	client.Target, client.EntryID, client.ParentID = storage.Path(p.Relative()), entryID, parentID
+	intent := client
+	intent.ParentPath = parentPath
 	intent.ParentRevision = parent.Revision
 	var oldBytes int64
 	existing, err := native.Stat(r.Context(), intent.Target)

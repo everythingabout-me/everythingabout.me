@@ -295,7 +295,7 @@ test("failed, cancelled, unknown, unavailable and wrong delete identities never 
   }
 });
 
-test("pending ancestor delete blocks mkdir and nested children while prefix siblings continue", async (t) => {
+test("pending ancestor delete blocks a folder tree while prefix siblings continue", async (t) => {
   const server = uploadServer();
   const mkdir = server.api.mkdir;
   const gate = deferred();
@@ -305,15 +305,18 @@ test("pending ancestor delete blocks mkdir and nested children while prefix sibl
   const harness = await mount(t, server.api);
   await harness.settle();
   harness.persistence.trackFileOperation(operation("delete-root"), "root");
-  enqueue(harness, [{ path: "root", file: null }, { path: "root/nested", file: null }, entry("root/nested/file"), entry("rootish/file")]);
-  let queue = await harness.until((queue) => queue.tasks[3]?.status === "completed");
+  // Folders that would contain files are created by the upload itself now, so a
+  // blocking test uses a folder tree with no file under it.
+  enqueue(harness, [{ path: "root", file: null }, { path: "root/nested", file: null }, entry("rootish/file")]);
+  let queue = await harness.until((queue) => queue.tasks[2]?.status === "completed");
   assert.equal(queue.tasks[0].status, "waiting");
+  assert.equal(queue.tasks[1].status, "queued");
   assert.equal(callsOf(server, "mkdir").length, 0);
   assert.equal(callsOf(server, "create").length, 1);
   done = true;
   await harness.tick();
   await harness.settle();
-  assert.equal(callsOf(server, "create").length, 1, "children stay blocked while parent mkdir is unresolved");
+  assert.equal(callsOf(server, "create").length, 1, "the sibling upload never waits for this tree");
   gate.resolve();
   queue = await harness.until(allComplete);
   assert.deepEqual(callsOf(server, "mkdir").map(([, path]) => path), ["root", "root/nested"]);
@@ -338,7 +341,8 @@ test("async mkdir completion is polled by its original Operation and never reall
   server.api.mkdir = async (path) => { server.calls.push(["mkdir", path]); return operation("mkdir-1", "running", null, "mkdir"); };
   server.api.getOperation = async (id) => { server.calls.push(["operation", id]); return operation(id, "succeeded", item("folder", "folder"), "mkdir"); };
   const harness = await mount(t, server.api);
-  enqueue(harness, [{ path: "folder", file: null }, entry("folder/file")]);
+  // An empty folder is the case that still needs an explicit create.
+  enqueue(harness, [{ path: "folder", file: null }]);
   await harness.until((queue) => queue.tasks[0]?.status === "finalizing");
   // An explicit retry also must resolve the durable operation, not issue mkdir again.
   harness.render().retry(harness.render().tasks[0].id);
@@ -421,7 +425,7 @@ test("cancel waiting folder removes descendants and a late poll cannot revive re
   server.api.mkdir = async () => { throw conflict(); };
   server.api.getOperation = async () => gate.promise;
   const harness = await mount(t, server.api);
-  const entries = [{ path: "folder", file: null }, entry("folder/file")];
+  const entries = [{ path: "folder", file: null }, { path: "folder/child", file: null }];
   enqueue(harness, entries);
   await harness.until((queue) => queue.tasks[0]?.status === "waiting");
   await harness.tick();

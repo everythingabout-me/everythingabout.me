@@ -6,7 +6,7 @@ import { transformWithOxc } from "vite";
 // Reuse Vite's TypeScript transform to support Node versions without type stripping.
 const source = await readFile(new URL("../src/pages/uploadSelection.ts", import.meta.url), "utf8");
 const { code } = await transformWithOxc(source, "uploadSelection.ts");
-const { droppedUploadEntries, filesToUploadEntries } = await import(
+const { droppedUploadEntries, filesToUploadEntries, foldersWithoutFiles } = await import(
   `data:text/javascript;base64,${Buffer.from(code).toString("base64")}`
 );
 
@@ -264,4 +264,17 @@ test("drops validate fallback paths as strictly as picker paths", async () => {
     items: [{ kind: "file", getAsFile: () => file }],
     files: [],
   }), /Invalid upload path/);
+});
+
+test("folders that contain a file are left to the upload, empty ones stay", () => {
+  const entries = [
+    { path: "apple-health", file: null },
+    { path: "apple-health/2025", file: null },
+    { path: "apple-health/2025/07", file: null },
+    { path: "apple-health/2025/07/01", file: null },
+    { path: "apple-health/2025/07/01/steps.json", file: new File(["{}"], "steps.json") },
+    { path: "apple-health/empty", file: null },
+  ];
+  const kept = foldersWithoutFiles(entries).map((entry) => entry.path);
+  assert.deepEqual(kept, ["apple-health/2025/07/01/steps.json", "apple-health/empty"]);
 });

@@ -57,7 +57,9 @@ Creation/move/copy destinations use one of:
 {"parent":{"id":"1f12cfd6-b93b-41ad-ae71-52a4299c3421"},"name":"new.md"}
 ```
 
-The parent may instead use `{"path":"/Notes"}`. It must resolve to an existing authorized folder; `name` is
+The parent may instead use `{"path":"/Notes"}`. It must resolve to an existing authorized folder, unless
+the creation asks for `parents` (a full-path creation then creates the missing chain first, with the same
+folder identity, change facts and audit an explicit mkdir produces); `name` is
 one accepted native filename segment. Destinations cannot select or assign an existing file ID. Raw streaming
 creation uses full `path`, or exactly one of `parentId`/`parentPath` plus `name`, exclusive with `id` and the
 other destination form. Parent-and-name raw PUT is create-only; ID/path replacement requires the existing

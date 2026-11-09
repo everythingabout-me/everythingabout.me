@@ -530,7 +530,7 @@ export type FileUploadInput = {
   mediaType: string;
   sourceModifiedAt?: string;
 } & (
-  | { path: string; condition: FileUploadCondition; destination?: never; target?: never }
+  | { path: string; condition: FileUploadCondition; parents?: true; destination?: never; target?: never }
   | { destination: Destination; condition?: { mode: "create" }; path?: never; target?: never }
   | { target: EntrySelector; condition: { mode: "replace"; contentRevision: string }; path?: never; destination?: never }
 );

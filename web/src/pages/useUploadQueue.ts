@@ -2,7 +2,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { ApiError, FileApiError, api, type FileProblem, type Item, type FileOperation, type FileUploadInput, type FileUploadPartGrant, type FileUploadSession } from "../api/client";
 import { t } from "../i18n";
-import type { UploadEntry } from "./uploadSelection";
+import { foldersWithoutFiles, type UploadEntry } from "./uploadSelection";
 import { claimUploadPath } from "./uploadOwnership";
 import { pendingFileOperation, setUploadOwner, settleFileOperation } from "./uploadPersistence";
 
@@ -44,6 +44,8 @@ export interface UploadTask {
   path: string;
   size: number;
   overwrite: boolean;
+  /** The upload creates missing ancestor folders instead of waiting for their tasks. */
+  parents: boolean;
   status: UploadStatus;
   loaded: number;
   speed: number;
@@ -252,6 +254,7 @@ export function useUploadQueue(onUploaded: (task: UploadTask, item: Item) => voi
           const capabilities = await api.capabilities(parent);
           if (signal.aborted) return;
           intent = { path: task.path, size: task.size, mediaType: task.file?.type || "application/octet-stream", condition,
+            ...(task.parents && condition.mode === "create" ? { parents: true as const } : {}),
             ...(capabilities.sourceModifiedAt && task.modifiedAt !== undefined ? { sourceModifiedAt: new Date(task.modifiedAt).toISOString() } : {}) };
           // Retain the exact intent/key in memory before allocation, including a lost create ACK.
           patch(id, { intent });
@@ -634,7 +637,9 @@ export function useUploadQueue(onUploaded: (task: UploadTask, item: Item) => voi
     pumpRef.current();
   }, [cancel, patch]);
   const enqueue = useCallback((entries: UploadEntry[], dir: string, exists: (path: string) => boolean) => {
-    for (const entry of entries) {
+    // A selected tree keeps only the folders that stay empty: every other folder is
+    // created by the upload that first needs it, inside that upload's request.
+    for (const entry of foldersWithoutFiles(entries)) {
       const path = relative(dir ? `${dir}/${entry.path}` : entry.path);
       const old = tasksRef.current.find((task) => task.path === path && task.status !== "completed");
       if (old) {
@@ -649,7 +654,7 @@ export function useUploadQueue(onUploaded: (task: UploadTask, item: Item) => voi
       if (overwrite && !window.confirm(t("drive.overwriteConfirm", { name: entry.path }))) continue;
       const id = taskId();
       update((current) => [...current, { id, file: entry.file, isDir: !entry.file, name: entry.path, dir: relative(dir), path, size: entry.file?.size ?? 0, modifiedAt: entry.file?.lastModified,
-        overwrite, status: "queued", loaded: 0, speed: 0, uploaded: false, createKey: id }]);
+        overwrite, parents: !!entry.file && path.includes("/"), status: "queued", loaded: 0, speed: 0, uploaded: false, createKey: id }]);
     }
     pumpRef.current();
   }, [patch, update]);

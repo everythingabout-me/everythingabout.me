@@ -171,6 +171,9 @@ Use a durable operation journal and recovery workflow:
 1. Bind user/root/config generation, target path/identity, expected revision and target generation; reserve
    logical quota and serialize conflicting file/folder operations. Capture selected file/parent ID and ancestor
    namespace state; a moved/recreated target or ancestor invalidates admitted work, including ID-selected uploads.
+   An upload may ask for its missing ancestors (`parents`): the service creates them with the same mkdir
+   effect an explicit folder create produces before binding the parent revision, so the ordering guarantee
+   is unchanged — the parent exists before the file is published, only the request that creates it differs.
    New ID requests after a completed move may select its current authorized location.
 2. Receive bytes into isolated temporary state or an unpublished native upload. Confirm resumable progress
    only after bytes and receipt survive restart. Failed uploads must not be treated as current files.
