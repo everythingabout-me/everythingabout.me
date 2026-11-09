@@ -30,6 +30,14 @@
   font-size: 13px;
 }
 
+/* Live entry counts while a long move runs; the dialog used to show only a verb. */
+.progress {
+  margin: 10px 0 0;
+  color: var(--text-2);
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+}
+
 .crumbs {
   display: flex;
   align-items: center;

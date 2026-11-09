@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { api, type Item } from "../api/client";
+import { api, type FileOperation, type Item } from "../api/client";
 import { ChevronRightIcon, FolderIcon } from "./icons";
 import { t } from "../i18n";
 import styles from "./TransferDialog.module.css";
@@ -19,12 +19,19 @@ function cleanPath(path: string): string {
 export function TransferDialog({
   mode,
   item,
+  progress,
+  cancelling,
   onCancel,
+  onCancelOperation,
   onConfirm,
 }: {
   mode: TransferMode;
   item: Item;
+  /** Entry counts the server reports while the move/copy runs. */
+  progress: FileOperation["progress"] | null;
+  cancelling: boolean;
   onCancel: () => void;
+  onCancelOperation: () => void;
   onConfirm: (destination: string) => Promise<void>;
 }) {
   const dialog = useRef<HTMLDialogElement>(null);
@@ -163,6 +170,12 @@ export function TransferDialog({
         )}
       </div>
 
+      {busy && progress && progress.total ? (
+        <p className={styles.progress} role="status">
+          {t("drive.progress", { done: progress.completed, total: progress.total })}
+        </p>
+      ) : null}
+      {busy && cancelling ? <p className={styles.hint}>{t("drive.cancelling")}</p> : null}
       {blocked && <p className={styles.warning}>{blocked}</p>}
       {error && (
         <p className={styles.error} role="alert">
@@ -171,8 +184,13 @@ export function TransferDialog({
       )}
 
       <div className={styles.actions}>
-        <button className={styles.cancel} disabled={busy} onClick={onCancel}>
-          {t("common.cancel")}
+        {/* While the operation runs, Cancel stops it on the server instead of hiding it. */}
+        <button
+          className={styles.cancel}
+          disabled={cancelling}
+          onClick={() => (busy ? onCancelOperation() : onCancel())}
+        >
+          {busy && cancelling ? t("drive.cancellingShort") : t("common.cancel")}
         </button>
         <button className={styles.primary} disabled={busy || blocked !== null} onClick={() => void confirm()}>
           {busy

@@ -97,14 +97,22 @@ function compareItems(a: Item, b: Item): number {
   return compareNames(a.name, b.name);
 }
 
-async function waitForOperation(operation: FileOperation): Promise<void> {
+async function waitForOperation(
+  operation: FileOperation,
+  onProgress?: (progress: FileOperation["progress"]) => void,
+): Promise<void> {
   let current = operation;
+  onProgress?.(current.progress);
   while (current.state !== "succeeded") {
-    if (current.state === "failed" || current.state === "cancelled") {
+    if (current.state === "cancelled") {
+      throw new Error(current.error?.detail || t("drive.transferCancelled"));
+    }
+    if (current.state === "failed") {
       throw new Error(current.error?.detail || t("error.saveFailed"));
     }
     await new Promise<void>((resolve) => window.setTimeout(resolve, 1000));
     current = await api.getOperation(current.id);
+    onProgress?.(current.progress);
   }
 }
 
@@ -538,6 +546,9 @@ export function FilesPage() {
   const [renameJob, setRenameJob] = useState<FileOperation | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<Item | null>(null);
   const [transfer, setTransfer] = useState<{ mode: TransferMode; item: Item } | null>(null);
+  const [transferProgress, setTransferProgress] = useState<FileOperation["progress"] | null>(null);
+  const [transferCancelling, setTransferCancelling] = useState(false);
+  const transferOperation = useRef<string | null>(null);
   const [trackedDeletions, setTrackedDeletions] = useState<{ operation: FileOperation; path: string }[]>([]);
   const [deletionStatusError, setDeletionStatusError] = useState(false);
   const deletionRequest = useRef(0);
@@ -685,10 +696,14 @@ export function FilesPage() {
         if (result.state === "failed" || result.state === "cancelled") {
           throw new Error(result.error?.detail || t("drive.transferFailed"));
         }
+        transferOperation.current = result.id;
+        setTransferProgress(result.progress);
         try {
-          await waitForOperation(result);
+          await waitForOperation(result, setTransferProgress);
         } catch (caught) {
           throw caught instanceof Error ? caught : new Error(t("drive.transferFailed"));
+        } finally {
+          transferOperation.current = null;
         }
       }
       setTransfer(null);
@@ -698,6 +713,18 @@ export function FilesPage() {
     },
     [load, navigate, path, showToast],
   );
+
+  /** Cancel while the move/copy is still running: the operation stops between entries. */
+  const cancelTransfer = useCallback(async () => {
+    const id = transferOperation.current;
+    if (!id) return;
+    setTransferCancelling(true);
+    try {
+      await api.cancelOperation(id);
+    } catch (error) {
+      showToast(error instanceof Error ? error.message : t("drive.transferFailed"), "error");
+    }
+  }, [showToast]);
 
   // The path is the URL (/files/Photos/2024), so back/forward and direct visits open the right place.
   useEffect(() => {
@@ -709,6 +736,12 @@ export function FilesPage() {
     setMenuOpen(false);
     setDeleteTarget(null);
   }, [path]);
+
+  // Progress belongs to the dialog that is open now, never to the previous transfer.
+  useEffect(() => {
+    setTransferProgress(null);
+    setTransferCancelling(false);
+  }, [transfer]);
 
   /** Only settled upload resources replace placeholder rows. */
   const handleUploaded = useCallback((_task: UploadTask, item: Item) => {
@@ -1561,7 +1594,10 @@ export function FilesPage() {
           key={`${transfer.mode}:${transfer.item.path}`}
           mode={transfer.mode}
           item={transfer.item}
+          progress={transferProgress}
+          cancelling={transferCancelling}
           onCancel={() => setTransfer(null)}
+          onCancelOperation={() => void cancelTransfer()}
           onConfirm={(destination) => applyTransfer(transfer.mode, transfer.item, destination)}
         />
       )}
