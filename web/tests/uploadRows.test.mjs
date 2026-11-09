@@ -66,7 +66,9 @@ test("shows only immediate children and aggregates all selected descendants", ()
   assert.equal(rows[0].isDir, true);
   assert.equal(rows[0].name, "apple-health");
   assert.deepEqual(rows[0].upload, {
-    status: "uploading", files: 3, completedFiles: 1, failed: 0,
+    status: "uploading", files: 3, completedFiles: 1,
+    folders: 2, completedFolders: 2, items: 5, completedItems: 3,
+    progressUnit: "bytes", preparing: false, failed: 0,
     size: 500, loaded: 220, speed: 50, percent: 44,
     cancelIds: ["task:health/apple-health"], retryIds: [],
   });
@@ -184,6 +186,7 @@ test("normalizes Unicode paths and compares directory boundaries without flatten
 
 test("clamps sent bytes and handles zero-byte files and finalization without NaN", () => {
   const zero = [folder("health/root"), task("health/root/empty", { size: 0, status: "completed" }), task("health/root/another", { size: 0 })];
+  // No byte can move, so the row counts its two files instead of dividing by zero.
   assert.equal(buildUploadRows([], zero, "health")[0].upload.percent, 50);
   const row = buildUploadRows([], [task("health/file", { loaded: 200, size: 100, status: "finalizing" })], "health")[0];
   assert.equal(row.upload.loaded, 100);
@@ -193,6 +196,28 @@ test("clamps sent bytes and handles zero-byte files and finalization without NaN
   const cancelling = buildUploadRows([], [task("health/file", { status: "finalizing", cancelRequested: true })], "health")[0];
   assert.deepEqual(cancelling.upload.cancelIds, []);
   assert.equal(buildUploadRows([], [task("health/file", { loaded: -1 })], "health")[0].upload.loaded, 0);
+});
+
+test("a large tree counts folder creation as progress instead of bytes that cannot move yet", () => {
+  const tasks = [folder("health/tree")];
+  for (let day = 0; day < 12; day++) {
+    tasks.push(folder(`health/tree/2025/07/${day}`, day < 5 ? "completed" : "uploading"));
+  }
+  for (let i = 0; i < 20; i++) tasks.push(task(`health/tree/2025/07/${i % 12}/f${i}.json`, { size: 10 }));
+  const summary = buildUploadRows([], tasks, "health")[0].upload;
+  // 12 day folders + 20 files, five of the days already created. The row's own folder
+  // is the row, not one of its items.
+  assert.equal(summary.items, 32);
+  assert.equal(summary.completedItems, 5);
+  assert.equal(summary.progressUnit, "items");
+  assert.equal(summary.percent, 15);
+  assert.equal(summary.loaded, 0);
+  assert.equal(summary.preparing, true);
+  // The first file starts: the badge switches from folder creation to the transfer.
+  const started = tasks.map((entry) => entry.path === "health/tree/2025/07/0/f0.json"
+    ? { ...entry, status: "uploading", loaded: 5 }
+    : entry);
+  assert.equal(buildUploadRows([], started, "health")[0].upload.preparing, false);
 });
 
 test("a folder does not claim to be finishing while later files remain queued", () => {

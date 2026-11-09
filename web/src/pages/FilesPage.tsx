@@ -203,7 +203,8 @@ const UploadRow = memo(function UploadRow({
   if (!upload) return null;
   const completed = upload.status === "completed";
   const navigable = isDir || completed;
-  const showProgress = !completed && upload.status !== "waiting" && (!isDir || upload.files > 0);
+  const showProgress = !completed && upload.status !== "waiting"
+    && (!isDir || upload.files > 0 || upload.folders > 1);
   const content = (
     <>
       <span className={styles.glyph}>
@@ -218,10 +219,10 @@ const UploadRow = memo(function UploadRow({
             <span className={`${styles.statusBadge} ${uploadStatusClass(upload.status)}`}>
               {upload.failed > 0
                 ? t("drive.uploadFailedCount", { count: upload.failed.toLocaleString() })
-                : uploadStatusText(upload.status)}
+                : upload.preparing ? t("drive.uploadCreatingFolders") : uploadStatusText(upload.status)}
             </span>
           )}
-          {!isDir && upload.status === "uploading" && (
+          {upload.status === "uploading" && (!isDir || upload.speed > 0) && (
             <span className={styles.uploadSpeed}>
               <span className={styles.uploadSep} aria-hidden="true">·</span>
               {formatSpeed(upload.speed)}
@@ -231,8 +232,18 @@ const UploadRow = memo(function UploadRow({
         {isDir ? (
           <div className={styles.uploadMeta}>
             <span>{t("drive.uploadFileCount", { count: upload.files.toLocaleString() })}</span>
-            <span className={styles.uploadSep}>·</span>
-            <span>{t("drive.uploadedFileCount", { count: upload.completedFiles.toLocaleString() })}</span>
+            {upload.folders > 1 && (
+              <>
+                <span className={styles.uploadSep}>·</span>
+                <span>{t("drive.uploadFolderCount", { count: upload.folders.toLocaleString() })}</span>
+              </>
+            )}
+            {upload.progressUnit === "bytes" && (
+              <>
+                <span className={styles.uploadSep}>·</span>
+                <span>{t("drive.uploadedFileCount", { count: upload.completedFiles.toLocaleString() })}</span>
+              </>
+            )}
           </div>
         ) : task?.error ? (
           <div className={styles.uploadMeta}>
@@ -243,8 +254,15 @@ const UploadRow = memo(function UploadRow({
       </div>
       {showProgress ? (
         <div className={styles.uploadProgress}>
+          {/* A selected tree is counted in items, because creating its folders moves no byte
+              and would otherwise hold an empty 0% bar over work that is really happening. */}
           <div className={styles.uploadProgressLabel}>
-            <span>{formatPreciseBytes(upload.loaded)} / {formatBytes(upload.size)}</span>
+            <span>{upload.progressUnit === "items"
+              ? t("drive.uploadItemProgress", {
+                done: upload.completedItems.toLocaleString(),
+                total: upload.items.toLocaleString(),
+              })
+              : `${formatPreciseBytes(upload.loaded)} / ${formatBytes(upload.size)}`}</span>
             <span className={styles.uploadPercent}>{upload.percent}%</span>
           </div>
           <div
@@ -254,11 +272,17 @@ const UploadRow = memo(function UploadRow({
             aria-valuemin={0}
             aria-valuemax={100}
             aria-valuenow={upload.percent}
-            aria-valuetext={t("drive.uploadProgressValue", {
-              percent: upload.percent,
-              sent: formatPreciseBytes(upload.loaded),
-              total: formatBytes(upload.size),
-            })}
+            aria-valuetext={upload.progressUnit === "items"
+              ? t("drive.uploadProgressItemsValue", {
+                percent: upload.percent,
+                done: upload.completedItems.toLocaleString(),
+                total: upload.items.toLocaleString(),
+              })
+              : t("drive.uploadProgressValue", {
+                percent: upload.percent,
+                sent: formatPreciseBytes(upload.loaded),
+                total: formatBytes(upload.size),
+              })}
           >
             <div
               className={`${styles.progressFill} ${upload.status === "finalizing" ? styles.progressFillFinishing : ""}`}
