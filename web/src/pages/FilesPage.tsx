@@ -569,20 +569,28 @@ export function FilesPage() {
 
   const refreshDeletions = useCallback(async () => {
     const request = ++deletionRequest.current;
-    try {
-      const known = pendingFileOperations();
-      const results = await Promise.all(known.map(async (entry) => ({
-        operation: await api.getOperation(entry.id), path: entry.path,
-      })));
-      if (request !== deletionRequest.current) return;
-      for (const { operation } of results) {
+    const known = pendingFileOperations();
+    const active: { operation: FileOperation; path: string }[] = [];
+    let failed = false;
+    // One operation's failure must not hide the others, and a record the server no
+    // longer knows is settled rather than reported: this is background bookkeeping,
+    // not something the user asked for or can act on.
+    await Promise.all(known.map(async (entry) => {
+      try {
+        const operation = await api.getOperation(entry.id);
         if (operation.state === "succeeded") settleFileOperation(operation.id);
+        else active.push({ operation, path: entry.path });
+      } catch (error) {
+        if (error instanceof ApiError && (error.status === 404 || error.status === 410)) {
+          settleFileOperation(entry.id);
+          return;
+        }
+        failed = true;
       }
-      setDeletionJobs(results.filter(({ operation }) => operation.kind === "delete" && operation.state !== "succeeded"));
-      setDeletionStatusError(false);
-    } catch {
-      if (request === deletionRequest.current) setDeletionStatusError(true);
-    }
+    }));
+    if (request !== deletionRequest.current) return;
+    setDeletionJobs(active.filter(({ operation }) => operation.kind === "delete" && operation.state !== "succeeded"));
+    setDeletionStatusError(failed);
   }, []);
 
   useEffect(() => {
@@ -598,11 +606,13 @@ export function FilesPage() {
     if (!activeDeletions && !deletionStatusError) return;
     let stopped = false;
     let timer: number;
+    // Poll while a deletion is running. When the status cannot be read the retry
+    // backs off instead of hammering the API in a three-second loop.
     const tick = async () => {
       await refreshDeletions();
-      if (!stopped) timer = window.setTimeout(tick, 3000);
+      if (!stopped) timer = window.setTimeout(tick, deletionStatusError ? 30_000 : 3_000);
     };
-    timer = window.setTimeout(tick, 3000);
+    timer = window.setTimeout(tick, deletionStatusError ? 30_000 : 3_000);
     return () => { stopped = true; window.clearTimeout(timer); };
   }, [activeDeletions, deletionStatusError, refreshDeletions]);
 
@@ -1096,7 +1106,7 @@ export function FilesPage() {
       />
 
       <main className={styles.main}>
-        {(deletionJobs.length > 0 || deletionStatusError) && (
+        {deletionJobs.length > 0 && (
           <aside className={styles.deletions} aria-label={t("drive.cleanupTitle")} aria-live="polite">
             {deletionJobs.map(({ operation: job, path: deletionPath }) => (
               <div key={job.id} className={styles.deletionStatus}>
@@ -1110,12 +1120,6 @@ export function FilesPage() {
                 {(job.state === "failed" || job.state === "cancelled" || job.state === "outcome_unknown") && <span className={styles.deletionMessage}>{t("drive.cleanupFailed")}</span>}
               </div>
             ))}
-            {deletionStatusError && (
-              <p className={styles.deletionMessage}>
-                {t("drive.cleanupUnavailable")} {" "}
-                <button className={styles.textBtn} onClick={() => void refreshDeletions()}>{t("common.retry")}</button>
-              </p>
-            )}
           </aside>
         )}
         {/* The path is the title: one row, with this page's controls on the right. */}
