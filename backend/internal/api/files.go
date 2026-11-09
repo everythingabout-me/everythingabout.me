@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"fmt"
 	"math"
 	"net/http"
 	"strings"
@@ -11,14 +12,16 @@ import (
 	"everythingabout.me/backend/internal/jobs"
 	"everythingabout.me/backend/internal/nodes"
 	"everythingabout.me/backend/internal/paths"
+	"everythingabout.me/backend/internal/sizeformat"
 	"everythingabout.me/backend/internal/storage"
 )
 
 const (
 	listLimit   = 5000
 	searchLimit = 200
-	// COS caps one object at 48.82 TB; this stays well below that.
-	maxFileSize = int64(48) * 1024 * 1024 * 1024
+	// COS caps one object at 48.82 TB; this stays well below that. Declared in decimal
+	// units so the message below prints exactly "48 GB" (see internal/sizeformat).
+	maxFileSize = int64(48) * 1000 * 1000 * 1000
 )
 
 type pathBody struct {
@@ -138,7 +141,8 @@ func (s *Server) handleUploadSign(w http.ResponseWriter, r *http.Request) error 
 		return httpx.BadRequest("invalid file size")
 	}
 	if body.Size > float64(maxFileSize) {
-		return httpx.NewError(http.StatusRequestEntityTooLarge, "a single file is limited to 48GB")
+		return httpx.NewError(http.StatusRequestEntityTooLarge,
+			fmt.Sprintf("a single file is limited to %s", sizeformat.Bytes(maxFileSize)))
 	}
 
 	unlock, err := s.lockBrowserNamespace(r.Context(), user.ID)

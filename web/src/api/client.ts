@@ -83,6 +83,7 @@ export interface FileResource {
   revision: string;
   /** Saved content generation; content and replacement requests revalidate native evidence. */
   contentRevision: string | null;
+  /** Raw bytes. Format with sizeFormat.ts before showing it; never interpolate. */
   size: number | null;
   mediaType: string | null;
   sourceModifiedAt: string | null;

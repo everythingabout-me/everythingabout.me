@@ -39,6 +39,7 @@ import (
 	"everythingabout.me/backend/internal/httpx"
 	"everythingabout.me/backend/internal/nodes"
 	"everythingabout.me/backend/internal/paths"
+	"everythingabout.me/backend/internal/sizeformat"
 	"everythingabout.me/backend/internal/store"
 )
 
@@ -73,7 +74,7 @@ const (
 	MaxMeta     = 120
 	MaxMetrics  = 3
 	MaxMedia    = 4
-	MaxHTMLLen  = 32 << 10
+	MaxHTMLLen  = 32 * 1000
 	MinHTMLSize = 40
 	MaxHTMLSize = 640
 	MaxURLLen   = 2000
@@ -662,7 +663,7 @@ func ValidateApp(in *AppInput) error {
 		}
 	case TypeHTML:
 		if strings.TrimSpace(p.HTML) == "" || len(p.HTML) > MaxHTMLLen {
-			return httpx.BadRequest("html card needs html under 32KB")
+			return httpx.BadRequest(fmt.Sprintf("html card needs html under %s", sizeformat.Bytes(MaxHTMLLen)))
 		}
 		if p.Height == 0 {
 			p.Height = 240

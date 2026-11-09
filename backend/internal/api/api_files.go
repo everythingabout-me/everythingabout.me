@@ -17,6 +17,7 @@ import (
 	"everythingabout.me/backend/internal/jobs"
 	"everythingabout.me/backend/internal/nodes"
 	"everythingabout.me/backend/internal/paths"
+	"everythingabout.me/backend/internal/sizeformat"
 	"everythingabout.me/backend/internal/storage"
 )
 
@@ -614,7 +615,7 @@ func (s *Server) checkQuota(ctx context.Context, userID string, incoming int64, 
 	total := used - old + incoming
 	if total > quota {
 		return httpx.NewError(http.StatusInsufficientStorage,
-			fmt.Sprintf("not enough space: need %d bytes, quota is %d bytes", total, quota))
+			fmt.Sprintf("not enough space: need %s, quota is %s", sizeformat.Bytes(total), sizeformat.Bytes(quota)))
 	}
 	return nil
 }

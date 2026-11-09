@@ -178,6 +178,12 @@ Common commands:
 - Take fonts, spacing, radii, and shadows from the variables in `globals.css`; `--danger` is only for
   irreversible actions.
 - Keep the first-paint bundle small: dynamically import heavy dependencies.
+- **Human-readable sizes are decimal**: `1 KB = 1000 bytes`, labels `KB/MB/GB/TB`, never KiB — the
+  same convention Finder and `ls -h` use, so the number here matches the one in the user's file
+  manager. Every byte count a person reads goes through `web/src/pages/sizeFormat.ts` (server text:
+  `backend/internal/sizeformat.Bytes`), and a user-visible limit is declared in decimal and rendered
+  by the formatter, never hard-coded into a message (`48 * 1000 * 1000 * 1000` prints "48 GB").
+  Spec and the golden table both implementations must match: [docs/design/size-units.md](docs/design/size-units.md).
 
 ## After changing something
 

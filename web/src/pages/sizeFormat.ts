@@ -4,6 +4,9 @@
  * Units are decimal, the convention macOS Finder and `ls -h` use: 1 KB is 1000 bytes, never
  * KiB. Digits per unit also follow Finder's file style, so a size read here matches the one
  * Finder shows for the same file (21,253,968,461 bytes is "21.25 GB" in both places).
+ *
+ * docs/design/size-units.md is the spec; its golden table is repeated in
+ * web/tests/sizeFormat.test.mjs and backend/internal/sizeformat/size_test.go.
  */
 const SIZE_UNITS = [
   { label: "KB", decimals: 0 },
