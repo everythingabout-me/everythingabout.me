@@ -57,7 +57,10 @@ func (s *Server) handleFilesSync(w http.ResponseWriter, r *http.Request, f *file
 	}
 	defer unlock()
 	var deleting bool
-	if err := conn.QueryRow(ctx, `select exists(select 1 from fs_jobs where user_id=$1::uuid and op='delete' and status<>'done')`, owner).Scan(&deleting); err != nil {
+	// A scan must not race a deletion: the index still lists the path while the
+	// native purge runs, and re-importing or pruning it mid-flight would fight settlement.
+	if err := conn.QueryRow(ctx, `select exists(select 1 from fs_jobs where user_id=$1::uuid and op='delete' and status<>'done')
+		or exists(select 1 from file_operations where owner_id=$1::uuid and action='delete' and snapshot->>'State' in ('queued','running','outcome_unknown'))`, owner).Scan(&deleting); err != nil {
 		return err
 	}
 	if deleting {

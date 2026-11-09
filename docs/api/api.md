@@ -331,7 +331,11 @@ quota charges the new sizes. No application-only content sharing replaces the de
 DELETE optionally accepts `If-Revision: nr_...` to guard the selected file or folder; recursive deletion additionally
 serializes against subtree mutations. Without it deletion explicitly applies to the current accessible subtree.
 No trash or restore API. Success requires actual native deletion plus index settlement; removing only index
-rows is not deletion. Recursive deletion can partially succeed and must journal each captured entry; never
+rows is not deletion. An accepted deletion is final for the user at once: every listing, metadata read and
+ID lookup conceals the path and its captured subtree while the native purge runs, and only a terminal
+operation that deleted nothing makes it visible again. Reusing that path before the operation is terminal is
+`409 operation_in_progress`, not a silent overwrite. Recursive deletion can partially succeed and must
+journal each captured entry; never
 rescan and remove new external additions. Provider backup/version retention is separate and secure erasure is
 not promised. Temporary transfer cleanup is background work, not deletion of authoritative user content.
 

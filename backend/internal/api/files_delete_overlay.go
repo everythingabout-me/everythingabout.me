@@ -8,27 +8,14 @@ import (
 	"golang.org/x/text/unicode/norm"
 )
 
-// filesDeleteOverlay hides accepted legacy deletions until their native purge is
-// complete. Index absence alone cannot conceal paths from authoritative reads.
-func (s *Server) filesDeleteOverlay(ctx context.Context, owner string, driver storage.Driver) (storage.Driver, error) {
-	if s.cfg == nil || s.cfg.BackendName() != "cos" || s.db == nil {
-		return driver, nil
-	}
-	rows, err := s.db.Pool().Query(ctx, `select from_path from fs_jobs
-		where user_id=$1::uuid and op='delete' and status<>'done' and delete_binding=$2`, owner, uploadIndexBinding(s.cfg))
+// filesDeleteOverlay hides every path whose deletion has been accepted until its
+// native purge finishes. The native tree stays authoritative — deletion is complete
+// only once the objects are gone and the index settled — but the user's confirmation
+// is final: reads must treat the path as deleted at once instead of exposing the
+// internal cleanup that remains.
+func (s *Server) filesDeleteOverlay(ctx context.Context, owner, namespace string, driver storage.Driver) (storage.Driver, error) {
+	roots, err := s.pendingDeleteRoots(ctx, owner, namespace)
 	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var roots []string
-	for rows.Next() {
-		var root string
-		if err := rows.Scan(&root); err != nil {
-			return nil, err
-		}
-		roots = append(roots, norm.NFC.String(root))
-	}
-	if err := rows.Err(); err != nil {
 		return nil, err
 	}
 	if len(roots) == 0 {
@@ -41,6 +28,72 @@ func (s *Server) filesDeleteOverlay(ctx context.Context, owner string, driver st
 		return &pendingDeleteReferenceDriver{pendingDeleteDriver: overlay}, nil
 	}
 	return overlay, nil
+}
+
+// pendingDeleteRoots lists the root-relative paths of deletions that have been accepted
+// but are not terminal yet. Pending legacy jobs (fs_jobs) and current actions
+// (file_operations) both contribute: in either case the user has already confirmed the
+// deletion, so every read treats the path as gone while the native purge runs.
+func (s *Server) pendingDeleteRoots(ctx context.Context, owner, namespace string) ([]string, error) {
+	if s.db == nil {
+		return nil, nil
+	}
+	var roots []string
+	seen := map[string]bool{}
+	add := func(root string) {
+		root = norm.NFC.String(root)
+		if root == "" || root == "/" || seen[root] {
+			return
+		}
+		seen[root] = true
+		roots = append(roots, root)
+	}
+	// Accepted deletions of the retiring legacy job runner keep their own binding.
+	if s.cfg != nil && s.cfg.BackendName() == "cos" {
+		rows, err := s.db.Pool().Query(ctx, `select from_path from fs_jobs
+			where user_id=$1::uuid and op='delete' and status<>'done' and delete_binding=$2`, owner, uploadIndexBinding(s.cfg))
+		if err != nil {
+			return nil, err
+		}
+		for rows.Next() {
+			var root string
+			if err := rows.Scan(&root); err != nil {
+				rows.Close()
+				return nil, err
+			}
+			add(root)
+		}
+		err = rows.Err()
+		rows.Close()
+		if err != nil {
+			return nil, err
+		}
+	}
+	// A delete action is hidden from its own namespace only: an adopted or restored
+	// native root must never inherit a stale hidden path from another generation.
+	rows, err := s.db.Pool().Query(ctx, `select distinct g.native_path
+		from file_operation_guards g
+		join file_operations o on o.id=g.operation_id and o.owner_id=g.owner_id
+		where g.owner_id=$1::uuid and o.action='delete'
+		  and o.snapshot->>'State' in ('queued','running','outcome_unknown')
+		  and concat_ws(':', o.snapshot->'Root'->>'OwnerID', o.snapshot->'Root'->>'ConnectionID',
+		      o.snapshot->'Root'->>'Generation', o.snapshot->'Root'->>'ContentRoot',
+		      o.snapshot->'Root'->>'SystemRoot')=$2`, owner, namespace)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var root string
+		if err := rows.Scan(&root); err != nil {
+			return nil, err
+		}
+		add(root)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return roots, nil
 }
 
 type pendingDeleteDriver struct {

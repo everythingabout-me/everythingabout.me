@@ -97,7 +97,8 @@ Common commands:
 - Dependencies are wired in `api.New`; define an interface first for a new service (see `storage.Storage`,
   `timeline.Analyzer`) and never construct clients inside a handler.
 - **Deletion is permanent** (there is no trash); deleting a nonempty directory requires explicit `?recursive=true`, and
-  code must never recurse "helpfully" on the user's behalf.
+  code must never recurse "helpfully" on the user's behalf. An accepted delete is concealed from every read at
+  once; the native purge and index settlement continue in the background.
 - File clients share `/api/files`; legacy cookie `/api/fs/*` and root public file routes return 410.
   The accepted file API is one `/api/files` contract for every client,
   accepting a stable service UUID or direct path at the same endpoint, with no `/api/web/files` mount.

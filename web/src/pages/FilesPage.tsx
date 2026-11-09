@@ -538,9 +538,10 @@ export function FilesPage() {
   const [renameJob, setRenameJob] = useState<FileOperation | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<Item | null>(null);
   const [transfer, setTransfer] = useState<{ mode: TransferMode; item: Item } | null>(null);
-  const [deletionJobs, setDeletionJobs] = useState<{ operation: FileOperation; path: string }[]>([]);
+  const [trackedDeletions, setTrackedDeletions] = useState<{ operation: FileOperation; path: string }[]>([]);
   const [deletionStatusError, setDeletionStatusError] = useState(false);
   const deletionRequest = useRef(0);
+  const notifiedDeleteFailures = useRef(new Set<string>());
   const deleting = useRef(false);
   const menuTrigger = useRef<HTMLButtonElement>(null);
 
@@ -557,6 +558,8 @@ export function FilesPage() {
   // The upload callback is async: by completion the user may have moved to another directory.
   const listingRef = useRef({ path, searching: false });
   listingRef.current = { path, searching: Boolean(activeQuery) };
+  // The mounted view to reload after a background deletion changes the truth on screen.
+  const reloadView = useRef<() => void>(() => {});
   const panelRef = useRef<HTMLElement>(null);
   // The card's height just before a switch, so it can resize instead of jumping.
   const heightFrom = useRef<{ key: string; height: number } | null>(null);
@@ -579,19 +582,32 @@ export function FilesPage() {
     [],
   );
 
+  // Accepted deletions are not user-facing work: the path disappears from the listing
+  // at once and the native purge runs invisibly. Only an operation that ends without
+  // deleting anything is worth reporting, because that row is back (or may be).
   const refreshDeletions = useCallback(async () => {
     const request = ++deletionRequest.current;
     const known = pendingFileOperations();
     const active: { operation: FileOperation; path: string }[] = [];
     let failed = false;
     // One operation's failure must not hide the others, and a record the server no
-    // longer knows is settled rather than reported: this is background bookkeeping,
-    // not something the user asked for or can act on.
+    // longer knows is settled rather than reported.
     await Promise.all(known.map(async (entry) => {
       try {
         const operation = await api.getOperation(entry.id);
-        if (operation.state === "succeeded") settleFileOperation(operation.id);
-        else active.push({ operation, path: entry.path });
+        if (operation.state === "succeeded") {
+          settleFileOperation(operation.id);
+          return;
+        }
+        const ended = operation.state === "failed" || operation.state === "cancelled" || operation.state === "outcome_unknown";
+        if (operation.kind === "delete" && ended && !notifiedDeleteFailures.current.has(operation.id)) {
+          notifiedDeleteFailures.current.add(operation.id);
+          showToast(t("drive.deleteIncomplete", { path: entry.path }), "error");
+          settleFileOperation(operation.id);
+          reloadView.current();
+          return;
+        }
+        active.push({ operation, path: entry.path });
       } catch (error) {
         if (error instanceof ApiError && (error.status === 404 || error.status === 410)) {
           settleFileOperation(entry.id);
@@ -601,9 +617,9 @@ export function FilesPage() {
       }
     }));
     if (request !== deletionRequest.current) return;
-    setDeletionJobs(active.filter(({ operation }) => operation.kind === "delete" && operation.state !== "succeeded"));
+    setTrackedDeletions(active.filter(({ operation }) => operation.kind === "delete"));
     setDeletionStatusError(failed);
-  }, []);
+  }, [showToast, t]);
 
   useEffect(() => {
     setUploadOwner(user.id);
@@ -612,7 +628,7 @@ export function FilesPage() {
     return () => { deletionRequest.current += 1; unsubscribe(); };
   }, [user.id, refreshDeletions]);
 
-  const activeDeletions = deletionJobs.some(({ operation }) =>
+  const activeDeletions = trackedDeletions.some(({ operation }) =>
     operation.state === "queued" || operation.state === "running" || operation.state === "outcome_unknown");
   useEffect(() => {
     if (!activeDeletions && !deletionStatusError) return;
@@ -812,6 +828,11 @@ export function FilesPage() {
       if (requestId.current === request) setLoading(false);
     }
   };
+  // A failed delete must put the restored row back; a search is not the folder listing.
+  reloadView.current = () => {
+    if (activeQuery) void runSearch(activeQuery);
+    else void load(listingRef.current.path);
+  };
 
   const itemExists = useCallback(
     (target: string) => items.some((item) => item.path === filePath(target)),
@@ -931,19 +952,22 @@ export function FilesPage() {
     try {
       const operation = await api.deletePath(target.path, target.kind === "folder", target.revision);
       deletionRequest.current += 1;
-      if (operation && operation.state !== "succeeded") {
-        trackFileOperation(operation, target.path);
-        setDeletionJobs((jobs) => [{ operation, path: target.path }, ...jobs.filter((existing) => existing.operation.id !== operation.id)]);
-        showToast(t("drive.cleanupActive"));
-      } else {
-        showToast(t("drive.deleted", { name: target.name }));
-      }
+      // The accepted delete is already the user's final answer; only the native purge
+      // is still running, and it is tracked only so a failure can be reported.
+      if (operation && operation.state !== "succeeded") trackFileOperation(operation, target.path);
+      showToast(t("drive.deleted", { name: target.name }));
       setDeletionStatusError(false);
+      // Drop the row before the listing round trip; the reload then confirms it.
+      setItems((current) => current.filter((item) => target.kind === "folder"
+        ? item.path !== target.path && !item.path.startsWith(`${target.path}/`)
+        : item.path !== target.path));
       uploads.filter((task) => filePath(task.path) === target.path || filePath(task.path).startsWith(`${target.path}/`))
         .forEach((task) => cancelUpload(task.id));
       setDeleteTarget(null);
       if (filePath(listingRef.current.path) === target.path) {
         navigate(filesHref(target.parentPath ?? "/"), { replace: true });
+      } else {
+        reloadView.current();
       }
     } catch (error) {
       if (error instanceof ApiError && error.operationId) {
@@ -1118,22 +1142,6 @@ export function FilesPage() {
       />
 
       <main className={styles.main}>
-        {deletionJobs.length > 0 && (
-          <aside className={styles.deletions} aria-label={t("drive.cleanupTitle")} aria-live="polite">
-            {deletionJobs.map(({ operation: job, path: deletionPath }) => (
-              <div key={job.id} className={styles.deletionStatus}>
-                <span className={styles.deletionPath} title={deletionPath}>{deletionPath}</span>
-                <span className={job.state === "failed" || job.state === "cancelled" || job.state === "outcome_unknown" ? styles.deletionAttention : undefined}>
-                  {t(job.state === "failed" || job.state === "cancelled" || job.state === "outcome_unknown" ? "drive.cleanupAttention" : "drive.cleanupActive")}
-                </span>
-                <span className={styles.deletionProgress}>
-                  {t("drive.cleanupProgress", { done: job.progress.completed.toLocaleString(), total: job.progress.total?.toLocaleString() ?? "—" })}
-                </span>
-                {(job.state === "failed" || job.state === "cancelled" || job.state === "outcome_unknown") && <span className={styles.deletionMessage}>{t("drive.cleanupFailed")}</span>}
-              </div>
-            ))}
-          </aside>
-        )}
         {/* The path is the title: one row, with this page's controls on the right. */}
         {downloadMissing && <StorageNotice missingContent />}
         {downloadError && <p className={styles.downloadError} role="alert">{downloadError}</p>}

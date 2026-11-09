@@ -99,11 +99,16 @@ func filesPathKey(f *fileRequest) fc.SegmentKey {
 	return func(s string) string { return cases.Fold().String(norm.NFC.String(s)) }
 }
 
-// Accepted legacy deletions remain hidden while their native purge completes.
+// Accepted deletions remain hidden while their native purge completes.
 // The index applies these exclusions before keyset pagination and membership hashes.
+// A reference-capable driver is wrapped one level deeper, so both overlay types must
+// expose their roots or every index read silently ignores the concealment.
 func filesHiddenRoots(f *fileRequest) []string {
-	if overlay, ok := f.Driver.(*pendingDeleteDriver); ok {
+	switch overlay := f.Driver.(type) {
+	case *pendingDeleteDriver:
 		return overlay.roots
+	case *pendingDeleteReferenceDriver:
+		return overlay.pendingDeleteDriver.roots
 	}
 	return nil
 }

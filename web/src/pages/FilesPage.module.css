@@ -19,48 +19,6 @@
   padding: 28px 24px 64px;
 }
 
-/* ---------- Background cleanup ---------- */
-
-.deletions {
-  margin-bottom: 18px;
-  padding: 10px 14px;
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  background: var(--surface);
-  color: var(--text-2);
-  font-size: 13px;
-}
-
-.deletionStatus {
-  display: flex;
-  align-items: baseline;
-  flex-wrap: wrap;
-  gap: 4px 12px;
-  padding: 4px 0;
-}
-
-.deletionPath {
-  max-width: 100%;
-  overflow-wrap: anywhere;
-  color: var(--text);
-  font-weight: 500;
-}
-
-.deletionProgress {
-  margin-left: auto;
-  font-variant-numeric: tabular-nums;
-}
-
-.deletionAttention {
-  color: var(--danger);
-}
-
-.deletionMessage {
-  flex-basis: 100%;
-  margin: 0;
-  line-height: 1.5;
-}
-
 /* ---------- Page header: the path, plus this page's controls ---------- */
 
 .topbar {

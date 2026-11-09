@@ -292,10 +292,6 @@ func (s *Server) fileWrapWithAudit(fn fileHandler, persist filesAuditRecorder) h
 				return err
 			}
 			defer driver.Close()
-			driver, err = s.filesDeleteOverlay(r.Context(), principal.User.ID, driver)
-			if err != nil {
-				return err
-			}
 			scope := fc.Path("/")
 			if principal.Token != nil {
 				scope, err = fc.FromRelative(principal.Token.Prefix)
@@ -312,6 +308,12 @@ func (s *Server) fileWrapWithAudit(fn fileHandler, persist filesAuditRecorder) h
 					return e
 				}
 				rootIdentity = fmt.Sprintf("%s:%s:%d:%s:%s", binding.OwnerID, binding.ConnectionID, binding.Generation, binding.ContentRoot, binding.SystemRoot)
+			}
+			// Start concealment before any read: the accepted delete is already final
+			// for the user, only its native purge remains.
+			driver, err = s.filesDeleteOverlay(r.Context(), principal.User.ID, rootIdentity, driver)
+			if err != nil {
+				return err
 			}
 			req := &fileRequest{Principal: principal, Source: source, Driver: driver, Scope: scope, ContentNamespace: rootIdentity, Namespace: rootIdentity + ":" + filePrincipalID(principal) + ":" + string(scope)}
 			if principal.Token != nil {
