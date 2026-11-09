@@ -37,6 +37,7 @@ import { useUploadQueue, type UploadStatus, type UploadTask } from "./useUploadQ
 import { droppedUploadEntries, filesToUploadEntries } from "./uploadSelection";
 import { buildUploadRows, isUploadDirectory, type UploadRowEntry } from "./uploadRows";
 import { pendingFileOperations, setUploadOwner, settleFileOperation, subscribeFileOperations, trackFileOperation } from "./uploadPersistence";
+import { formatBytes, formatPreciseBytes, formatSize, formatSpeed } from "./sizeFormat";
 import styles from "./FilesPage.module.css";
 
 /**
@@ -47,41 +48,6 @@ const FilePreview = lazy(() => import("../components/preview/FilePreview"));
 
 function joinPath(dir: string, name: string): string {
   return dir ? `${dir}/${name}` : name;
-}
-
-function formatBytes(bytes: number): string {
-  if (bytes < 1024) return `${Math.max(0, Math.round(bytes))} B`;
-  const units = ["KB", "MB", "GB", "TB"];
-  let value = bytes / 1024;
-  let index = 0;
-  while (value >= 1024 && index < units.length - 1) {
-    value /= 1024;
-    index += 1;
-  }
-  return `${value.toFixed(value >= 100 || Number.isInteger(value) ? 0 : 1)} ${units[index]}`;
-}
-
-function formatSize(bytes: number): string {
-  return bytes ? formatBytes(bytes) : "—";
-}
-
-function formatSpeed(bytesPerSecond: number): string {
-  if (!Number.isFinite(bytesPerSecond) || bytesPerSecond <= 0) return "0 B/s";
-  return `${formatSize(bytesPerSecond)}/s`;
-}
-
-/** Keeps two decimals below the unit so a per-second progress tick always moves the number. */
-function formatPreciseBytes(bytes: number): string {
-  if (!(bytes > 0)) return "0 B";
-  if (bytes < 1024) return `${Math.round(bytes)} B`;
-  const units = ["KB", "MB", "GB", "TB"];
-  let value = bytes / 1024;
-  let index = 0;
-  while (value >= 1024 && index < units.length - 1) {
-    value /= 1024;
-    index += 1;
-  }
-  return `${value.toFixed(2)} ${units[index]}`;
 }
 
 /** Matches the backend: directories first, the rest sorted by lowercased name. */
