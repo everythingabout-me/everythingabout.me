@@ -237,8 +237,9 @@ than silently following a stable ID. Parent redaction and selector validation ar
 ### Reference-addressed reads
 
 Content delivery must not re-derive the namespace on every transfer. `Stat` and `Open` answer path-addressed
-questions, so an object adapter proves the spelling by listing each ancestor (depth × directory size native
-calls) before it can touch one object. A driver may therefore implement the optional capability
+questions; an object adapter settles one path with the byte-exact probes described under *a path costs what
+the path names* and never walks the ancestor chain, before it can touch one object. A driver may therefore
+implement the optional capability
 
 ```go
 type ReferenceReader interface {
@@ -256,6 +257,8 @@ a stale index is not authority to read a different object or another root genera
 Reference equality is byte-exact: a key from an older root generation, or one whose spelling the requested
 path cannot reproduce byte for byte, deliberately falls back to path-addressed traversal instead of guessing
 that two spellings denote the same object.
+
+### A path costs what the path names
 
 Path-addressed `Stat` stays constant-cost: an object-store adapter settles one path with at most three
 byte-exact probes — the folder marker key (`key + "/"`), the file key, and one parent listing for a prefix
@@ -294,6 +297,27 @@ Conditions that cannot be implemented with native support or a declared coordina
 return unsupported before an unsafe effect. Conflicting external writes are outside an application lock;
 do not claim they are fenced. An atomic no-replace primitive is needed to guarantee absence against them.
 A native MOVE that is atomic only within a filesystem must not be advertised as atomic across volumes.
+
+### Why a listing does not establish a revision
+
+A revision is only ever taken from an observation that returns one *for that exact entry*, and only from the
+channel every revision it will be compared against comes from. Two facts force that:
+
+- The listing API this adapter uses does not carry a per-object version id at all. S3 `ListObjectsV2` and the
+  COS bucket listing have no version field; the tree's revision is a version id, so a listing cannot supply
+  it even in principle.
+- Both listings do return an ETag, but whether a listing's ETag is byte-identical to the one a HEAD returns
+  is a per-provider fact, not a portable guarantee. Mixing the two would make `sameNative` compare tokens
+  from different sources and report `target_changed` for an object that never moved — a false failure, and
+  the expensive kind: it stops a move that was going correctly.
+
+So each channel stays self-consistent: the tree takes a revision from HEAD/GET, the coordinator takes one
+from HEAD. This is not a claim that ETags are useless — the same fixture also serves one ETag for every
+object, which guards a different rule: an ETag is not an *identity*. Identity is the key (`NativeRef`) plus
+what the driver proves about the content; a revision is only what a conditional effect compares.
+
+Trusting a listing's ETag would be a per-connection decision, taken on evidence for that endpoint, exactly
+like the other admission capabilities — not a default that a provider is assumed to satisfy.
 
 The object mutation driver derives `Revision` from the current object's ETag and sends every conditional
 effect with native `If-Match` / `If-None-Match` where the provider enforces them (COS ignores `If-Match`
