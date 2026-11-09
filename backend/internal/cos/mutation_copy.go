@@ -41,6 +41,9 @@ func (b *mutationBackend) CopyObject(ctx context.Context, in objectmutation.Copy
 		ContentType:           in.MediaType,
 		XOptionHeader:         &headers,
 	}}
+	// A provider that materialises the copy takes as long as the bytes need.
+	ctx, cancel := transferBudget(ctx, in.Size)
+	defer cancel()
 	result, response, err := b.client.Object.Copy(ctx, in.Target, b.copySource(in.Source), options)
 	if err != nil {
 		return objectmutation.Object{}, mutationCopyError(in.Target, err)
@@ -61,6 +64,8 @@ func (b *mutationBackend) CopyPart(ctx context.Context, key, uploadID string, nu
 		return "", storage.NewError("invalid_request", storage.Path(key), nil)
 	}
 	options := &sdk.ObjectCopyPartOptions{XCosCopySourceRange: fmt.Sprintf("bytes=%d-%d", offset, offset+length-1), XCosCopySourceIfMatch: sourceETag}
+	ctx, cancel := transferBudget(ctx, length)
+	defer cancel()
 	result, response, err := b.client.Object.CopyPart(ctx, key, uploadID, number, b.copySource(source), options)
 	if err != nil {
 		return "", mutationCopyError(key, err)

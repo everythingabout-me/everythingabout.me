@@ -39,6 +39,32 @@ func (c *Client) Close() error {
 	return nil
 }
 
+// A copy, an upload or a part write lasts as long as its bytes take, so it cannot
+// share one fixed deadline with a metadata request. metadataBudget bounds the
+// requests whose duration does not scale with size; transferBudget adds the time
+// the bytes need at a deliberately pessimistic provider rate.
+const (
+	metadataBudget = 5 * time.Minute
+	// minTransferBytesPerSecond is far below any real provider; it exists to make a
+	// deadline that never fires on a healthy transfer and still fires on a stalled
+	// connection.
+	minTransferBytesPerSecond = 5 << 20
+	maxTransferBudget         = 6 * time.Hour
+)
+
+// transferBudget caps one request at metadataBudget plus the time size bytes need
+// at minTransferBytesPerSecond.
+func transferBudget(ctx context.Context, size int64) (context.Context, context.CancelFunc) {
+	budget := metadataBudget
+	if size > 0 {
+		budget += time.Duration(size/minTransferBytesPerSecond) * time.Second
+	}
+	if budget > maxTransferBudget {
+		budget = maxTransferBudget
+	}
+	return context.WithTimeout(ctx, budget)
+}
+
 func New(cfg config.COS) (*Client, error) {
 	bucketURL, err := url.Parse(fmt.Sprintf("https://%s.cos.%s.myqcloud.com", cfg.Bucket, cfg.Region))
 	if err != nil {
@@ -49,10 +75,14 @@ func New(cfg config.COS) (*Client, error) {
 		DialContext:       (&net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
 		ForceAttemptHTTP2: true, MaxIdleConns: 128, MaxIdleConnsPerHost: 32, MaxConnsPerHost: 64,
 		IdleConnTimeout: 90 * time.Second, TLSHandshakeTimeout: 10 * time.Second,
-		ResponseHeaderTimeout: 30 * time.Second, ExpectContinueTimeout: time.Second,
+		// One budget for requests whose duration does not depend on size. The
+		// client-wide timeout that used to sit here also capped every transfer at
+		// 60s, so an object big enough to need longer failed with no explanation:
+		// transferBudget bounds those requests by the bytes they can move instead.
+		ResponseHeaderTimeout: metadataBudget,
+		ExpectContinueTimeout: time.Second,
 	}
 	httpClient := &http.Client{
-		Timeout:   60 * time.Second,
 		Transport: &cos.AuthorizationTransport{SecretID: cfg.SecretID, SecretKey: cfg.SecretKey, Transport: transport},
 	}
 	client := cos.NewClient(&cos.BaseURL{BucketURL: bucketURL}, httpClient)

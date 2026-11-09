@@ -99,6 +99,9 @@ func (b *mutationBackend) Put(ctx context.Context, in objectmutation.Put) (objec
 	if in.Size == 0 {
 		body = strings.NewReader("")
 	}
+	// The body streams here, so the request lasts as long as the upload takes.
+	ctx, cancel := transferBudget(ctx, in.Size)
+	defer cancel()
 	response, err := b.client.Object.Put(ctx, in.Key, body, &sdk.ObjectPutOptions{ObjectPutHeaderOptions: &sdk.ObjectPutHeaderOptions{ContentLength: in.Size, ContentType: in.MediaType, XOptionHeader: &headers}})
 	if err != nil {
 		return objectmutation.Object{}, mutationPublishError(in, err)

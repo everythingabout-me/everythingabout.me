@@ -28,6 +28,8 @@ func (b *mutationBackend) BeginMultipart(ctx context.Context, in objectmutation.
 	return result.UploadID, nil
 }
 func (b *mutationBackend) PutPart(ctx context.Context, key, id string, number int, body io.Reader, size int64) (string, error) {
+	ctx, cancel := transferBudget(ctx, size)
+	defer cancel()
 	response, err := b.client.Object.UploadPart(ctx, key, id, number, body, &sdk.ObjectUploadPartOptions{ContentLength: size})
 	if err != nil {
 		return "", mutationWriteError(key, err)
