@@ -549,7 +549,7 @@ func (d *driver) Open(ctx context.Context, path storage.Path, options storage.Re
 	if err := validatePath(path); err != nil {
 		return storage.Read{}, err
 	}
-	if len(options.Version) != 0 {
+	if len(options.PinnedVersion) != 0 {
 		return storage.Read{}, storage.NewError("unsupported", path, nil)
 	}
 	if options.Offset < 0 || options.Length != nil && *options.Length <= 0 {

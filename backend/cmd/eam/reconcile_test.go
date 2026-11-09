@@ -288,7 +288,7 @@ func TestReconcilePostgresIdentityDryRunAndAtomicity(t *testing.T) {
 	if !reflect.DeepEqual(before, snapshot()) {
 		t.Fatal("transaction failure leaked an earlier insert")
 	}
-	nativeScan, err := treescan.Scan(ctx, singleScanTree{entry: storage.Entry{Path: "native-ref", Kind: storage.File, NativeRef: []byte("opaque-provider-locator"), Version: []byte("opaque-native-version"), Size: 1}}, treescan.Options{})
+	nativeScan, err := treescan.Scan(ctx, singleScanTree{entry: storage.Entry{Path: "native-ref", Kind: storage.File, NativeRef: []byte("opaque-provider-locator"), Revision: []byte("opaque-native-version"), Size: 1}}, treescan.Options{})
 	if err != nil {
 		t.Fatal(err)
 	}

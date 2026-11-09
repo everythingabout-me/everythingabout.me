@@ -124,7 +124,7 @@ func Run(t *testing.T, construct func(*httptest.Server) (storage.Factory, error)
 			if string(data) != string(want) || info.Size != int64(len(want)) || read.Entry.Size != int64(len(want)) {
 				t.Fatalf("native readback %q: %q %+v %+v", path, data, info, read)
 			}
-			if info.MediaType != "text/plain" || !info.ModifiedAt.Equal(fixedTime) || len(info.Version) == 0 {
+			if info.MediaType != "text/plain" || !info.ModifiedAt.Equal(fixedTime) || len(info.Revision) == 0 {
 				t.Fatalf("HEAD evidence: %+v", info)
 			}
 		}
@@ -169,7 +169,7 @@ func Run(t *testing.T, construct func(*httptest.Server) (storage.Factory, error)
 			t.Fatal(err)
 		}
 		read.Body.Close()
-		if read.Entry.Size != 12 || string(read.Entry.Version) != "native-version:new-version" || !read.Entry.ModifiedAt.Equal(fixedTime.Add(time.Hour)) || read.Entry.MediaType != "application/changed" {
+		if read.Entry.Size != 12 || string(read.Entry.Revision) != "native-version:new-version" || !read.Entry.ModifiedAt.Equal(fixedTime.Add(time.Hour)) || read.Entry.MediaType != "application/changed" {
 			t.Fatalf("GET representation was replaced by preflight metadata: %+v", read.Entry)
 		}
 	})
@@ -185,7 +185,7 @@ func Run(t *testing.T, construct func(*httptest.Server) (storage.Factory, error)
 		before := native.listRequests
 		native.mu.Unlock()
 		entry, err := reader.StatReference(ctx, storage.Path(special), key)
-		if err != nil || entry.Kind != storage.File || entry.Size != 10 || len(entry.Version) == 0 {
+		if err != nil || entry.Kind != storage.File || entry.Size != 10 || len(entry.Revision) == 0 {
 			t.Fatalf("reference stat: %+v %v", entry, err)
 		}
 		read, err := reader.OpenReference(ctx, storage.Path(special), key, storage.ReadOptions{Offset: 2, Length: ptr(4)})
@@ -220,31 +220,31 @@ func Run(t *testing.T, construct func(*httptest.Server) (storage.Factory, error)
 		if err != nil {
 			t.Fatal(err)
 		}
-		read, err := driver.Open(ctx, storage.Path(special), storage.ReadOptions{Version: entry.Version})
+		read, err := driver.Open(ctx, storage.Path(special), storage.ReadOptions{PinnedVersion: entry.Revision})
 		if err != nil {
 			t.Fatal(err)
 		}
 		read.Body.Close()
-		_, err = driver.Open(ctx, storage.Path(special), storage.ReadOptions{Version: []byte("native-version:missing")})
+		_, err = driver.Open(ctx, storage.Path(special), storage.ReadOptions{PinnedVersion: []byte("native-version:missing")})
 		code(t, err, "changed")
-		_, err = driver.Open(ctx, storage.Path(special), storage.ReadOptions{Version: []byte("etag:guess")})
+		_, err = driver.Open(ctx, storage.Path(special), storage.ReadOptions{PinnedVersion: []byte("etag:guess")})
 		code(t, err, "unsupported")
 		native.mu.Lock()
 		native.mode = "ignore_version"
 		native.mu.Unlock()
-		_, err = driver.Open(ctx, storage.Path(special), storage.ReadOptions{Version: []byte("native-version:other")})
+		_, err = driver.Open(ctx, storage.Path(special), storage.ReadOptions{PinnedVersion: []byte("native-version:other")})
 		code(t, err, "changed")
 		native.mu.Lock()
 		native.mode = "precondition"
 		native.mu.Unlock()
-		_, err = driver.Open(ctx, storage.Path(special), storage.ReadOptions{Version: entry.Version})
+		_, err = driver.Open(ctx, storage.Path(special), storage.ReadOptions{PinnedVersion: entry.Revision})
 		code(t, err, "changed")
 		native.mu.Lock()
 		native.mode = ""
 		native.version = ""
 		native.mu.Unlock()
 		entry, err = driver.Stat(ctx, storage.Path(special))
-		if err != nil || len(entry.Version) != 0 {
+		if err != nil || len(entry.Revision) != 0 {
 			t.Fatalf("ETag/mtime incorrectly pinned: %+v %v", entry, err)
 		}
 		_, err = driver.Stat(ctx, "absent")

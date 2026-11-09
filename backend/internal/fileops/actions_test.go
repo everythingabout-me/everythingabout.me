@@ -48,7 +48,7 @@ func (n *actionNative) put(p storage.Path, kind storage.Kind, data string) {
 	if kind == storage.Folder {
 		size = 0
 	}
-	n.entries[p] = storage.Entry{Path: p, Kind: kind, Size: size, Version: []byte(strconv.Itoa(n.serial)), NativeRef: []byte(fmt.Sprintf("inode-%d", n.serial))}
+	n.entries[p] = storage.Entry{Path: p, Kind: kind, Size: size, Revision: []byte(strconv.Itoa(n.serial)), NativeRef: []byte(fmt.Sprintf("inode-%d", n.serial))}
 	n.data[p] = data
 }
 func (n *actionNative) StorageBinding() storage.Config {
@@ -99,10 +99,10 @@ func (n *actionNative) Mkdir(ctx context.Context, m storage.Mutation, save stora
 	return n.effect(ctx, storage.EffectIntent{ID: m.ID, Action: "mkdir", Target: m.Path, Conditions: m.Conditions}, save)
 }
 func (n *actionNative) Remove(ctx context.Context, m storage.Mutation, save storage.Checkpoint) (storage.MutationResult, error) {
-	return n.effect(ctx, storage.EffectIntent{ID: m.ID, Action: "delete", Source: m.Path, SourceVersion: m.Conditions.ExpectedVersion}, save)
+	return n.effect(ctx, storage.EffectIntent{ID: m.ID, Action: "delete", Source: m.Path, SourceRevision: m.Conditions.ExpectedRevision}, save)
 }
 func (n *actionNative) Copy(ctx context.Context, m storage.MoveRequest, save storage.Checkpoint) (storage.MutationResult, error) {
-	return n.effect(ctx, storage.EffectIntent{ID: m.ID, Action: "copy", Source: m.Source, Target: m.Target, SourceVersion: m.SourceVersion, Conditions: m.TargetConditions}, save)
+	return n.effect(ctx, storage.EffectIntent{ID: m.ID, Action: "copy", Source: m.Source, Target: m.Target, SourceRevision: m.SourceRevision, Conditions: m.TargetConditions}, save)
 }
 func (n *actionNative) Move(context.Context, storage.MoveRequest, storage.Checkpoint) (storage.MutationResult, error) {
 	return storage.MutationResult{}, errors.New("service must use captured copy/verify/delete")
@@ -132,7 +132,7 @@ func (n *actionNative) effect(ctx context.Context, i storage.EffectIntent, save 
 	}
 	if i.Source != "" {
 		e, ok := n.entries[i.Source]
-		if !ok || !bytes.Equal(e.Version, i.SourceVersion) {
+		if !ok || !bytes.Equal(e.Revision, i.SourceRevision) {
 			return fail(storage.NewError("changed", i.Source, nil))
 		}
 	}

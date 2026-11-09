@@ -48,7 +48,7 @@ func TestMutationListScansSiblingsOncePerPage(t *testing.T) {
 		}
 		for _, e := range page.Entries {
 			expectedPath := storage.Path(fmt.Sprintf("entry-%04d", seen))
-			if e.Path != expectedPath || len(e.Version) == 0 || len(e.ContentIdentity) == 0 {
+			if e.Path != expectedPath || len(e.Revision) == 0 || len(e.ContentIdentity) == 0 {
 				t.Fatalf("bad enriched entry %+v", e)
 			}
 			if e.Kind == storage.File && (e.Digest == nil || e.Digest.Algorithm != "sha-256") {

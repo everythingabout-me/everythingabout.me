@@ -142,7 +142,7 @@ func TestNativeTreeConformanceAndDirectExit(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if !reflect.DeepEqual(stat, e) || !stat.ModifiedAt.Equal(info.ModTime()) || len(e.Version) != 0 {
+			if !reflect.DeepEqual(stat, e) || !stat.ModifiedAt.Equal(info.ModTime()) || len(e.Revision) != 0 {
 				t.Fatalf("metadata differs for %q", e.Path)
 			}
 			if e.Kind == storage.Folder {
@@ -226,7 +226,7 @@ func TestRangesVersionsAndTypedErrors(t *testing.T) {
 		{name: "zero length", path: "file", options: storage.ReadOptions{Length: ptr(0)}, code: "invalid_range"},
 		{name: "negative length", path: "file", options: storage.ReadOptions{Length: ptr(-1)}, code: "invalid_range"},
 		{name: "overflow", path: "file", options: storage.ReadOptions{Offset: 1, Length: ptr(math.MaxInt64)}, code: "invalid_range"},
-		{name: "version", path: "file", options: storage.ReadOptions{Version: []byte("mtime-size-is-not-immutable")}, code: "unsupported"},
+		{name: "version", path: "file", options: storage.ReadOptions{PinnedVersion: []byte("mtime-size-is-not-immutable")}, code: "unsupported"},
 		{name: "missing", path: "missing", code: "not_found"},
 		{name: "folder", path: "folder", code: "not_file"},
 		{name: "root", path: "", code: "not_file"},
@@ -249,7 +249,7 @@ func TestRangesVersionsAndTypedErrors(t *testing.T) {
 			if err != nil || string(data) != tc.want {
 				t.Fatalf("data=%q err=%v want=%q", data, err, tc.want)
 			}
-			if result.Offset != tc.options.Offset || result.Length != int64(len(tc.want)) || len(result.Entry.Version) != 0 {
+			if result.Offset != tc.options.Offset || result.Length != int64(len(tc.want)) || len(result.Entry.Revision) != 0 {
 				t.Fatalf("read descriptor = %+v", result)
 			}
 			if tc.path == "file" && result.Entry.Size != 10 {

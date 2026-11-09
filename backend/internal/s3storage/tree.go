@@ -89,7 +89,7 @@ func (b *backend) Head(ctx context.Context, key string) (objecttree.Object, erro
 	if output.ContentLength == nil {
 		return objecttree.Object{}, storage.NewError("invalid_backend_response", "", nil)
 	}
-	return objecttree.Object{Key: key, Size: *output.ContentLength, ModifiedAt: aws.ToTime(output.LastModified), MediaType: aws.ToString(output.ContentType), Version: aws.ToString(output.VersionId)}, nil
+	return objecttree.Object{Key: key, Size: *output.ContentLength, ModifiedAt: aws.ToTime(output.LastModified), MediaType: aws.ToString(output.ContentType), VersionID: aws.ToString(output.VersionId)}, nil
 }
 func (b *backend) List(ctx context.Context, prefix, cursor string) (objecttree.NativePage, error) {
 	input := &s3.ListObjectsV2Input{Bucket: aws.String(b.bucket), Prefix: aws.String(prefix), Delimiter: aws.String("/"), MaxKeys: aws.Int32(1000)}
@@ -154,7 +154,7 @@ func (b *backend) Get(ctx context.Context, key, byteRange, version string) (obje
 		output.Body.Close()
 		return objecttree.Response{}, storage.NewError("invalid_backend_response", "", nil)
 	}
-	obj := objecttree.Object{Key: key, Size: *output.ContentLength, ModifiedAt: aws.ToTime(output.LastModified), MediaType: aws.ToString(output.ContentType), Version: aws.ToString(output.VersionId)}
+	obj := objecttree.Object{Key: key, Size: *output.ContentLength, ModifiedAt: aws.ToTime(output.LastModified), MediaType: aws.ToString(output.ContentType), VersionID: aws.ToString(output.VersionId)}
 	return objecttree.Response{Object: obj, Body: output.Body, Status: status, Length: *output.ContentLength, ContentRange: aws.ToString(output.ContentRange)}, nil
 }
 func nativeError(ctx context.Context, err error, versioned bool) error {

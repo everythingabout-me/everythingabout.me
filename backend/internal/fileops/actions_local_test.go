@@ -128,7 +128,7 @@ func TestActionsLocalPostgres(t *testing.T) {
 			t.Fatal(out.State, err)
 		}
 		after, err := native.Stat(ctx, "real/empty")
-		if err != nil || string(before.Version) != string(after.Version) {
+		if err != nil || string(before.Revision) != string(after.Revision) {
 			t.Fatal("index repair repeated native mkdir", err)
 		}
 	})

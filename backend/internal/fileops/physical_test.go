@@ -232,13 +232,13 @@ func TestRetainingUploadPostgresSettlementAndCleanup(t *testing.T) {
 	pool := isolatedPostgres(t)
 	ctx := context.Background()
 	p, root, actor := seedRetainingOwner(t, pool, provenBaseline(8, 30, 100, 100))
-	intent := storage.WriteIntent{Target: "file", Size: 5, Conditions: storage.Conditions{ExpectedVersion: []byte("captured-old-version")}}
+	intent := storage.WriteIntent{Target: "file", Size: 5, Conditions: storage.Conditions{ExpectedRevision: []byte("captured-old-version")}}
 	encoded, _ := json.Marshal(intent)
 	reserved, err := PhysicalReservation(root, intent.Size)
 	if err != nil {
 		t.Fatal(err)
 	}
-	op := mustBegin(t, p, BeginRequest{Root: root, Actor: actor, Kind: "upload_commit", Intent: encoded, Guards: []Guard{{Path: "file"}}, Reservation: ReservationRequest{NewBytes: 5, OldBytes: 8, CreditPath: "file", CreditVersion: intent.Conditions.ExpectedVersion, PhysicalBytes: reserved}})
+	op := mustBegin(t, p, BeginRequest{Root: root, Actor: actor, Kind: "upload_commit", Intent: encoded, Guards: []Guard{{Path: "file"}}, Reservation: ReservationRequest{NewBytes: 5, OldBytes: 8, CreditPath: "file", CreditVersion: intent.Conditions.ExpectedRevision, PhysicalBytes: reserved}})
 	op = mustClaim(t, p, op, actor)
 	intent.ID = op.ID
 	stage := storage.Staged{Intent: intent, Handle: []byte("durable private spool"), Size: 5, Digest: &storage.Digest{Algorithm: "sha-256", Value: []byte("verified")}}

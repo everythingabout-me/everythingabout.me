@@ -23,14 +23,15 @@ import (
 	"golang.org/x/text/unicode/norm"
 )
 
-// Object is metadata supplied by a native HEAD, list or GET. Version is an
-// immutable native version ID, never an ETag or a timestamp.
+// Object is metadata supplied by a native HEAD, list or GET. VersionID is the
+// provider's immutable version id, and is empty unless the provider retains
+// versions. It is never the revision a conditional effect compares.
 type Object struct {
 	Key        string
 	Size       int64
 	ModifiedAt time.Time
 	MediaType  string
-	Version    string
+	VersionID  string
 }
 type NativePage struct {
 	Objects   []Object
@@ -197,7 +198,7 @@ func (t *Tree) children(ctx context.Context, path storage.Path) ([]storage.Entry
 			entry.Size = obj.Size
 			entry.ModifiedAt = obj.ModifiedAt
 			entry.MediaType = obj.MediaType
-			entry.Version = version(obj.Version)
+			entry.Revision = versionToken(obj.VersionID)
 		}
 		entries[relative] = entry
 		return nil
@@ -306,15 +307,18 @@ func (t *Tree) Stat(ctx context.Context, path storage.Path) (storage.Entry, erro
 	return t.entry(path, obj), nil
 }
 func (t *Tree) entry(path storage.Path, obj Object) storage.Entry {
-	return storage.Entry{Path: path, Kind: storage.File, NativeRef: []byte(t.key(path)), Version: version(obj.Version), Size: obj.Size, ModifiedAt: obj.ModifiedAt, MediaType: obj.MediaType}
+	return storage.Entry{Path: path, Kind: storage.File, NativeRef: []byte(t.key(path)), Revision: versionToken(obj.VersionID), Size: obj.Size, ModifiedAt: obj.ModifiedAt, MediaType: obj.MediaType}
 }
-func version(v string) []byte {
+// versionToken encodes a provider version id as this tree's revision token. A
+// provider that retains no versions yields no token; the mutation driver then
+// derives its revision from the object ETag instead.
+func versionToken(v string) []byte {
 	if v == "" || v == "null" {
 		return nil
 	}
 	return []byte("native-version:" + v)
 }
-func parseVersion(v []byte) (string, error) {
+func parseVersionToken(v []byte) (string, error) {
 	if len(v) == 0 {
 		return "", nil
 	}
@@ -488,7 +492,7 @@ func (t *Tree) OpenReference(ctx context.Context, path storage.Path, ref []byte,
 
 // fetch issues exactly one ranged or full GET for an already proven key.
 func (t *Tree) fetch(ctx context.Context, path storage.Path, key string, opts storage.ReadOptions, done func()) (storage.Read, error) {
-	selected, err := parseVersion(opts.Version)
+	selected, err := parseVersionToken(opts.PinnedVersion)
 	if err != nil {
 		return storage.Read{}, err
 	}
@@ -513,7 +517,7 @@ func (t *Tree) fetch(ctx context.Context, path storage.Path, key string, opts st
 	if response.Body == nil || response.Length < 0 {
 		return reject("invalid_backend_response")
 	}
-	if selected != "" && response.Object.Version != selected {
+	if selected != "" && response.Object.VersionID != selected {
 		return reject("changed")
 	}
 	fullSize := response.Length

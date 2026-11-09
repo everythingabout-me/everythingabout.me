@@ -22,15 +22,15 @@ func CommitNativeTreeMove(ctx context.Context, tx pgx.Tx, op fileops.Operation, 
 	}
 	effect := op.Entries[0]
 	var result storage.MutationResult
-	if effect.Action != "move" || effect.State != "applied" || effect.Source != request.From || effect.Target != request.To || effect.SourceEntry == nil || effect.SourceEntry.Kind != storage.Folder || effect.SourceEntry.Path != effect.Source || !bytes.Equal(effect.SourceVersion, effect.SourceEntry.Version) || len(effect.SourceVersion) == 0 || json.Unmarshal(effect.Result, &result) != nil || result.Entry == nil || result.Entry.Kind != storage.Folder || result.Entry.Path != request.To || len(result.Evidence) == 0 || !bytes.Equal(result.Evidence, effect.Evidence) {
+	if effect.Action != "move" || effect.State != "applied" || effect.Source != request.From || effect.Target != request.To || effect.SourceEntry == nil || effect.SourceEntry.Kind != storage.Folder || effect.SourceEntry.Path != effect.Source || !bytes.Equal(effect.SourceRevision, effect.SourceEntry.Revision) || len(effect.SourceRevision) == 0 || json.Unmarshal(effect.Result, &result) != nil || result.Entry == nil || result.Entry.Kind != storage.Folder || result.Entry.Path != request.To || len(result.Evidence) == 0 || !bytes.Equal(result.Evidence, effect.Evidence) {
 		return nil, fileops.E("invalid_native_result", nil)
 	}
 	entry := *result.Entry
-	if !bytes.Equal(entry.Version, effect.SourceEntry.Version) || !bytes.Equal(entry.NativeRef, effect.SourceEntry.NativeRef) || !bytes.Equal(entry.ContentIdentity, effect.SourceEntry.ContentIdentity) {
+	if !bytes.Equal(entry.Revision, effect.SourceEntry.Revision) || !bytes.Equal(entry.NativeRef, effect.SourceEntry.NativeRef) || !bytes.Equal(entry.ContentIdentity, effect.SourceEntry.ContentIdentity) {
 		return nil, fileops.E("invalid_native_result", nil)
 	}
 	if native != nil && native.Entry != nil {
-		if native.Entry.Path != entry.Path || native.Entry.Kind != storage.Folder || !bytes.Equal(native.Entry.Version, entry.Version) || !bytes.Equal(native.Entry.NativeRef, entry.NativeRef) {
+		if native.Entry.Path != entry.Path || native.Entry.Kind != storage.Folder || !bytes.Equal(native.Entry.Revision, entry.Revision) || !bytes.Equal(native.Entry.NativeRef, entry.NativeRef) {
 			return nil, fileops.E("invalid_native_result", nil)
 		}
 		entry = *native.Entry

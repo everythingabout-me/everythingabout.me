@@ -17,7 +17,7 @@ func uploadRequest(r Root, a Actor, target storage.Path, size int64, key string)
 	captured := client
 	captured.Conditions = storage.Conditions{Absent: true}
 	captured.ParentPath = "folder"
-	captured.ParentVersion = []byte("captured-parent")
+	captured.ParentRevision = []byte("captured-parent")
 	intent, _ := json.Marshal(captured)
 	return BeginRequest{Root: r, Actor: a, Kind: "upload_commit", IdempotencyKey: key, Intent: intent, Reservation: ReservationRequest{NewBytes: size, PhysicalBytes: 2*size + 16}}, UploadOptions{PartSize: 4, ClientIntent: client}
 }
@@ -48,9 +48,9 @@ func TestUploadClientFingerprint(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	w.Conditions = storage.Conditions{ExpectedVersion: []byte("new native evidence")}
+	w.Conditions = storage.Conditions{ExpectedRevision: []byte("new native evidence")}
 	w.ParentPath = "new-parent"
-	w.ParentVersion = []byte("new version")
+	w.ParentRevision = []byte("new version")
 	b, err := clientUploadFingerprint(w)
 	if err != nil || a != b {
 		t.Fatalf("native evidence changed client identity: %v", err)
@@ -91,8 +91,8 @@ func TestPostgresUploads(t *testing.T) {
 		req, opt := uploadRequest(r, a, "folder/one", 8, "same-key")
 		var captured storage.WriteIntent
 		_ = json.Unmarshal(req.Intent, &captured)
-		captured.Conditions = storage.Conditions{ExpectedVersion: []byte("changed-evidence")}
-		captured.ParentVersion = []byte("reobserved-parent")
+		captured.Conditions = storage.Conditions{ExpectedRevision: []byte("changed-evidence")}
+		captured.ParentRevision = []byte("reobserved-parent")
 		req.Intent, _ = json.Marshal(captured)
 		req.Reservation.PhysicalBytes++
 		got, replay, err := p.CreateUpload(ctx, req, opt)

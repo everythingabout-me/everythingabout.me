@@ -367,7 +367,7 @@ func runBenchCase(t *testing.T, backend string, driver storage.Driver, c benchCa
 	intents := make([]storage.WriteIntent, c.count)
 	for i := range intents {
 		id := fmt.Sprintf("bench-%s-%d-%d", label, stamp, i)
-		intents[i] = storage.WriteIntent{ID: id, Target: storage.Path(id + ".bin"), Size: c.size, MediaType: "application/octet-stream", Conditions: storage.Conditions{Absent: true}, ParentVersion: parent.Version}
+		intents[i] = storage.WriteIntent{ID: id, Target: storage.Path(id + ".bin"), Size: c.size, MediaType: "application/octet-stream", Conditions: storage.Conditions{Absent: true}, ParentRevision: parent.Revision}
 	}
 	var results []benchResult
 	start := time.Now()
@@ -407,7 +407,7 @@ func runBenchCase(t *testing.T, backend string, driver storage.Driver, c benchCa
 			}
 			entry, err := driver.Stat(ctx, r.path)
 			if err == nil {
-				_, err = remover.Remove(ctx, storage.Mutation{ID: fmt.Sprintf("bench-rm-%d-%d", stamp, i), Path: r.path, Conditions: storage.Conditions{ExpectedVersion: entry.Version}}, func(context.Context, []byte) error { return nil })
+				_, err = remover.Remove(ctx, storage.Mutation{ID: fmt.Sprintf("bench-rm-%d-%d", stamp, i), Path: r.path, Conditions: storage.Conditions{ExpectedRevision: entry.Revision}}, func(context.Context, []byte) error { return nil })
 			}
 			if err != nil {
 				t.Logf("  cleanup %s: %v", r.path, err)

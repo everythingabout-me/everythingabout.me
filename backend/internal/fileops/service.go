@@ -46,7 +46,7 @@ func operationIntent(op Operation) (storage.WriteIntent, error) {
 		return intent, E("invalid_intent", nil)
 	}
 	intent.ID = op.ID
-	if intent.Conditions.Absent == (len(intent.Conditions.ExpectedVersion) > 0) {
+	if intent.Conditions.Absent == (len(intent.Conditions.ExpectedRevision) > 0) {
 		return intent, E("invalid_intent", nil)
 	}
 	return intent, nil

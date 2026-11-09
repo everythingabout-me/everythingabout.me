@@ -146,31 +146,31 @@ func (d *Driver) key(p storage.Path, kind storage.Kind) string {
 	return key
 }
 
-// nativeVersion derives the revision token from the current object's ETag.
+// nativeRevision derives the revision token from the current object's ETag.
 // Every conditional native request (If-Match / If-None-Match) uses the ETag, so
 // bucket versioning is neither required nor consulted.
-func nativeVersion(etag string) []byte {
+func nativeRevision(etag string) []byte {
 	if etag == "" || len(etag) > 1024 || strings.ContainsAny(etag, "\r\n\x00") {
 		return nil
 	}
 	return []byte("native-etag:" + etag)
 }
-func parseVersion(value []byte) (string, error) {
+func parseRevision(value []byte) (string, error) {
 	if len(value) > 4096 || !bytes.HasPrefix(value, []byte("native-etag:")) {
 		return "", fail("unsupported", "")
 	}
 	s := string(bytes.TrimPrefix(value, []byte("native-etag:")))
-	if len(nativeVersion(s)) == 0 {
+	if len(nativeRevision(s)) == 0 {
 		return "", fail("unsupported", "")
 	}
 	return s, nil
 }
 func (d *Driver) objectEntry(p storage.Path, kind storage.Kind, obj Object) (storage.Entry, error) {
-	if obj.Key != d.key(p, kind) || obj.Size < 0 || len(nativeVersion(obj.ETag)) == 0 || kind == storage.Folder && obj.Size != 0 {
+	if obj.Key != d.key(p, kind) || obj.Size < 0 || len(nativeRevision(obj.ETag)) == 0 || kind == storage.Folder && obj.Size != 0 {
 		return storage.Entry{}, fail("unsupported", p)
 	}
 	modified := obj.ModifiedAt
-	e := storage.Entry{Path: p, Kind: kind, NativeRef: []byte(obj.Key), Version: nativeVersion(obj.ETag), Size: obj.Size, ModifiedAt: modified, MediaType: obj.MediaType}
+	e := storage.Entry{Path: p, Kind: kind, NativeRef: []byte(obj.Key), Revision: nativeRevision(obj.ETag), Size: obj.Size, ModifiedAt: modified, MediaType: obj.MediaType}
 	if kind == storage.Folder {
 		e.Size = 0
 		e.MediaType = ""
@@ -183,7 +183,7 @@ func (d *Driver) rootEntry(e storage.Entry) storage.Entry {
 	e.Size = 0
 	e.NativeRef = []byte(d.binding.ContentRoot)
 	h := sha256.Sum256([]byte(d.namespace))
-	e.Version = []byte("object-root:" + hex.EncodeToString(h[:]))
+	e.Revision = []byte("object-root:" + hex.EncodeToString(h[:]))
 	return e
 }
 func (d *Driver) Stat(ctx context.Context, p storage.Path) (storage.Entry, error) {
@@ -217,7 +217,7 @@ func (d *Driver) Stat(ctx context.Context, p storage.Path) (storage.Entry, error
 func (d *Driver) observe(ctx context.Context, e storage.Entry) (storage.Entry, error) {
 	obj, err := d.backend.Head(ctx, d.key(e.Path, e.Kind))
 	if storage.IsCode(err, "not_found") && e.Kind == storage.Folder {
-		e.Version = nil
+		e.Revision = nil
 		e.Size = 0
 		e.MediaType = ""
 		return e, nil
@@ -272,12 +272,12 @@ func (d *Driver) Open(ctx context.Context, p storage.Path, options storage.ReadO
 		done()
 		return storage.Read{}, err
 	}
-	if len(options.Version) > 0 && !bytes.Equal(options.Version, current.Version) {
+	if len(options.PinnedVersion) > 0 && !bytes.Equal(options.PinnedVersion, current.Revision) {
 		done()
 		return storage.Read{}, fail("changed", p)
 	}
 	treeOptions := options
-	treeOptions.Version = nil
+	treeOptions.PinnedVersion = nil
 	read, err := d.tree.Open(ctx, p, treeOptions)
 	if err != nil {
 		done()
@@ -290,7 +290,7 @@ func (d *Driver) Open(ctx context.Context, p storage.Path, options storage.ReadO
 		done()
 		return storage.Read{}, fail("changed", p)
 	}
-	read.Entry.Version = current.Version
+	read.Entry.Revision = current.Revision
 	read.Body = &operationBody{ReadCloser: read.Body, done: done}
 	return read, nil
 }
@@ -340,7 +340,7 @@ func (d *Driver) OpenReference(ctx context.Context, p storage.Path, ref []byte, 
 	}
 	treeOptions := options
 	// The tree's version is a provider version id; this driver's revision is the ETag.
-	treeOptions.Version = nil
+	treeOptions.PinnedVersion = nil
 	read, err := tree.OpenReference(ctx, p, ref, treeOptions)
 	if err != nil {
 		done()
@@ -353,7 +353,7 @@ func (d *Driver) OpenReference(ctx context.Context, p storage.Path, ref []byte, 
 		done()
 		return storage.Read{}, fail("changed", p)
 	}
-	read.Entry.Version = bytes.Clone(options.Version)
+	read.Entry.Revision = bytes.Clone(options.PinnedVersion)
 	read.Body = &operationBody{ReadCloser: read.Body, done: done}
 	return read, nil
 }
@@ -376,8 +376,8 @@ func parentPath(p storage.Path) storage.Path {
 	return ""
 }
 func cloneIntent(in storage.WriteIntent) storage.WriteIntent {
-	in.Conditions.ExpectedVersion = bytes.Clone(in.Conditions.ExpectedVersion)
-	in.ParentVersion = bytes.Clone(in.ParentVersion)
+	in.Conditions.ExpectedRevision = bytes.Clone(in.Conditions.ExpectedRevision)
+	in.ParentRevision = bytes.Clone(in.ParentRevision)
 	if in.Digest != nil {
 		in.Digest = &storage.Digest{Algorithm: in.Digest.Algorithm, Value: bytes.Clone(in.Digest.Value)}
 	}
@@ -393,7 +393,7 @@ func sameJSON(a, b any) bool {
 	return bytes.Equal(x, y)
 }
 func validateRecoveryIntent(in storage.WriteIntent) error {
-	if in.ID == "" || len(in.ID) > 1024 || strings.ContainsAny(in.ID, "\r\n\x00") || in.Target == "" || storage.ValidatePath(in.Target) != nil || in.Size < 0 || in.Size > 9007199254740991 || len(in.MediaType) > 4096 || len(in.Conditions.ExpectedVersion) > 4096 || in.Conditions.Absent == (len(in.Conditions.ExpectedVersion) > 0) {
+	if in.ID == "" || len(in.ID) > 1024 || strings.ContainsAny(in.ID, "\r\n\x00") || in.Target == "" || storage.ValidatePath(in.Target) != nil || in.Size < 0 || in.Size > 9007199254740991 || len(in.MediaType) > 4096 || len(in.Conditions.ExpectedRevision) > 4096 || in.Conditions.Absent == (len(in.Conditions.ExpectedRevision) > 0) {
 		return fail("invalid_intent", in.Target)
 	}
 	return nil
@@ -408,11 +408,11 @@ func (d *Driver) validateIntent(in storage.WriteIntent) error {
 	if len(d.binding.ContentRoot)+len(in.Target) > 1024 {
 		return fail("invalid_name", in.Target)
 	}
-	if in.ID == "" || len(in.ID) > 1024 || strings.ContainsAny(in.ID, "\r\n\x00") || in.Target == "" || storage.ValidatePath(in.Target) != nil || in.Size < 0 || in.Size > d.options.MaxPublishBytes || len(in.MediaType) > 1024 || in.Conditions.Absent == (len(in.Conditions.ExpectedVersion) > 0) {
+	if in.ID == "" || len(in.ID) > 1024 || strings.ContainsAny(in.ID, "\r\n\x00") || in.Target == "" || storage.ValidatePath(in.Target) != nil || in.Size < 0 || in.Size > d.options.MaxPublishBytes || len(in.MediaType) > 1024 || in.Conditions.Absent == (len(in.Conditions.ExpectedRevision) > 0) {
 		return fail("invalid_intent", in.Target)
 	}
-	if len(in.Conditions.ExpectedVersion) > 0 {
-		if _, err := parseVersion(in.Conditions.ExpectedVersion); err != nil {
+	if len(in.Conditions.ExpectedRevision) > 0 {
+		if _, err := parseRevision(in.Conditions.ExpectedRevision); err != nil {
 			return err
 		}
 	}
@@ -491,10 +491,10 @@ func (d *Driver) stageLocked(ctx context.Context, r *ledger, body io.Reader, cp 
 	if parent.Kind != storage.Folder {
 		return storage.Staged{}, fail("not_folder", r.Intent.Target)
 	}
-	if len(r.Intent.ParentVersion) > 0 && !bytes.Equal(parent.Version, r.Intent.ParentVersion) {
+	if len(r.Intent.ParentRevision) > 0 && !bytes.Equal(parent.Revision, r.Intent.ParentRevision) {
 		return storage.Staged{}, fail("changed", r.Intent.Target)
 	}
-	r.ParentVersion = bytes.Clone(parent.Version)
+	r.ParentRevision = bytes.Clone(parent.Revision)
 	if err = d.checkTarget(ctx, r); err != nil {
 		return storage.Staged{}, err
 	}
@@ -597,7 +597,7 @@ func (d *Driver) checkTarget(ctx context.Context, r *ledger) error {
 	if err != nil {
 		return err
 	}
-	if !bytes.Equal(nativeVersion(obj.ETag), r.Intent.Conditions.ExpectedVersion) {
+	if !bytes.Equal(nativeRevision(obj.ETag), r.Intent.Conditions.ExpectedRevision) {
 		return fail("changed", r.Intent.Target)
 	}
 	r.ExpectedETag = obj.ETag
@@ -658,7 +658,7 @@ func (d *Driver) publishLocked(ctx context.Context, r *ledger, cp storage.Checkp
 		return storage.MutationResult{}, err
 	}
 	parent, err := d.Stat(ctx, parentPath(r.Intent.Target))
-	if err == nil && (parent.Kind != storage.Folder || !bytes.Equal(parent.Version, r.ParentVersion)) {
+	if err == nil && (parent.Kind != storage.Folder || !bytes.Equal(parent.Revision, r.ParentRevision)) {
 		err = fail("changed", r.Intent.Target)
 	}
 	if err == nil {
@@ -689,7 +689,7 @@ func (d *Driver) publishLocked(ctx context.Context, r *ledger, cp storage.Checkp
 	// A delayed checkpoint can allow coordinated parents/targets to change. Native
 	// conditional create plus revalidation avoids a Stat/unconditional-write shim.
 	parent, err = d.Stat(ctx, parentPath(r.Intent.Target))
-	if err == nil && !bytes.Equal(parent.Version, r.ParentVersion) {
+	if err == nil && !bytes.Equal(parent.Revision, r.ParentRevision) {
 		err = fail("changed", r.Intent.Target)
 	}
 	if err == nil {
@@ -753,7 +753,7 @@ func (d *Driver) refreshApplied(ctx context.Context, r *ledger) error {
 	if err != nil {
 		return err
 	}
-	if !bytes.Equal(actual.Version, expected.Version) || actual.Size != expected.Size {
+	if !bytes.Equal(actual.Revision, expected.Revision) || actual.Size != expected.Size {
 		return fail("changed", expected.Path)
 	}
 
@@ -765,7 +765,7 @@ func cloneResult(v storage.MutationResult) storage.MutationResult {
 	v.Evidence = bytes.Clone(v.Evidence)
 	if v.Entry != nil {
 		e := *v.Entry
-		e.Version = bytes.Clone(e.Version)
+		e.Revision = bytes.Clone(e.Revision)
 		e.NativeRef = bytes.Clone(e.NativeRef)
 		e.ContentIdentity = bytes.Clone(e.ContentIdentity)
 		e.Digest = cloneDigest(e.Digest)

@@ -25,7 +25,7 @@ type ledger struct {
 	Attempt       string
 	Phase         string
 	Digest        *storage.Digest
-	ParentVersion []byte
+	ParentRevision []byte
 	ExpectedETag  string
 	Result        *storage.MutationResult
 	MetadataReady bool
@@ -380,13 +380,13 @@ func (d *Driver) discard(ctx context.Context, kind, id string, in *storage.Write
 	return syncDirectory(d.root)
 }
 func cloneEffect(in storage.EffectIntent) *storage.EffectIntent {
-	in.SourceVersion = bytes.Clone(in.SourceVersion)
-	in.Conditions.ExpectedVersion = bytes.Clone(in.Conditions.ExpectedVersion)
+	in.SourceRevision = bytes.Clone(in.SourceRevision)
+	in.Conditions.ExpectedRevision = bytes.Clone(in.Conditions.ExpectedRevision)
 	return &in
 }
 
 func (d *Driver) Mkdir(ctx context.Context, in storage.Mutation, cp storage.Checkpoint) (storage.MutationResult, error) {
-	if in.Path == "" || !in.Conditions.Absent || len(in.Conditions.ExpectedVersion) > 0 {
+	if in.Path == "" || !in.Conditions.Absent || len(in.Conditions.ExpectedRevision) > 0 {
 		return storage.MutationResult{}, fail("unsupported", in.Path)
 	}
 	intent := storage.WriteIntent{ID: in.ID, Target: in.Path, Conditions: in.Conditions, Size: 0, MediaType: "application/octet-stream"}
@@ -436,10 +436,10 @@ func (d *Driver) Move(context.Context, storage.MoveRequest, storage.Checkpoint) 
 	return storage.MutationResult{}, &storage.NoFinalEffect{Cause: fail("unsupported", "")}
 }
 func (d *Driver) Copy(ctx context.Context, in storage.MoveRequest, cp storage.Checkpoint) (storage.MutationResult, error) {
-	if in.Source == "" || in.Target == "" || in.Source == in.Target || storage.ValidatePath(in.Source) != nil || !in.TargetConditions.Absent || len(in.TargetConditions.ExpectedVersion) > 0 {
+	if in.Source == "" || in.Target == "" || in.Source == in.Target || storage.ValidatePath(in.Source) != nil || !in.TargetConditions.Absent || len(in.TargetConditions.ExpectedRevision) > 0 {
 		return storage.MutationResult{}, fail("unsupported", in.Target)
 	}
-	etag, err := parseVersion(in.SourceVersion)
+	etag, err := parseRevision(in.SourceRevision)
 	if err != nil {
 		return storage.MutationResult{}, err
 	}
@@ -453,7 +453,7 @@ func (d *Driver) Copy(ctx context.Context, in storage.MoveRequest, cp storage.Ch
 // PUT. It stays the fallback for backends without a provider-side copy.
 func (d *Driver) copyRelay(ctx context.Context, in storage.MoveRequest, etag string, cp storage.Checkpoint) (storage.MutationResult, error) {
 	intent := storage.WriteIntent{ID: in.ID, Target: in.Target, Conditions: in.TargetConditions, MediaType: "application/octet-stream"}
-	effect := storage.EffectIntent{ID: in.ID, Action: "copy", Source: in.Source, Target: in.Target, Conditions: in.TargetConditions, SourceVersion: bytes.Clone(in.SourceVersion)}
+	effect := storage.EffectIntent{ID: in.ID, Action: "copy", Source: in.Source, Target: in.Target, Conditions: in.TargetConditions, SourceRevision: bytes.Clone(in.SourceRevision)}
 	ctx, done, err := d.operation(ctx)
 	if err != nil {
 		return storage.MutationResult{}, err
@@ -486,7 +486,7 @@ func (d *Driver) copyRelay(ctx context.Context, in storage.MoveRequest, etag str
 		if err != nil {
 			return storage.MutationResult{}, err
 		}
-		if source.Kind != storage.File || !bytes.Equal(source.Version, in.SourceVersion) {
+		if source.Kind != storage.File || !bytes.Equal(source.Revision, in.SourceRevision) {
 			return storage.MutationResult{}, fail("changed", in.Source)
 		}
 		if source.Size > d.options.MaxPublishBytes {
@@ -534,7 +534,7 @@ const copyPartBytes int64 = 512 << 20
 // reply is resolved from the intent marker this exact request wrote, never by
 // replaying the copy.
 func (d *Driver) copyProvider(ctx context.Context, in storage.MoveRequest, sourceETag string, cp storage.Checkpoint, copier CopyBackend) (storage.MutationResult, error) {
-	effect := storage.EffectIntent{ID: in.ID, Action: "copy", Source: in.Source, Target: in.Target, Conditions: in.TargetConditions, SourceVersion: bytes.Clone(in.SourceVersion)}
+	effect := storage.EffectIntent{ID: in.ID, Action: "copy", Source: in.Source, Target: in.Target, Conditions: in.TargetConditions, SourceRevision: bytes.Clone(in.SourceRevision)}
 	ctx, done, err := d.operation(ctx)
 	if err != nil {
 		return storage.MutationResult{}, err
@@ -576,7 +576,7 @@ func (d *Driver) copyProvider(ctx context.Context, in storage.MoveRequest, sourc
 	if err != nil {
 		return storage.MutationResult{}, err
 	}
-	if source.Kind != storage.File || !bytes.Equal(source.Version, in.SourceVersion) {
+	if source.Kind != storage.File || !bytes.Equal(source.Revision, in.SourceRevision) {
 		return storage.MutationResult{}, fail("changed", in.Source)
 	}
 	if _, ok := d.backend.(PartCopyBackend); source.Size > singleCopyLimit && (!ok || !d.options.Admission.MultipartUploads) {
@@ -596,7 +596,7 @@ func (d *Driver) copyProvider(ctx context.Context, in storage.MoveRequest, sourc
 		return storage.MutationResult{}, &storage.NoFinalEffect{Cause: fail("parent_missing", in.Target)}
 	}
 	r.Intent = cloneIntent(intent)
-	r.ParentVersion = bytes.Clone(parent.Version)
+	r.ParentRevision = bytes.Clone(parent.Revision)
 	r.Provider, r.Attempt, r.Native = true, "", nil
 	r.Phase = "ready"
 	if err = d.save(r); err != nil {
@@ -612,7 +612,7 @@ func (d *Driver) copyProvider(ctx context.Context, in storage.MoveRequest, sourc
 	// A delayed checkpoint can let the parent or the target change. Revalidate the
 	// indexed view, then let the native condition refuse an occupied target.
 	parent, err = d.Stat(ctx, parentPath(in.Target))
-	if err == nil && !bytes.Equal(parent.Version, r.ParentVersion) {
+	if err == nil && !bytes.Equal(parent.Revision, r.ParentRevision) {
 		err = fail("changed", in.Target)
 	}
 	if err == nil {
@@ -770,13 +770,13 @@ func (d *Driver) Remove(ctx context.Context, in storage.Mutation, cp storage.Che
 	if in.Path == "" || storage.ValidatePath(in.Path) != nil || in.Conditions.Absent {
 		return storage.MutationResult{}, fail("unsupported", in.Path)
 	}
-	if len(in.Conditions.ExpectedVersion) == 0 {
+	if len(in.Conditions.ExpectedRevision) == 0 {
 		return d.removeImplicitFolder(ctx, in)
 	}
-	if _, err := parseVersion(in.Conditions.ExpectedVersion); err != nil {
+	if _, err := parseRevision(in.Conditions.ExpectedRevision); err != nil {
 		return storage.MutationResult{}, err
 	}
-	effect := storage.EffectIntent{ID: in.ID, Action: "delete", Source: in.Path, SourceVersion: bytes.Clone(in.Conditions.ExpectedVersion)}
+	effect := storage.EffectIntent{ID: in.ID, Action: "delete", Source: in.Path, SourceRevision: bytes.Clone(in.Conditions.ExpectedRevision)}
 	ctx, done, err := d.operation(ctx)
 	if err != nil {
 		return storage.MutationResult{}, err
@@ -806,7 +806,7 @@ func (d *Driver) Remove(ctx context.Context, in storage.Mutation, cp storage.Che
 	if err != nil {
 		return storage.MutationResult{}, err
 	}
-	if !bytes.Equal(current.Version, in.Conditions.ExpectedVersion) {
+	if !bytes.Equal(current.Revision, in.Conditions.ExpectedRevision) {
 		return storage.MutationResult{}, fail("changed", in.Path)
 	}
 	if current.Kind == storage.Folder {
@@ -822,12 +822,12 @@ func (d *Driver) Remove(ctx context.Context, in storage.Mutation, cp storage.Che
 	if err != nil {
 		return storage.MutationResult{}, err
 	}
-	if !bytes.Equal(nativeVersion(obj.ETag), in.Conditions.ExpectedVersion) {
+	if !bytes.Equal(nativeRevision(obj.ETag), in.Conditions.ExpectedRevision) {
 		return storage.MutationResult{}, fail("changed", in.Path)
 	}
 	r.ExpectedETag = obj.ETag
 	r.Phase = "ready"
-	r.ParentVersion = bytes.Clone(current.Version)
+	r.ParentRevision = bytes.Clone(current.Revision)
 	if err = d.save(r); err != nil {
 		return storage.MutationResult{}, err
 	}
@@ -836,7 +836,7 @@ func (d *Driver) Remove(ctx context.Context, in storage.Mutation, cp storage.Che
 	}
 	// Revalidate after a delayed checkpoint, before journaling the one remote call.
 	current, err = d.Stat(ctx, in.Path)
-	if err == nil && !bytes.Equal(current.Version, in.Conditions.ExpectedVersion) {
+	if err == nil && !bytes.Equal(current.Revision, in.Conditions.ExpectedRevision) {
 		err = fail("changed", in.Path)
 	}
 	if err == nil && current.Kind == storage.Folder {
@@ -862,7 +862,7 @@ func (d *Driver) Remove(ctx context.Context, in storage.Mutation, cp storage.Che
 		return storage.MutationResult{}, errors.Join(&storage.NoFinalEffect{Cause: err}, d.save(r))
 	}
 	latest, checkErr := d.Stat(ctx, in.Path)
-	if checkErr == nil && !bytes.Equal(latest.Version, in.Conditions.ExpectedVersion) {
+	if checkErr == nil && !bytes.Equal(latest.Revision, in.Conditions.ExpectedRevision) {
 		checkErr = fail("changed", in.Path)
 	}
 	if checkErr == nil && latest.Kind == storage.Folder {

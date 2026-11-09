@@ -19,7 +19,7 @@ func (d *Driver) publishNativeLocked(ctx context.Context, r *ledger, cp storage.
 		if err != nil {
 			return err
 		}
-		if parent.Kind != storage.Folder || !bytes.Equal(parent.Version, r.ParentVersion) {
+		if parent.Kind != storage.Folder || !bytes.Equal(parent.Revision, r.ParentRevision) {
 			return fail("changed", r.Intent.Target)
 		}
 		return d.checkTarget(ctx, r)
@@ -57,7 +57,7 @@ func (d *Driver) publishNativeLocked(ctx context.Context, r *ledger, cp storage.
 			r.Phase = "not_applied"
 			return storage.MutationResult{}, errors.Join(err, d.save(r))
 		}
-		// Remote errors, missing version evidence and lost replies remain unknown.
+		// Remote errors, missing revision evidence and lost replies remain unknown.
 		return storage.MutationResult{}, err
 	}
 	entry, err := d.objectEntry(r.Intent.Target, storage.File, object)

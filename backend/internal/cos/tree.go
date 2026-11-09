@@ -112,7 +112,7 @@ func cosTreeObject(key string, header http.Header) (objecttree.Object, error) {
 			return objecttree.Object{}, storage.NewError("invalid_backend_response", "", err)
 		}
 	}
-	return objecttree.Object{Key: key, Size: size, ModifiedAt: modified, MediaType: header.Get("Content-Type"), Version: header.Get("x-cos-version-id")}, nil
+	return objecttree.Object{Key: key, Size: size, ModifiedAt: modified, MediaType: header.Get("Content-Type"), VersionID: header.Get("x-cos-version-id")}, nil
 }
 func cosTreeError(ctx context.Context, err error, versioned bool) error {
 	if ctx.Err() != nil {

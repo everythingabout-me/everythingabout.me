@@ -122,7 +122,7 @@ func (s *Server) filesContentByReference(w http.ResponseWriter, r *http.Request,
 		}
 		status := http.StatusOK
 		var selected *filesByteRange
-		options := storage.ReadOptions{Version: entry.Version}
+		options := storage.ReadOptions{PinnedVersion: entry.Revision}
 		if r.Method != http.MethodHead && f.Driver.Describe().RangeRead && filesIfRange(r.Header, tag) {
 			selected, err = filesParseRange(strings.Join(r.Header.Values("Range"), ","), entry.Size)
 			if err != nil {
@@ -148,7 +148,7 @@ func (s *Server) filesContentByReference(w http.ResponseWriter, r *http.Request,
 		}
 		// The transfer must still be the representation the observation promised;
 		// otherwise select again instead of pairing old validators with new bytes.
-		if read.Entry.Size != entry.Size || !bytes.Equal(read.Entry.Version, entry.Version) ||
+		if read.Entry.Size != entry.Size || !bytes.Equal(read.Entry.Revision, entry.Revision) ||
 			read.Offset != options.Offset || read.Length != readLengthFor(read, selected) {
 			if err := read.Body.Close(); err != nil {
 				return false, err
@@ -192,14 +192,14 @@ func (s *Server) filesContentByTraversal(w http.ResponseWriter, r *http.Request,
 		if entry.Kind != storage.File {
 			return fc.NewProblem(409, "not_a_file", "The path is not a file.")
 		}
-		read, err := f.Driver.Open(r.Context(), native, storage.ReadOptions{Version: entry.Version})
+		read, err := f.Driver.Open(r.Context(), native, storage.ReadOptions{PinnedVersion: entry.Revision})
 		if err != nil {
 			if storage.IsCode(err, "changed") {
 				continue
 			}
 			return err
 		}
-		if err := filesValidateRead(native, read, storage.ReadOptions{Version: entry.Version}); err != nil {
+		if err := filesValidateRead(native, read, storage.ReadOptions{PinnedVersion: entry.Revision}); err != nil {
 			if closeErr := filesCloseRead(read); closeErr != nil {
 				return closeErr
 			}
@@ -210,19 +210,19 @@ func (s *Server) filesContentByTraversal(w http.ResponseWriter, r *http.Request,
 		}
 		// An unversioned Stat may race a versioned GET. Reopen that exact version
 		// before exposing its revision, including for HEAD and conditional responses.
-		if len(entry.Version) == 0 && len(read.Entry.Version) != 0 {
-			selected := bytes.Clone(read.Entry.Version)
+		if len(entry.Revision) == 0 && len(read.Entry.Revision) != 0 {
+			selected := bytes.Clone(read.Entry.Revision)
 			if err := read.Body.Close(); err != nil {
 				return err
 			}
-			read, err = f.Driver.Open(r.Context(), native, storage.ReadOptions{Version: selected})
+			read, err = f.Driver.Open(r.Context(), native, storage.ReadOptions{PinnedVersion: selected})
 			if err != nil {
 				if storage.IsCode(err, "changed") {
 					continue
 				}
 				return err
 			}
-			if err := filesValidateRead(native, read, storage.ReadOptions{Version: selected}); err != nil {
+			if err := filesValidateRead(native, read, storage.ReadOptions{PinnedVersion: selected}); err != nil {
 				if closeErr := filesCloseRead(read); closeErr != nil {
 					return closeErr
 				}
@@ -275,7 +275,7 @@ func (s *Server) filesContentByTraversal(w http.ResponseWriter, r *http.Request,
 			if err := read.Body.Close(); err != nil {
 				return err
 			}
-			options := storage.ReadOptions{Offset: selected.offset, Length: &selected.length, Version: original.Version}
+			options := storage.ReadOptions{Offset: selected.offset, Length: &selected.length, PinnedVersion: original.Revision}
 			read, err = f.Driver.Open(r.Context(), native, options)
 			if err != nil {
 				if storage.IsCode(err, "changed") || storage.IsCode(err, "invalid_range") {
@@ -295,7 +295,7 @@ func (s *Server) filesContentByTraversal(w http.ResponseWriter, r *http.Request,
 			actual, rangeErr := filesParseRange(strings.Join(r.Header.Values("Range"), ","), read.Entry.Size)
 			// A suffix/clamped range can change when an unversioned file grows. Retry
 			// selection instead of pairing old bounds/conditions with new GET bytes.
-			if rangeErr != nil || actual == nil || *actual != *selected || read.Entry.Size != original.Size || !bytes.Equal(read.Entry.Version, original.Version) || !bytes.Equal(read.Entry.NativeRef, original.NativeRef) {
+			if rangeErr != nil || actual == nil || *actual != *selected || read.Entry.Size != original.Size || !bytes.Equal(read.Entry.Revision, original.Revision) || !bytes.Equal(read.Entry.NativeRef, original.NativeRef) {
 				if err := read.Body.Close(); err != nil {
 					return err
 				}
@@ -394,7 +394,7 @@ func filesValidateRead(expected storage.Path, read storage.Read, options storage
 	if read.Entry.Path != expected || read.Entry.Kind != storage.File || read.Entry.Size < 0 || read.Entry.Size > 1<<53-1 || read.Offset != options.Offset || read.Length < 0 || read.Offset > read.Entry.Size || read.Length > read.Entry.Size-read.Offset {
 		return storage.NewError("invalid_backend_response", read.Entry.Path, nil)
 	}
-	if len(options.Version) != 0 && !bytes.Equal(options.Version, read.Entry.Version) {
+	if len(options.PinnedVersion) != 0 && !bytes.Equal(options.PinnedVersion, read.Entry.Revision) {
 		return storage.NewError("changed", read.Entry.Path, nil)
 	}
 	if options.Length != nil {

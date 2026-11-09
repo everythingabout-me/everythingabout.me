@@ -65,7 +65,7 @@ func TestMutationNativeCRUDAndContentIdentity(t *testing.T) {
 	if err != nil || made.Entry.Kind != storage.Folder {
 		t.Fatalf("mkdir=%+v %v", made, err)
 	}
-	originalFolderVersion := bytes.Clone(made.Entry.Version)
+	originalFolderVersion := bytes.Clone(made.Entry.Revision)
 	in := writeIntent("file", "Native + 名/raw", "raw\x00\xffbytes")
 	staged := stageFile(t, w.StagedWriter, in, "raw\x00\xffbytes")
 	published, err := w.Publish(ctx, staged, stageOK)
@@ -73,13 +73,13 @@ func TestMutationNativeCRUDAndContentIdentity(t *testing.T) {
 		t.Fatal(err)
 	}
 	source := mutationStat(t, w, in.Target)
-	if !bytes.Equal(published.Entry.Version, source.Version) || !bytes.Equal(published.Entry.ContentIdentity, source.ContentIdentity) || len(source.Version) != 32 {
+	if !bytes.Equal(published.Entry.Revision, source.Revision) || !bytes.Equal(published.Entry.ContentIdentity, source.ContentIdentity) || len(source.Revision) != 32 {
 		t.Fatal("publication and reads disagree")
 	}
-	if !bytes.Equal(originalFolderVersion, mutationStat(t, w, mk.Path).Version) {
+	if !bytes.Equal(originalFolderVersion, mutationStat(t, w, mk.Path).Revision) {
 		t.Fatal("child membership changed ancestor identity version")
 	}
-	read, err := w.Open(ctx, in.Target, storage.ReadOptions{Version: source.Version})
+	read, err := w.Open(ctx, in.Target, storage.ReadOptions{PinnedVersion: source.Revision})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -88,22 +88,22 @@ func TestMutationNativeCRUDAndContentIdentity(t *testing.T) {
 	if err != nil || string(body) != "raw\x00\xffbytes" {
 		t.Fatal("native read differs")
 	}
-	_, err = w.Open(ctx, in.Target, storage.ReadOptions{Version: []byte("stale")})
+	_, err = w.Open(ctx, in.Target, storage.ReadOptions{PinnedVersion: []byte("stale")})
 	requireCode(t, err, "changed")
-	copyReq := storage.MoveRequest{ID: "copy", Source: in.Target, Target: "copy", SourceVersion: source.Version, TargetConditions: storage.Conditions{Absent: true}}
+	copyReq := storage.MoveRequest{ID: "copy", Source: in.Target, Target: "copy", SourceRevision: source.Revision, TargetConditions: storage.Conditions{Absent: true}}
 	copied, err := w.Copy(ctx, copyReq, stageOK)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if bytes.Equal(copied.Entry.Version, source.Version) || bytes.Equal(copied.Entry.ContentIdentity, source.ContentIdentity) || !bytes.Equal(copied.Entry.Digest.Value, source.Digest.Value) {
+	if bytes.Equal(copied.Entry.Revision, source.Revision) || bytes.Equal(copied.Entry.ContentIdentity, source.ContentIdentity) || !bytes.Equal(copied.Entry.Digest.Value, source.Digest.Value) {
 		t.Fatal("copy is not an independent native generation")
 	}
-	moveReq := storage.MoveRequest{ID: "move", Source: in.Target, Target: "renamed", SourceVersion: source.Version, TargetConditions: storage.Conditions{Absent: true}}
+	moveReq := storage.MoveRequest{ID: "move", Source: in.Target, Target: "renamed", SourceRevision: source.Revision, TargetConditions: storage.Conditions{Absent: true}}
 	moved, err := w.Move(ctx, moveReq, stageOK)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !bytes.Equal(moved.Entry.Version, source.Version) || !bytes.Equal(moved.Entry.ContentIdentity, source.ContentIdentity) {
+	if !bytes.Equal(moved.Entry.Revision, source.Revision) || !bytes.Equal(moved.Entry.ContentIdentity, source.ContentIdentity) {
 		t.Fatal("rename changed content generation")
 	}
 	if err := os.WriteFile(filepath.Join(cfg.ContentRoot, "renamed"), []byte("changed independent bytes"), 0600); err != nil {
@@ -118,16 +118,16 @@ func TestMutationNativeCRUDAndContentIdentity(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, e := range page.Entries {
-		if len(e.Version) == 0 || len(e.ContentIdentity) == 0 {
+		if len(e.Revision) == 0 || len(e.ContentIdentity) == 0 {
 			t.Fatal("list omitted trusted identity")
 		}
 	}
-	rm := storage.Mutation{ID: "remove", Path: "copy", Conditions: storage.Conditions{ExpectedVersion: copied.Entry.Version}}
+	rm := storage.Mutation{ID: "remove", Path: "copy", Conditions: storage.Conditions{ExpectedRevision: copied.Entry.Revision}}
 	if _, err := w.Remove(ctx, rm, stageOK); err != nil {
 		t.Fatal(err)
 	}
 	actionInspection(t, restartMutation(t, f, cfg), storage.EffectIntent{ID: rm.ID, Action: "remove", Target: rm.Path, Conditions: rm.Conditions}, nil, storage.Applied)
-	if _, err := w.Remove(ctx, storage.Mutation{ID: "rmdir", Path: mk.Path, Conditions: storage.Conditions{ExpectedVersion: originalFolderVersion}}, stageOK); err != nil {
+	if _, err := w.Remove(ctx, storage.Mutation{ID: "rmdir", Path: mk.Path, Conditions: storage.Conditions{ExpectedRevision: originalFolderVersion}}, stageOK); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := os.Stat(filepath.Join(cfg.ContentRoot, string(mk.Path))); !errors.Is(err, os.ErrNotExist) {
@@ -140,7 +140,7 @@ func TestMutationReplacementPreservesOldUntilPublish(t *testing.T) {
 	writeFixture(t, cfg.ContentRoot, "file", "old complete bytes")
 	old := mutationStat(t, w, "file")
 	in := writeIntent("replace", "file", "new complete bytes")
-	in.Conditions = storage.Conditions{ExpectedVersion: old.Version}
+	in.Conditions = storage.Conditions{ExpectedRevision: old.Revision}
 	s := stageFile(t, w.StagedWriter, in, "new complete bytes")
 	raw, _ := os.ReadFile(filepath.Join(cfg.ContentRoot, "file"))
 	if string(raw) != "old complete bytes" {
@@ -152,7 +152,7 @@ func TestMutationReplacementPreservesOldUntilPublish(t *testing.T) {
 		t.Fatal(err)
 	}
 	raw, _ = os.ReadFile(filepath.Join(cfg.ContentRoot, "file"))
-	if string(raw) != "new complete bytes" || bytes.Equal(old.Version, result.Entry.Version) {
+	if string(raw) != "new complete bytes" || bytes.Equal(old.Revision, result.Entry.Revision) {
 		t.Fatal("replacement did not switch generation")
 	}
 	inspectState(t, w.StagedWriter, in, storage.Applied)
@@ -172,7 +172,7 @@ func TestMutationReplacementConditionAfterDelayedCheckpoint(t *testing.T) {
 			writeFixture(t, cfg.ContentRoot, "dir/file", "old")
 			old := mutationStat(t, w, "dir/file")
 			in := writeIntent("replace", "dir/file", "new")
-			in.Conditions = storage.Conditions{ExpectedVersion: old.Version}
+			in.Conditions = storage.Conditions{ExpectedRevision: old.Revision}
 			s := stageFile(t, w.StagedWriter, in, "new")
 			_, err := w.Publish(ctx, s, func(_ context.Context, b []byte) error {
 				var r stageReceipt
@@ -220,7 +220,7 @@ func TestMutationNoImplicitRecursionAndTypedErrors(t *testing.T) {
 	}
 	writeFixture(t, cfg.ContentRoot, "dir/child", "keep")
 	folder := mutationStat(t, w, "dir")
-	_, err := w.Remove(ctx, storage.Mutation{ID: "not-empty", Path: "dir", Conditions: storage.Conditions{ExpectedVersion: folder.Version}}, stageOK)
+	_, err := w.Remove(ctx, storage.Mutation{ID: "not-empty", Path: "dir", Conditions: storage.Conditions{ExpectedRevision: folder.Revision}}, stageOK)
 	requireCode(t, err, "not_empty")
 	raw, _ := os.ReadFile(filepath.Join(cfg.ContentRoot, "dir/child"))
 	if string(raw) != "keep" {
@@ -232,9 +232,9 @@ func TestMutationNoImplicitRecursionAndTypedErrors(t *testing.T) {
 	requireCode(t, err, "not_folder")
 	_, err = w.Mkdir(ctx, storage.Mutation{ID: "conflict", Path: "dir", Conditions: storage.Conditions{Absent: true}}, stageOK)
 	requireCode(t, err, "name_conflict")
-	_, err = w.Copy(ctx, storage.MoveRequest{ID: "copy-folder", Source: "dir", Target: "other", SourceVersion: folder.Version, TargetConditions: storage.Conditions{Absent: true}}, stageOK)
+	_, err = w.Copy(ctx, storage.MoveRequest{ID: "copy-folder", Source: "dir", Target: "other", SourceRevision: folder.Revision, TargetConditions: storage.Conditions{Absent: true}}, stageOK)
 	requireCode(t, err, "unsupported")
-	_, err = w.Move(ctx, storage.MoveRequest{ID: "ancestor", Source: "dir", Target: "dir/sub", SourceVersion: folder.Version, TargetConditions: storage.Conditions{Absent: true}}, stageOK)
+	_, err = w.Move(ctx, storage.MoveRequest{ID: "ancestor", Source: "dir", Target: "dir/sub", SourceRevision: folder.Revision, TargetConditions: storage.Conditions{Absent: true}}, stageOK)
 	requireCode(t, err, "invalid_name")
 	if err := os.Symlink(cfg.SystemRoot, filepath.Join(cfg.ContentRoot, "symlink")); err != nil {
 		t.Fatal(err)
@@ -254,11 +254,11 @@ func TestMutationActionsLostReplyRestartAndTombstones(t *testing.T) {
 			in := storage.EffectIntent{ID: "lost-" + action, Action: action, Target: "target", Conditions: storage.Conditions{Absent: true}}
 			if action == "move" || action == "copy" {
 				in.Source = "source"
-				in.SourceVersion = e.Version
+				in.SourceRevision = e.Revision
 			}
 			if action == "remove" {
 				in.Target = "source"
-				in.Conditions = storage.Conditions{ExpectedVersion: e.Version}
+				in.Conditions = storage.Conditions{ExpectedRevision: e.Revision}
 			}
 			var evidence []byte
 			_, err := w.runAction(ctx, in, func(_ context.Context, b []byte) error {
@@ -294,7 +294,7 @@ func TestMutationNativeErrorAfterRenameRecovery(t *testing.T) {
 			in := storage.EffectIntent{ID: action, Action: action, Target: "target", Conditions: storage.Conditions{Absent: true}}
 			if action == "move" {
 				in.Source = "source"
-				in.SourceVersion = e.Version
+				in.SourceRevision = e.Revision
 			}
 			w.rename = func(from *os.Root, old string, to *os.Root, name string, replace bool) error {
 				if err := actionRename(from, old, to, name, replace); err != nil {
@@ -307,7 +307,7 @@ func TestMutationNativeErrorAfterRenameRecovery(t *testing.T) {
 				t.Fatal(err)
 			}
 			ins := actionInspection(t, restartMutation(t, f, cfg), in, nil, storage.Applied)
-			if ins.Result.Entry == nil || len(ins.Result.Entry.Version) == 0 {
+			if ins.Result.Entry == nil || len(ins.Result.Entry.Revision) == 0 {
 				t.Fatal("recovery lost entry evidence")
 			}
 		})
@@ -365,7 +365,7 @@ func TestMutationSourceAndTargetChangesDuringCallback(t *testing.T) {
 			}
 			writeFixture(t, cfg.ContentRoot, "source", "bytes")
 			e := mutationStat(t, w, "source")
-			in := storage.EffectIntent{ID: mode, Action: "move", Source: "source", Target: "dir/target", SourceVersion: e.Version, Conditions: storage.Conditions{Absent: true}}
+			in := storage.EffectIntent{ID: mode, Action: "move", Source: "source", Target: "dir/target", SourceRevision: e.Revision, Conditions: storage.Conditions{Absent: true}}
 			_, err := w.runAction(ctx, in, func(_ context.Context, b []byte) error {
 				if actionPhase(b) != "executing" {
 					return nil
@@ -398,7 +398,7 @@ func TestMutationFailedReplacementInputKeepsOldBytes(t *testing.T) {
 	old := mutationStat(t, w, "file")
 	for _, body := range []string{"short", "too many bytes"} {
 		in := writeIntent("input-"+body, "file", "new bytes")
-		in.Conditions = storage.Conditions{ExpectedVersion: old.Version}
+		in.Conditions = storage.Conditions{ExpectedRevision: old.Revision}
 		_, err := w.Stage(context.Background(), in, strings.NewReader(body), stageOK)
 		if err == nil {
 			t.Fatal("bad input accepted")

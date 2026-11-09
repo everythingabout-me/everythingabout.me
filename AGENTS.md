@@ -111,6 +111,13 @@ Common commands:
 - Canonical identity is owner/root/parent/name/comparisonName; legacy path/key columns are nullable derived
   caches. Use file_entries/current ancestry, never stale cached paths as identity or authorization. Comparison
   versions nfc-sensitive-v1/nfc-fold-v1 must agree between Go and Postgres; full Unicode folding is not lower().
+- State vocabulary: **revision** (`Entry.Revision`, `ExpectedRevision`, `SourceRevision`) is the driver's opaque
+  token for one native state — the CAS/identity receipt, derived from the ETag or a provider version id, never
+  exposed by the API. **version** (`RetainsVersions`, `PinnedRead`, `ReadOptions.PinnedVersion`,
+  `Object.VersionID`) is a retained historical copy, a feature this service does not use. **index revision**
+  (`nr_…`, `If-Revision`) gates application mutations and is unrelated to both. Do not call a revision a version.
+  Hashed or persisted byte spellings (`native-etag:`, `native-version:`, the `Version` key in content-revision
+  evidence) keep their historical form so old records stay comparable.
   Eligible Local non-growing folder moves use one root native effect; growing/deeper targets and flat object
   moves retain finite manifests. Dynamic ancestry/search is not universally O(1).
 - Change facts, recursive/namespace markers and confirmed effect audit settle with index/results. No native

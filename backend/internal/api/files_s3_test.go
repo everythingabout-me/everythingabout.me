@@ -177,7 +177,7 @@ func TestFilesS3UnifiedHTTPReadConformance(t *testing.T) {
 			}
 			// A saved publication/scan observation supplies this revision. Browsing
 			// never probes the provider to manufacture or validate native evidence.
-			revision := filerevision.Content(namespace, storage.Entry{Path: storage.Path(special), Kind: storage.File, NativeRef: []byte(binding.ContentRoot + special), Version: []byte("native-version:retained-v1")})
+			revision := filerevision.Content(namespace, storage.Entry{Path: storage.Path(special), Kind: storage.File, NativeRef: []byte(binding.ContentRoot + special), Revision: []byte("native-version:retained-v1")})
 			index.revisions = map[string]*string{special: revision}
 		} else {
 			index.rows = []nodes.Row{filesReadRow("private.txt", false)}

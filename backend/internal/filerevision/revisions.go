@@ -17,16 +17,16 @@ import (
 // trusted driver may supply identity independent of a path to preserve revisions
 // through rename. Other drivers retain the path-scoped P2 revision contract.
 func Content(namespace string, entry storage.Entry) *string {
-	if entry.Kind != storage.File || len(entry.Version) == 0 {
+	if entry.Kind != storage.File || len(entry.Revision) == 0 {
 		return nil
 	}
 	h := sha256.New()
 	h.Write([]byte("eam/files/content/v1\x00"))
-	values := [][]byte{[]byte(namespace), []byte(entry.Path), entry.NativeRef, entry.Version}
+	values := [][]byte{[]byte(namespace), []byte(entry.Path), entry.NativeRef, entry.Revision}
 	if len(entry.ContentIdentity) != 0 {
 		// Domain separation prevents stable identities from aliasing path tuples.
 		h.Write([]byte("stable-identity\x00"))
-		values = [][]byte{[]byte(namespace), entry.ContentIdentity, entry.Version}
+		values = [][]byte{[]byte(namespace), entry.ContentIdentity, entry.Revision}
 	}
 	for _, value := range values {
 		var length [8]byte
@@ -50,6 +50,9 @@ func Metadata(namespace string, metadata fc.Metadata, version []byte, membership
 	h.Write(representation)
 	evidence, _ := json.Marshal(struct {
 		Namespace string
+		// Version is part of the hashed evidence. Renaming it would change every
+		// published content revision, so the key stays even though the concept is
+		// now called revision everywhere else.
 		Version   []byte
 	}{namespace, version})
 	h.Write(evidence)

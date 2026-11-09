@@ -412,7 +412,7 @@ func (d *Driver) SealStage(ctx context.Context, in storage.WriteIntent, parts []
 	if err != nil {
 		return storage.Staged{}, err
 	}
-	r = &ledger{Kind: "write", ID: in.ID, Intent: cloneIntent(in), Attempt: attempt, Phase: "ready", ParentVersion: bytes.Clone(in.ParentVersion), Native: stage}
+	r = &ledger{Kind: "write", ID: in.ID, Intent: cloneIntent(in), Attempt: attempt, Phase: "ready", ParentRevision: bytes.Clone(in.ParentRevision), Native: stage}
 	if err = d.save(r); err != nil {
 		return storage.Staged{}, err
 	}

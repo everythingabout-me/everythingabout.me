@@ -34,7 +34,7 @@ func TestCanonicalTreeMovePreservesThirtyThousandDescendants(t *testing.T) {
 		t.Fatal(err)
 	}
 	event := attachActionEvent(t, pool, root, leafID)
-	nativeLeaf := storage.Entry{Path: "before/file-00001.txt", Kind: storage.File, Size: 3, Version: []byte("native-version"), ContentIdentity: []byte("native-file-identity")}
+	nativeLeaf := storage.Entry{Path: "before/file-00001.txt", Kind: storage.File, Size: 3, Revision: []byte("native-version"), ContentIdentity: []byte("native-file-identity")}
 	originalRevision := "cr_preserved_from_earlier_move"
 	tx, err := pool.Begin(ctx)
 	if err != nil {
@@ -66,7 +66,7 @@ func TestCanonicalTreeMovePreservesThirtyThousandDescendants(t *testing.T) {
 	}
 	source := *nativeMove.Entry
 	source.Path = "before"
-	effect.SourceVersion = source.Version
+	effect.SourceRevision = source.Revision
 	effect.SourceEntry = &source
 	raw := runActionCommit(t, pool, actionOperation(root, "move", "before", "after", effect))
 	var result struct{ ID, Path string }

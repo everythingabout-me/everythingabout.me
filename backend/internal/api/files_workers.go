@@ -96,7 +96,7 @@ func (s *Server) runFileOperation(ctx context.Context, op fileops.Operation) err
 				return fileops.E("invalid_intent", nil)
 			}
 			parent, err := native.Stat(ctx, intent.ParentPath)
-			if err != nil || parent.Kind != storage.Folder || !bytes.Equal(parent.Version, intent.ParentVersion) {
+			if err != nil || parent.Kind != storage.Folder || !bytes.Equal(parent.Revision, intent.ParentRevision) {
 				return fileops.E("target_changed", err)
 			}
 		}

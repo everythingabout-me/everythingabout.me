@@ -135,7 +135,7 @@ func (f effectRecovery) InspectEffect(ctx context.Context, intent storage.Effect
 func newEffectFixture(t *testing.T, action string) (*Service, *effectJournal, Actor) {
 	t.Helper()
 	root := Root{OwnerID: "owner", ConnectionID: "fixture", Generation: 1, ContentRoot: "content", SystemRoot: "system", CaseSensitive: true}
-	entry := EntryEffect{ManifestEntry: ManifestEntry{Number: 7, Action: action, Source: "source", Target: "target", SourceVersion: []byte("captured-source"), TargetConditions: storage.Conditions{Absent: true}, Size: 3}, State: "pending"}
+	entry := EntryEffect{ManifestEntry: ManifestEntry{Number: 7, Action: action, Source: "source", Target: "target", SourceRevision: []byte("captured-source"), TargetConditions: storage.Conditions{Absent: true}, Size: 3}, State: "pending"}
 	switch action {
 	case "mkdir":
 		entry.Source = ""
@@ -156,7 +156,7 @@ func nativeEntryResult(action string) storage.MutationResult {
 			kind = storage.Folder
 			size = 0
 		}
-		result.Entry = &storage.Entry{Path: "target", Kind: kind, Size: size, NativeRef: []byte("private-reference"), Version: []byte("private-version")}
+		result.Entry = &storage.Entry{Path: "target", Kind: kind, Size: size, NativeRef: []byte("private-reference"), Revision: []byte("private-version")}
 	}
 	return result
 }
@@ -185,7 +185,7 @@ func TestApplyEntryJournalsIntentAndCheckpointsBeforeNativeSuccess(t *testing.T)
 				if j.op.Entries[0].State != "started" {
 					t.Fatal("native effect preceded durable BeginEntry")
 				}
-				if intent.ID != "op-fixture/entry/7" || intent.Action != action || intent.Source != original.Entries[0].Source || intent.Target != original.Entries[0].Target || !bytes.Equal(intent.SourceVersion, original.Entries[0].SourceVersion) || !reflect.DeepEqual(intent.Conditions, original.Entries[0].TargetConditions) {
+				if intent.ID != "op-fixture/entry/7" || intent.Action != action || intent.Source != original.Entries[0].Source || intent.Target != original.Entries[0].Target || !bytes.Equal(intent.SourceRevision, original.Entries[0].SourceRevision) || !reflect.DeepEqual(intent.Conditions, original.Entries[0].TargetConditions) {
 					t.Fatalf("immutable intent mismatch: %+v", intent)
 				}
 				if err := save(ctx, []byte("allocated-native-id")); err != nil {
@@ -195,7 +195,7 @@ func TestApplyEntryJournalsIntentAndCheckpointsBeforeNativeSuccess(t *testing.T)
 					t.Fatal("checkpoint was not durable")
 				}
 				// Callback-owned slices cannot mutate the admitted manifest or recovery intent.
-				intent.SourceVersion[0] = 'X'
+				intent.SourceRevision[0] = 'X'
 				return nativeEntryResult(action), nil
 			})
 			if err != nil || op.Entries[0].State != "applied" || calls != 1 {
@@ -205,7 +205,7 @@ func TestApplyEntryJournalsIntentAndCheckpointsBeforeNativeSuccess(t *testing.T)
 			if err = json.Unmarshal(op.Entries[0].Result, &private); err != nil || !reflect.DeepEqual(private, nativeEntryResult(action)) {
 				t.Fatalf("saved private result %+v %v", private, err)
 			}
-			if !bytes.Equal(j.op.Entries[0].SourceVersion, original.Entries[0].SourceVersion) {
+			if !bytes.Equal(j.op.Entries[0].SourceRevision, original.Entries[0].SourceRevision) {
 				t.Fatal("callback changed manifest")
 			}
 			if !reflect.DeepEqual(op.Guards, original.Guards) || op.State != Running {
@@ -230,7 +230,7 @@ func TestApplyEntryLostNativeReplyInspectsWithoutRepeating(t *testing.T) {
 	recovery := effectRecovery(func(_ context.Context, intent storage.EffectIntent, checkpoint []byte) (storage.Inspection, error) {
 		inspections++
 		j.calls = append(j.calls, "inspect")
-		if intent.ID != "op-fixture/entry/7" || string(checkpoint) != "copy-native-id" || string(intent.SourceVersion) != "captured-source" {
+		if intent.ID != "op-fixture/entry/7" || string(checkpoint) != "copy-native-id" || string(intent.SourceRevision) != "captured-source" {
 			t.Fatalf("lost saved recovery identity %+v %q", intent, checkpoint)
 		}
 		result := nativeEntryResult("copy")
@@ -240,7 +240,7 @@ func TestApplyEntryLostNativeReplyInspectsWithoutRepeating(t *testing.T) {
 		if err := save(ctx, []byte("copy-native-id")); err != nil {
 			return storage.MutationResult{}, err
 		}
-		intent.SourceVersion[0] = 'X'
+		intent.SourceRevision[0] = 'X'
 		return storage.MutationResult{}, ioFailure
 	})
 	if err != nil || op.Entries[0].State != "applied" || inspections != 1 {

@@ -28,6 +28,6 @@
 // roots, naming rules and parent. They are process/factory-local and are not snapshots:
 // external additions or removals between pages may change the subsequent result.
 // Concurrent external writes may also change bytes during an open read. Size, mtime
-// and an open descriptor do not prove immutability; PinnedRead is false, Entry.Version
-// is empty, and every nonempty requested version is rejected as unsupported.
+// and an open descriptor do not prove immutability; PinnedRead is false, Entry.Revision
+// is empty, and every requested pinned version is rejected as unsupported.
 package localstorage

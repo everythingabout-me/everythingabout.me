@@ -13,11 +13,11 @@ func TestObjectMkdirUnderImplicitPrefixFolder(t *testing.T) {
 	ctx := context.Background()
 	b.current[cfg.ContentRoot+"Prefix/child"] = Object{Key: cfg.ContentRoot + "Prefix/child", ETag: "external", Size: 1}
 	parent, err := d.Stat(ctx, "Prefix")
-	if err != nil || parent.Kind != storage.Folder || parent.Version != nil {
+	if err != nil || parent.Kind != storage.Folder || parent.Revision != nil {
 		t.Fatalf("implicit parent=%+v %v", parent, err)
 	}
 	made, err := d.Mkdir(ctx, storage.Mutation{ID: "mkdir-implicit", Path: "Prefix/sub", Conditions: storage.Conditions{Absent: true}}, cpOK)
-	if err != nil || made.Entry.Kind != storage.Folder || len(made.Entry.Version) == 0 {
+	if err != nil || made.Entry.Kind != storage.Folder || len(made.Entry.Revision) == 0 {
 		t.Fatalf("mkdir under implicit prefix=%+v %v", made, err)
 	}
 	if _, ok := b.current[cfg.ContentRoot+"Prefix/sub/"]; !ok {
@@ -33,7 +33,7 @@ func TestObjectRecursiveDeleteOfImplicitFolder(t *testing.T) {
 	ctx := context.Background()
 	b.current[cfg.ContentRoot+"Prefix/child"] = Object{Key: cfg.ContentRoot + "Prefix/child", ETag: "external", Size: 1}
 	folder, err := d.Stat(ctx, "Prefix")
-	if err != nil || folder.Version != nil {
+	if err != nil || folder.Revision != nil {
 		t.Fatalf("implicit folder=%+v %v", folder, err)
 	}
 	_, err = d.Remove(ctx, storage.Mutation{ID: "early", Path: "Prefix"}, cpOK)
@@ -46,7 +46,7 @@ func TestObjectRecursiveDeleteOfImplicitFolder(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err = d.Remove(ctx, storage.Mutation{ID: "child", Path: "Prefix/child", Conditions: storage.Conditions{ExpectedVersion: child.Version}}, cpOK); err != nil {
+	if _, err = d.Remove(ctx, storage.Mutation{ID: "child", Path: "Prefix/child", Conditions: storage.Conditions{ExpectedRevision: child.Revision}}, cpOK); err != nil {
 		t.Fatal(err)
 	}
 	deletes := b.deletes

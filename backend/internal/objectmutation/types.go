@@ -56,7 +56,7 @@ type Put struct {
 }
 
 // Copy is one provider-side copy request. SourceETag binds the exact source
-// version and Absent refuses to replace an existing target, so the request needs
+// revision and Absent refuses to replace an existing target, so the request needs
 // no Stat-then-write shim. Metadata carries the intent marker that lets recovery
 // attribute its own effect after a lost reply.
 type Copy struct {
@@ -70,7 +70,7 @@ type Copy struct {
 }
 
 // CopyBackend copies one object inside the provider without streaming its bytes
-// through the gateway. It must bind the source version and refuse an existing
+// through the gateway. It must bind the source revision and refuse an existing
 // target through native conditions; it must never fall back to a read/put pair.
 type CopyBackend interface {
 	CopyObject(context.Context, Copy) (Object, error)

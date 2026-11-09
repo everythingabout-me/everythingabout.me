@@ -168,7 +168,7 @@ func manifestEffect(op Operation, number int) (EntryEffect, storage.EffectIntent
 		return selected, storage.EffectIntent{}, E("not_found", nil)
 	}
 	e := selected.ManifestEntry
-	if storage.ValidatePath(e.Source) != nil || storage.ValidatePath(e.Target) != nil || e.Size < 0 || e.Size > 9007199254740991 || e.TargetConditions.Absent && len(e.TargetConditions.ExpectedVersion) > 0 {
+	if storage.ValidatePath(e.Source) != nil || storage.ValidatePath(e.Target) != nil || e.Size < 0 || e.Size > 9007199254740991 || e.TargetConditions.Absent && len(e.TargetConditions.ExpectedRevision) > 0 {
 		return selected, storage.EffectIntent{}, E("invalid_intent", nil)
 	}
 	switch e.Action {
@@ -194,17 +194,17 @@ func manifestEffect(op Operation, number int) (EntryEffect, storage.EffectIntent
 			return selected, storage.EffectIntent{}, E("invalid_intent", nil)
 		}
 	}
-	selected.SourceVersion = bytes.Clone(e.SourceVersion)
-	selected.TargetConditions.ExpectedVersion = bytes.Clone(e.TargetConditions.ExpectedVersion)
+	selected.SourceRevision = bytes.Clone(e.SourceRevision)
+	selected.TargetConditions.ExpectedRevision = bytes.Clone(e.TargetConditions.ExpectedRevision)
 	selected.Checkpoint = bytes.Clone(selected.Checkpoint)
 	selected.Evidence = bytes.Clone(selected.Evidence)
 	selected.Result = bytes.Clone(selected.Result)
-	intent := storage.EffectIntent{ID: fmt.Sprintf("%s/entry/%d", op.ID, number), Action: e.Action, Source: e.Source, Target: e.Target, Conditions: storage.Conditions{Absent: e.TargetConditions.Absent, ExpectedVersion: bytes.Clone(e.TargetConditions.ExpectedVersion)}, SourceVersion: bytes.Clone(e.SourceVersion)}
+	intent := storage.EffectIntent{ID: fmt.Sprintf("%s/entry/%d", op.ID, number), Action: e.Action, Source: e.Source, Target: e.Target, Conditions: storage.Conditions{Absent: e.TargetConditions.Absent, ExpectedRevision: bytes.Clone(e.TargetConditions.ExpectedRevision)}, SourceRevision: bytes.Clone(e.SourceRevision)}
 	return selected, intent, nil
 }
 func cloneEffectIntent(intent storage.EffectIntent) storage.EffectIntent {
-	intent.SourceVersion = bytes.Clone(intent.SourceVersion)
-	intent.Conditions.ExpectedVersion = bytes.Clone(intent.Conditions.ExpectedVersion)
+	intent.SourceRevision = bytes.Clone(intent.SourceRevision)
+	intent.Conditions.ExpectedRevision = bytes.Clone(intent.Conditions.ExpectedRevision)
 	return intent
 }
 func recordedEntry(entry EntryEffect) (bool, error) {

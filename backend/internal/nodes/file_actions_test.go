@@ -97,17 +97,17 @@ func indexActionEntry(t *testing.T, pool *pgxpool.Pool, root fileops.Root, p str
 	return id
 }
 func actionEffect(number int, action, source, target string, kind storage.Kind) fileops.EntryEffect {
-	effect := fileops.EntryEffect{ManifestEntry: fileops.ManifestEntry{Number: number, Action: action, Source: storage.Path(source), Target: storage.Path(target), SourceVersion: []byte("captured-version"), Size: 3}, State: "applied", Evidence: []byte("proven-native-effect")}
+	effect := fileops.EntryEffect{ManifestEntry: fileops.ManifestEntry{Number: number, Action: action, Source: storage.Path(source), Target: storage.Path(target), SourceRevision: []byte("captured-version"), Size: 3}, State: "applied", Evidence: []byte("proven-native-effect")}
 	result := storage.MutationResult{Evidence: effect.Evidence}
 	if action != "delete" {
-		entry := storage.Entry{Path: storage.Path(target), Kind: kind, Size: 3, MediaType: "text/plain", Version: []byte("target-version"), ModifiedAt: time.Date(2026, 10, 31, 12, 0, 0, 123456000, time.UTC)}
+		entry := storage.Entry{Path: storage.Path(target), Kind: kind, Size: 3, MediaType: "text/plain", Revision: []byte("target-version"), ModifiedAt: time.Date(2026, 10, 31, 12, 0, 0, 123456000, time.UTC)}
 		if kind == storage.Folder {
 			entry.Size = 0
 			entry.MediaType = ""
 			effect.Size = 0
 		}
 		if action == "mkdir" {
-			effect.SourceVersion = nil
+			effect.SourceRevision = nil
 		}
 		result.Entry = &entry
 	}
@@ -308,7 +308,7 @@ func TestCommitFileActionProvenEffects(t *testing.T) {
 		root := actionOwner(t, pool)
 		id := indexActionEntry(t, pool, root, "source.txt", false)
 		effect := actionEffect(0, "delete", "source.txt", "", storage.File)
-		effect.SourceVersion = nil
+		effect.SourceRevision = nil
 		tx, err := pool.Begin(context.Background())
 		if err != nil {
 			t.Fatal(err)
@@ -327,7 +327,7 @@ func TestCommitStagedFilePublicRevision(t *testing.T) {
 	ctx := context.Background()
 	intent := storage.WriteIntent{Target: "file.txt", Size: 3}
 	encoded, _ := json.Marshal(intent)
-	entry := storage.Entry{Path: "file.txt", Kind: storage.File, Size: 3, Version: []byte("selected-version"), ContentIdentity: []byte("inode"), ModifiedAt: time.Date(2026, 10, 31, 12, 0, 0, 123456000, time.UTC)}
+	entry := storage.Entry{Path: "file.txt", Kind: storage.File, Size: 3, Revision: []byte("selected-version"), ContentIdentity: []byte("inode"), ModifiedAt: time.Date(2026, 10, 31, 12, 0, 0, 123456000, time.UTC)}
 	tx, err := pool.Begin(ctx)
 	if err != nil {
 		t.Fatal(err)

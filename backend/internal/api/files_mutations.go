@@ -178,7 +178,7 @@ func (s *Server) filesMutationAuthorize(r *http.Request, f *fileRequest, native 
 			if err != nil {
 				return filesMutationProblem(err)
 			}
-			if parent.Kind != storage.Folder || !bytes.Equal(parent.Version, intent.ParentVersion) {
+			if parent.Kind != storage.Folder || !bytes.Equal(parent.Revision, intent.ParentRevision) {
 				return fc.NewProblem(412, "target_changed", "The destination parent changed.")
 			}
 		}
@@ -485,7 +485,7 @@ func (s *Server) handleFilesPut(w http.ResponseWriter, r *http.Request, f *fileR
 	if parent.Kind != storage.Folder {
 		return fc.NewProblem(409, "not_a_folder", "The destination parent is not a folder.")
 	}
-	intent.ParentVersion = bytes.Clone(parent.Version)
+	intent.ParentRevision = bytes.Clone(parent.Revision)
 	var oldBytes int64
 	existing, err := native.Stat(r.Context(), intent.Target)
 	if err != nil && !storage.IsCode(err, "not_found") {
@@ -511,7 +511,7 @@ func (s *Server) handleFilesPut(w http.ResponseWriter, r *http.Request, f *fileR
 			}
 			return e
 		}
-		intent.Conditions.ExpectedVersion = bytes.Clone(existing.Version)
+		intent.Conditions.ExpectedRevision = bytes.Clone(existing.Revision)
 		oldBytes = existing.Size
 	} else {
 		if condition.Mode == fc.PutReplace {
@@ -534,7 +534,7 @@ func (s *Server) handleFilesPut(w http.ResponseWriter, r *http.Request, f *fileR
 		return ""
 	}(), CreditVersion: func() []byte {
 		if oldBytes > 0 {
-			return intent.Conditions.ExpectedVersion
+			return intent.Conditions.ExpectedRevision
 		}
 		return nil
 	}()}})

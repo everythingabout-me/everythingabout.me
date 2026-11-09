@@ -21,7 +21,7 @@ func replacementRequest(r Root, a Actor, path storage.Path, newBytes, oldBytes i
 	req.Reservation.OldBytes = oldBytes
 	req.Reservation.CreditPath = path
 	req.Reservation.CreditVersion = version
-	req.Intent, _ = json.Marshal(storage.WriteIntent{Target: path, Size: newBytes, Conditions: storage.Conditions{ExpectedVersion: version}})
+	req.Intent, _ = json.Marshal(storage.WriteIntent{Target: path, Size: newBytes, Conditions: storage.Conditions{ExpectedRevision: version}})
 	return req
 }
 func TestCanonicalFingerprintAndNativePaths(t *testing.T) {
@@ -148,7 +148,7 @@ func TestUploadIntentBinding(t *testing.T) {
 		t.Fatal("caller supplied operation ID accepted")
 	}
 	w.ID = ""
-	for _, conditions := range []storage.Conditions{{}, {Absent: true, ExpectedVersion: []byte("v1")}} {
+	for _, conditions := range []storage.Conditions{{}, {Absent: true, ExpectedRevision: []byte("v1")}} {
 		w.Conditions = conditions
 		req.Intent, _ = json.Marshal(w)
 		if _, _, _, err := validateBegin(req); !IsCode(err, "invalid_request") {

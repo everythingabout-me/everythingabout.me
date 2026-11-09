@@ -115,7 +115,7 @@ func nativeIntent(t *testing.T, d *Driver, id string, size int64) storage.WriteI
 	if e != nil {
 		t.Fatal(e)
 	}
-	return storage.WriteIntent{ID: id, Target: storage.Path(id), Size: size, Conditions: storage.Conditions{Absent: true}, ParentVersion: parent.Version, MediaType: "application/octet-stream"}
+	return storage.WriteIntent{ID: id, Target: storage.Path(id), Size: size, Conditions: storage.Conditions{Absent: true}, ParentRevision: parent.Revision, MediaType: "application/octet-stream"}
 }
 func keepPart(part storage.UploadPart) (storage.UploadPart, error) { return part, nil }
 

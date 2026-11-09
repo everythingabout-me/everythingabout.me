@@ -159,7 +159,7 @@ func validateBegin(req BeginRequest) (BeginRequest, string, int64, error) {
 	req.Manifest = append([]ManifestEntry(nil), req.Manifest...)
 	sort.Slice(req.Manifest, func(i, j int) bool { return req.Manifest[i].Number < req.Manifest[j].Number })
 	for i, e := range req.Manifest {
-		if e.Number < 0 || (i > 0 && req.Manifest[i-1].Number == e.Number) || e.Size < 0 || e.Action == "" || storage.ValidatePath(e.Source) != nil || storage.ValidatePath(e.Target) != nil || e.TargetConditions.Absent && len(e.TargetConditions.ExpectedVersion) > 0 {
+		if e.Number < 0 || (i > 0 && req.Manifest[i-1].Number == e.Number) || e.Size < 0 || e.Action == "" || storage.ValidatePath(e.Source) != nil || storage.ValidatePath(e.Target) != nil || e.TargetConditions.Absent && len(e.TargetConditions.ExpectedRevision) > 0 {
 			return fail()
 		}
 		for _, p := range []storage.Path{e.Source, e.Target} {
@@ -189,7 +189,7 @@ func validateBegin(req BeginRequest) (BeginRequest, string, int64, error) {
 	// A credit is a captured exclusive target revision, never a free-form discount.
 	if req.Kind == "upload_commit" {
 		var w storage.WriteIntent
-		if json.Unmarshal(req.Intent, &w) != nil || w.ID != "" || w.Size != q.NewBytes || w.Size < 0 || w.Target == "" || storage.ValidatePath(w.Target) != nil || !covered(req.Root, req.Guards, w.Target) || w.Conditions.Absent == (len(w.Conditions.ExpectedVersion) > 0) {
+		if json.Unmarshal(req.Intent, &w) != nil || w.ID != "" || w.Size != q.NewBytes || w.Size < 0 || w.Target == "" || storage.ValidatePath(w.Target) != nil || !covered(req.Root, req.Guards, w.Target) || w.Conditions.Absent == (len(w.Conditions.ExpectedRevision) > 0) {
 			return fail()
 		}
 		if req.Root.RetainsVersions {
@@ -198,14 +198,14 @@ func validateBegin(req BeginRequest) (BeginRequest, string, int64, error) {
 				return fail()
 			}
 		}
-		if q.OldBytes > 0 && (w.Target != q.CreditPath || !bytes.Equal(w.Conditions.ExpectedVersion, q.CreditVersion)) {
+		if q.OldBytes > 0 && (w.Target != q.CreditPath || !bytes.Equal(w.Conditions.ExpectedRevision, q.CreditVersion)) {
 			return fail()
 		}
 	}
 	if q.OldBytes > 0 && len(req.Manifest) > 0 {
 		matched := false
 		for _, e := range req.Manifest {
-			if e.Target == q.CreditPath && bytes.Equal(e.TargetConditions.ExpectedVersion, q.CreditVersion) || e.Action == "delete" && e.Source == q.CreditPath && bytes.Equal(e.SourceVersion, q.CreditVersion) {
+			if e.Target == q.CreditPath && bytes.Equal(e.TargetConditions.ExpectedRevision, q.CreditVersion) || e.Action == "delete" && e.Source == q.CreditPath && bytes.Equal(e.SourceRevision, q.CreditVersion) {
 				matched = true
 			}
 		}

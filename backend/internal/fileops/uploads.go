@@ -27,7 +27,7 @@ const (
 )
 
 // UploadOptions describes fixed ingress geometry and the original public intent.
-// ClientIntent excludes captured native parent/version evidence from replay identity.
+// ClientIntent excludes captured native parent/revision evidence from replay identity.
 type UploadOptions struct {
 	PartSize     int64
 	ClientIntent storage.WriteIntent
@@ -90,11 +90,11 @@ func clientUploadFingerprint(w storage.WriteIntent) (string, error) {
 	if w.ID != "" || w.Target == "" && (w.Selection != "id" || w.EntryID == "") || storage.ValidatePath(w.Target) != nil || w.Size < 0 || strings.ContainsRune(w.ClientCondition, 0) {
 		return "", E("invalid_request", nil)
 	}
-	// Native Conditions, ParentPath and ParentVersion are captured admission evidence.
+	// Native Conditions, ParentPath and ParentRevision are captured admission evidence.
 	// ClientCondition is the canonical original API precondition.
 	w.Conditions = storage.Conditions{}
 	w.ParentPath = ""
-	w.ParentVersion = nil
+	w.ParentRevision = nil
 	w = clientWriteIdentity(w)
 	if w.SourceModifiedAt != nil {
 		t := w.SourceModifiedAt.UTC()

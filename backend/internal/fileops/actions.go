@@ -268,17 +268,17 @@ func parentPath(p storage.Path) storage.Path {
 	}
 	return ""
 }
-func requireVersion(e storage.Entry) error {
+func requireRevision(e storage.Entry) error {
 	// Prefix folders without a native marker have no revision; they exist only
 	// through their children and are never the subject of a conditional effect.
-	if storage.ValidatePath(e.Path) != nil || len(e.Version) == 0 && e.Kind != storage.Folder || e.Size < 0 || e.Size > 9007199254740991 || e.Kind != storage.File && e.Kind != storage.Folder || e.Kind == storage.Folder && e.Size != 0 {
+	if storage.ValidatePath(e.Path) != nil || len(e.Revision) == 0 && e.Kind != storage.Folder || e.Size < 0 || e.Size > 9007199254740991 || e.Kind != storage.File && e.Kind != storage.Folder || e.Kind == storage.Folder && e.Size != 0 {
 		return E("unsupported", nil)
 	}
 	return nil
 }
 func cloneActionEntry(e storage.Entry) storage.Entry {
 	e.NativeRef = bytes.Clone(e.NativeRef)
-	e.Version = bytes.Clone(e.Version)
+	e.Revision = bytes.Clone(e.Revision)
 	e.ContentIdentity = bytes.Clone(e.ContentIdentity)
 	if e.Digest != nil {
 		digest := *e.Digest
@@ -291,10 +291,10 @@ func cloneActionEntry(e storage.Entry) storage.Entry {
 // implicitFolderGone reports that a captured marker-less prefix folder vanished
 // because its children were removed; that is the expected outcome, not a change.
 func implicitFolderGone(captured storage.Entry, err error) bool {
-	return captured.Kind == storage.Folder && len(captured.Version) == 0 && storage.IsCode(err, "not_found")
+	return captured.Kind == storage.Folder && len(captured.Revision) == 0 && storage.IsCode(err, "not_found")
 }
 func sameNative(a, b storage.Entry) bool {
-	return a.Path == b.Path && a.Kind == b.Kind && a.Size == b.Size && bytes.Equal(a.Version, b.Version) && bytes.Equal(a.NativeRef, b.NativeRef)
+	return a.Path == b.Path && a.Kind == b.Kind && a.Size == b.Size && bytes.Equal(a.Revision, b.Revision) && bytes.Equal(a.NativeRef, b.NativeRef)
 }
 func observe(ctx context.Context, native NativeActions, p storage.Path) (storage.Entry, error) {
 	e, err := native.Stat(ctx, p)
@@ -304,7 +304,7 @@ func observe(ctx context.Context, native NativeActions, p storage.Path) (storage
 	if e.Path != p {
 		return e, E("target_changed", nil)
 	}
-	return cloneActionEntry(e), requireVersion(e)
+	return cloneActionEntry(e), requireRevision(e)
 }
 func captureAction(ctx context.Context, req ActionRequest, native NativeActions) (actionBinding, []ManifestEntry, ReservationRequest, error) {
 	var binding actionBinding
@@ -336,7 +336,7 @@ func captureAction(ctx context.Context, req ActionRequest, native NativeActions)
 	}
 	sourceEvidence := make(map[storage.Path]storage.Entry)
 	add := func(action string, source, target storage.Path, version []byte, size int64) {
-		entry := ManifestEntry{Number: len(manifest), Action: action, Source: source, Target: target, SourceVersion: bytes.Clone(version), TargetConditions: storage.Conditions{Absent: action != "delete"}, Size: size}
+		entry := ManifestEntry{Number: len(manifest), Action: action, Source: source, Target: target, SourceRevision: bytes.Clone(version), TargetConditions: storage.Conditions{Absent: action != "delete"}, Size: size}
 		if source != "" {
 			cloned := cloneActionEntry(sourceEvidence[source])
 			entry.SourceEntry = &cloned
@@ -393,7 +393,7 @@ func captureAction(ctx context.Context, req ActionRequest, native NativeActions)
 		if err != nil {
 			return fail(err)
 		}
-		if source.Kind == storage.Folder && len(source.Version) > 0 {
+		if source.Kind == storage.Folder && len(source.Revision) > 0 {
 			if err = addAncestors(parentPath(req.To)); err != nil {
 				if storage.IsCode(err, "not_found") {
 					err = E("parent_missing", err)
@@ -411,7 +411,7 @@ func captureAction(ctx context.Context, req ActionRequest, native NativeActions)
 			binding.Strategy = nativeTreeMoveStrategy
 			binding.Sources = []storage.Entry{source}
 			sourceEvidence[source.Path] = source
-			add("move", req.From, req.To, source.Version, 0)
+			add("move", req.From, req.To, source.Revision, 0)
 			return binding, manifest, reserve, nil
 		}
 	}
@@ -443,7 +443,7 @@ func captureAction(ctx context.Context, req ActionRequest, native NativeActions)
 			if e.Kind == storage.Folder {
 				add("mkdir", "", target, nil, 0)
 			} else {
-				add("copy", e.Path, target, e.Version, e.Size)
+				add("copy", e.Path, target, e.Revision, e.Size)
 				var ok bool
 				reserve.NewBytes, ok = addOK(reserve.NewBytes, e.Size)
 				if !ok || reserve.NewBytes > 9007199254740991 {
@@ -459,7 +459,7 @@ func captureAction(ctx context.Context, req ActionRequest, native NativeActions)
 	if req.Kind == "delete" || req.Kind == "move" {
 		for i := len(sources) - 1; i >= 0; i-- {
 			e := sources[i]
-			add("delete", e.Path, "", e.Version, e.Size)
+			add("delete", e.Path, "", e.Revision, e.Size)
 			var ok bool
 			reserve.OldBytes, ok = addOK(reserve.OldBytes, e.Size)
 			if !ok || reserve.OldBytes > 9007199254740991 {
@@ -508,7 +508,7 @@ func snapshotActionTree(ctx context.Context, native NativeActions, root storage.
 			}
 			for _, e := range page.Entries {
 				key := comparePathFromNative(native, e.Path)
-				if e.Path == "" || parentPath(e.Path) != folder.Path || seen[key] || requireVersion(e) != nil {
+				if e.Path == "" || parentPath(e.Path) != folder.Path || seen[key] || requireRevision(e) != nil {
 					return nil, E("ambiguous_path", nil)
 				}
 				seen[key] = true
@@ -732,14 +732,14 @@ func executeAction(ctx context.Context, native NativeActions, intent storage.Eff
 	case "mkdir":
 		return native.Mkdir(ctx, storage.Mutation{ID: intent.ID, Path: intent.Target, Conditions: intent.Conditions}, save)
 	case "delete":
-		return native.Remove(ctx, storage.Mutation{ID: intent.ID, Path: intent.Source, Conditions: storage.Conditions{ExpectedVersion: intent.SourceVersion}}, save)
+		return native.Remove(ctx, storage.Mutation{ID: intent.ID, Path: intent.Source, Conditions: storage.Conditions{ExpectedRevision: intent.SourceRevision}}, save)
 	case "move":
 		if !native.Describe().NativeTreeMove {
 			return storage.MutationResult{}, E("unsupported", nil)
 		}
-		return native.Move(ctx, storage.MoveRequest{ID: intent.ID, Source: intent.Source, Target: intent.Target, SourceVersion: intent.SourceVersion, TargetConditions: intent.Conditions}, save)
+		return native.Move(ctx, storage.MoveRequest{ID: intent.ID, Source: intent.Source, Target: intent.Target, SourceRevision: intent.SourceRevision, TargetConditions: intent.Conditions}, save)
 	case "copy":
-		return native.Copy(ctx, storage.MoveRequest{ID: intent.ID, Source: intent.Source, Target: intent.Target, SourceVersion: intent.SourceVersion, TargetConditions: intent.Conditions}, save)
+		return native.Copy(ctx, storage.MoveRequest{ID: intent.ID, Source: intent.Source, Target: intent.Target, SourceRevision: intent.SourceRevision, TargetConditions: intent.Conditions}, save)
 	default:
 		return storage.MutationResult{}, E("invalid_intent", nil)
 	}
@@ -798,7 +798,7 @@ func observeChecks(ctx context.Context, native NativeActions, checks []nativeChe
 				results[i] = checkResult{err: E("target_changed", err)}
 				return
 			}
-			if !sameNative(check.expected, current) || (len(check.version) > 0 && !bytes.Equal(current.Version, check.version)) {
+			if !sameNative(check.expected, current) || (len(check.version) > 0 && !bytes.Equal(current.Revision, check.version)) {
 				results[i] = checkResult{err: E("target_changed", nil)}
 			}
 		}(i)
@@ -883,7 +883,7 @@ func validateActionStep(ctx context.Context, native NativeActions, req ActionReq
 		if tolerant {
 			stop = len(checks)
 		}
-		checks = append(checks, nativeCheck{expected: *entry.SourceEntry, version: entry.SourceVersion, tolerateGone: tolerant})
+		checks = append(checks, nativeCheck{expected: *entry.SourceEntry, version: entry.SourceRevision, tolerateGone: tolerant})
 	}
 	for i, result := range observeChecks(ctx, native, checks) {
 		if i == stop && result.gone {
@@ -1065,7 +1065,7 @@ func observeActionResult(ctx context.Context, native NativeActions, op Operation
 			}
 			for _, child := range page.Entries {
 				key := comparePath(op.Root, child.Path)
-				if child.Path == "" || parentPath(child.Path) != req.To || seen[key] || requireVersion(child) != nil {
+				if child.Path == "" || parentPath(child.Path) != req.To || seen[key] || requireRevision(child) != nil {
 					return observation, E("invalid_native_result", nil)
 				}
 				seen[key] = true

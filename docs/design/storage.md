@@ -154,7 +154,7 @@ A folder move cannot be promised as one atomic transaction on every backend. Mul
 can be partial after failure and must expose durable progress and affected paths. Checkpoint each safe step;
 never delete a source until its destination is proven complete. For a non-atomic folder move, copy and verify
 the entire captured destination set before starting source deletion; then delete only captured unchanged
-source versions. Retries follow the recorded manifest and
+source revisions. Retries follow the recorded manifest and
 validators rather than blindly rescan/delete a changed source. Cancellation stops further safe steps and
 reports what remains; it does not promise to undo completed native effects.
 
@@ -168,7 +168,7 @@ Discard the old claim that a database reference swap alone publishes file bytes.
 in an external filesystem/storage system; Postgres and provider operations cannot share one atomic transaction.
 Use a durable operation journal and recovery workflow:
 
-1. Bind user/root/config generation, target path/identity, expected version and target generation; reserve
+1. Bind user/root/config generation, target path/identity, expected revision and target generation; reserve
    logical quota and serialize conflicting file/folder operations. Capture selected file/parent ID and ancestor
    namespace state; a moved/recreated target or ancestor invalidates admitted work, including ID-selected uploads.
    New ID requests after a completed move may select its current authorized location.

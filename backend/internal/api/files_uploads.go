@@ -297,7 +297,7 @@ func (s *Server) handleFilesCreateUpload(w http.ResponseWriter, r *http.Request,
 	if parent.Kind != storage.Folder {
 		return fc.NewProblem(409, "not_a_folder", "The destination parent is not a folder.")
 	}
-	intent.ParentVersion = parent.Version
+	intent.ParentRevision = parent.Revision
 	var oldBytes int64
 	existing, err := native.Stat(r.Context(), intent.Target)
 	if err != nil && !storage.IsCode(err, "not_found") {
@@ -317,7 +317,7 @@ func (s *Server) handleFilesCreateUpload(w http.ResponseWriter, r *http.Request,
 		if e = fc.CheckPutCondition(condition, revision); e != nil {
 			return e
 		}
-		intent.Conditions.ExpectedVersion = existing.Version
+		intent.Conditions.ExpectedRevision = existing.Revision
 		oldBytes = existing.Size
 	} else {
 		if condition.Mode == fc.PutReplace {
@@ -337,7 +337,7 @@ func (s *Server) handleFilesCreateUpload(w http.ResponseWriter, r *http.Request,
 	reservation := fileops.ReservationRequest{NewBytes: intent.Size, OldBytes: oldBytes, PhysicalBytes: physical}
 	if oldBytes > 0 {
 		reservation.CreditPath = intent.Target
-		reservation.CreditVersion = intent.Conditions.ExpectedVersion
+		reservation.CreditVersion = intent.Conditions.ExpectedRevision
 	}
 	encoded, _ := json.Marshal(intent)
 	u, _, err := s.filesJournal.CreateUpload(r.Context(), fileops.BeginRequest{Root: root, Actor: actor, Kind: "upload_commit", IdempotencyKey: key, Intent: encoded, Guards: []fileops.Guard{{Path: intent.Target}}, Reservation: reservation}, fileops.UploadOptions{PartSize: filesUploadPartSize, ClientIntent: client})

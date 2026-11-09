@@ -149,7 +149,7 @@ func (f *fileWorkerFixture) admittedPut(t *testing.T, root fileops.Root, native 
 	if err != nil {
 		t.Fatal(err)
 	}
-	intent := storage.WriteIntent{Target: storage.Path(target), Conditions: storage.Conditions{Absent: true}, Size: int64(len(data)), MediaType: "application/octet-stream", ParentPath: parent, ParentVersion: entry.Version, ClientCondition: "create:default"}
+	intent := storage.WriteIntent{Target: storage.Path(target), Conditions: storage.Conditions{Absent: true}, Size: int64(len(data)), MediaType: "application/octet-stream", ParentPath: parent, ParentRevision: entry.Revision, ClientCondition: "create:default"}
 	encoded, _ := json.Marshal(intent)
 	op, _, err := f.journal.Begin(f.ctx, fileops.BeginRequest{Root: root, Actor: actor, Kind: "upload_commit", Intent: encoded, Guards: []fileops.Guard{{Path: actor.Scope, Subtree: true}}, Reservation: fileops.ReservationRequest{NewBytes: int64(len(data)), PhysicalBytes: int64(len(data))}})
 	if err != nil {

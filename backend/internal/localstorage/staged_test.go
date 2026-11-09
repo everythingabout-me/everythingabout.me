@@ -92,7 +92,7 @@ func TestStagedAdmissionAndUnsupportedReplace(t *testing.T) {
 		t.Fatal("read factory capabilities changed")
 	}
 	writeFixture(t, cfg.ContentRoot, "old", "keep old complete bytes")
-	for _, conditions := range []storage.Conditions{{ExpectedVersion: []byte("untrustworthy")}, {}, {Absent: true, ExpectedVersion: []byte("both")}} {
+	for _, conditions := range []storage.Conditions{{ExpectedRevision: []byte("untrustworthy")}, {}, {Absent: true, ExpectedRevision: []byte("both")}} {
 		in := writeIntent("replace", "old", "new")
 		in.Conditions = conditions
 		_, err := w.Stage(context.Background(), in, strings.NewReader("new"), stageOK)

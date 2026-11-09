@@ -247,7 +247,7 @@ func TestFilesContentVersionedConditions(t *testing.T) {
 				t.Fatalf("ETag %q != %q", w.Header().Get("ETag"), tag)
 			}
 			for _, options := range driver.opens {
-				if !bytes.Equal(options.Version, driver.entry.Version) {
+				if !bytes.Equal(options.PinnedVersion, driver.entry.Revision) {
 					t.Fatal("validator used without native pinned Open")
 				}
 			}
@@ -269,7 +269,7 @@ func TestFilesContentVersionedHeadAndEmptyFile(t *testing.T) {
 		if err != nil || w.Code != 200 || w.Body.Len() != 0 || w.Header().Get("Content-Length") != strconv.Itoa(len(data)) || w.Header().Get("ETag") == "" {
 			t.Fatalf("HEAD: %v %v %q", err, w.Header(), w.Body.String())
 		}
-		if driver.closes != 1 || len(driver.opens) != 1 || len(driver.opens[0].Version) == 0 {
+		if driver.closes != 1 || len(driver.opens) != 1 || len(driver.opens[0].PinnedVersion) == 0 {
 			t.Fatal("HEAD did not prove and close a pinned native read")
 		}
 	}
@@ -348,7 +348,7 @@ func TestFilesContentActualOpenMetadataAndChangingRanges(t *testing.T) {
 		driver := newContentDriver("new", []byte("real-version"))
 		driver.statEntry = &storage.Entry{Kind: storage.File, Path: "file", Size: 3}
 		w, err := runContent(t, contentRequest(driver), http.MethodGet, "/file", nil)
-		if err != nil || w.Header().Get("ETag") == "" || len(driver.opens) != 2 || len(driver.opens[0].Version) != 0 || string(driver.opens[1].Version) != "real-version" {
+		if err != nil || w.Header().Get("ETag") == "" || len(driver.opens) != 2 || len(driver.opens[0].PinnedVersion) != 0 || string(driver.opens[1].PinnedVersion) != "real-version" {
 			t.Fatalf("%v %v %+v", err, w.Header(), driver.opens)
 		}
 	})
@@ -370,7 +370,7 @@ func TestFilesContentActualOpenMetadataAndChangingRanges(t *testing.T) {
 	})
 	t.Run("mismatch never emits old validator", func(t *testing.T) {
 		driver := newContentDriver("payload", []byte("current"))
-		driver.statEntry = &storage.Entry{Kind: storage.File, Path: "file", Size: 7, Version: []byte("wrong")}
+		driver.statEntry = &storage.Entry{Kind: storage.File, Path: "file", Size: 7, Revision: []byte("wrong")}
 		driver.ignoreVersion = true
 		w, err := runContent(t, contentRequest(driver), http.MethodGet, "/file", nil)
 		if !storage.IsCode(err, "changed") || driver.openCount != 3 || w.Header().Get("ETag") != "" || w.Body.Len() != 0 || driver.closes != 3 {
@@ -532,7 +532,7 @@ func TestFilesContentHTTPFailureTruncatesConnection(t *testing.T) {
 }
 
 func TestFilesContentRevisionBindingAndNativeRename(t *testing.T) {
-	entry := storage.Entry{Kind: storage.File, Path: "old", NativeRef: []byte("private/old"), Version: []byte("native-version:opaque")}
+	entry := storage.Entry{Kind: storage.File, Path: "old", NativeRef: []byte("private/old"), Revision: []byte("native-version:opaque")}
 	a := filesContentRevision("owner-root", entry)
 	if a == nil {
 		t.Fatal("versioned file has no revision")
@@ -550,12 +550,12 @@ func TestFilesContentRevisionBindingAndNativeRename(t *testing.T) {
 	if b == nil || *a == *b {
 		t.Fatal("different native paths reused a content revision")
 	}
-	entry.Version = nil
+	entry.Revision = nil
 	if filesContentRevision("owner-root", entry) != nil {
 		t.Fatal("unversioned content has revision")
 	}
 	entry.Kind = storage.Folder
-	entry.Version = []byte("native-version:folder")
+	entry.Revision = []byte("native-version:folder")
 	if filesContentRevision("owner-root", entry) != nil {
 		t.Fatal("folder has content revision")
 	}
@@ -681,7 +681,7 @@ type contentDriver struct {
 }
 
 func newContentDriver(data string, version []byte) *contentDriver {
-	return &contentDriver{entry: storage.Entry{Path: "file", NativeRef: []byte("native-object:file"), Kind: storage.File, Size: int64(len(data)), Version: version}, data: data, ranges: true}
+	return &contentDriver{entry: storage.Entry{Path: "file", NativeRef: []byte("native-object:file"), Kind: storage.File, Size: int64(len(data)), Revision: version}, data: data, ranges: true}
 }
 func (d *contentDriver) Describe() storage.Descriptor {
 	return storage.Descriptor{RangeRead: d.ranges, Names: storage.NameRules{CaseSensitive: true}}
@@ -715,7 +715,7 @@ func (d *contentDriver) Open(ctx context.Context, p storage.Path, options storag
 	if d.beforeOpen != nil {
 		d.beforeOpen(d.openCount, options)
 	}
-	if len(options.Version) > 0 && !d.ignoreVersion && !bytes.Equal(options.Version, d.entry.Version) {
+	if len(options.PinnedVersion) > 0 && !d.ignoreVersion && !bytes.Equal(options.PinnedVersion, d.entry.Revision) {
 		return storage.Read{}, storage.NewError("changed", p, nil)
 	}
 	length := int64(len(d.data)) - options.Offset

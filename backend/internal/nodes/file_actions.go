@@ -62,13 +62,13 @@ func commitFileAction(ctx context.Context, tx pgx.Tx, op fileops.Operation, nati
 		if storage.ValidatePath(effect.Source) != nil || storage.ValidatePath(effect.Target) != nil {
 			return nil, fileops.E("invalid_intent", nil)
 		}
-		if effect.SourceEntry != nil && (effect.SourceEntry.Path != effect.Source || !bytes.Equal(effect.SourceEntry.Version, effect.SourceVersion)) {
+		if effect.SourceEntry != nil && (effect.SourceEntry.Path != effect.Source || !bytes.Equal(effect.SourceEntry.Revision, effect.SourceRevision)) {
 			return nil, fileops.E("invalid_native_result", nil)
 		}
 		switch effect.Action {
 		case "delete":
-			// SourceVersion is captured unchanged-source proof, not a fresh DB lookup.
-			if effect.Source == "" || effect.Target != "" || len(effect.SourceVersion) == 0 || result.Entry != nil {
+			// SourceRevision is captured unchanged-source proof, not a fresh DB lookup.
+			if effect.Source == "" || effect.Target != "" || len(effect.SourceRevision) == 0 || result.Entry != nil {
 				return nil, fileops.E("invalid_native_result", nil)
 			}
 			deletes[effect.Source] = effect
@@ -81,7 +81,7 @@ func commitFileAction(ctx context.Context, tx pgx.Tx, op fileops.Operation, nati
 				if effect.Source != "" || entry.Kind != storage.Folder {
 					return nil, fileops.E("invalid_native_result", nil)
 				}
-			} else if effect.Source == "" || effect.Source == effect.Target || len(effect.SourceVersion) == 0 || (entry.Kind == storage.File && entry.Size != effect.Size) {
+			} else if effect.Source == "" || effect.Source == effect.Target || len(effect.SourceRevision) == 0 || (entry.Kind == storage.File && entry.Size != effect.Size) {
 				return nil, fileops.E("invalid_native_result", nil)
 			}
 			if _, duplicate := results[entry.Path]; duplicate {
@@ -191,7 +191,7 @@ func commitFileAction(ctx context.Context, tx pgx.Tx, op fileops.Operation, nati
 				if !ok {
 					continue
 				}
-				if effect.Action == "copy" && (effect.Source != source || !bytes.Equal(effect.SourceVersion, deletion.SourceVersion)) {
+				if effect.Action == "copy" && (effect.Source != source || !bytes.Equal(effect.SourceRevision, deletion.SourceRevision)) {
 					return nil, fileops.E("invalid_native_result", nil)
 				}
 			}
@@ -265,7 +265,7 @@ func commitFileAction(ctx context.Context, tx pgx.Tx, op fileops.Operation, nati
 		if len(native.Evidence) == 0 || final.Path != request.To || storage.ValidatePath(final.Path) != nil || final.Size < 0 || final.Size > 9007199254740991 || (final.Kind != storage.File && final.Kind != storage.Folder) || (final.Kind == storage.Folder && final.Size != 0) {
 			return nil, fileops.E("invalid_native_result", nil)
 		}
-		if ok && (entry.Kind != final.Kind || entry.Size != final.Size || !bytes.Equal(entry.Version, final.Version) || !bytes.Equal(entry.NativeRef, final.NativeRef)) {
+		if ok && (entry.Kind != final.Kind || entry.Size != final.Size || !bytes.Equal(entry.Revision, final.Revision) || !bytes.Equal(entry.NativeRef, final.NativeRef)) {
 			return nil, fileops.E("invalid_native_result", nil)
 		}
 		if !ok && !(op.Kind == "mkdir" && len(op.Entries) == 0 && final.Kind == storage.Folder) {

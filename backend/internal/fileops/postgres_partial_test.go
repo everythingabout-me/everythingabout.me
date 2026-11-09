@@ -16,7 +16,7 @@ func TestPostgresPartialChargingAndQuotaSafety(t *testing.T) {
 		p, r, a := seedOwner(t, pool, baseline)
 		req := genericRequest(r, a, "tree", 10)
 		req.Guards[0].Subtree = true
-		req.Manifest = []ManifestEntry{{Number: 0, Action: "copy", Source: "tree/a", Target: "tree/b", SourceVersion: []byte("v1"), TargetConditions: storage.Conditions{Absent: true}, Size: 5}, {Number: 1, Action: "copy", Source: "tree/c", Target: "tree/d", SourceVersion: []byte("v2"), TargetConditions: storage.Conditions{Absent: true}, Size: 5}}
+		req.Manifest = []ManifestEntry{{Number: 0, Action: "copy", Source: "tree/a", Target: "tree/b", SourceRevision: []byte("v1"), TargetConditions: storage.Conditions{Absent: true}, Size: 5}, {Number: 1, Action: "copy", Source: "tree/c", Target: "tree/d", SourceRevision: []byte("v2"), TargetConditions: storage.Conditions{Absent: true}, Size: 5}}
 		op := mustClaim(t, p, mustBegin(t, p, req), a)
 		if err := p.BeginEntry(ctx, op.Lease, 0); err != nil {
 			t.Fatal(err)

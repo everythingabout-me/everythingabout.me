@@ -42,7 +42,7 @@ func lookupContentRevision(ctx context.Context, reader contentRevisionReader, ow
 func contentFingerprint(entry storage.Entry) []byte {
 	h := sha256.New()
 	h.Write([]byte("eam/native-content/v1\x00"))
-	for _, value := range [][]byte{entry.NativeRef, entry.ContentIdentity, entry.Version} {
+	for _, value := range [][]byte{entry.NativeRef, entry.ContentIdentity, entry.Revision} {
 		var length [8]byte
 		binary.BigEndian.PutUint64(length[:], uint64(len(value)))
 		h.Write(length[:])

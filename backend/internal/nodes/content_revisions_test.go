@@ -16,7 +16,7 @@ func TestContentGenerationTransfersAndInvalidation(t *testing.T) {
 	pool := actionTestDatabase(t)
 	ctx := context.Background()
 	root := actionOwner(t, pool)
-	source := storage.Entry{Path: "from/a.txt", Kind: storage.File, Size: 3, Version: []byte("captured-version"), NativeRef: []byte("source-inode"), ContentIdentity: []byte("source-content")}
+	source := storage.Entry{Path: "from/a.txt", Kind: storage.File, Size: 3, Revision: []byte("captured-version"), NativeRef: []byte("source-inode"), ContentIdentity: []byte("source-content")}
 	indexActionEntry(t, pool, root, "from", true)
 	id := indexActionEntry(t, pool, root, string(source.Path), false)
 	first := filerevision.Content(fileRootNamespace(root), source)
@@ -53,10 +53,10 @@ func TestContentGenerationTransfersAndInvalidation(t *testing.T) {
 	// the intermediate native revision from its new inode.
 	second := actionEffect(0, "copy", string(target.Path), "again.txt", storage.File)
 	second.SourceEntry = &target
-	second.SourceVersion = target.Version
+	second.SourceRevision = target.Revision
 	secondDelete := actionEffect(1, "delete", string(target.Path), "", storage.File)
 	secondDelete.SourceEntry = &target
-	secondDelete.SourceVersion = target.Version
+	secondDelete.SourceRevision = target.Revision
 	raw := runActionCommit(t, pool, actionOperation(root, "move", string(target.Path), "again.txt", second, secondDelete))
 	var m fc.Metadata
 	if err = json.Unmarshal(raw, &m); err != nil {
@@ -69,7 +69,7 @@ func TestContentGenerationTransfersAndInvalidation(t *testing.T) {
 	json.Unmarshal(second.Result, &secondResult)
 	current := *secondResult.Entry
 	changed := current
-	changed.Version = []byte("external-replacement")
+	changed.Revision = []byte("external-replacement")
 	got, err = lookupContentRevision(ctx, pool, root.OwnerID, fileRootNamespace(root), changed)
 	if err != nil || got == nil || *got == *first || *got != *filerevision.Content(fileRootNamespace(root), changed) {
 		t.Fatalf("external replacement inherited generation: %v %v", got, err)
@@ -85,7 +85,7 @@ func TestContentGenerationTransfersAndInvalidation(t *testing.T) {
 	}
 	copyOnly := actionEffect(0, "copy", string(current.Path), "independent.txt", storage.File)
 	copyOnly.SourceEntry = &current
-	copyOnly.SourceVersion = current.Version
+	copyOnly.SourceRevision = current.Revision
 	copyRaw := runActionCommit(t, pool, actionOperation(root, "copy", string(current.Path), "independent.txt", copyOnly))
 	var independent fc.Metadata
 	json.Unmarshal(copyRaw, &independent)

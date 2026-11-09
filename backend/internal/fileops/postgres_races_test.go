@@ -128,16 +128,16 @@ func TestPostgresAdmissionRacesAndHandoff(t *testing.T) {
 		req := genericRequest(r, a, "tree", 12)
 		req.Guards[0].Subtree = true
 		req.IdempotencyKey = "manifest"
-		req.Manifest = []ManifestEntry{{Number: 0, Action: "copy", Source: "tree/a", Target: "tree/b", Size: 12, SourceVersion: []byte("v1"), TargetConditions: storage.Conditions{Absent: true}}}
+		req.Manifest = []ManifestEntry{{Number: 0, Action: "copy", Source: "tree/a", Target: "tree/b", Size: 12, SourceRevision: []byte("v1"), TargetConditions: storage.Conditions{Absent: true}}}
 		op := mustBegin(t, p, req)
 		changed := req
 		changed.Manifest = append([]ManifestEntry(nil), req.Manifest...)
-		changed.Manifest[0].SourceVersion = []byte("v2")
+		changed.Manifest[0].SourceRevision = []byte("v2")
 		_, _, err := p.Begin(ctx, changed)
 		requireCode(t, err, "idempotency_conflict")
 		changed = req
 		changed.Manifest = append([]ManifestEntry(nil), req.Manifest...)
-		changed.Manifest[0].TargetConditions = storage.Conditions{ExpectedVersion: []byte("target-v1")}
+		changed.Manifest[0].TargetConditions = storage.Conditions{ExpectedRevision: []byte("target-v1")}
 		_, _, err = p.Begin(ctx, changed)
 		requireCode(t, err, "idempotency_conflict")
 		changed = req

@@ -504,7 +504,7 @@ func TestFilesObjectsPostgresS3MutationConformance(t *testing.T) {
 		entry, err := driver.Stat(f.ctx, storage.Path(strings.TrimPrefix(special, "/")))
 		description := driver.Describe()
 		driver.Close()
-		if err != nil || !bytes.Equal(entry.Version, []byte("native-etag:"+old.ETag)) || description.RetainsVersions || description.PinnedRead {
+		if err != nil || !bytes.Equal(entry.Revision, []byte("native-etag:"+old.ETag)) || description.RetainsVersions || description.PinnedRead {
 			t.Fatalf("object revision must use the current ETag without retained-version guarantees: entry=%+v description=%+v error=%v", entry, description, err)
 		}
 		if tag == "" || tag != strconv.Quote(created["contentRevision"].(string)) {
@@ -609,7 +609,7 @@ func TestFilesObjectsPostgresS3MutationConformance(t *testing.T) {
 		}
 		parent, err := driver.Stat(f.ctx, "Implicit")
 		driver.Close()
-		if err != nil || parent.Kind != storage.Folder || len(parent.Version) != 0 {
+		if err != nil || parent.Kind != storage.Folder || len(parent.Revision) != 0 {
 			t.Fatalf("implicit parent must exist without a native validator: %+v %v", parent, err)
 		}
 		created := objectsAPIJSON(t, f.request(t, "PUT", "/content", "/Implicit/new", []byte("published"), nil), 201)

@@ -246,7 +246,7 @@ func (d *Driver) SealPlannedUpload(ctx context.Context, in storage.WriteIntent, 
 	if err != nil {
 		return storage.Staged{}, err
 	}
-	r = &ledger{Kind: "write", ID: in.ID, Intent: cloneIntent(in), Attempt: attempt, Phase: "ready", ParentVersion: append([]byte(nil), in.ParentVersion...), Native: stage}
+	r = &ledger{Kind: "write", ID: in.ID, Intent: cloneIntent(in), Attempt: attempt, Phase: "ready", ParentRevision: append([]byte(nil), in.ParentRevision...), Native: stage}
 	if err = d.save(r); err != nil {
 		return storage.Staged{}, err
 	}

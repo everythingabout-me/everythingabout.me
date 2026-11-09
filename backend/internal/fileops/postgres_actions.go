@@ -99,7 +99,7 @@ func (p *Postgres) FreezeAction(ctx context.Context, l Lease, b actionBinding, m
 		}
 		for _, e := range manifest {
 			if e.Action == "delete" && e.Size > 0 {
-				tag, err := tx.Exec(ctx, `insert into file_credit_claims(owner_id,comparison_path,version,operation_id) values($1,$2,$3,$4) on conflict do nothing`, op.Root.OwnerID, comparePath(op.Root, e.Source), e.SourceVersion, op.ID)
+				tag, err := tx.Exec(ctx, `insert into file_credit_claims(owner_id,comparison_path,version,operation_id) values($1,$2,$3,$4) on conflict do nothing`, op.Root.OwnerID, comparePath(op.Root, e.Source), e.SourceRevision, op.ID)
 				if err != nil {
 					return err
 				}
@@ -140,7 +140,7 @@ func validateFrozenAction(op Operation, b actionBinding, entries []ManifestEntry
 	}
 	sources := make(map[storage.Path]storage.Entry, len(b.Sources))
 	for _, e := range b.Sources {
-		if requireVersion(e) != nil || !within(comparePath(op.Root, e.Path), comparePath(op.Root, req.From)) || sources[e.Path].Kind != "" {
+		if requireRevision(e) != nil || !within(comparePath(op.Root, e.Path), comparePath(op.Root, req.From)) || sources[e.Path].Kind != "" {
 			return E("invalid_intent", nil)
 		}
 		sources[e.Path] = e
@@ -150,7 +150,7 @@ func validateFrozenAction(op Operation, b actionBinding, entries []ManifestEntry
 	}
 	var expected []ManifestEntry
 	add := func(action string, source, target storage.Path, v []byte, size int64) {
-		entry := ManifestEntry{Number: len(expected), Action: action, Source: source, Target: target, SourceVersion: v, Size: size, TargetConditions: storage.Conditions{Absent: action != "delete"}}
+		entry := ManifestEntry{Number: len(expected), Action: action, Source: source, Target: target, SourceRevision: v, Size: size, TargetConditions: storage.Conditions{Absent: action != "delete"}}
 		if source != "" {
 			captured := cloneActionEntry(sources[source])
 			entry.SourceEntry = &captured
@@ -161,16 +161,16 @@ func validateFrozenAction(op Operation, b actionBinding, entries []ManifestEntry
 		return E("invalid_intent", nil)
 	}
 	if b.Strategy == nativeTreeMoveStrategy {
-		if req.Kind != "move" || req.From == "" || req.To == "" || req.From == req.To || len(b.Sources) != 1 || b.Sources[0].Kind != storage.Folder || len(b.Sources[0].Version) == 0 || b.Existing != nil {
+		if req.Kind != "move" || req.From == "" || req.To == "" || req.From == req.To || len(b.Sources) != 1 || b.Sources[0].Kind != storage.Folder || len(b.Sources[0].Revision) == 0 || b.Existing != nil {
 			return E("invalid_intent", nil)
 		}
-		add("move", req.From, req.To, b.Sources[0].Version, 0)
+		add("move", req.From, req.To, b.Sources[0].Revision, 0)
 	} else if req.Kind == "mkdir" {
 		if len(b.Sources) != 0 {
 			return E("invalid_intent", nil)
 		}
 		if b.Existing != nil {
-			if b.Existing.Path != req.To || b.Existing.Kind != storage.Folder || requireVersion(*b.Existing) != nil || len(entries) != 0 {
+			if b.Existing.Path != req.To || b.Existing.Kind != storage.Folder || requireRevision(*b.Existing) != nil || len(entries) != 0 {
 				return E("invalid_intent", nil)
 			}
 		} else {
@@ -178,7 +178,7 @@ func validateFrozenAction(op Operation, b actionBinding, entries []ManifestEntry
 				return E("invalid_intent", nil)
 			}
 			for i, e := range entries {
-				if e.Action != "mkdir" || e.Source != "" || e.Size != 0 || len(e.SourceVersion) > 0 || !e.TargetConditions.Absent || len(e.TargetConditions.ExpectedVersion) > 0 || e.Number != i || i > 0 && parentPath(e.Target) != entries[i-1].Target {
+				if e.Action != "mkdir" || e.Source != "" || e.Size != 0 || len(e.SourceRevision) > 0 || !e.TargetConditions.Absent || len(e.TargetConditions.ExpectedRevision) > 0 || e.Number != i || i > 0 && parentPath(e.Target) != entries[i-1].Target {
 					return E("invalid_intent", nil)
 				}
 			}
@@ -195,14 +195,14 @@ func validateFrozenAction(op Operation, b actionBinding, entries []ManifestEntry
 				if e.Kind == storage.Folder {
 					add("mkdir", "", target, nil, 0)
 				} else {
-					add("copy", e.Path, target, e.Version, e.Size)
+					add("copy", e.Path, target, e.Revision, e.Size)
 				}
 			}
 		}
 		if req.Kind == "delete" || req.Kind == "move" {
 			for i := len(b.Sources) - 1; i >= 0; i-- {
 				e := b.Sources[i]
-				add("delete", e.Path, "", e.Version, e.Size)
+				add("delete", e.Path, "", e.Revision, e.Size)
 			}
 		}
 	}
@@ -353,17 +353,17 @@ func validateActionSettlement(ctx context.Context, tx pgx.Tx, op Operation, b ac
 	for _, entry := range op.Entries {
 		if entry.Action == "delete" && entry.Size > 0 {
 			var exists bool
-			err = tx.QueryRow(ctx, `select exists(select 1 from file_credit_claims where owner_id=$1 and operation_id=$2 and comparison_path=$3 and version=$4)`, op.Root.OwnerID, op.ID, comparePath(op.Root, entry.Source), entry.SourceVersion).Scan(&exists)
+			err = tx.QueryRow(ctx, `select exists(select 1 from file_credit_claims where owner_id=$1 and operation_id=$2 and comparison_path=$3 and version=$4)`, op.Root.OwnerID, op.ID, comparePath(op.Root, entry.Source), entry.SourceRevision).Scan(&exists)
 			if err != nil {
 				return err
 			}
 			if !exists {
 				return E("credit_conflict", nil)
 			}
-			// Only consumed source-version credits remain permanent. A cancelled pending
+			// Only consumed source-revision credits remain permanent. A cancelled pending
 			// delete must not prevent a future operation from deleting that same source.
 			if entry.State != "applied" {
-				_, err = tx.Exec(ctx, `delete from file_credit_claims where owner_id=$1 and operation_id=$2 and comparison_path=$3 and version=$4`, op.Root.OwnerID, op.ID, comparePath(op.Root, entry.Source), entry.SourceVersion)
+				_, err = tx.Exec(ctx, `delete from file_credit_claims where owner_id=$1 and operation_id=$2 and comparison_path=$3 and version=$4`, op.Root.OwnerID, op.ID, comparePath(op.Root, entry.Source), entry.SourceRevision)
 				if err != nil {
 					return err
 				}

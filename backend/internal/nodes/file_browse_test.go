@@ -127,7 +127,7 @@ func TestIndexedMutationResponsesMatchBrowsing(t *testing.T) {
 	mkdir := actionEffect(0, "mkdir", "", "folder", storage.Folder)
 	assertResponse(runActionCommit(t, pool, actionOperation(root, "mkdir", "", "folder", mkdir)), "folder")
 	intent, _ := json.Marshal(storage.WriteIntent{Target: "folder/a.txt", Size: 3})
-	entry := storage.Entry{Path: "folder/a.txt", Kind: storage.File, Size: 3, Version: []byte("native-v1")}
+	entry := storage.Entry{Path: "folder/a.txt", Kind: storage.File, Size: 3, Revision: []byte("native-v1")}
 	tx, err := pool.Begin(ctx)
 	if err != nil {
 		t.Fatal(err)
@@ -144,11 +144,11 @@ func TestIndexedMutationResponsesMatchBrowsing(t *testing.T) {
 	source := entry
 	copy := actionEffect(0, "copy", "folder/a.txt", "folder/b.txt", storage.File)
 	copy.SourceEntry = &source
-	copy.SourceVersion = source.Version
+	copy.SourceRevision = source.Revision
 	assertResponse(runActionCommit(t, pool, actionOperation(root, "copy", "folder/a.txt", "folder/b.txt", copy)), "folder/b.txt")
 	move := actionEffect(0, "move", "folder/a.txt", "folder/c.txt", storage.File)
 	move.SourceEntry = &source
-	move.SourceVersion = source.Version
+	move.SourceRevision = source.Revision
 	assertResponse(runActionCommit(t, pool, actionOperation(root, "move", "folder/a.txt", "folder/c.txt", move)), "folder/c.txt")
 }
 

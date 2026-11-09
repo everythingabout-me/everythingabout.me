@@ -211,7 +211,7 @@ func TestScanBoundsCancellationAndFailures(t *testing.T) {
 		m.stat = func(context.Context, storage.Path) (storage.Entry, error) {
 			calls++
 			e := folder("")
-			e.Version = []byte(fmt.Sprint(calls))
+			e.Revision = []byte(fmt.Sprint(calls))
 			return e, nil
 		}
 		_, err := Scan(context.Background(), m, Options{})
@@ -226,7 +226,7 @@ func TestResultCannotBeForgedOrMutated(t *testing.T) {
 	}
 	e := file("a")
 	e.NativeRef = []byte("native")
-	e.Version = []byte("version")
+	e.Revision = []byte("version")
 	e.Digest = &storage.Digest{Algorithm: "sha256", Value: []byte("digest")}
 	r, err := Scan(context.Background(), tree(e), Options{})
 	if err != nil {
@@ -235,7 +235,7 @@ func TestResultCannotBeForgedOrMutated(t *testing.T) {
 	records, _ := r.Records()
 	records[0].Entry.Path = "changed"
 	records[0].Entry.NativeRef[0] = 'X'
-	records[0].Entry.Version[0] = 'X'
+	records[0].Entry.Revision[0] = 'X'
 	records[0].Entry.Digest.Value[0] = 'X'
 	again, _ := r.Records()
 	if !reflect.DeepEqual(again[0].Entry, e) {

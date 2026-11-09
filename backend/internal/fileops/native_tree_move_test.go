@@ -24,7 +24,7 @@ func (n *nativeTreeMoveTestDriver) Describe() storage.Descriptor {
 }
 func (n *nativeTreeMoveTestDriver) Move(ctx context.Context, in storage.MoveRequest, save storage.Checkpoint) (storage.MutationResult, error) {
 	n.moves++
-	effect := storage.EffectIntent{ID: in.ID, Action: "move", Source: in.Source, Target: in.Target, SourceVersion: in.SourceVersion, Conditions: in.TargetConditions}
+	effect := storage.EffectIntent{ID: in.ID, Action: "move", Source: in.Source, Target: in.Target, SourceRevision: in.SourceRevision, Conditions: in.TargetConditions}
 	n.calls = append(n.calls, effect)
 	if err := save(ctx, []byte("durable-native-move")); err != nil {
 		return storage.MutationResult{}, err

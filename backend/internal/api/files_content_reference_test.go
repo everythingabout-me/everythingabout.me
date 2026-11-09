@@ -83,7 +83,7 @@ func referenceContentRow(p, key string, size int64) nodes.Row {
 }
 
 func referenceContentFixture(key string) (*referenceContentDriver, *Server, *fileRequest) {
-	d := &referenceContentDriver{entry: storage.Entry{Path: "file", Kind: storage.File, NativeRef: []byte(key), Version: []byte("native-etag:abc"), Size: 10, MediaType: "text/plain"}, data: "0123456789", key: key}
+	d := &referenceContentDriver{entry: storage.Entry{Path: "file", Kind: storage.File, NativeRef: []byte(key), Revision: []byte("native-etag:abc"), Size: 10, MediaType: "text/plain"}, data: "0123456789", key: key}
 	f := &fileRequest{Principal: &auth.Principal{User: &auth.User{ID: "owner-a"}}, Driver: d, Scope: "/", Namespace: "caller-scope", ContentNamespace: "owner-root-config"}
 	return d, &Server{cfg: &config.Config{AppSecret: "stable-test-secret"}}, f
 }

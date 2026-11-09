@@ -50,11 +50,11 @@ func (w *MutationDriver) validateAction(in storage.EffectIntent) error {
 	}
 	switch in.Action {
 	case "mkdir":
-		if in.Source != "" || len(in.SourceVersion) != 0 {
+		if in.Source != "" || len(in.SourceRevision) != 0 {
 			return storage.NewError("invalid_intent", in.Target, nil)
 		}
 	case "remove":
-		if in.Source != "" || len(in.SourceVersion) != 0 || in.Conditions.Absent || len(in.Conditions.ExpectedVersion) != sha256.Size {
+		if in.Source != "" || len(in.SourceRevision) != 0 || in.Conditions.Absent || len(in.Conditions.ExpectedRevision) != sha256.Size {
 			return storage.NewError("unsupported", in.Target, nil)
 		}
 		return nil
@@ -65,7 +65,7 @@ func (w *MutationDriver) validateAction(in storage.EffectIntent) error {
 		if err := validatePath(in.Source); err != nil {
 			return err
 		}
-		if len(in.SourceVersion) != sha256.Size {
+		if len(in.SourceRevision) != sha256.Size {
 			return storage.NewError("unsupported", in.Source, nil)
 		}
 		if w.driver.key(string(in.Source)) == w.driver.key(string(in.Target)) || strings.HasPrefix(w.driver.key(string(in.Target)), w.driver.key(string(in.Source))+"/") {
@@ -74,7 +74,7 @@ func (w *MutationDriver) validateAction(in storage.EffectIntent) error {
 	default:
 		return storage.NewError("unsupported", in.Target, nil)
 	}
-	if !in.Conditions.Absent || len(in.Conditions.ExpectedVersion) != 0 {
+	if !in.Conditions.Absent || len(in.Conditions.ExpectedRevision) != 0 {
 		return storage.NewError("unsupported", in.Target, nil)
 	}
 	return nil
@@ -198,15 +198,15 @@ func (w *MutationDriver) Remove(ctx context.Context, in storage.Mutation, cp sto
 	return w.runAction(ctx, storage.EffectIntent{ID: in.ID, Action: "remove", Target: in.Path, Conditions: in.Conditions}, cp)
 }
 func (w *MutationDriver) Move(ctx context.Context, in storage.MoveRequest, cp storage.Checkpoint) (storage.MutationResult, error) {
-	return w.runAction(ctx, storage.EffectIntent{ID: in.ID, Action: "move", Source: in.Source, Target: in.Target, SourceVersion: in.SourceVersion, Conditions: in.TargetConditions}, cp)
+	return w.runAction(ctx, storage.EffectIntent{ID: in.ID, Action: "move", Source: in.Source, Target: in.Target, SourceRevision: in.SourceRevision, Conditions: in.TargetConditions}, cp)
 }
 func (w *MutationDriver) Copy(ctx context.Context, in storage.MoveRequest, cp storage.Checkpoint) (storage.MutationResult, error) {
-	return w.runAction(ctx, storage.EffectIntent{ID: in.ID, Action: "copy", Source: in.Source, Target: in.Target, SourceVersion: in.SourceVersion, Conditions: in.TargetConditions}, cp)
+	return w.runAction(ctx, storage.EffectIntent{ID: in.ID, Action: "copy", Source: in.Source, Target: in.Target, SourceRevision: in.SourceRevision, Conditions: in.TargetConditions}, cp)
 }
 func (w *MutationDriver) runAction(ctx context.Context, in storage.EffectIntent, cp storage.Checkpoint) (storage.MutationResult, error) {
 	// Clone caller-owned conditions before durable comparison/callbacks.
-	in.Conditions.ExpectedVersion = bytes.Clone(in.Conditions.ExpectedVersion)
-	in.SourceVersion = bytes.Clone(in.SourceVersion)
+	in.Conditions.ExpectedRevision = bytes.Clone(in.Conditions.ExpectedRevision)
+	in.SourceRevision = bytes.Clone(in.SourceRevision)
 	root, done, err := w.beginAction(ctx, in)
 	if err != nil {
 		return storage.MutationResult{}, err
@@ -267,11 +267,11 @@ func (w *MutationDriver) runAction(ctx context.Context, in storage.EffectIntent,
 		if err != nil {
 			return storage.MutationResult{}, noEffect(err)
 		}
-		expected := in.SourceVersion
+		expected := in.SourceRevision
 		if in.Action == "remove" {
-			expected = in.Conditions.ExpectedVersion
+			expected = in.Conditions.ExpectedRevision
 		}
-		if !bytes.Equal(expected, e.Version) {
+		if !bytes.Equal(expected, e.Revision) {
 			return storage.MutationResult{}, noEffect(storage.NewError("changed", path, nil))
 		}
 		r.Source = &e
@@ -429,7 +429,7 @@ func (w *MutationDriver) recheckAction(ctx context.Context, r *actionLedger) err
 		if err != nil {
 			return err
 		}
-		if r.Source == nil || !bytes.Equal(e.Version, r.Source.Version) {
+		if r.Source == nil || !bytes.Equal(e.Revision, r.Source.Revision) {
 			return storage.NewError("changed", path, nil)
 		}
 		if in.Action == "remove" && e.Kind == storage.Folder {

@@ -47,7 +47,7 @@ func NewMutationDriver(driver storage.Driver, options WriteOptions) (*MutationDr
 func (w *MutationDriver) Describe() storage.Descriptor {
 	d := w.driver.Describe()
 	d.PinnedRead, d.AtomicCreate, d.AtomicReplace = true, true, true
-	// Expected-version conditions rely on the declared coordinated writer model;
+	// Expected-revision conditions rely on the declared coordinated writer model;
 	// the filesystem supplies atomic visibility, not a native version CAS.
 	d.NativeConditionalMutation, d.NativeTreeMove = false, true
 	return d
@@ -61,7 +61,7 @@ func nativeVersion(e storage.Entry, info os.FileInfo) storage.Entry {
 	e.ContentIdentity = bytes.Clone(e.NativeRef)
 	if e.Kind == storage.Folder {
 		h := sha256.Sum256(e.NativeRef)
-		e.Version = h[:]
+		e.Revision = h[:]
 		return e
 	}
 	b, _ := json.Marshal(struct {
@@ -72,7 +72,7 @@ func nativeVersion(e storage.Entry, info os.FileInfo) storage.Entry {
 		Digest         *storage.Digest
 	}{rootIdentity(info), e.Kind, e.Size, info.ModTime().UnixNano(), uint32(info.Mode()), e.Digest})
 	h := sha256.Sum256(b)
-	e.Version = h[:]
+	e.Revision = h[:]
 	return e
 }
 func sameNativeStat(a, b os.FileInfo) bool {
@@ -260,7 +260,7 @@ func (w *MutationDriver) Open(ctx context.Context, path storage.Path, options st
 	if err != nil {
 		return storage.Read{}, err
 	}
-	if len(options.Version) != 0 && !bytes.Equal(options.Version, e.Version) {
+	if len(options.PinnedVersion) != 0 && !bytes.Equal(options.PinnedVersion, e.Revision) {
 		f.Close()
 		return storage.Read{}, storage.NewError("changed", path, nil)
 	}

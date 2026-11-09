@@ -44,6 +44,25 @@ at construction, validate them there, and never construct provider clients in an
 
 ## 2. File and folder interfaces
 
+Three words cover state in this service. They are not interchangeable.
+
+- **revision** — `Entry.Revision`, `Conditions.ExpectedRevision`, `MoveRequest.SourceRevision`. The driver's
+  opaque token for the exact native state of one entry. It is what a conditional effect compares against and
+  what proves an effect applied to the node we observed. Its derivation belongs to the driver: the object ETag
+  on S3/COS/R2, a generation number on GCS, a revision id on a cloud drive. It is internal and never crosses the
+  API boundary.
+- **version** — `Descriptor.RetainsVersions`, `Descriptor.PinnedRead`, `ReadOptions.PinnedVersion`,
+  `objecttree.Object.VersionID`. A retained historical copy held by the provider. Version history is a product
+  feature this service does not use: every deployed driver reports `RetainsVersions=false` and
+  `PinnedRead=false`, and no API exposes a version list, restore or pin.
+- **index revision** — `nr_…` in a file resource, `If-Revision`, `ifSourceRevision`. Our own token over the
+  indexed metadata. It gates application mutations and says nothing about the native state.
+
+A revision is not a version. The current state has a revision even where the provider keeps no history, and a
+version id never names the current state. Byte spellings that are hashed or persisted keep their historical
+form (`native-etag:`, `native-version:`, the `Version` key inside content-revision evidence) so existing
+records stay comparable; only the Go vocabulary changed.
+
 ```go
 package storage
 
@@ -65,7 +84,7 @@ type Entry struct {
     Path       Path
     Kind       Kind
     NativeRef  []byte // internal native ID/locator, optional
-    Version    []byte // native change/pinning evidence, opaque and possibly unavailable
+    Revision   []byte // opaque native state token; see the vocabulary above
     Size       int64  // file only
     ModifiedAt time.Time
     MediaType  string
@@ -90,7 +109,7 @@ type Page struct {
 type ReadOptions struct {
     Offset      int64
     Length      *int64 // nil means remaining bytes; non-nil exact positive range length
-    Version     []byte // requested native version/validator, not an application revision
+    PinnedVersion []byte // provider version id to read; empty means the current state
 }
 
 type Read struct {
@@ -108,7 +127,7 @@ type Tree interface {
 
 type Conditions struct {
     Absent          bool // atomic create-only at the destination
-    ExpectedVersion []byte // conditional mutation of a native revision, exclusive with Absent
+    ExpectedRevision []byte // conditional mutation of a native revision, exclusive with Absent
 }
 
 type Mutation struct {
@@ -136,7 +155,7 @@ type MoveRequest struct {
     ID string
     Source Path
     Target Path
-    SourceVersion []byte
+    SourceRevision []byte
     TargetConditions Conditions
 }
 
@@ -241,15 +260,15 @@ that two spellings denote the same object.
 Callers order the calls as observation → condition → transfer, so a 304 or a HEAD costs one native request and
 nothing is opened. `OpenReference` transfers exactly the requested range once; it must not open a full object
 and discard it to reposition. Because native object reads are validated but not version-pinned, the returned
-`Entry.Version` is the revision the caller observed with `StatReference`, exactly as `Open` already reports the
+`Entry.Revision` is the revision the caller observed with `StatReference`, exactly as `Open` already reports the
 revision from its own HEAD.
 
 Missing entries return a typed not_found error; not nil success. List is mandatory even on read-only drivers.
 The service recurses paginated child listings or uses an optional inventory optimization. Native IDs/versions
 remain private and are not file contents or public app IDs. Read callers must close Body and handle context
 cancellation. The driver must not silently serve a different version or ignore a requested byte range; it
-returns changed/unsupported and the API chooses an explicit fallback. Version pinning may use native versions,
-conditional reads, or coordinated exclusion of conflicting application mutations for the read duration.
+returns changed/unsupported and the API chooses an explicit fallback. Pinned reads may select a native version where
+one is retained, otherwise the driver refuses with unsupported.
 
 Files and folders share one native sibling namespace. Service uniqueness uses owner/root/parent and the
 versioned backend comparison-name rules; original accepted spelling stays visible. Different native IDs do
@@ -268,11 +287,11 @@ return unsupported before an unsafe effect. Conflicting external writes are outs
 do not claim they are fenced. An atomic no-replace primitive is needed to guarantee absence against them.
 A native MOVE that is atomic only within a filesystem must not be advertised as atomic across volumes.
 
-The object mutation driver derives `Version` from the current object's ETag and sends every conditional
+The object mutation driver derives `Revision` from the current object's ETag and sends every conditional
 effect with native `If-Match` / `If-None-Match` where the provider enforces them (COS ignores `If-Match`
 on PUT, so replacement re-checks the ETag under the gateway lock just before publishing). It advertises
 `AtomicCreate=true` and `AtomicReplace=true` without requiring bucket versioning. It sets `PinnedRead=false` and
-`RetainsVersions=false`. Prefix folders without a marker object have nil `Version`; they may be parents
+`RetainsVersions=false`. Prefix folders without a marker object have nil `Revision`; they may be parents
 but cannot be conditionally removed. Baseline/accounting uses the initial matched native/index observation
 plus application journal changes and reservations; exact global quota enforcement across external writers
 is not claimed.
@@ -414,7 +433,7 @@ type EffectIntent struct {
     Source Path
     Target Path
     Conditions Conditions
-    SourceVersion []byte
+    SourceRevision []byte
 }
 
 type EffectRecovery interface {

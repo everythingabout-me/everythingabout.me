@@ -106,8 +106,8 @@ func TestObjectRegressedSpoolCannotDowngradeFinalReceipt(t *testing.T) {
 						t.Fatal(err)
 					}
 					b.putError = io.ErrUnexpectedEOF
-					effect = storage.EffectIntent{ID: "regressed", Action: "copy", Source: "source", Target: "target", SourceVersion: result.Entry.Version, Conditions: storage.Conditions{Absent: true}}
-					_, err = d.Copy(ctx, storage.MoveRequest{ID: effect.ID, Source: effect.Source, Target: effect.Target, SourceVersion: effect.SourceVersion, TargetConditions: effect.Conditions}, capture)
+					effect = storage.EffectIntent{ID: "regressed", Action: "copy", Source: "source", Target: "target", SourceRevision: result.Entry.Revision, Conditions: storage.Conditions{Absent: true}}
+					_, err = d.Copy(ctx, storage.MoveRequest{ID: effect.ID, Source: effect.Source, Target: effect.Target, SourceRevision: effect.SourceRevision, TargetConditions: effect.Conditions}, capture)
 					if err == nil {
 						t.Fatal("expected ambiguous copy")
 					}

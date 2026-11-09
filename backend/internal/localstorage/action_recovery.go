@@ -40,7 +40,7 @@ func (w *MutationDriver) copyAction(ctx context.Context, root *os.Root, r *actio
 		return storage.MutationResult{}, noEffect(err)
 	}
 	defer f.Close()
-	if !bytes.Equal(e.Version, in.SourceVersion) {
+	if !bytes.Equal(e.Revision, in.SourceRevision) {
 		release()
 		return storage.MutationResult{}, noEffect(storage.NewError("changed", in.Source, nil))
 	}
@@ -113,10 +113,10 @@ func (w *MutationDriver) copyAction(ctx context.Context, root *os.Root, r *actio
 
 func (w *MutationDriver) InspectEffect(ctx context.Context, in storage.EffectIntent, evidence []byte) (storage.Inspection, error) {
 	if in.Action == "delete" {
-		if in.Target != "" || in.Conditions.Absent || len(in.Conditions.ExpectedVersion) != 0 {
+		if in.Target != "" || in.Conditions.Absent || len(in.Conditions.ExpectedRevision) != 0 {
 			return storage.Inspection{}, storage.NewError("intent_conflict", in.Target, nil)
 		}
-		in.Action, in.Target, in.Source, in.Conditions.ExpectedVersion, in.SourceVersion = "remove", in.Source, "", bytes.Clone(in.SourceVersion), nil
+		in.Action, in.Target, in.Source, in.Conditions.ExpectedRevision, in.SourceRevision = "remove", in.Source, "", bytes.Clone(in.SourceRevision), nil
 	}
 	if in.Action == "publish" {
 		return w.StagedWriter.InspectEffect(ctx, in, evidence)
@@ -226,13 +226,13 @@ func (w *MutationDriver) InspectEffect(ctx context.Context, in storage.EffectInt
 			}
 			return storage.Inspection{State: storage.Applied, Result: &result, Evidence: w.actionReceipt(r)}, nil
 		}
-		if targetErr == nil && bytes.Equal(targetEntry.Version, r.Source.Version) {
+		if targetErr == nil && bytes.Equal(targetEntry.Revision, r.Source.Revision) {
 			return seal()
 		}
 		return unknown()
 	}
 	if in.Action == "mkdir" {
-		if targetErr == nil && bytes.Equal(targetEntry.Version, r.Source.Version) {
+		if targetErr == nil && bytes.Equal(targetEntry.Revision, r.Source.Revision) {
 			if err := syncRoot(target); err != nil {
 				return storage.Inspection{}, err
 			}
@@ -260,10 +260,10 @@ func (w *MutationDriver) InspectEffect(ctx context.Context, in storage.EffectInt
 		return unknown()
 	}
 	sourceEntry, sourceErr := w.stat(ctx, in.Source)
-	if sourceErr == nil && bytes.Equal(sourceEntry.Version, r.Source.Version) {
+	if sourceErr == nil && bytes.Equal(sourceEntry.Revision, r.Source.Revision) {
 		return seal()
 	}
-	if storage.IsCode(sourceErr, "not_found") && targetErr == nil && bytes.Equal(targetEntry.Version, r.Source.Version) {
+	if storage.IsCode(sourceErr, "not_found") && targetErr == nil && bytes.Equal(targetEntry.Revision, r.Source.Revision) {
 		if err := syncRoot(source); err != nil {
 			return storage.Inspection{}, err
 		}

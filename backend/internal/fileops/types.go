@@ -54,7 +54,7 @@ type ManifestEntry struct {
 	Action           string
 	Source           storage.Path
 	Target           storage.Path
-	SourceVersion    []byte
+	SourceRevision    []byte
 	SourceEntry      *storage.Entry
 	TargetConditions storage.Conditions
 	Size             int64

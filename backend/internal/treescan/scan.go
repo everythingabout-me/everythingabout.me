@@ -115,7 +115,7 @@ func (r *Result) NameRules() storage.NameRules {
 }
 func clone(r Record) Record {
 	r.Entry.NativeRef = bytes.Clone(r.Entry.NativeRef)
-	r.Entry.Version = bytes.Clone(r.Entry.Version)
+	r.Entry.Revision = bytes.Clone(r.Entry.Revision)
 	r.Entry.ContentIdentity = bytes.Clone(r.Entry.ContentIdentity)
 	if r.Entry.Digest != nil {
 		d := *r.Entry.Digest
@@ -310,7 +310,7 @@ func Scan(ctx context.Context, tree storage.Tree, opts Options) (*Result, error)
 		if after.Path != dir.Path || after.Kind != storage.Folder || after.Size != 0 {
 			return nil, issue("changed", dir.Path, "", "directory changed during scan")
 		}
-		if len(dir.Version) > 0 && !bytes.Equal(dir.Version, after.Version) {
+		if len(dir.Revision) > 0 && !bytes.Equal(dir.Revision, after.Revision) {
 			return nil, issue("changed", dir.Path, "", "directory version changed during enumeration")
 		}
 	}

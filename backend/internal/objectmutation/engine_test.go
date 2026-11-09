@@ -140,10 +140,10 @@ func (t *fakeTree) Stat(ctx context.Context, path storage.Path) (storage.Entry, 
 	defer t.backend.mu.Unlock()
 	key := t.root + string(path)
 	if o, ok := t.backend.current[key]; ok {
-		return storage.Entry{Path: path, Kind: storage.File, Size: o.Size, Version: nativeVersion(o.VersionID)}, nil
+		return storage.Entry{Path: path, Kind: storage.File, Size: o.Size, Revision: nativeRevision(o.VersionID)}, nil
 	}
 	if o, ok := t.backend.current[key+"/"]; ok {
-		return storage.Entry{Path: path, Kind: storage.Folder, Version: nativeVersion(o.VersionID)}, nil
+		return storage.Entry{Path: path, Kind: storage.Folder, Revision: nativeRevision(o.VersionID)}, nil
 	}
 	for k := range t.backend.current {
 		if strings.HasPrefix(k, key+"/") {
@@ -197,10 +197,10 @@ func (t *fakeTree) Open(ctx context.Context, path storage.Path, opts storage.Rea
 		return storage.Read{}, fail("not_file", path)
 	}
 	version := ""
-	if len(opts.Version) > 0 {
-		version, err = parseVersion(opts.Version)
+	if len(opts.PinnedVersion) > 0 {
+		version, err = parseRevision(opts.PinnedVersion)
 	} else {
-		version, err = parseVersion(e.Version)
+		version, err = parseRevision(e.Revision)
 	}
 	if err != nil {
 		return storage.Read{}, err
@@ -211,7 +211,7 @@ func (t *fakeTree) Open(ctx context.Context, path storage.Path, opts storage.Rea
 	if !ok {
 		return storage.Read{}, fail("changed", path)
 	}
-	e.Version = nativeVersion(version)
+	e.Revision = nativeRevision(version)
 	e.NativeRef = []byte(t.root + string(path))
 	e.Size = int64(len(data))
 	length := e.Size - opts.Offset
@@ -297,7 +297,7 @@ func TestObjectPublicationDurabilityReplayAndDirectExit(t *testing.T) {
 	if err != nil || again.Entry.Path != in.Target || b.puts != 1 {
 		t.Fatalf("duplicate publication=%+v %v count%d", again, err, b.puts)
 	}
-	body, err := b.Open(ctx, cfg.ContentRoot+string(in.Target), strings.TrimPrefix(string(result.Entry.Version), "native-etag:"))
+	body, err := b.Open(ctx, cfg.ContentRoot+string(in.Target), strings.TrimPrefix(string(result.Entry.Revision), "native-etag:"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -480,14 +480,14 @@ func TestObjectCopyFoldersAndCapturedCurrentDelete(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	copied, err := d.Copy(ctx, storage.MoveRequest{ID: "copy", Source: "source", Target: "copy", SourceVersion: source.Entry.Version, TargetConditions: storage.Conditions{Absent: true}}, cpOK)
+	copied, err := d.Copy(ctx, storage.MoveRequest{ID: "copy", Source: "source", Target: "copy", SourceRevision: source.Entry.Revision, TargetConditions: storage.Conditions{Absent: true}}, cpOK)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err = d.Remove(ctx, storage.Mutation{ID: "delete", Path: "source", Conditions: storage.Conditions{ExpectedVersion: source.Entry.Version}}, cpOK); err != nil {
+	if _, err = d.Remove(ctx, storage.Mutation{ID: "delete", Path: "source", Conditions: storage.Conditions{ExpectedRevision: source.Entry.Revision}}, cpOK); err != nil {
 		t.Fatal(err)
 	}
-	body, err := b.Open(ctx, string(copied.Entry.NativeRef), strings.TrimPrefix(string(copied.Entry.Version), "native-etag:"))
+	body, err := b.Open(ctx, string(copied.Entry.NativeRef), strings.TrimPrefix(string(copied.Entry.Revision), "native-etag:"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -500,21 +500,21 @@ func TestObjectCopyFoldersAndCapturedCurrentDelete(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !bytes.Equal(current.Version, folder.Entry.Version) {
+	if !bytes.Equal(current.Revision, folder.Entry.Revision) {
 		t.Fatal("folder marker native version mismatch")
 	}
-	if _, err = d.Remove(ctx, storage.Mutation{ID: "delete-empty", Path: "Empty", Conditions: storage.Conditions{ExpectedVersion: current.Version}}, cpOK); err != nil {
+	if _, err = d.Remove(ctx, storage.Mutation{ID: "delete-empty", Path: "Empty", Conditions: storage.Conditions{ExpectedRevision: current.Revision}}, cpOK); err != nil {
 		t.Fatal(err)
 	}
 	implicit := createIntent("implicit", "Implicit/child", "x")
 	b.current["drive/owner/Implicit/child"] = Object{Key: "drive/owner/Implicit/child", ETag: "external", Size: 1}
 	prefix, err := d.Stat(ctx, "Implicit")
-	if err != nil || prefix.Kind != storage.Folder || prefix.Version != nil {
+	if err != nil || prefix.Kind != storage.Folder || prefix.Revision != nil {
 		t.Fatalf("implicit prefix folder=%+v %v", prefix, err)
 	}
 	_, err = d.Stage(ctx, implicit, strings.NewReader("x"), cpOK)
 	requireCode(t, err, "precondition_failed")
-	inspection, err := d.InspectEffect(ctx, storage.EffectIntent{ID: "copy", Action: "copy", Source: "source", Target: "copy", SourceVersion: source.Entry.Version, Conditions: storage.Conditions{Absent: true}}, copied.Evidence)
+	inspection, err := d.InspectEffect(ctx, storage.EffectIntent{ID: "copy", Action: "copy", Source: "source", Target: "copy", SourceRevision: source.Entry.Revision, Conditions: storage.Conditions{Absent: true}}, copied.Evidence)
 	if err != nil || inspection.State != storage.Applied {
 		t.Fatalf("copy recovery=%+v %v", inspection, err)
 	}
@@ -672,7 +672,7 @@ func TestReferenceReadsUseTheProvenKey(t *testing.T) {
 
 	reader := storage.ReferenceReader(d)
 	entry, err := reader.StatReference(ctx, "file.txt", []byte(key))
-	if err != nil || entry.Size != 3 || string(entry.Version) != "native-etag:etag-v1" || string(entry.NativeRef) != key {
+	if err != nil || entry.Size != 3 || string(entry.Revision) != "native-etag:etag-v1" || string(entry.NativeRef) != key {
 		t.Fatalf("reference stat: %+v %v", entry, err)
 	}
 	b.mu.Lock()
@@ -698,13 +698,13 @@ func TestReferenceReadsUseTheProvenKey(t *testing.T) {
 	}
 
 	length := int64(1)
-	read, err := reader.OpenReference(ctx, "file.txt", []byte(key), storage.ReadOptions{Offset: 1, Length: &length, Version: entry.Version})
+	read, err := reader.OpenReference(ctx, "file.txt", []byte(key), storage.ReadOptions{Offset: 1, Length: &length, PinnedVersion: entry.Revision})
 	if err != nil {
 		t.Fatal(err)
 	}
 	data, readErr := io.ReadAll(read.Body)
 	closeErr := read.Body.Close()
-	if readErr != nil || closeErr != nil || string(data) != "b" || read.Length != 1 || !bytes.Equal(read.Entry.Version, entry.Version) {
+	if readErr != nil || closeErr != nil || string(data) != "b" || read.Length != 1 || !bytes.Equal(read.Entry.Revision, entry.Revision) {
 		t.Fatalf("reference read: %q %+v %v %v", data, read, readErr, closeErr)
 	}
 }

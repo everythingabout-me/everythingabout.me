@@ -28,7 +28,7 @@ func TestMutationPrimitiveAmbiguityRecovery(t *testing.T) {
 			var err error
 			if action == "replace" {
 				in := writeIntent("replace", "file", "new")
-				in.Conditions = storage.Conditions{ExpectedVersion: old.Version}
+				in.Conditions = storage.Conditions{ExpectedRevision: old.Revision}
 				s := stageFile(t, w.StagedWriter, in, "new")
 				w.replace = func(a *os.Root, an string, b *os.Root, bn string, replace bool) error {
 					if err := actionRename(a, an, b, bn, replace); err != nil {
@@ -41,11 +41,11 @@ func TestMutationPrimitiveAmbiguityRecovery(t *testing.T) {
 					t.Fatal(err)
 				}
 				ins := inspectState(t, restartMutation(t, f, cfg).StagedWriter, in, storage.Applied)
-				if len(ins.Result.Entry.Version) == 0 {
+				if len(ins.Result.Entry.Revision) == 0 {
 					t.Fatal("replacement recovery lost version")
 				}
 			} else if action == "copy" {
-				in := storage.EffectIntent{ID: "copy", Action: "copy", Source: "file", Target: "copied", SourceVersion: old.Version, Conditions: storage.Conditions{Absent: true}}
+				in := storage.EffectIntent{ID: "copy", Action: "copy", Source: "file", Target: "copied", SourceRevision: old.Revision, Conditions: storage.Conditions{Absent: true}}
 				w.link = func(a *os.Root, an string, b *os.Root, bn string) error {
 					if err := stagedLink(a, an, b, bn); err != nil {
 						return err
@@ -58,7 +58,7 @@ func TestMutationPrimitiveAmbiguityRecovery(t *testing.T) {
 				}
 				actionInspection(t, restartMutation(t, f, cfg), in, nil, storage.Applied)
 			} else {
-				in := storage.EffectIntent{ID: "remove", Action: "remove", Target: "file", Conditions: storage.Conditions{ExpectedVersion: old.Version}}
+				in := storage.EffectIntent{ID: "remove", Action: "remove", Target: "file", Conditions: storage.Conditions{ExpectedRevision: old.Revision}}
 				w.remove = func(root *os.Root, name string) error {
 					if err := root.Remove(name); err != nil {
 						return err
@@ -71,7 +71,7 @@ func TestMutationPrimitiveAmbiguityRecovery(t *testing.T) {
 				}
 				fresh := restartMutation(t, f, cfg)
 				ins := actionInspection(t, fresh, in, nil, storage.Applied)
-				actionInspection(t, fresh, storage.EffectIntent{ID: in.ID, Action: "delete", Source: in.Target, SourceVersion: old.Version}, ins.Evidence, storage.Applied)
+				actionInspection(t, fresh, storage.EffectIntent{ID: in.ID, Action: "delete", Source: in.Target, SourceRevision: old.Revision}, ins.Evidence, storage.Applied)
 			}
 		})
 	}
@@ -84,7 +84,7 @@ func TestMutationReplacementRetainsNotAppliedAndUnknownEvidence(t *testing.T) {
 			writeFixture(t, cfg.ContentRoot, "file", "old")
 			old := mutationStat(t, w, "file")
 			in := writeIntent("replace", "file", "new")
-			in.Conditions = storage.Conditions{ExpectedVersion: old.Version}
+			in.Conditions = storage.Conditions{ExpectedRevision: old.Revision}
 			s := stageFile(t, w.StagedWriter, in, "new")
 			_, err := w.Publish(ctx, s, func(_ context.Context, b []byte) error {
 				var receipt stageReceipt
@@ -134,7 +134,7 @@ func TestMutationCopyRechecksSourceAfterDelayedCallback(t *testing.T) {
 	w, _, cfg := mutationFixture(t)
 	writeFixture(t, cfg.ContentRoot, "file", "old")
 	old := mutationStat(t, w, "file")
-	req := storage.MoveRequest{ID: "copy", Source: "file", Target: "copied", SourceVersion: old.Version, TargetConditions: storage.Conditions{Absent: true}}
+	req := storage.MoveRequest{ID: "copy", Source: "file", Target: "copied", SourceRevision: old.Revision, TargetConditions: storage.Conditions{Absent: true}}
 	_, err := w.Copy(context.Background(), req, func(_ context.Context, b []byte) error {
 		if actionPhase(b) == "executing" {
 			return os.WriteFile(filepath.Join(cfg.ContentRoot, "file"), []byte("new"), 0600)
@@ -160,13 +160,13 @@ func TestMutationSourceTimestampAndFrozenRead(t *testing.T) {
 	if !result.Entry.ModifiedAt.Equal(modified) {
 		t.Fatal("accepted native timestamp was not preserved")
 	}
-	read, err := w.Open(ctx, "file", storage.ReadOptions{Version: result.Entry.Version})
+	read, err := w.Open(ctx, "file", storage.ReadOptions{PinnedVersion: result.Entry.Revision})
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer read.Body.Close()
 	replacement := writeIntent("next", "file", "new bytes")
-	replacement.Conditions = storage.Conditions{ExpectedVersion: result.Entry.Version}
+	replacement.Conditions = storage.Conditions{ExpectedRevision: result.Entry.Revision}
 	next, err := w.Stage(ctx, replacement, strings.NewReader("new bytes"), stageOK)
 	if err != nil {
 		t.Fatal(err)
@@ -179,7 +179,7 @@ func TestMutationSourceTimestampAndFrozenRead(t *testing.T) {
 		t.Fatal("selected generation changed under atomic replacement")
 	}
 	newEntry := mutationStat(t, w, "file")
-	if bytes.Equal(newEntry.Version, result.Entry.Version) {
+	if bytes.Equal(newEntry.Revision, result.Entry.Revision) {
 		t.Fatal("replacement reused version")
 	}
 	_ = cfg
@@ -191,7 +191,7 @@ func TestMutationRemoveRechecksEmptyFolderAfterCallback(t *testing.T) {
 		t.Fatal(err)
 	}
 	e := mutationStat(t, w, "folder")
-	in := storage.EffectIntent{ID: "remove-folder", Action: "remove", Target: "folder", Conditions: storage.Conditions{ExpectedVersion: e.Version}}
+	in := storage.EffectIntent{ID: "remove-folder", Action: "remove", Target: "folder", Conditions: storage.Conditions{ExpectedRevision: e.Revision}}
 	_, err := w.runAction(ctx, in, func(_ context.Context, b []byte) error {
 		if actionPhase(b) == "executing" {
 			return os.WriteFile(filepath.Join(cfg.ContentRoot, "folder/new"), []byte("keep"), 0600)

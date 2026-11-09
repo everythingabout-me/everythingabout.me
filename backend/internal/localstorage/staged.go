@@ -138,7 +138,7 @@ func cloneDigest(d *storage.Digest) *storage.Digest {
 	return &storage.Digest{Algorithm: d.Algorithm, Value: bytes.Clone(d.Value)}
 }
 func cloneIntent(in storage.WriteIntent) storage.WriteIntent {
-	in.Conditions.ExpectedVersion = bytes.Clone(in.Conditions.ExpectedVersion)
+	in.Conditions.ExpectedRevision = bytes.Clone(in.Conditions.ExpectedRevision)
 	in.Digest = cloneDigest(in.Digest)
 	if in.SourceModifiedAt != nil {
 		captured := *in.SourceModifiedAt
@@ -158,7 +158,7 @@ func (w *StagedWriter) validateIntent(in storage.WriteIntent) error {
 	if err := validatePath(in.Target); err != nil {
 		return err
 	}
-	if !(in.Conditions.Absent && len(in.Conditions.ExpectedVersion) == 0) && !(w.replacement && !in.Conditions.Absent && len(in.Conditions.ExpectedVersion) == sha256.Size) {
+	if !(in.Conditions.Absent && len(in.Conditions.ExpectedRevision) == 0) && !(w.replacement && !in.Conditions.Absent && len(in.Conditions.ExpectedRevision) == sha256.Size) {
 		return storage.NewError("unsupported", in.Target, nil)
 	}
 	if in.Digest != nil && (in.Digest.Algorithm != "sha-256" || len(in.Digest.Value) != sha256.Size) {
@@ -324,7 +324,7 @@ func (w *StagedWriter) destination(ctx context.Context, in storage.WriteIntent) 
 			root.Close()
 			return nil, "", err
 		}
-		if e.Kind != storage.File || !bytes.Equal(e.Version, in.Conditions.ExpectedVersion) {
+		if e.Kind != storage.File || !bytes.Equal(e.Revision, in.Conditions.ExpectedRevision) {
 			root.Close()
 			return nil, "", storage.NewError("changed", in.Target, nil)
 		}
@@ -711,7 +711,7 @@ func (w *StagedWriter) inspectFinal(ctx context.Context, root *os.Root, r *stage
 	if r.Phase == "publishing" && !r.Intent.Conditions.Absent && err == nil {
 		mw := &MutationDriver{StagedWriter: w}
 		current, verifyErr := mw.nativeAt(ctx, dest, parent, name)
-		if verifyErr == nil && bytes.Equal(current.Version, r.Intent.Conditions.ExpectedVersion) {
+		if verifyErr == nil && bytes.Equal(current.Revision, r.Intent.Conditions.ExpectedRevision) {
 			r.Phase = "not_applied"
 			if err := w.save(root, r); err != nil {
 				return unknown, err
@@ -805,7 +805,7 @@ func (w *StagedWriter) InspectEffect(ctx context.Context, in storage.EffectInten
 	if in.Action != "publish" {
 		return storage.Inspection{State: storage.OutcomeUnknown}, nil
 	}
-	if in.Source != "" || len(in.SourceVersion) != 0 {
+	if in.Source != "" || len(in.SourceRevision) != 0 {
 		return storage.Inspection{}, storage.NewError("intent_conflict", in.Target, nil)
 	}
 	if !validIdentity(in.ID) {
@@ -823,7 +823,7 @@ func (w *StagedWriter) InspectEffect(ctx context.Context, in storage.EffectInten
 	}
 	defer f.Close()
 	var r stageLedger
-	if json.NewDecoder(io.LimitReader(f, 65537)).Decode(&r) != nil || r.Intent.ID != in.ID || r.Intent.Target != in.Target || r.Intent.Conditions.Absent != in.Conditions.Absent || !bytes.Equal(r.Intent.Conditions.ExpectedVersion, in.Conditions.ExpectedVersion) {
+	if json.NewDecoder(io.LimitReader(f, 65537)).Decode(&r) != nil || r.Intent.ID != in.ID || r.Intent.Target != in.Target || r.Intent.Conditions.Absent != in.Conditions.Absent || !bytes.Equal(r.Intent.Conditions.ExpectedRevision, in.Conditions.ExpectedRevision) {
 		return storage.Inspection{}, storage.NewError("intent_conflict", in.Target, nil)
 	}
 	return w.Inspect(ctx, r.Intent, evidence)

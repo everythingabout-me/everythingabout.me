@@ -9,8 +9,9 @@ import (
 // Conditions must be enforced at the native effect. Stat followed by an
 // unconditional mutation is not a native conditional implementation.
 type Conditions struct {
-	Absent          bool
-	ExpectedVersion []byte
+	Absent bool
+	// ExpectedRevision requires the native state to still be this exact revision.
+	ExpectedRevision []byte
 }
 type Mutation struct {
 	ID         string
@@ -35,7 +36,7 @@ type WriteIntent struct {
 	SourceModifiedAt *time.Time
 	ClientCondition  string
 	ParentPath       Path
-	ParentVersion    []byte
+	ParentRevision   []byte
 	Digest           *Digest
 }
 type Staged struct {
@@ -79,7 +80,7 @@ type EffectIntent struct {
 	ID, Action     string
 	Source, Target Path
 	Conditions     Conditions
-	SourceVersion  []byte
+	SourceRevision []byte
 }
 type EffectRecovery interface {
 	InspectEffect(context.Context, EffectIntent, []byte) (Inspection, error)
@@ -99,7 +100,7 @@ type Remover interface {
 type MoveRequest struct {
 	ID               string
 	Source, Target   Path
-	SourceVersion    []byte
+	SourceRevision   []byte
 	TargetConditions Conditions
 }
 type NativeMover interface {

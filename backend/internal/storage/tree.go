@@ -27,7 +27,12 @@ type Entry struct {
 	Path      Path
 	Kind      Kind
 	NativeRef []byte
-	Version   []byte
+	// Revision is the driver's opaque token for this exact native state. It is
+	// what a conditional effect compares against and what proves an effect was
+	// applied to the object we observed. Its derivation belongs to the driver:
+	// an object store derives it from the object ETag, a versioned provider from
+	// its version id. It is not a retained version; see Descriptor.RetainsVersions.
+	Revision []byte
 	// ContentIdentity is private driver-proven identity independent of pathname.
 	// Only admitted coordinated/versioned drivers may supply it; it is not an app file ID.
 	ContentIdentity []byte
@@ -45,9 +50,12 @@ type Page struct {
 	NextCursor string
 }
 type ReadOptions struct {
-	Offset  int64
-	Length  *int64
-	Version []byte
+	Offset int64
+	Length *int64
+	// PinnedVersion selects one provider version id for this read, which needs a
+	// provider that retains versions. A revision cannot do this: it names the
+	// current state, not a retained copy.
+	PinnedVersion []byte
 }
 type Read struct {
 	Body   io.ReadCloser
@@ -95,15 +103,25 @@ type Config struct {
 type SecretSource interface {
 	Load(context.Context) ([]byte, error)
 }
+
+// Descriptor advertises what this driver has actually been proven to do. Two
+// flags look similar and are not: PinnedRead and RetainsVersions both concern
+// provider version history, while Entry.Revision concerns the current state and
+// exists on every driver.
 type Descriptor struct {
-	MaxFileBytes              int64
-	RangeRead                 bool
-	PinnedRead                bool
+	MaxFileBytes int64
+	RangeRead    bool
+	// PinnedRead: a reader may select one provider version through
+	// ReadOptions.PinnedVersion. Requires retained versions.
+	PinnedRead bool
+	// RetainsVersions: the provider keeps superseded copies after a delete or
+	// replace, so removing bytes does not free them. This system does not ask for
+	// version history and every deployed driver reports false.
+	RetainsVersions           bool
 	AtomicCreate              bool
 	AtomicReplace             bool
 	NativeConditionalMutation bool
 	NativeTreeMove            bool
-	RetainsVersions           bool
 	// TransferClasses is the subset of presigned-parts, resumable-session and
 	// relay this driver can serve. The connection selects exactly one of them.
 	TransferClasses []string

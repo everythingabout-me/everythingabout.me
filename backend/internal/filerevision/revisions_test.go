@@ -12,7 +12,7 @@ import (
 )
 
 func TestContentStableIdentityAndFallback(t *testing.T) {
-	entry := storage.Entry{Path: "before.txt", Kind: storage.File, NativeRef: []byte("native"), Version: []byte("version"), ContentIdentity: []byte("inode")}
+	entry := storage.Entry{Path: "before.txt", Kind: storage.File, NativeRef: []byte("native"), Revision: []byte("version"), ContentIdentity: []byte("inode")}
 	before := *Content("owner:root", entry)
 	entry.Path = "folder/after.txt"
 	entry.NativeRef = []byte("new-locator")
@@ -22,14 +22,14 @@ func TestContentStableIdentityAndFallback(t *testing.T) {
 	if got := *Content("other-owner:root", entry); got == before {
 		t.Fatal("root namespaces aliased")
 	}
-	entry.Version = []byte("replacement")
+	entry.Revision = []byte("replacement")
 	if got := *Content("owner:root", entry); got == before {
 		t.Fatal("replacement retained content revision")
 	}
 	entry.ContentIdentity = nil
 	h := sha256.New()
 	h.Write([]byte("eam/files/content/v1\x00"))
-	for _, value := range [][]byte{[]byte("owner:root"), []byte(entry.Path), entry.NativeRef, entry.Version} {
+	for _, value := range [][]byte{[]byte("owner:root"), []byte(entry.Path), entry.NativeRef, entry.Revision} {
 		var length [8]byte
 		binary.BigEndian.PutUint64(length[:], uint64(len(value)))
 		h.Write(length[:])
@@ -43,7 +43,7 @@ func TestContentStableIdentityAndFallback(t *testing.T) {
 	if got := *Content("owner:root", entry); got == old {
 		t.Fatal("path-scoped fallback lost native object identity")
 	}
-	entry.Version = nil
+	entry.Revision = nil
 	if Content("owner:root", entry) != nil {
 		t.Fatal("unversioned content acquired a revision")
 	}
