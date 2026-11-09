@@ -52,9 +52,12 @@ func (s *Server) queueFileOperation(op fileops.Operation) error {
 	parentCtx := worker.ctx
 	go func() {
 		defer func() { worker.mu.Lock(); delete(worker.active, op.ID); worker.mu.Unlock(); <-worker.slots }()
-		ctx, cancel := context.WithTimeout(parentCtx, 10*time.Minute)
-		defer cancel()
-		if err := s.runFileOperation(ctx, op); err != nil && !errors.Is(err, context.Canceled) {
+		// No wall clock here: the operation is resumable from its journal, every
+		// native request is bounded by the provider's own timeout, and a folder move
+		// of one terabyte legitimately outlives any deadline picked in advance. A
+		// timer on top only ever fires on the operation large enough to matter, and
+		// the client then sees a failure the response cannot explain.
+		if err := s.runFileOperation(parentCtx, op); err != nil && !errors.Is(err, context.Canceled) {
 			slog.Warn("file operation retained for recovery", "operation", op.ID, "error", err)
 		}
 	}()
