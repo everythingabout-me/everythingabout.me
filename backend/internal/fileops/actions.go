@@ -56,6 +56,11 @@ const nativeTreeMoveStrategy = "native_tree_move"
 const maxActionEntries = 100000
 const maxActionPages = 1000
 
+// listConcurrency is how many folders one BFS level lists at once. It matches the
+// observation pool: enough to turn a wide folder's round trips into one wave, small
+// enough not to read as a burst against the provider.
+const listConcurrency = 6
+
 func validateActionAuthority(req ActionRequest, native NativeActions) error {
 	if err := validateRoot(req.Root); err != nil {
 		return err
@@ -475,61 +480,128 @@ func captureAction(ctx context.Context, req ActionRequest, native NativeActions)
 
 // snapshotActionTree accepts only immediate, unambiguous children and bounded
 // pagination. It never follows a driver-provided path out of the selected tree.
+//
+// Sibling folders are listed concurrently, a BFS level at a time. The cost of a
+// recursive capture is therefore the tree's depth plus its folder count divided by
+// listConcurrency, instead of one sequential round trip per folder: a flat folder of 776
+// subfolders cost 776 sequential LISTs (about a minute against a bucket in another
+// region) and made every recursive action on it a dead request. The walk stays bounded by
+// maxActionPages and maxActionEntries, which is the bound that matters — not a clock.
 func snapshotActionTree(ctx context.Context, native NativeActions, root storage.Path, recursive bool) ([]storage.Entry, error) {
 	first, err := observe(ctx, native, root)
 	if err != nil {
 		return nil, err
 	}
+	walk := &treeWalk{native: native, seen: map[string]bool{comparePathFromNative(native, root): true}, entries: 1}
 	entries := []storage.Entry{first}
-	seen := map[string]bool{comparePathFromNative(native, root): true}
-	pages := 0
-	for i := 0; i < len(entries); i++ {
-		folder := entries[i]
-		if folder.Kind != storage.Folder {
-			continue
+	for levelStart := 0; levelStart < len(entries); {
+		levelEnd := len(entries)
+		var folders []storage.Entry
+		for i := levelStart; i < levelEnd; i++ {
+			if entries[i].Kind == storage.Folder {
+				folders = append(folders, entries[i])
+			}
 		}
-		cursor := ""
-		cursors := map[string]bool{}
-		var children []storage.Entry
-		for {
-			pages++
-			if pages > maxActionPages {
-				return nil, E("request_too_large", nil)
-			}
-			page, err := native.List(ctx, folder.Path, storage.PageRequest{Cursor: cursor, Limit: 1000})
-			if err != nil {
-				return nil, err
-			}
-			if len(page.Entries) > 1000 {
-				return nil, E("invalid_native_result", nil)
-			}
-			if !recursive && len(page.Entries) > 0 {
-				return nil, E("directory_not_empty", nil)
-			}
-			for _, e := range page.Entries {
-				key := comparePathFromNative(native, e.Path)
-				if e.Path == "" || parentPath(e.Path) != folder.Path || seen[key] || requireRevision(e) != nil {
-					return nil, E("ambiguous_path", nil)
-				}
-				seen[key] = true
-				children = append(children, cloneActionEntry(e))
-				if len(entries)+len(children) > maxActionEntries {
-					return nil, E("request_too_large", nil)
-				}
-			}
-			if page.NextCursor == "" {
-				break
-			}
-			if cursors[page.NextCursor] || page.NextCursor == cursor {
-				return nil, E("invalid_native_result", nil)
-			}
-			cursors[page.NextCursor] = true
-			cursor = page.NextCursor
+		children, err := walk.listLevel(ctx, folders, recursive)
+		if err != nil {
+			return nil, err
 		}
-		sort.Slice(children, func(i, j int) bool { return children[i].Path < children[j].Path })
-		entries = append(entries, children...)
+		// Appending level by level, in discovery order, reproduces the sequential walk:
+		// every folder of a level is visited before any of its children's level.
+		for _, folderChildren := range children {
+			entries = append(entries, folderChildren...)
+		}
+		levelStart = levelEnd
 	}
 	return entries, nil
+}
+
+// treeWalk holds the bookkeeping shared by the concurrent listings of one snapshot.
+// Network calls happen outside the lock; discovery, deduplication and both limits are
+// decided under it, so concurrency cannot loosen them.
+type treeWalk struct {
+	native  NativeActions
+	mu      sync.Mutex
+	seen    map[string]bool
+	pages   int
+	entries int
+}
+
+func (w *treeWalk) listLevel(ctx context.Context, folders []storage.Entry, recursive bool) ([][]storage.Entry, error) {
+	results := make([][]storage.Entry, len(folders))
+	if len(folders) == 0 {
+		return results, nil
+	}
+	sem := make(chan struct{}, listConcurrency)
+	errs := make([]error, len(folders))
+	var wg sync.WaitGroup
+	for i, folder := range folders {
+		wg.Add(1)
+		sem <- struct{}{}
+		go func(i int, folder storage.Entry) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			results[i], errs[i] = w.listFolder(ctx, folder, recursive)
+		}(i, folder)
+	}
+	wg.Wait()
+	for _, err := range errs {
+		if err != nil {
+			return nil, err
+		}
+	}
+	return results, nil
+}
+
+func (w *treeWalk) listFolder(ctx context.Context, folder storage.Entry, recursive bool) ([]storage.Entry, error) {
+	cursor := ""
+	cursors := map[string]bool{}
+	var children []storage.Entry
+	for {
+		w.mu.Lock()
+		w.pages++
+		overPages := w.pages > maxActionPages
+		w.mu.Unlock()
+		if overPages {
+			return nil, E("request_too_large", nil)
+		}
+		page, err := w.native.List(ctx, folder.Path, storage.PageRequest{Cursor: cursor, Limit: 1000})
+		if err != nil {
+			return nil, err
+		}
+		if len(page.Entries) > 1000 {
+			return nil, E("invalid_native_result", nil)
+		}
+		if !recursive && len(page.Entries) > 0 {
+			return nil, E("directory_not_empty", nil)
+		}
+		w.mu.Lock()
+		for _, e := range page.Entries {
+			key := comparePathFromNative(w.native, e.Path)
+			if e.Path == "" || parentPath(e.Path) != folder.Path || w.seen[key] || requireRevision(e) != nil {
+				w.mu.Unlock()
+				return nil, E("ambiguous_path", nil)
+			}
+			w.seen[key] = true
+			w.entries++
+			if w.entries > maxActionEntries {
+				w.mu.Unlock()
+				return nil, E("request_too_large", nil)
+			}
+			children = append(children, cloneActionEntry(e))
+		}
+		w.mu.Unlock()
+		if page.NextCursor == "" {
+			break
+		}
+		if cursors[page.NextCursor] || page.NextCursor == cursor {
+			return nil, E("invalid_native_result", nil)
+		}
+		cursors[page.NextCursor] = true
+		cursor = page.NextCursor
+	}
+	sort.Slice(children, func(i, j int) bool { return children[i].Path < children[j].Path })
+	return children, nil
 }
 func comparePathFromNative(native NativeActions, p storage.Path) string {
 	return comparePath(Root{CaseSensitive: native.StorageNameRules().CaseSensitive}, p)

@@ -27,6 +27,11 @@ type FilesAuthenticator interface {
 	ValidateFileCSRF(*http.Request, string) bool
 }
 
+// filesMetadataDeadline bounds one metadata read. Reads are the only requests whose work
+// does not grow with the drive, so a clock is the right bound for them; a mutation must be
+// bounded by its own page and entry limits instead (see fileWrapWithAudit).
+const filesMetadataDeadline = 30 * time.Second
+
 func writeFilesJSON(w http.ResponseWriter, status int, value any) error {
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "no-store")
@@ -221,8 +226,15 @@ func (s *Server) fileWrapWithAudit(fn fileHandler, persist filesAuditRecorder) h
 	return func(w http.ResponseWriter, r *http.Request) {
 		clearReadDeadline := partReadIdle(w, r, uploadPartReadIdleTimeout)
 		defer clearReadDeadline()
-		if r.URL.Path != fc.Base+"/content" && !(r.Method == http.MethodPut && strings.Contains(r.URL.Path, "/uploads/") && strings.Contains(r.URL.Path, "/parts/")) {
-			ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+		// Only a metadata read gets a wall clock: its work is bounded and small by
+		// construction (one page, one observation). A mutation's work is proportional to
+		// the tree it captures — up to maxActionPages listings, twice — so a timer here
+		// fires exactly on the large folders that need the time: the old blanket cutoff
+		// aborted a 776-folder recursive delete mid-capture and reported "backend_error"
+		// with no cause. Mutations bound the work itself and keep the request context as
+		// their only deadline.
+		if (r.Method == http.MethodGet || r.Method == http.MethodHead) && r.URL.Path != fc.Base+"/content" {
+			ctx, cancel := context.WithTimeout(r.Context(), filesMetadataDeadline)
 			defer cancel()
 			r = r.WithContext(ctx)
 		}

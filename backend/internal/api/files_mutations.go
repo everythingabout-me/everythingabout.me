@@ -29,6 +29,12 @@ func filesMutationProblem(err error) error {
 	if errors.As(err, &p) {
 		return err
 	}
+	// A request cut short must say which fact cut it short. This used to surface as
+	// "The file operation could not complete: backend_error", which names nothing the user
+	// can act on; the deadline itself is the answer.
+	if errors.Is(err, context.DeadlineExceeded) {
+		return fc.NewProblem(504, "request_timeout", "The request ran out of time before it finished. Reload to see what was applied; an operation the server already accepted keeps running in the background.")
+	}
 	var e *fileops.Error
 	if errors.As(err, &e) {
 		// A copy that never started keeps its storage cause: the object exceeds what

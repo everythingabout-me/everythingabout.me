@@ -358,6 +358,14 @@ const UploadRow = memo(function UploadRow({
   );
 });
 
+/**
+ * The question is the whole decision: confirming closes the dialog and hands the request
+ * to the page. A recursive delete spends its whole request enumerating the subtree
+ * natively (one listing per folder, then a second pass that re-reads every identity), so
+ * holding a disabled modal over it traps the user behind "Submitting…" for as long as the
+ * folder is large, with nothing to cancel and no number to watch. The path bar and the
+ * toast carry the outcome instead.
+ */
 function DeleteConfirmation({
   target,
   onCancel,
@@ -365,33 +373,15 @@ function DeleteConfirmation({
 }: {
   target: Item;
   onCancel: () => void;
-  onConfirm: () => Promise<void>;
+  onConfirm: () => void;
 }) {
   const dialog = useRef<HTMLDialogElement>(null);
-  const submitting = useRef(false);
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     const element = dialog.current;
     element?.showModal();
     return () => element?.close();
   }, []);
-
-  const confirm = async () => {
-    if (submitting.current) return;
-    submitting.current = true;
-    setBusy(true);
-    setError(null);
-    try {
-      await onConfirm();
-    } catch (error) {
-      setError(error instanceof Error ? error.message : t("drive.deleteFailed"));
-    } finally {
-      submitting.current = false;
-      setBusy(false);
-    }
-  };
 
   return (
     <dialog
@@ -401,7 +391,7 @@ function DeleteConfirmation({
       aria-describedby="delete-description"
       onCancel={(event) => {
         event.preventDefault();
-        if (!submitting.current) onCancel();
+        onCancel();
       }}
     >
       <h2 id="delete-title" className={styles.deleteTitle}>
@@ -411,13 +401,12 @@ function DeleteConfirmation({
         {t(target.kind === "folder" ? "drive.deleteFolderWarning" : "drive.deleteFileWarning")}
       </p>
       <p className={styles.deletePath}>{target.path}</p>
-      {error && <p className={styles.deleteError} role="alert">{error}</p>}
-      <div className={styles.deleteActions} aria-busy={busy}>
-        <button className={styles.secondaryBtn} autoFocus disabled={busy} onClick={onCancel}>
+      <div className={styles.deleteActions}>
+        <button className={styles.secondaryBtn} autoFocus onClick={onCancel}>
           {t("common.cancel")}
         </button>
-        <button className={styles.confirmDeleteBtn} disabled={busy} onClick={() => void confirm()}>
-          {t(busy ? "drive.deleting" : "drive.delete")}
+        <button className={styles.confirmDeleteBtn} onClick={onConfirm}>
+          {t("drive.delete")}
         </button>
       </div>
     </dialog>
@@ -559,6 +548,9 @@ export function FilesPage() {
   const [renameName, setRenameName] = useState("");
   const [renameJob, setRenameJob] = useState<FileOperation | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<Item | null>(null);
+  // Paths whose delete request is in flight. The dialog is already gone, and this is what
+  // marks the item on screen while the server enumerates a large subtree.
+  const [deletingPaths, setDeletingPaths] = useState<string[]>([]);
   const [transfer, setTransfer] = useState<{ mode: TransferMode; item: Item } | null>(null);
   const [transferProgress, setTransferProgress] = useState<FileOperation["progress"] | null>(null);
   const [transferCancelling, setTransferCancelling] = useState(false);
@@ -567,7 +559,9 @@ export function FilesPage() {
   const [deletionStatusError, setDeletionStatusError] = useState(false);
   const deletionRequest = useRef(0);
   const notifiedDeleteFailures = useRef(new Set<string>());
-  const deleting = useRef(false);
+  // `deletingPaths` is what the screen shows; this set answers synchronously, so a second
+  // click in the same tick cannot start a duplicate request.
+  const deletesInFlight = useRef(new Set<string>());
   const menuTrigger = useRef<HTMLButtonElement>(null);
 
   const fileInput = useRef<HTMLInputElement>(null);
@@ -992,10 +986,23 @@ export function FilesPage() {
     setDeleteTarget(target);
   };
 
+  /**
+   * Runs the delete and reports it where the deleted item is marked on screen, never in the
+   * dialog that is already closed. A recursive delete can take a minute to be *accepted* (the server
+   * enumerates the subtree twice before it freezes the manifest), so every failure ends in
+   * an actionable toast instead of a thrown error nobody can answer.
+   */
   const applyDelete = async (target: Item) => {
-    if (deleting.current) return;
-    if (hasUnfinishedUploads(target.path)) throw new Error(t("drive.deleteUploadBlocked"));
-    deleting.current = true;
+    if (deletesInFlight.current.has(target.path)) {
+      showToast(t("drive.deleteAlreadyRunning"), "info");
+      return;
+    }
+    if (hasUnfinishedUploads(target.path)) {
+      showToast(t("drive.deleteUploadBlocked"), "error", true);
+      return;
+    }
+    deletesInFlight.current.add(target.path);
+    setDeletingPaths((paths) => [...paths, target.path]);
     try {
       let operation: FileOperation | void;
       let cancelledUploads = 0;
@@ -1029,7 +1036,6 @@ export function FilesPage() {
         : item.path !== target.path));
       uploads.filter((task) => filePath(task.path) === target.path || filePath(task.path).startsWith(`${target.path}/`))
         .forEach((task) => cancelUpload(task.id));
-      setDeleteTarget(null);
       if (filePath(listingRef.current.path) === target.path) {
         navigate(filesHref(target.parentPath ?? "/"), { replace: true });
       } else {
@@ -1038,11 +1044,21 @@ export function FilesPage() {
     } catch (error) {
       if (error instanceof ApiError && error.status === 401) {
         navigate("/login", { replace: true });
+        return;
       }
-      throw error;
+      // The reason has to outlive a glance: it names the upload or operation that still
+      // holds this path, and the item it refers to is still on screen behind the toast.
+      showToast(error instanceof Error ? error.message : t("drive.deleteFailed"), "error", true);
     } finally {
-      deleting.current = false;
+      deletesInFlight.current.delete(target.path);
+      setDeletingPaths((paths) => paths.filter((path) => path !== target.path));
     }
+  };
+
+  /** Confirming is the decision, not the wait: close the question and let the page report. */
+  const confirmDelete = (target: Item) => {
+    setDeleteTarget(null);
+    void applyDelete(target);
   };
 
   const startCreateFolder = () => {
@@ -1243,6 +1259,12 @@ export function FilesPage() {
                         />
                       ) : (
                         <h1 className={styles.crumb}>{crumbName(crumb)}</h1>
+                      )}
+                      {/* The folder you are inside has no row of its own to carry the wait. */}
+                      {isLast && deletingPaths.includes(crumb.path) && (
+                        <span className={`${styles.statusBadge} ${styles.statusActive}`}>
+                          {t("drive.deletingNow")}
+                        </span>
                       )}
                     </span>
                   );
@@ -1489,8 +1511,10 @@ export function FilesPage() {
             <FileDetail
               file={file}
               onDelete={() => startDelete(file)}
-              deleteDisabled={pending || Boolean(renameJob) || deleteBlocked}
-              deleteHint={deleteBlocked ? t("drive.deleteUploadBlocked") : undefined}
+              deleteDisabled={pending || Boolean(renameJob) || deleteBlocked
+                || deletingPaths.includes(file.path)}
+              deleteHint={deleteBlocked ? t("drive.deleteUploadBlocked")
+                : deletingPaths.includes(file.path) ? t("drive.deletingNow") : undefined}
             />
           </div>
         ) : notFound ? (
@@ -1631,7 +1655,7 @@ export function FilesPage() {
           key={deleteTarget.path}
           target={deleteTarget}
           onCancel={() => setDeleteTarget(null)}
-          onConfirm={() => applyDelete(deleteTarget)}
+          onConfirm={() => confirmDelete(deleteTarget)}
         />
       )}
 

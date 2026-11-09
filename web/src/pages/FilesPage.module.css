@@ -328,13 +328,6 @@ a.crumb:hover {
   overflow-wrap: anywhere;
 }
 
-.deleteError {
-  margin: 12px 0 0;
-  color: var(--danger);
-  font-size: 13px;
-  overflow-wrap: anywhere;
-}
-
 .deleteActions {
   display: flex;
   justify-content: flex-end;
