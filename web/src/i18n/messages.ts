@@ -154,6 +154,14 @@ const en = {
   "file.backToRoot": "Back to all files",
 
   "preview.loading": "Loading preview…",
+  "preview.failed": "The preview could not load. Downloading the file may still work.",
+  "storageDrift.contentTitle": "This file is no longer in storage",
+  "storageDrift.contentText":
+    "It was probably moved or deleted outside the app, and the index still points at the old location. Syncing the index shows where it is now.",
+  "storageDrift.pathTitle": "Nothing is indexed at this path",
+  "storageDrift.pathText":
+    "If the file was moved or renamed elsewhere, syncing the index will show it at its current location.",
+  "storageDrift.action": "Sync the index",
 
   "auth.titleCode": "Sign in or sign up",
   "auth.titlePassword": "Sign in with password",
@@ -497,6 +505,13 @@ const zh: Record<MessageKey, string> = {
   "file.backToRoot": "回到全部文件",
 
   "preview.loading": "正在加载预览…",
+  "preview.failed": "预览加载失败，可以试试下载这个文件。",
+  "storageDrift.contentTitle": "这个文件在存储里已经不存在了",
+  "storageDrift.contentText":
+    "它可能是在别处被移动或删除了，索引还停在旧位置。同步索引后就能看到它现在的去向。",
+  "storageDrift.pathTitle": "索引里没有这个位置",
+  "storageDrift.pathText": "如果文件刚在别处被移动或改名，同步一次索引就会出现在新位置。",
+  "storageDrift.action": "去同步索引",
 
   "auth.titleCode": "登录 / 注册",
   "auth.titlePassword": "密码登录",

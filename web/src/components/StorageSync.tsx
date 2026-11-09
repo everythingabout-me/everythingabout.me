@@ -18,6 +18,11 @@ export function StorageSync() {
 
   useEffect(() => {
     void loadRecords();
+    // Another page links here as /account#storage; React Router does not scroll to a
+    // hash target that mounts after navigation, so settle it once the panel exists.
+    if (window.location.hash === "#storage") {
+      document.getElementById("storage")?.scrollIntoView({ block: "start" });
+    }
   }, []);
 
   async function loadRecords() {
@@ -54,7 +59,7 @@ export function StorageSync() {
   const removedPaths = report?.removedPaths ?? [];
 
   return (
-    <div className={styles.syncPanel}>
+    <div className={styles.syncPanel} id="storage">
       <h2 className={styles.syncTitle}>{t("account.storage.title")}</h2>
       <p className={styles.footnote}>{t("account.storage.hint")}</p>
       <div className={styles.syncActions}>

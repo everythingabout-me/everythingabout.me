@@ -20,3 +20,24 @@
     min-height: 340px;
   }
 }
+
+/* A preview that has nothing to draw still has something to say: keep it centered. */
+.notice {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  padding: 24px;
+}
+
+.notice > * {
+  max-width: 560px;
+}
+
+.failure {
+  margin: auto;
+  padding: 24px;
+  color: var(--text-2);
+  font-size: 13px;
+  text-align: center;
+}

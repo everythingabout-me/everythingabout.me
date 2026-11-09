@@ -44,6 +44,17 @@ export class FileApiError extends ApiError {
   }
 }
 
+/**
+ * The index still lists the file, but storage has no object at its path: someone moved or
+ * deleted it outside the app. Read grants refuse this instead of handing out a URL that
+ * can only answer 404, so callers can offer a sync instead of a broken preview.
+ */
+export function isNativeAbsent(error: unknown): boolean {
+  // A failed download item arrives as a Problem inside a 200 batch, so the grant helper
+  // rethrows it as the base ApiError; a direct file call raises FileApiError instead.
+  return error instanceof ApiError && error.status === 404 && error.code === "native_absent";
+}
+
 /** Service identity and native location select the same resource. A string retains legacy path convenience. */
 export type EntrySelector = { id: string; path?: never } | { path: string; id?: never };
 export type FileSelector = string | EntrySelector;

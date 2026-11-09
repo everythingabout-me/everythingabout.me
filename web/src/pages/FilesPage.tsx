@@ -10,8 +10,9 @@ import {
   useState,
 } from "react";
 import { Link, useBlocker, useLoaderData, useLocation, useNavigate } from "react-router";
-import { ApiError, api, filePath, isFileOperation, prefetchListing, type AuthUser, type Crumb, type Item, type FileOperation } from "../api/client";
+import { ApiError, api, filePath, isFileOperation, isNativeAbsent, prefetchListing, type AuthUser, type Crumb, type Item, type FileOperation } from "../api/client";
 import { AppHeader } from "../components/AppHeader";
+import { StorageNotice } from "../components/StorageNotice";
 import {
   ChevronDownIcon,
   ChevronRightIcon,
@@ -409,11 +410,16 @@ function FileDetail({ file, onDelete, deleteDisabled, deleteHint }: {
   deleteHint?: string;
 }) {
   const [downloadError, setDownloadError] = useState<string | null>(null);
-  useEffect(() => { setDownloadError(null); }, [file.path]);
+  const [downloadMissing, setDownloadMissing] = useState(false);
+  useEffect(() => { setDownloadError(null); setDownloadMissing(false); }, [file.path]);
   const download = async () => {
     setDownloadError(null);
+    setDownloadMissing(false);
     try { await api.download(file.path); }
-    catch (error) { setDownloadError(error instanceof Error ? error.message : t("error.unknown")); }
+    catch (error) {
+      if (isNativeAbsent(error)) setDownloadMissing(true);
+      else setDownloadError(error instanceof Error ? error.message : t("error.unknown"));
+    }
   };
   return (
     <>
@@ -450,6 +456,7 @@ function FileDetail({ file, onDelete, deleteDisabled, deleteHint }: {
               <DownloadIcon size={14} />
               {t("file.download")}
             </button>
+            {downloadMissing && <StorageNotice missingContent />}
             {downloadError && <p className={styles.downloadError} role="alert">{downloadError}</p>}
           </div>
         )}
@@ -515,10 +522,15 @@ export function FilesPage() {
   const [searchOpen, setSearchOpen] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
   const [downloadError, setDownloadError] = useState<string | null>(null);
+  const [downloadMissing, setDownloadMissing] = useState(false);
   const downloadFile = async () => {
     setDownloadError(null);
+    setDownloadMissing(false);
     try { await api.download(file?.path ?? path); }
-    catch (error) { setDownloadError(error instanceof Error ? error.message : t("error.unknown")); }
+    catch (error) {
+      if (isNativeAbsent(error)) setDownloadMissing(true);
+      else setDownloadError(error instanceof Error ? error.message : t("error.unknown"));
+    }
   };
   const [uploadMenuOpen, setUploadMenuOpen] = useState(false);
   const [renaming, setRenaming] = useState(false);
@@ -1123,6 +1135,7 @@ export function FilesPage() {
           </aside>
         )}
         {/* The path is the title: one row, with this page's controls on the right. */}
+        {downloadMissing && <StorageNotice missingContent />}
         {downloadError && <p className={styles.downloadError} role="alert">{downloadError}</p>}
         <div className={styles.topbar}>
           <div className={styles.pathArea}>
@@ -1427,6 +1440,7 @@ export function FilesPage() {
                 <Link className={styles.secondaryBtn} to="/files">
                   {t("file.backToRoot")}
                 </Link>
+                <StorageNotice />
               </div>
             </section>
           </>

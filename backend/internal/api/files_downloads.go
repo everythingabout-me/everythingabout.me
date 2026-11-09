@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"mime"
 	"net/http"
 	"strconv"
@@ -75,12 +76,15 @@ func (s *Server) filesDownloadGrant(r *http.Request, f *fileRequest, selector fc
 	if err := f.RequireRead(p); err != nil {
 		return nil, "", "", err
 	}
-	metadata, err := s.filesIndexedMetadata(r.Context(), f, p)
+	metadata, key, err := s.filesIndexedContent(r.Context(), f, p)
 	if err != nil {
 		return nil, "", "", err
 	}
 	if metadata.Kind != "file" {
 		return nil, "", "", fc.NewProblem(409, "not_a_file", "The selected entry is not a file.")
+	}
+	if err := filesVerifyReadableContent(r.Context(), f, p, key); err != nil {
+		return nil, "", "", err
 	}
 	mediaType := "application/octet-stream"
 	if metadata.MediaType != nil && *metadata.MediaType != "" {
@@ -145,4 +149,34 @@ func (s *Server) filesDownloadGrant(r *http.Request, f *fileRequest, selector fc
 		item["etag"] = etag
 	}
 	return item, metadata.Path, metadata.ID, nil
+}
+
+// filesVerifyReadableContent proves the indexed key still names a native object, so a
+// read grant is never issued for bytes that can only answer 404. The returning viewer
+// has no way to read a cross-origin status, so a missing object there looks like a
+// broken preview; failing the grant gives the client a code it can act on.
+//
+// The key comes from the index row the content path already addresses, so this is one
+// reference HEAD without an ancestor walk. A key from another root generation says
+// nothing about this tree, and the grant keeps its previous behavior rather than
+// refusing a file it cannot cheaply check.
+func filesVerifyReadableContent(ctx context.Context, f *fileRequest, p fc.Path, key string) error {
+	reader, ok := f.Driver.(storage.ReferenceReader)
+	if !ok || key == "" {
+		return nil
+	}
+	entry, err := reader.StatReference(ctx, storage.Path(p.Relative()), []byte(key))
+	switch {
+	case err == nil:
+		if entry.Kind != storage.File {
+			return fc.NewProblem(409, "not_a_file", "The path is not a file.")
+		}
+		return nil
+	case storage.IsCode(err, "stale_reference"):
+		return nil
+	case storage.IsCode(err, "not_found"):
+		return fc.NewProblem(404, "native_absent", "The index lists "+p.Relative()+" as a file, but storage has no object at this path. It was probably moved or deleted outside this application; sync the index from Account -> Storage to pick up its current location.")
+	default:
+		return err
+	}
 }

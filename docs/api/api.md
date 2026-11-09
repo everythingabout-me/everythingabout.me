@@ -387,6 +387,13 @@ Grants are `no-store`.
 A bearer grant is issued only to a principal whose scope covers the token's reach; otherwise
 `403 transfer_scope_exceeded`. Per-item failures are returned as Problem objects in the item position.
 
+A grant is issued only for bytes that still exist: the item is one native observation (HEAD) through the
+index-named key, so an index entry whose object was moved or deleted outside the application fails in its item
+position with `404 native_absent`, naming the path, instead of returning a URL that can only answer 404. A
+reference from another root generation is not evidence of absence, so it keeps the previous behavior; the key
+is never used as authority beyond this file. `native_absent` is the client's cue to offer index
+synchronization (`POST /sync`, described in §4) rather than a broken preview.
+
 `conditions` lists only what the effective route enforces natively; without `if-range` the client revalidates
 through the service before resuming. `etag` is present only when the route proves the §2 version guarantee.
 Direct URLs are served from the provider's domain; class A forces `attachment` except for the safe inline media

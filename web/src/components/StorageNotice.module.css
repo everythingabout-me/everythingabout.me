@@ -1,0 +1,61 @@
+/* A quiet inline explanation with one action; it must not read as an error. */
+
+.notice {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 14px 16px;
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--accent);
+  border-radius: 10px;
+  background: var(--surface);
+  box-shadow: var(--shadow-soft);
+}
+
+.copy {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.text {
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--text-2);
+}
+
+.action {
+  margin-left: auto;
+  flex: none;
+  align-self: center;
+  color: var(--accent);
+  font-size: 13px;
+  font-weight: 600;
+  text-decoration: none;
+  white-space: nowrap;
+}
+
+.action:hover,
+.action:focus-visible {
+  text-decoration: underline;
+  outline: none;
+}
+
+@media (max-width: 640px) {
+  .notice {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .action {
+    margin-left: 0;
+    align-self: flex-start;
+  }
+}
