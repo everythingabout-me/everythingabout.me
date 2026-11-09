@@ -522,10 +522,13 @@ the provider by the step that relies on it; a confirmation after the write is wh
 revision the index records. Merging those across the checkpoint would remove the property the
 journal exists to provide.
 
-What is not deliberate is observing the same path twice inside one phase. Removing that is safe
-and is where the cost should come down (target: under six requests); removing the observations
-around the checkpoint is not, and a driver that did it would have to say so and explain which
-guarantee it gave up.
+The observations sit in different phases, not inside one: admission observes the target to freeze
+the manifest, the run step re-observes it because a run may execute long after admission, and the
+post-effect observation is what confirms the written revision. That is why a first estimate of
+"under six requests by removing duplicates inside a phase" was too optimistic: most of the repeats
+are these phase boundaries, and merging them would let an admission-time observation stand in for a
+run-time one. Before cutting the count, attribute every request to its phase with `COS_TRACE=1`;
+a request that genuinely repeats inside one phase is the only safe removal.
 
 Native success followed by index failure leaves real changed files. Recover/index that result from the journal,
 return the same recorded client outcome, and settle quota; do not delete a final file just because its database
