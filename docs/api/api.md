@@ -243,6 +243,7 @@ All suffixes are below `B`:
 | DELETE | `/uploads/{uploadId}` | Abort and discard provider state |
 | GET | `/operations/{operationId}` | Durable workflow state/result |
 | POST | `/operations/{operationId}/cancel` | Request stopping further safe steps |
+| POST | `/sync` | Sync the index to the native tree: `{dryRun:boolean}`; returns the scan report and, when previewing, the paths a sync would remove |
 | POST | `/change-snapshots` | Synchronously capture a bounded immutable indexed baseline and checkpoint |
 | GET, DELETE | `/change-snapshots/{id}` | Page saved metadata or release the baseline |
 | GET | `/changes?cursor=&limit=` | Pull fixed-filter authorized changes; returns items/nextCursor/hasMore |

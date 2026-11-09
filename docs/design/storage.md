@@ -280,13 +280,16 @@ recorded; incomplete completion telemetry is explicit and never proof of client 
 
 Rows have a 90-day change expiry and an explicit file-changes-prune CLI that removes only an expired
 contiguous feed prefix while retaining effect receipts. No automatic retention scheduler is wired. Audit
-history currently remains indefinitely; no 365-day deletion policy is implemented. Additive scan/import records external creations/updates, not outside deletions or guessed
-rename continuity; unchanged scans emit no facts. Audit export/automatic retention, external deletion repair,
+history currently remains indefinitely; no 365-day deletion policy is implemented. Scan/import records external creations and updates; `--sync` additionally removes index entries the
+native tree no longer has, writing one audit record and one deleted change fact per removal; it never guesses
+rename continuity, and unchanged scans emit no facts. Audit export/automatic retention, external deletion repair,
 native watcher health and external-writer budget resynchronization remain separate work. Full contracts and
 observation limits are in [file changes](file-changes.md) and the [API](../api/api.md).
 
-Migration 032 durably binds the change stream to the current configured root namespace on first use. Root
-mismatches reject access instead of silently rebinding. Producers take shared root protection before index
+Migration 032 durably binds the change stream to the current configured root namespace on first use.
+Configuration selects the root: at startup the server adopts a changed root by rebinding each owner budget and
+rotating the change-stream namespace, and logs what it adopted. A mismatch that appears while running still
+rejects access instead of silently rebinding. Producers take shared root protection before index
 locks and the short ordering head afterward; repeatable-read consumers take session root protection before
 their MVCC snapshot. Reset takes exclusive root protection. After database restore/mapping rebuild or every
 rebind, including A → B → A, stop writers, settle accepted work and explicitly run file-changes-reset with

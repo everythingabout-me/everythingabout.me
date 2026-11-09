@@ -3,6 +3,7 @@ package nodes
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -13,6 +14,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"everythingabout.me/backend/internal/filechanges"
+	fc "everythingabout.me/backend/internal/filecontract"
 	"everythingabout.me/backend/internal/fileops"
 	"everythingabout.me/backend/internal/paths"
 	"everythingabout.me/backend/internal/storage"
@@ -29,8 +31,20 @@ type ScanApplyOptions struct {
 	// namespace as the file API. Production reconcile always supplies it; nil is
 	// reserved for index-only utilities/tests with no configured storage binding.
 	ChangeRoot *fileops.Root
+	// Sync makes the index equal the scan instead of only adding to it: entries the
+	// native tree no longer has are removed. The native tree is authoritative and the
+	// index is a derived view, so a refresh that cannot remove is not a refresh.
+	Sync bool
 }
-type ScanApplyReport struct{ Scanned, Inserted, Updated, Unchanged int }
+
+// maxReportedRemovals bounds the dry-run list handed to a CLI or API caller.
+const maxReportedRemovals = 1000
+
+type ScanApplyReport struct {
+	Scanned, Inserted, Updated, Unchanged, Removed int
+	// RemovedPaths carries the dry-run preview; it is empty once rows are deleted.
+	RemovedPaths []string
+}
 
 // ApplyScan imports a successful scan in one serializable transaction. It never
 // deletes rows, changes node IDs/application metadata, or touches native storage.
@@ -245,6 +259,13 @@ func ApplyScan(ctx context.Context, db ScanDB, ownerID string, result *treescan.
 			report.Updated++
 		}
 	}
+	if opts.Sync {
+		deletions, err := removeAbsentEntries(ctx, tx, ownerID, absentEntries(existing, records), opts, &report)
+		if err != nil {
+			return report, err
+		}
+		changes = append(changes, deletions...)
+	}
 	if opts.ChangeRoot != nil && len(changes) > 0 {
 		if err := settleScanChanges(ctx, tx, *opts.ChangeRoot, changes); err != nil {
 			return ScanApplyReport{}, fmt.Errorf("record scan changes: %w", err)
@@ -257,6 +278,90 @@ func ApplyScan(ctx context.Context, db ScanDB, ownerID string, result *treescan.
 		return ScanApplyReport{}, fmt.Errorf("commit scan index (retry after coordinating writers): %w", err)
 	}
 	return report, nil
+}
+
+// absentEntries lists the indexed entries the complete scan did not observe,
+// deepest first so a removed folder's children leave before the folder itself.
+func absentEntries(existing []storage.Entry, records []treescan.Record) []storage.Entry {
+	present := make(map[string]struct{}, len(records))
+	for _, record := range records {
+		present[norm.NFC.String(string(record.Entry.Path))] = struct{}{}
+	}
+	absent := make([]storage.Entry, 0, len(existing))
+	for _, entry := range existing {
+		if entry.Path == "" {
+			// The owner root is identity, not a scanned child.
+			continue
+		}
+		if _, ok := present[norm.NFC.String(string(entry.Path))]; !ok {
+			absent = append(absent, entry)
+		}
+	}
+	sort.Slice(absent, func(i, j int) bool {
+		if len(absent[i].Path) != len(absent[j].Path) {
+			return len(absent[i].Path) > len(absent[j].Path)
+		}
+		return absent[i].Path > absent[j].Path
+	})
+	return absent
+}
+
+// removeAbsentEntries deletes index rows for entries the native tree no longer
+// has. The audit record is written before the row disappears: the audit trail is
+// the only durable account of what a sync removed.
+func removeAbsentEntries(ctx context.Context, tx pgx.Tx, ownerID string, absent []storage.Entry, opts ScanApplyOptions, report *ScanApplyReport) ([]scanChangeCapture, error) {
+	deletions := make([]scanChangeCapture, 0, len(absent))
+	for _, entry := range absent {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		p := string(entry.Path)
+		if opts.DryRun {
+			report.Removed++
+			if len(report.RemovedPaths) < maxReportedRemovals {
+				report.RemovedPaths = append(report.RemovedPaths, p)
+			}
+			continue
+		}
+		var before capturedFileState
+		if opts.ChangeRoot != nil {
+			var err error
+			before, err = captureFileState(ctx, tx, ownerID, fileRootNamespace(*opts.ChangeRoot), p)
+			if err != nil {
+				return nil, fmt.Errorf("capture removed entry %q: %w", p, err)
+			}
+			if before.metadata == nil {
+				// Already gone from the index: nothing to remove or record.
+				continue
+			}
+		}
+		if _, err := tx.Exec(ctx, `delete from nodes where owner_id=$1::uuid and id=file_tree_resolve($1::uuid,$2)`, ownerID, p); err != nil {
+			return nil, fmt.Errorf("remove %q: %w", p, err)
+		}
+		report.Removed++
+		if before.metadata != nil {
+			entryID := before.metadata.ID
+			// Audit paths are API paths (leading slash); the index path is relative.
+			relative := fc.Path("/" + p)
+			allowed := true
+			if err := filechanges.RecordAudit(ctx, tx, &filechanges.Audit{
+				OwnerID:    ownerID,
+				Action:     "file.deleted",
+				Outcome:    "confirmed",
+				Allowed:    &allowed,
+				Status:     200,
+				ReasonCode: "native_absent",
+				EntryID:    &entryID,
+				Path:       &relative,
+				Actor:      filechanges.Actor{Kind: "external"},
+				Origin:     "external",
+			}); err != nil {
+				return nil, fmt.Errorf("record removal audit %q: %w", p, err)
+			}
+			deletions = append(deletions, scanChangeCapture{path: p, before: before, deleted: true})
+		}
+	}
+	return deletions, nil
 }
 
 // LockScanNamespace retains one connection so the admission lock is acquired

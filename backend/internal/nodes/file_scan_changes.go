@@ -13,6 +13,8 @@ import (
 type scanChangeCapture struct {
 	path   string
 	before capturedFileState
+	// deleted marks an entry the scan did not observe and a sync removed.
+	deleted bool
 }
 
 // settleScanChanges records observed index transitions, not an attributed native
@@ -50,21 +52,36 @@ func settleScanChanges(ctx context.Context, tx pgx.Tx, root fileops.Root, captur
 		if err != nil {
 			return err
 		}
-		if after.metadata == nil {
-			return fmt.Errorf("scanned entry %q is missing after import", capture.path)
-		}
 		before := capture.before
-		kind := "updated"
-		if before.metadata == nil {
+		var kind string
+		switch {
+		case capture.deleted:
+			if before.metadata == nil {
+				return fmt.Errorf("removed entry %q had no captured state", capture.path)
+			}
+			if after.metadata != nil {
+				return fmt.Errorf("removed entry %q is still present after sync", capture.path)
+			}
+			kind = "deleted"
+		case after.metadata == nil:
+			return fmt.Errorf("scanned entry %q is missing after import", capture.path)
+		case before.metadata == nil:
 			kind = "created"
 			before.ancestors = nil
-		} else if before.metadata.ID != after.metadata.ID {
+		case before.metadata.ID != after.metadata.ID:
 			return fmt.Errorf("scanned entry %q changed identity during import", capture.path)
+		default:
+			kind = "updated"
 		}
 		id := changeID()
-		entryID := after.metadata.ID
-		after.metadata.ChangeToken = id
-		after.metadata.LastChangedAt = &at
+		var entryID string
+		if after.metadata != nil {
+			entryID = after.metadata.ID
+			after.metadata.ChangeToken = id
+			after.metadata.LastChangedAt = &at
+		} else {
+			entryID = before.metadata.ID
+		}
 		ids := []string{entryID}
 		for _, ancestor := range before.ancestors {
 			ids = append(ids, ancestor.ID)

@@ -6,6 +6,7 @@ import { ChangeEmailForm } from "./ChangeEmailForm";
 import { PasswordForm } from "./PasswordForm";
 import { SaveLinks } from "./SaveLinks";
 import { ActivityList } from "./ActivityList";
+import { StorageSync } from "./StorageSync";
 import styles from "../styles/auth.module.css";
 
 export function AccountPanel({
@@ -63,6 +64,9 @@ export function AccountPanel({
 
       <div className={styles.divider} />
       <ActivityList items={activity} />
+
+      <div className={styles.divider} />
+      <StorageSync />
 
       <div className={styles.divider} />
       <ChangeEmailForm currentEmail={email} onChanged={setEmail} />

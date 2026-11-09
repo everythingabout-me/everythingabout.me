@@ -27,6 +27,7 @@ func runReconcile(args []string) error {
 	owner := flags.String("owner", "", "required owner email or UUID")
 	inventory := flags.String("inventory", "", "scoped CSV with key,size headers and exact unescaped native-root keys (local: drive/<owner>/ keys)")
 	dryRun := flags.Bool("dry-run", false, "validate and report index changes without database writes")
+	sync := flags.Bool("sync", false, "remove index entries the native tree no longer has (the index is a derived view)")
 	maxEntries := flags.Int("max-entries", 1000000, "maximum scanned entries including implicit folders (up to 5000000)")
 	maxPages := flags.Int("max-pages", 100000, "maximum native listing pages (up to 1000000)")
 	maxDepth := flags.Int("max-depth", 128, "maximum path depth (up to 1024)")
@@ -130,7 +131,7 @@ func runReconcile(args []string) error {
 			return err
 		}
 	}
-	report, err := nodes.ApplyScan(ctx, scanConn, ownerID, result, nodes.ScanApplyOptions{DryRun: *dryRun, ChangeRoot: &changeRoot})
+	report, err := nodes.ApplyScan(ctx, scanConn, ownerID, result, nodes.ScanApplyOptions{DryRun: *dryRun, ChangeRoot: &changeRoot, Sync: *sync})
 	if err != nil {
 		return err
 	}
@@ -138,6 +139,18 @@ func runReconcile(args []string) error {
 	if *dryRun {
 		label = "[dry-run] "
 	}
-	fmt.Printf("%sscanned %d paths, inserted %d, updated %d, unchanged %d; pruned 0\n", label, report.Scanned, report.Inserted, report.Updated, report.Unchanged)
+	if !*sync {
+		fmt.Printf("%sscanned %d paths, inserted %d, updated %d, unchanged %d; pruned 0 (add --sync to remove entries the native tree no longer has)\n", label, report.Scanned, report.Inserted, report.Updated, report.Unchanged)
+		return nil
+	}
+	if *dryRun {
+		for _, path := range report.RemovedPaths {
+			fmt.Printf("  would remove %s\n", path)
+		}
+		if report.Removed > len(report.RemovedPaths) {
+			fmt.Printf("  ... and %d more\n", report.Removed-len(report.RemovedPaths))
+		}
+	}
+	fmt.Printf("%sscanned %d paths, inserted %d, updated %d, unchanged %d; removed %d\n", label, report.Scanned, report.Inserted, report.Updated, report.Unchanged, report.Removed)
 	return nil
 }

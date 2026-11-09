@@ -308,9 +308,11 @@ At millions of objects, switch to a COS **inventory** to avoid the request fees 
 go run ./cmd/eam reconcile --owner you@example.com --inventory ./inventory.csv
 ```
 
-`reconcile` adds new entries and updates observed metadata (including size/etag). It does not prune externally
-deleted entries; stale deletion cleanup requires explicit index repair. It scans only the given user's prefix
-and never deletes native objects.
+`reconcile` adds new entries and updates observed metadata (including size/etag). Add `--sync` to make the
+index equal the tree: entries the native tree no longer has are removed, and each removal leaves a
+`file.deleted` / `native_absent` audit record plus a deleted change fact. The native tree is authoritative, so
+`--sync` is what makes the index a faithful view of it; it scans only the given user's prefix and never deletes
+native objects.
 
 ## Deletion
 
@@ -365,6 +367,7 @@ existing separate endpoints and envelopes.
 | PUT | `/api/files/transfer/{encoded-object-key}?…` | Optional class A same-origin edge route; the application always refuses it |
 | POST | `/api/files/downloads` | Batch read grants (URL or bearer), renewable on expiry |
 | POST | `/api/files/uploads/{id}/commit` | Server verifies provider state and publishes; metadata or stable Operation |
+| POST | `/api/files/sync` | Sync the index to the native tree (`{dryRun}`); removals are audited and emitted as deleted change facts |
 | POST | `/api/files/change-snapshots` | Complete bounded synchronous metadata baseline with committed feed checkpoint |
 | GET, DELETE | `/api/files/change-snapshots/{id}` | Immutable metadata pages or release retained snapshot |
 | GET | `/api/files/changes?cursor=&limit=` | Authorized fixed-filter changes: items, nextCursor, hasMore |

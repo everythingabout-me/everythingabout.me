@@ -380,6 +380,8 @@ func (s *Server) filesHandler() http.Handler {
 			routes["POST"] = s.handleFilesCopy
 		case fc.Base + "/thumbnail":
 			routes["GET"] = pending
+		case fc.Base + "/sync":
+			routes["POST"] = s.handleFilesSync
 		case fc.Base + "/changes":
 			routes["GET"] = s.handleFilesChanges
 		case fc.Base + "/subscriptions":

@@ -176,6 +176,16 @@ export interface FileAudit {
   observedAt: string;
 }
 
+export interface FileSyncReport {
+  dryRun: boolean;
+  scanned: number;
+  inserted: number;
+  updated: number;
+  unchanged: number;
+  removed: number;
+  removedPaths?: string[];
+}
+
 export interface FileAuditPage {
   items: FileAudit[];
   nextCursor: string | null;
@@ -824,6 +834,10 @@ export const files = {
   capabilities(selector?: FileSelector): Promise<FileCapabilities> {
     return fileRequest(fileURL("/capabilities", selector === undefined ? {} : entrySelector(selector)));
   },
+  /** Make the index equal the native tree; dryRun lists what would be removed. */
+  sync(dryRun: boolean, signal?: AbortSignal): Promise<FileSyncReport> {
+    return filePost("/sync", { dryRun }, undefined, signal);
+  },
   createChangeSnapshot(filter: FileChangeFilter, signal?: AbortSignal): Promise<FileChangeSnapshot> {
     return filePost("/change-snapshots", { ...filter, target: entrySelector(filter.target) }, undefined, signal);
   },
@@ -1086,6 +1100,7 @@ export const api = {
     return fileRequest(`/api/audit${suffix ? `?${suffix}` : ""}`, { signal });
   },
 
+  syncFiles: files.sync,
   createChangeSnapshot: files.createChangeSnapshot,
   changeSnapshot: files.changeSnapshot,
   deleteChangeSnapshot: files.deleteChangeSnapshot,
