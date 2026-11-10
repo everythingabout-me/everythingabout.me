@@ -20,6 +20,34 @@ Accounts, the folder tree, attributes, and events live in Postgres; file bytes l
 Go backend (standard library `net/http`) + React SPA (Vite + React Router), frontend and backend split,
 no Next.js.
 
+## Bytes are the source of truth
+
+This is the product's basic philosophy, and it decides what may be treated as optional.
+
+The native tree — folder structure, original filenames, raw contents — **is** the product. Postgres is a
+**read cache** over it: accounts, the parent/name index, ACLs, events, stable IDs, change cursors and
+operation journals all exist to make that tree fast and safe to use, and all of them are disposable.
+Every piece of content that matters to a user lives in the bytes, in a form standard tools can open
+without this service.
+
+**Only user-visible loss is loss.** If the database is lost, every file is still there under its real name
+in its real folder and the user has lost nothing; the rebuild — scan the tree, re-index, re-issue IDs,
+re-apply ACLs, lose share links and tokens — is our cost, not their loss. Never describe operator cost as
+user cost, and never let a convenience for recovering our cache become a requirement on the user's data.
+
+Two consequences follow, and both are easy to get wrong:
+
+- **A cache may be thrown away, so nothing irreplaceable may live in it.** Credentials stay in `.env` or
+  another `0600` file and the database holds a reference to them, because a disposable artifact gets
+  dumped, copied off the host, restored into a drill and hand-edited. This is not hygiene; it is the same
+  rule applied to secrets.
+- **A cache that cannot be rebuilt is not a cache.** Rebuilding the index by scanning the native tree is
+  the load-bearing operation of this architecture. A change that makes it impossible, lossy, or dependent
+  on state the tree does not carry breaks the product's premise, not just an internal convenience.
+
+It also settles what a backup is: a user's content survives because the storage layer keeps copies of the
+tree. Application metadata is an operator convenience, and no user is ever asked to understand it.
+
 ## Contracts carry their reasons
 
 Every contract here — an API shape, an identity rule, an ordering, a "must"/"never", a storage
@@ -40,6 +68,29 @@ folder must exist before a file may be created into it (`409 parent_missing`) be
 parent/name and an empty folder needs a native marker object. That reason — not the status code — is
 what a proposal for implicit ancestor folders has to answer, and what decides whether the marker
 stays worth its cost.
+
+## A finding must change a decision
+
+An agent's contribution in a discussion is measured by what it changes, not by how much diligence it
+displays. A finding earns its paragraph only if it changes what someone will build or how, and then it
+has to say so: the decision, the reason, the alternative. Everything else costs the reader time and,
+worse, makes a settled premise look open again.
+
+- **Do not re-open a premise that is already a contract.** The reasons are written down here and in the
+  design docs. If the facts behind a reason changed, argue with the reason; otherwise build on it.
+  Asking whether a stated premise is tested, or whether it was considered, is not a contribution — it is
+  the appearance of one.
+- **Do not dress a checklist item as an opinion.** "This needs to be verified" names no decision, no
+  failure and no next step. Say what would be verified, what would break if it were not, and what you
+  would do differently — or leave it out.
+- **Do not invent a problem in order to have something to say.** If a stated contract already covers the
+  failure you are about to raise, raising it is noise; find the part the contract does not cover.
+- **Do not pad.** No unrequested caveats, no restating the question, no risk list that ends without a
+  recommendation, no summary of what was just said. If there is nothing substantive, say that in one line.
+- **When corrected, accept it in one sentence and move to the substance.** Re-explaining the mistake at
+  length is another way of not contributing.
+
+The test is blunt: if deleting the paragraph would not change what anyone builds, delete it.
 
 ## Running it
 
