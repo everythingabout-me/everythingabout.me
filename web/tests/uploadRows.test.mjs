@@ -23,6 +23,7 @@ function task(path, options = {}) {
     uploaded: false,
     overwrite: false,
     status: "queued",
+    activeParts: 0,
     ...options,
   };
 }
@@ -58,7 +59,7 @@ test("shows only immediate children and aggregates all selected descendants", ()
     folder("health/apple-health/2015"),
     folder("health/apple-health/2015/09"),
     task("health/apple-health/2015/09/steps.json", { status: "completed" }),
-    task("health/apple-health/2015/09/distance.json", { status: "uploading", size: 300, loaded: 120, speed: 50 }),
+    task("health/apple-health/2015/09/distance.json", { status: "uploading", activeParts: 2, size: 300, loaded: 120, speed: 50 }),
     task("health/apple-health/2025/steps.json"),
   ];
   const rows = buildUploadRows([], tasks, "health");
@@ -86,7 +87,7 @@ test("coalesces real items, pending folders and overwritten files by normalized 
   const rows = buildUploadRows([existingFile, existingFolder], [
     folder("health/root", "queued"),
     task("health/root/child.txt"),
-    task("health/readme.txt", { status: "uploading", loaded: 50 }),
+    task("health/readme.txt", { status: "uploading", activeParts: 1, loaded: 50 }),
   ], "health");
   assert.deepEqual(paths(rows), ["health/root", "health/readme.txt"]);
   assert.equal(rows[0].item, existingFolder);
@@ -159,7 +160,7 @@ test("failed directories and files propagate to their folder while successful si
     task("health/root/broken/a.txt"),
     task("health/root/b.txt", { status: "failed", loaded: 30 }),
     task("health/root/c.txt", { status: "completed" }),
-    task("health/root/d.txt", { status: "uploading", loaded: 50, speed: 10 }),
+    task("health/root/d.txt", { status: "uploading", activeParts: 1, loaded: 50, speed: 10 }),
   ];
   const summary = buildUploadRows([], tasks, "health")[0].upload;
   assert.equal(summary.status, "failed");
@@ -215,7 +216,7 @@ test("a large tree counts folder creation as progress instead of bytes that cann
   assert.equal(summary.preparing, true);
   // The first file starts: the badge switches from folder creation to the transfer.
   const started = tasks.map((entry) => entry.path === "health/tree/2025/07/0/f0.json"
-    ? { ...entry, status: "uploading", loaded: 5 }
+    ? { ...entry, status: "uploading", activeParts: 1, loaded: 5 }
     : entry);
   assert.equal(buildUploadRows([], started, "health")[0].upload.preparing, false);
 });
@@ -233,10 +234,31 @@ test("a folder does not claim to be finishing while later files remain queued", 
 test("only the newest task for a repeated path contributes to counts", () => {
   const rows = buildUploadRows([], [
     task("health/root/file", { status: "completed", size: 10 }),
-    task("health/root/file", { id: "replacement", size: 20, loaded: 5, status: "uploading" }),
+    task("health/root/file", { id: "replacement", size: 20, loaded: 5, status: "uploading", activeParts: 1 }),
   ], "health");
   assert.equal(rows[0].upload.files, 1);
   assert.equal(rows[0].upload.completedFiles, 0);
   assert.equal(rows[0].upload.size, 20);
   assert.equal(rows[0].upload.loaded, 5);
+});
+
+test("a started file that holds no part slot is queued, not uploading", () => {
+  const tasks = [
+    task("health/a.mov", { status: "uploading", activeParts: 4, loaded: 40, speed: 24 }),
+    task("health/b.mov", { status: "uploading", loaded: 0 }),
+    task("health/c.mov", { status: "uploading", loaded: 0 }),
+  ];
+  const rows = buildUploadRows([], tasks, "health");
+  assert.deepEqual(rows.map((row) => row.upload.status), ["uploading", "queued", "queued"]);
+  assert.deepEqual(rows.map((row) => row.upload.speed), [24, 0, 0]);
+  // The whole folder is queued while every file in it waits behind an earlier file.
+  const folderRows = buildUploadRows([], [folder("health/batch"),
+    ...tasks.map((entry) => ({ ...entry, path: `health/batch/${entry.name}`, dir: "health/batch", activeParts: 0 }))], "health");
+  assert.equal(folderRows[0].upload.status, "queued");
+  // A file that yields its slot halfway keeps its bytes and reports the wait honestly.
+  const yielded = buildUploadRows([], [task("health/d.mov", { status: "uploading", loaded: 51 })], "health")[0];
+  assert.equal(yielded.upload.status, "queued");
+  assert.equal(yielded.upload.percent, 51);
+  // A folder task is not a byte transfer: creating it is its own work, not a slot wait.
+  assert.equal(buildUploadRows([], [folder("health/empty", "uploading")], "health")[0].upload.status, "uploading");
 });

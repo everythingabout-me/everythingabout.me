@@ -226,7 +226,11 @@ The browser starts every queued task, so a large batch opens its sessions immedi
 numbered parts through one global pool of eight part requests with no per-file cap; the receiver admits
 part bodies process-wide, so no session publishes a parallelism for clients to respect. A freed slot
 immediately goes to the earliest-started file's next part, so files finish in order and one slow part never
-idles a connection. After an uncertain part request the client asks the session what the provider or
+idles a connection. Because of that ordering, a started file may hold no slot at all for a long stretch; the
+queue therefore reports a file as uploading only while it holds at least one part slot, and shows a started
+file that is still claiming, allocating, reading receipts or waiting behind an earlier file as queued.
+"Uploading · 0 B/s" would describe a stall; a batch that is working but serialized behind one file must not
+look like one. After an uncertain part request the client asks the session what the provider or
 relay holds before resending; class C receipt hashes are verified against the retained File before reuse. The browser queue exists only in memory for the current Files page/document and survives folder
 navigation. Refresh/close discards it without restoring failed tasks or requesting File reselection. Register the
 browser-native beforeunload warning while queued, waiting, uploading or finalizing tasks remain; do not rely on

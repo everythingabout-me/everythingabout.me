@@ -53,6 +53,22 @@ function compareRows(a: UploadRowEntry, b: UploadRowEntry): number {
   return a.name < b.name ? -1 : a.name > b.name ? 1 : 0;
 }
 
+/**
+ * The state a row may show.
+ *
+ * A started file is not necessarily uploading: it claims its path, allocates a session,
+ * reads receipts and then waits for a slot in the one global part pool, which hands every
+ * free slot to the earliest-started file. In a batch of large files the first one therefore
+ * takes all eight slots and the rest sit at exactly 0 B/s with an open session, and
+ * "Uploading · 0 B/s" reads as a stall to the person watching. Holding a part slot is the
+ * only fact that means bytes can move, so a file without one is reported as queued — for
+ * the user it is the same wait, because nothing happens either way.
+ */
+function visibleStatus(task: UploadTask): UploadStatus {
+  if (task.isDir || task.status !== "uploading") return task.status;
+  return task.activeParts > 0 ? "uploading" : "queued";
+}
+
 /** Project every selected descendant onto its immediate child in the browsed directory. */
 export function buildUploadRows(items: Item[], tasks: UploadTask[], directory: string): UploadRowEntry[] {
   const dir = normalize(directory);
@@ -116,9 +132,9 @@ export function buildUploadRows(items: Item[], tasks: UploadTask[], directory: s
       task.status === "uploading" || task.status === "finalizing" || task.status === "completed");
     const preparing = folders.length > 1 && completedFolders < folders.length && !fileStarted && failed.length === 0;
     const status: UploadStatus = failed.length ? "failed"
-      : pending.some((task) => task.status === "uploading") ? "uploading"
-        : pending.some((task) => task.status === "finalizing")
-          ? row.isDir && pending.some((task) => task.status === "queued") ? "uploading" : "finalizing"
+      : pending.some((task) => visibleStatus(task) === "uploading") ? "uploading"
+        : pending.some((task) => visibleStatus(task) === "finalizing")
+          ? row.isDir && pending.some((task) => visibleStatus(task) === "queued") ? "uploading" : "finalizing"
           : waiting.length ? "waiting" : pending.length ? "queued" : "completed";
     const cancelable = pending.filter((task) => !task.cancelRequested);
     row.upload = {
@@ -134,7 +150,7 @@ export function buildUploadRows(items: Item[], tasks: UploadTask[], directory: s
       failed: failed.length,
       size,
       loaded,
-      speed: files.reduce((sum, task) => sum + (task.status === "uploading" ? task.speed : 0), 0),
+      speed: files.reduce((sum, task) => sum + (visibleStatus(task) === "uploading" ? task.speed : 0), 0),
       percent: pending.length === 0 ? 100
         : progressUnit === "items" ? (items > 0 ? Math.floor(completedItems / items * 100) : 0)
           : size > 0 ? Math.floor(loaded / size * 100) : 0,

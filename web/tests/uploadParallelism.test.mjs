@@ -236,3 +236,25 @@ test("cancel aborts every parallel request and a pending retry delay", async (t)
   assert.equal(server.calls.filter(([kind]) => kind === "commit").length, 0);
   assert.equal([...harness.timers.values()].filter(({ delay }) => delay < 1000).length, 0);
 });
+
+test("a started file holds no part slot until the earlier file releases one", async (t) => {
+  const server = uploadServer();
+  const send = server.api.uploadPart;
+  const gate = deferred();
+  let active = 0;
+  server.api.uploadPart = async (...args) => {
+    active++;
+    try { await gate.promise; return await send(...args); } finally { active--; }
+  };
+  const harness = await mount(t, server.api);
+  harness.render().enqueue(["a", "b", "c"].map((path) => ({ path, file: new File(["abcdefgh"], path) })), "", () => false);
+  // Three files of four parts each over one eight-slot pool: the first two take every
+  // slot, and the third holds none although it already has an open session and its
+  // receipts read. That file is queued for the user, whatever its task status says.
+  const queue = await harness.until((queue) => queue.tasks.length === 3 && active === 8
+    && server.calls.filter(([kind]) => kind === "receipts").length === 3);
+  assert.deepEqual(queue.tasks.map((task) => task.activeParts), [4, 4, 0]);
+  assert.deepEqual(queue.tasks.map((task) => task.status), ["uploading", "uploading", "uploading"]);
+  gate.resolve();
+  await harness.until((queue) => queue.tasks.every((task) => task.status === "completed"));
+});

@@ -26,6 +26,8 @@ finalizing tasks remain.
 Durable server sessions and accepted Operations continue under their existing recovery/expiry rules. Clients
 that retain session identity and source bytes can use the resumable API independently of this browser behavior.
 Every queued file starts at once and their parts share one global pool of eight concurrent requests; one file may use all eight.
+A file is reported as uploading only while it holds a part slot: a started file that is still being allocated, or waiting behind an earlier
+file, shows as queued, because nothing is moving for it.
 See [transfer protocol](docs/design/transfer-protocol.md) for the exact boundaries.
 Object connections need no bucket versioning: revisions use current-object ETags and operation-specific
 conditions. COS ignores PUT If-Match, so admitted replacement rechecks ETag under gateway coordination;

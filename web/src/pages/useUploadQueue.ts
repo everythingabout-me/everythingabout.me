@@ -61,6 +61,18 @@ export interface UploadTask {
   status: UploadStatus;
   loaded: number;
   speed: number;
+  /**
+   * How many part requests this file currently holds a slot for.
+   *
+   * `status === "uploading"` only means the task was started: claiming the path,
+   * allocating the session, reading receipts and waiting behind an earlier file all
+   * happen before this file's first byte moves, and the global pool hands every free
+   * slot to the earliest-started file, so several started files can sit at 0 B/s for
+   * minutes. Counting held slots is the only local fact that says "bytes can move now";
+   * the row projection uses it to keep those files labelled as queued instead of
+   * reporting an upload that is not uploading.
+   */
+  activeParts: number;
   uploaded: boolean;
   uploadId?: string;
   operationId?: string;
@@ -586,21 +598,27 @@ export function useUploadQueue(onUploaded: (task: UploadTask, item: Item) => voi
             }
           };
           const rank = ranks.current.get(id) ?? Number.MAX_SAFE_INTEGER;
+          // Slots this file holds right now, across its workers. A worker keeps its slot
+          // between its own parts, and yields it to a higher-priority part waiting for it,
+          // so this count is what the row reads to decide whether the file is moving.
+          let held = 0;
+          const holdSlot = () => { held++; patch(id, { activeParts: held }); };
+          const yieldSlot = () => { held--; releasePart(); patch(id, { activeParts: held }); };
           await Promise.all(Array.from({ length: Math.min(parallelism, pending.length) }, async () => {
             let holding = false;
             try {
               for (let number = pending.shift(); number !== undefined && !batch.signal.aborted; number = pending.shift()) {
                 // Keep a held slot unless a higher-priority part is waiting for it.
                 const head = partPool.current.waiters[0];
-                if (holding && head && (head.rank < rank || head.rank === rank && head.number < number)) { holding = false; releasePart(); }
+                if (holding && head && (head.rank < rank || head.rank === rank && head.number < number)) { holding = false; yieldSlot(); }
                 if (!holding) {
                   try { await acquirePart(rank, number, batch.signal); }
                   catch (error) { if (failure === undefined && !signal.aborted) failure = error; return; }
-                  holding = true;
+                  holding = true; holdSlot();
                 }
                 await uploadOne(number);
               }
-            } finally { if (holding) releasePart(); }
+            } finally { if (holding) yieldSlot(); }
           }));
         } finally { signal.removeEventListener("abort", abortBatch); cancelProgress(); }
         if (signal.aborted) return;
@@ -750,7 +768,7 @@ export function useUploadQueue(onUploaded: (task: UploadTask, item: Item) => voi
       if (overwrite && !window.confirm(t("drive.overwriteConfirm", { name: entry.path }))) continue;
       const id = taskId();
       const task: UploadTask = { id, file: entry.file, isDir: !entry.file, name: entry.path, dir: relative(dir), path, size: entry.file?.size ?? 0, modifiedAt: entry.file?.lastModified,
-        overwrite, parents: !!entry.file && path.includes("/"), status: "queued", loaded: 0, speed: 0, uploaded: false, createKey: id };
+        overwrite, parents: !!entry.file && path.includes("/"), status: "queued", loaded: 0, speed: 0, activeParts: 0, uploaded: false, createKey: id };
       added.push(task);
       taken.set(path, task);
     }
