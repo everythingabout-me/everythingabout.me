@@ -79,6 +79,7 @@ export const conflict = (id = "delete-1") => new TestApiError("operation in prog
 export function uploadServer(partSize = 2, options = {}) {
   const classA = options.class === "A";
   const calls = [];
+  const probes = [];
   const sessions = new Map();
   const keys = new Map();
   const receipts = new Map();
@@ -92,7 +93,12 @@ export function uploadServer(partSize = 2, options = {}) {
   };
   const api = {
     me: async () => ({ id: "owner-a" }),
-    capabilities: async () => ({ sourceModifiedAt: false, transferClass: "C", transferKind: "relay" }),
+    capabilities: async (selector) => {
+      // Kept out of `calls`: the probe is not part of the upload flow that tests assert on
+      // call by call, but how often and with which selector it is asked is its own question.
+      probes.push(selector);
+      return { sourceModifiedAt: false, transferClass: "C", transferKind: "relay" };
+    },
     mkdir: async (path) => { calls.push(["mkdir", path]); return item(path, "folder", null); },
     metadata: async (path) => { calls.push(["metadata", path]); return item(path); },
     createUpload: async (input, key) => {
@@ -164,7 +170,7 @@ export function uploadServer(partSize = 2, options = {}) {
     getOperation: async (id) => { calls.push(["operation", id]); return operation(id); },
     cancelOperation: async (id) => { calls.push(["cancelOperation", id]); return operation(id, "cancelled"); },
   };
-  return { api, calls, sessions, keys, receipts };
+  return { api, calls, probes, sessions, keys, receipts };
 }
 
 export async function setup(overrides = {}, options = {}) {

@@ -208,6 +208,37 @@ test("receipt pagination must have one watermark and validate every resumed part
   }
 });
 
+// A service-wide flag must not be asked per path: during an import the parent is a folder
+// the upload itself creates, so a per-parent probe 404s and used to fail every file.
+test("capabilities are asked once, at the root, for files whose parents do not exist yet", async (t) => {
+  const server = uploadServer();
+  const asked = [];
+  server.api.capabilities = async (selector) => {
+    asked.push(selector);
+    if (selector !== undefined) throw new TestApiError("path not found", 404, { code: "not_found" });
+    return { sourceModifiedAt: true, transferClass: "C", transferKind: "relay" };
+  };
+  const harness = await mount(t, server.api);
+  enqueue(harness, [entry("Health/watch/a", "ab"), entry("Health/watch/b", "cd"), entry("Health/other/c", "ef")]);
+  const queue = await harness.until(allComplete);
+  assert.equal(queue.tasks.length, 3);
+  assert.deepEqual(asked, [undefined]);
+  assert.ok(queue.tasks.every((task) => task.intent?.sourceModifiedAt !== undefined), "the supported flag still reaches every intent");
+});
+
+// A failed probe costs the optional modification time, not the file, and is not retried
+// once per file — that retry is what turned one refusal into a request storm.
+test("a failed capability probe costs the modification time, not the files", async (t) => {
+  const server = uploadServer();
+  let asked = 0;
+  server.api.capabilities = async () => { asked++; throw new TestApiError("temporarily unavailable", 503); };
+  const harness = await mount(t, server.api);
+  enqueue(harness, [entry("a", "ab"), entry("b", "cd")]);
+  const queue = await harness.until(allComplete);
+  assert.equal(asked, 1);
+  assert.ok(queue.tasks.every((task) => task.intent && !("sourceModifiedAt" in task.intent)));
+});
+
 test("zero-byte upload commits an empty session without a part request", async (t) => {
   const server = uploadServer();
   const harness = await mount(t, server.api);

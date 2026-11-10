@@ -140,17 +140,19 @@ function compareQueueOrder(a: UploadTask, b: UploadTask): number {
   return a.path < b.path ? -1 : a.path > b.path ? 1 : 0;
 }
 let sequence = 0;
-// The only thing the queue asks capabilities for is whether this connection can
-// carry a source modification time — a service-wide flag, not a per-folder one.
-// Asking per file costs one request per file, which for a 23k-file folder is
-// 23k requests that never change their answer.
+// The only thing the queue asks capabilities for is whether this connection can carry a
+// source modification time — a service-wide flag, not a per-folder one. It was asked for
+// each file's parent, and during an import that parent is a folder the upload itself is
+// about to create: the answer was a 404 per file, clearing the memo on the way out, so
+// every file failed before it allocated anything and the log filled with the same request.
+// Ask the authorized root once. A probe that fails only costs the optional modification
+// time — never the file, and never a second request.
 let sourceModifiedAtSupport: Promise<boolean> | undefined;
-function supportsSourceModifiedAt(parent: string): Promise<boolean> {
-  sourceModifiedAtSupport ??= api.capabilities(parent)
-    .then((capabilities) => !!capabilities.sourceModifiedAt, (error) => {
-      sourceModifiedAtSupport = undefined;
-      throw error;
-    });
+function supportsSourceModifiedAt(): Promise<boolean> {
+  sourceModifiedAtSupport ??= api.capabilities().then(
+    (capabilities) => !!capabilities.sourceModifiedAt,
+    () => false,
+  );
   return sourceModifiedAtSupport;
 }
 
@@ -407,9 +409,7 @@ export function useUploadQueue(onUploaded: (task: UploadTask, item: Item) => voi
             if (old.kind !== "file" || !old.contentRevision) throw new Error("The destination cannot be replaced safely.");
             condition = { mode: "replace", contentRevision: old.contentRevision };
           }
-          const slash = task.path.lastIndexOf("/");
-          const parent = slash < 0 ? "/" : task.path.slice(0, slash);
-          const sourceModifiedAt = await supportsSourceModifiedAt(parent);
+          const sourceModifiedAt = await supportsSourceModifiedAt();
           if (signal.aborted) return;
           intent = { path: task.path, size: task.size, mediaType: task.file?.type || "application/octet-stream", condition,
             ...(task.parents && condition.mode === "create" ? { parents: true as const } : {}),
