@@ -275,8 +275,18 @@ func problem(code string, _ error) json.RawMessage {
 	value, _ := json.Marshal(map[string]any{"code": code, "detail": "The file operation did not complete."})
 	return value
 }
+// durableContext detaches a durable write from the client's cancellation: once a
+// native effect exists, its index settlement must finish even if the browser hangs
+// up. It carries no wall clock, because the work is already bounded where it is
+// produced (maxActionEntries, maxActionPages, page limits) and a budget picked in
+// advance can only fire on the operation large enough to matter. A 5 s budget here
+// is exactly what kept a 776-entry delete from ever settling: every retry hit the
+// deadline mid-commit, the deferred release then ran on the same expired context and
+// silently left the lease behind, so the operation answered every later attempt with
+// operation_in_progress for the rest of the TTL and repeated that forever while its
+// accepted deletion stayed non-terminal.
 func durableContext(ctx context.Context) (context.Context, context.CancelFunc) {
-	return context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	return context.WithCancel(context.WithoutCancel(ctx))
 }
 
 func (s *Service) keepLease(ctx context.Context, lease Lease) (context.Context, context.CancelFunc) {
