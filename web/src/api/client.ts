@@ -1080,6 +1080,33 @@ function takeListingPrefetch(selected: EntrySelector): Promise<ListResult> | nul
   return entry.expiresAt > Date.now() ? entry.listing : null;
 }
 
+export interface StorageConnection {
+  id: string;
+  name: string;
+  role: "authority" | "backup";
+  backend: string;
+  location: string;
+  enabled: boolean;
+  mine: boolean;
+}
+
+export interface BackupRun {
+  snapshot: string;
+  state: "running" | "complete" | "failed";
+  files: number;
+  folders: number;
+  bytes: number;
+  error?: string;
+  startedAt: string;
+  finishedAt?: string;
+}
+
+export interface StorageData {
+  connections: StorageConnection[];
+  keep: number;
+  runs: BackupRun[];
+}
+
 export const api = {
   async me(): Promise<AuthUser | null> {
     const data = await request<{ user: AuthUser | null }>("/api/auth/me");
@@ -1088,6 +1115,33 @@ export const api = {
 
   async account(): Promise<AccountSummary> {
     return request<AccountSummary>("/api/account");
+  },
+
+  storage(): Promise<StorageData> {
+    return request<StorageData>("/api/storage");
+  },
+
+  addStorageConnection(input: {
+    name: string;
+    bucket: string;
+    region: string;
+    secretId: string;
+    secretKey: string;
+  }): Promise<{ name: string }> {
+    return post<{ name: string }>("/api/storage/connections", input);
+  },
+
+  async removeStorageConnection(id: string): Promise<void> {
+    await request(`/api/storage/connections/${encodeURIComponent(id)}`, { method: "DELETE" });
+  },
+
+  startBackup(input: {
+    connectionId: string;
+    action: "snapshot" | "prune" | "restore";
+    date?: string;
+    keep?: number;
+  }): Promise<{ started: boolean }> {
+    return post<{ started: boolean }>("/api/storage/backup", input);
   },
 
   connect(): Promise<ConnectData> {

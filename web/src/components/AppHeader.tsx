@@ -15,6 +15,7 @@ export function AppHeader({ user }: { user: AuthUser }) {
   const homeActive = pathname === "/";
   const filesActive = pathname === "/files" || pathname.startsWith("/files/");
   const connectActive = pathname === "/connect";
+  const backupActive = pathname === "/backup";
 
   return (
     <header className={styles.topbar}>
@@ -38,6 +39,13 @@ export function AppHeader({ user }: { user: AuthUser }) {
             aria-current={filesActive ? "page" : undefined}
           >
             {t("nav.files")}
+          </Link>
+          <Link
+            className={`${styles.navLink} ${backupActive ? styles.navLinkActive : ""}`}
+            to="/backup"
+            aria-current={backupActive ? "page" : undefined}
+          >
+            {t("nav.backup")}
           </Link>
           <Link
             className={`${styles.navLink} ${connectActive ? styles.navLinkActive : ""}`}

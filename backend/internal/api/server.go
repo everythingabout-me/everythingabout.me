@@ -14,6 +14,7 @@ import (
 	"everythingabout.me/backend/internal/auth"
 	"everythingabout.me/backend/internal/browserupload"
 	"everythingabout.me/backend/internal/config"
+	"everythingabout.me/backend/internal/connections"
 	"everythingabout.me/backend/internal/emailcode"
 	"everythingabout.me/backend/internal/events"
 	fc "everythingabout.me/backend/internal/filecontract"
@@ -39,6 +40,9 @@ type Server struct {
 	browserUploads *browserupload.Service
 	uploadIndex    UploadIndex
 	trees          OwnerStorageFactory
+	conns          connections.Store
+	backupMu       sync.Mutex
+	backupJobs     map[string]bool
 	filesAuth      FilesAuthenticator
 	filesIndex     FileReadIndex
 	filesJournal   *fileops.Postgres
@@ -92,6 +96,7 @@ func New(cfg *config.Config, db *store.DB, objectStorage storage.Storage, web ht
 	}
 	if db != nil {
 		server.filesJournal = fileops.NewPostgres(db.Pool())
+		server.conns = connections.NewPostgresStore(db)
 	}
 	if cfg.BackendName() == "cos" && !cfg.Storage.CoordinatedWrites {
 		server.uploadIndex = uploadindex.New(uploadIndexBinding(cfg), uploadindex.NewJournal(db.Pool()), uploadindex.ObserverFunc(server.observeUploadedObject))
@@ -135,6 +140,13 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/auth/email", s.wrap(s.handleChangeEmail))
 	mux.HandleFunc("GET /api/account", s.wrap(s.handleAccount))
 	mux.HandleFunc("GET /api/audit", s.ownerAuditHandler())
+
+	// Storage settings are owner-only: they carry credentials, so an API token must
+	// never reach them.
+	mux.HandleFunc("GET /api/storage", s.wrap(s.handleStorageGet))
+	mux.HandleFunc("POST /api/storage/connections", s.wrap(s.handleStorageConnectionAdd))
+	mux.HandleFunc("DELETE /api/storage/connections/{id}", s.wrap(s.handleStorageConnectionRemove))
+	mux.HandleFunc("POST /api/storage/backup", s.wrap(s.handleBackupStart))
 
 	mux.HandleFunc("GET /api/save-links", s.wrap(s.handleListSaveLinks))
 	mux.HandleFunc("POST /api/save-links", s.wrap(s.handleCreateSaveLink))

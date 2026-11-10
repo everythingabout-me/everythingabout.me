@@ -1050,3 +1050,23 @@ commit/abort/restart/revocation, quota reservations, path-scope authorization af
 media safety, stale native effect blocking, partial tree recovery, readable no-database exit and scan/index repair. Measure tiny/large/mixed transfers,
 LAN/high RTT/throttling/interruptions, memory/staging, request overhead, and egress cost. This document specifies
 behavior; it does not claim the existing implementation or tests already meet it.
+
+## Storage settings and backups
+
+These endpoints are **owner-session only** (`/api/*` cookie plus same-origin): they carry provider
+credentials, so an API token must never reach them. They are the console for a single-owner deployment;
+a file client cannot select a provider through the file API.
+
+| Method | Route | Purpose |
+|---|---|---|
+| `GET` | `/api/storage` | This account's visible connections (its own plus the deployment default), the retention setting and the last 20 backup runs |
+| `POST` | `/api/storage/connections` | Attach the account's own COS bucket (`name`, `bucket`, `region`, `secretId`, `secretKey`); the backend is fixed to `cos` |
+| `DELETE` | `/api/storage/connections/{id}` | Remove one of the account's own connections |
+| `POST` | `/api/storage/backup` | Start `snapshot`, `prune` or `restore` for one connection; returns `202` and records progress in `backup_runs` |
+
+`POST /api/storage/connections` accepts only `cos`: a `local` row would give an account arbitrary host
+paths and an arbitrary `s3` endpoint would turn the server into an outbound request primitive. Secrets are
+never returned by any of these responses; a mutation replaces the whole credential.
+
+`restore` copies the chosen date to `restore-<date>/` on the owner's tree and cannot overwrite a live path.
+Nothing is indexed by a restore: run `eam reconcile --owner <id>` afterwards.
