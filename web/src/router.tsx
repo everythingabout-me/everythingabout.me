@@ -10,7 +10,6 @@ import {
 import { filesHref } from "./filesPath";
 import { AuthLayout } from "./layouts/AuthLayout";
 import { AccountPage } from "./pages/AccountPage";
-import { BackupPage } from "./pages/BackupPage";
 import { ConnectPage } from "./pages/ConnectPage";
 import { FilesPage } from "./pages/FilesPage";
 import { LegalPage } from "./pages/LegalPage";
@@ -83,21 +82,11 @@ export const router = createBrowserRouter([
     ...pageBoundary,
   },
   {
-    path: "/backup",
-    element: <BackupPage />,
-    loader: async () => {
-      const user = await requireUser();
-      const storage = (await api.storage()) as StorageData;
-      return { user, storage };
-    },
-    ...pageBoundary,
-  },
-  {
     path: "/account",
     element: <AccountPage />,
-    loader: async (): Promise<{ summary: AccountSummary }> => {
+    loader: async (): Promise<{ summary: AccountSummary; storage: StorageData }> => {
       try {
-        return { summary: await api.account() };
+        return { summary: await api.account(), storage: await api.storage() };
       } catch (error) {
         if (error instanceof ApiError && error.status === 401) throw redirect("/login");
         throw error;

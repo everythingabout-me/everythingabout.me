@@ -1,12 +1,13 @@
 import { useLoaderData } from "react-router";
-import type { AccountSummary } from "../api/client";
+import type { AccountSummary, StorageData } from "../api/client";
 import { AccountPanel } from "../components/AccountPanel";
 import { AppHeader } from "../components/AppHeader";
+import { BackupsPanel, DrivesPanel } from "../components/StoragePanels";
 import { t } from "../i18n";
 import styles from "../styles/auth.module.css";
 
 export function AccountPage() {
-  const { summary } = useLoaderData() as { summary: AccountSummary };
+  const { summary, storage } = useLoaderData() as { summary: AccountSummary; storage: StorageData };
 
   return (
     <div className={styles.page}>
@@ -19,6 +20,8 @@ export function AccountPage() {
           saveLinks={summary.saveLinks}
           activity={summary.activity}
         />
+        <DrivesPanel data={storage} />
+        <BackupsPanel data={storage} />
       </main>
     </div>
   );

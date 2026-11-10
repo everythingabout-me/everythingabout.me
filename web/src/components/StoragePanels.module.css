@@ -1,63 +1,31 @@
-.page {
-  min-height: 100vh;
-  background: var(--bg);
-  color: var(--text);
-}
-
-.main {
-  max-width: 820px;
-  margin: 0 auto;
-  padding: 40px 24px 96px;
-}
-
-.title {
-  margin: 0 0 8px;
-  font-size: 28px;
-  letter-spacing: -0.01em;
-}
-
-.lead {
-  margin: 0 0 28px;
-  color: var(--text-2);
-  line-height: 1.6;
-}
-
-.notice {
-  margin: 0 0 20px;
-  padding: 10px 14px;
-  border: 1px solid var(--border);
-  border-radius: 10px;
-  background: var(--surface);
-  color: var(--text-2);
-}
-
 .section {
-  margin: 0 0 32px;
-  padding: 20px;
+  margin: 0 0 20px;
+  padding: 22px 24px;
   border: 1px solid var(--border);
   border-radius: 14px;
   background: var(--surface);
 }
 
-.sectionTitle {
-  margin: 0 0 14px;
+.title {
+  margin: 0 0 6px;
   font-size: 15px;
   font-weight: 600;
-  color: var(--text-2);
 }
 
-.empty {
-  margin: 0;
-  color: var(--text-3);
+.lead {
+  margin: 0 0 16px;
+  color: var(--text-2);
+  font-size: 13px;
+  line-height: 1.55;
 }
 
 .list {
   list-style: none;
-  margin: 0;
+  margin: 0 0 14px;
   padding: 0;
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: 10px;
 }
 
 .row {
@@ -65,7 +33,7 @@
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  padding-bottom: 12px;
+  padding-bottom: 10px;
   border-bottom: 1px solid var(--border);
 }
 
@@ -76,12 +44,24 @@
 
 .name {
   font-weight: 600;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.badge {
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--text-3);
+  border: 1px solid var(--border-strong);
+  border-radius: 999px;
+  padding: 1px 8px;
 }
 
 .muted {
   color: var(--text-3);
   font-size: 13px;
-  margin-top: 2px;
+  margin-top: 3px;
 }
 
 .actions {
@@ -91,7 +71,7 @@
 }
 
 .button,
-.danger {
+.quiet {
   padding: 7px 12px;
   border-radius: 9px;
   border: 1px solid var(--border-strong);
@@ -101,25 +81,27 @@
   cursor: pointer;
 }
 
-.button:hover:not(:disabled) {
+.button:hover,
+.quiet:hover {
   background: var(--hover);
 }
 
 .button:disabled,
-.danger:disabled {
+.quiet:disabled {
   opacity: 0.45;
   cursor: default;
 }
 
-.danger {
-  border-color: var(--danger);
-  color: var(--danger);
+.quiet {
+  padding: 4px 9px;
+  font-size: 13px;
 }
 
 .table {
   width: 100%;
   border-collapse: collapse;
   font-size: 14px;
+  margin-top: 12px;
 }
 
 .table th {
@@ -137,7 +119,7 @@
 }
 
 .hint {
-  margin: 12px 0 0;
+  margin: 10px 0 0;
   color: var(--text-3);
   font-size: 13px;
   line-height: 1.55;
@@ -147,6 +129,7 @@
   display: grid;
   gap: 12px;
   max-width: 420px;
+  margin-top: 12px;
 }
 
 .field {
@@ -166,7 +149,7 @@
 }
 
 .error {
-  margin: 0;
+  margin: 8px 0 0;
   color: var(--danger);
   font-size: 13px;
 }
