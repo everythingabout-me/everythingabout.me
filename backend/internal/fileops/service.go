@@ -275,6 +275,7 @@ func problem(code string, _ error) json.RawMessage {
 	value, _ := json.Marshal(map[string]any{"code": code, "detail": "The file operation did not complete."})
 	return value
 }
+
 // durableContext detaches a durable write from the client's cancellation: once a
 // native effect exists, its index settlement must finish even if the browser hangs
 // up. It carries no wall clock, because the work is already bounded where it is
@@ -315,7 +316,7 @@ func (s *Service) keepLease(ctx context.Context, lease Lease) (context.Context, 
 			<-done
 			persist, finish := durableContext(ctx)
 			defer finish()
-			_ = s.journal.Release(persist, lease)
+			releaseLease(persist, s.journal, lease)
 		})
 	}
 }

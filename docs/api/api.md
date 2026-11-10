@@ -716,9 +716,12 @@ until their expiry and still cannot publish. Queued work rechecks authorization 
 
 ## 8. Operations, concurrency, and quota
 
-Operation JSON has `{id,kind,state,progress,result,error,cancelRequested,createdAt,finishedAt}`. States are
+Operation JSON has `{id,kind,state,progress,result,error,cancelRequested,retrying,createdAt,finishedAt}`. States are
 `queued/running/outcome_unknown/succeeded/failed/cancelled`; progress is `{completed,total,unit}` with nullable
 total. Also record per-entry effects, conflicts and remaining work for partial tree operations.
+`retrying` is null while the worker is making progress and otherwise `{attempts,code,lastAttemptAt,nextAttemptAt}`,
+so a nonterminal operation that keeps failing is distinguishable from one that is merely slow; the attempts back off
+from 30 seconds to 30 minutes instead of repeating once per lease. The cause chain itself stays in the server log.
 Kinds are bounded file actions (`mkdir/move/copy/delete/upload_commit/thumbnail`), not user-submitted arbitrary tasks.
 Result is the file/folder metadata for mkdir/move/copy/upload_commit, `{deleted:true}` for delete, or
 `{contentUrl,mediaType,size,contentRevision}` for thumbnail; contentUrl is a same-origin representation endpoint.

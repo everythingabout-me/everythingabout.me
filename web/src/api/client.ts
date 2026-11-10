@@ -236,6 +236,9 @@ export interface FileOperation {
   result: FileResource | { deleted: boolean } | { effects: FileEffect[]; remaining: FileEffect[] } | null;
   error: FileProblem | null;
   cancelRequested: boolean;
+  // Present while a worker keeps failing on a nonterminal operation: the attempts
+  // count and the failing step, backing off from 30 seconds to 30 minutes.
+  retrying: { attempts: number; code: string; lastAttemptAt: string; nextAttemptAt: string } | null;
   createdAt: string;
   finishedAt: string | null;
 }

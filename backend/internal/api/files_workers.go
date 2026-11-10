@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"log/slog"
+	"strings"
 	"sync"
 	"time"
 
@@ -16,17 +17,52 @@ import (
 )
 
 type fileWorkers struct {
-	mu     sync.Mutex
-	active map[string]bool
-	slots  chan struct{}
-	ctx    context.Context
+	mu      sync.Mutex
+	active  map[string]bool
+	retries map[string]*fileWorkerRetry
+	slots   chan struct{}
+	ctx     context.Context
+}
+
+// fileWorkerRetry is the consecutive-failure record for one operation. The journal
+// already knows a retry happened (it is the expiry of the lease), but it cannot say
+// how many times the same attempt failed or when the next one is due; that is the
+// difference between an operation that is slow and one that can never settle.
+type fileWorkerRetry struct {
+	attempts int
+	code     string
+	lastAt   time.Time
+	nextTry  time.Time
+}
+
+// An operation that keeps failing backs off instead of retrying once per lease TTL
+// forever. The first attempt after a failure waits the floor; each consecutive
+// failure doubles the wait up to the ceiling, so a stuck operation costs a handful of
+// log lines an hour instead of thousands a day.
+const (
+	fileOperationRetryFloor   = 30 * time.Second
+	fileOperationRetryCeiling = 30 * time.Minute
+)
+
+func fileOperationBackoff(attempts int) time.Duration {
+	if attempts < 1 {
+		return fileOperationRetryFloor
+	}
+	wait := fileOperationRetryFloor
+	for i := 1; i < attempts && wait < fileOperationRetryCeiling; i++ {
+		wait *= 2
+	}
+	if wait > fileOperationRetryCeiling {
+		wait = fileOperationRetryCeiling
+	}
+	return wait
 }
 
 func (s *Server) workers() *fileWorkers {
 	s.fileWorkerMu.Lock()
 	defer s.fileWorkerMu.Unlock()
 	if s.fileWorkers == nil {
-		s.fileWorkers = &fileWorkers{active: make(map[string]bool), slots: make(chan struct{}, 4), ctx: context.Background()}
+		s.fileWorkers = &fileWorkers{active: make(map[string]bool), retries: make(map[string]*fileWorkerRetry), slots: make(chan struct{}, 4), ctx: context.Background()}
 	}
 	return s.fileWorkers
 }
@@ -38,6 +74,12 @@ func (s *Server) queueFileOperation(op fileops.Operation) error {
 	worker.mu.Lock()
 	defer worker.mu.Unlock()
 	if worker.active[op.ID] {
+		return nil
+	}
+	if retry, ok := worker.retries[op.ID]; ok && time.Now().Before(retry.nextTry) {
+		// Deliberately quiet: the deferred attempt is reported where it is scheduled,
+		// with the cause chain, so the retry itself is not news.
+		slog.Debug("file operation retry deferred", "operation", op.ID, "attempt", retry.attempts, "code", retry.code, "retryIn", time.Until(retry.nextTry).Round(time.Second))
 		return nil
 	}
 	if err := worker.ctx.Err(); err != nil {
@@ -57,11 +99,126 @@ func (s *Server) queueFileOperation(op fileops.Operation) error {
 		// of one terabyte legitimately outlives any deadline picked in advance. A
 		// timer on top only ever fires on the operation large enough to matter, and
 		// the client then sees a failure the response cannot explain.
-		if err := s.runFileOperation(parentCtx, op); err != nil && !errors.Is(err, context.Canceled) {
-			slog.Warn("file operation retained for recovery", "operation", op.ID, "error", err)
+		err := s.runFileOperation(parentCtx, op)
+		switch {
+		case err == nil:
+			s.fileOperationProgressed(op.ID)
+		case errors.Is(err, context.Canceled):
+			slog.Debug("file operation stopped with the server", "operation", op.ID)
+		default:
+			s.fileOperationRetained(op, err)
 		}
 	}()
 	return nil
+}
+
+// fileOperationProgressed clears the failure record: the next attempt starts from a
+// clean slate instead of inheriting an old backoff.
+func (s *Server) fileOperationProgressed(id string) {
+	worker := s.workers()
+	worker.mu.Lock()
+	defer worker.mu.Unlock()
+	delete(worker.retries, id)
+}
+
+// fileOperationRetained reports one failed attempt with everything needed to debug it
+// without reproducing it: which operation, which kind, how far its manifest got, the
+// code of the failing step, the whole cause chain and when the next attempt is due.
+// A failure that repeats is the only way to diagnose a stuck operation, so the record
+// escalates to Error after a few attempts instead of staying one unremarkable warning.
+func (s *Server) fileOperationRetained(op fileops.Operation, err error) {
+	worker := s.workers()
+	worker.mu.Lock()
+	retry := worker.retries[op.ID]
+	if retry == nil {
+		retry = &fileWorkerRetry{}
+		worker.retries[op.ID] = retry
+	}
+	retry.attempts++
+	retry.code = fileOperationErrorCode(err)
+	retry.lastAt = time.Now()
+	retry.nextTry = retry.lastAt.Add(fileOperationBackoff(retry.attempts))
+	if len(worker.retries) > 4096 {
+		// Terminal operations never call this path; a map this large means the scan is
+		// replaying operations that are not making progress at all.
+		slog.Warn("file operation retry table is large", "entries", len(worker.retries))
+	}
+	attempts, code, nextTry := retry.attempts, retry.code, retry.nextTry
+	worker.mu.Unlock()
+
+	applied, total := 0, len(op.Entries)
+	for _, entry := range op.Entries {
+		if entry.State == "applied" {
+			applied++
+		}
+	}
+	attributes := []any{
+		"operation", op.ID, "kind", op.Kind, "state", op.State, "phase", op.Phase,
+		"owner", op.Root.OwnerID, "attempt", attempts, "code", code,
+		"cause", errorCauseChain(err), "entriesApplied", applied, "entriesTotal", total,
+		"retryIn", time.Until(nextTry).Round(time.Second),
+	}
+	if attempts > 3 {
+		slog.Error("file operation cannot make progress", attributes...)
+		return
+	}
+	slog.Warn("file operation retained for recovery", attributes...)
+}
+
+// fileOperationErrorCode names the layer that refused, without the parameters a
+// database or provider error can carry.
+func fileOperationErrorCode(err error) string {
+	var operation *fileops.Error
+	if errors.As(err, &operation) {
+		return operation.Code
+	}
+	var native *storage.Error
+	if errors.As(err, &native) {
+		return native.Code
+	}
+	switch {
+	case errors.Is(err, context.DeadlineExceeded):
+		return "deadline_exceeded"
+	case errors.Is(err, context.Canceled):
+		return "cancelled"
+	}
+	return "error"
+}
+
+// errorCauseChain renders the whole chain, not just its outermost code: every
+// wrapper the operation passes through names its own step, and the leaf is the
+// message a person can act on.
+func errorCauseChain(err error) string {
+	var parts []string
+	for current := err; current != nil; current = errors.Unwrap(current) {
+		var part string
+		switch typed := current.(type) {
+		case *fileops.Error:
+			part = typed.Code
+		case *storage.Error:
+			part = typed.Code
+		default:
+			part = current.Error()
+		}
+		if part == "" || len(parts) > 0 && parts[len(parts)-1] == part {
+			continue
+		}
+		parts = append(parts, part)
+	}
+	return strings.Join(parts, " <- ")
+}
+
+// fileOperationRetry exposes the retry state on the operation resource, so a stuck
+// operation is visible to a client instead of only to whoever reads the server log.
+func (s *Server) fileOperationRetry(id string) map[string]any {
+	worker := s.workers()
+	worker.mu.Lock()
+	defer worker.mu.Unlock()
+	retry := worker.retries[id]
+	if retry == nil {
+		return nil
+	}
+	return map[string]any{"attempts": retry.attempts, "code": retry.code, "lastAttemptAt": retry.lastAt.UTC(), "nextAttemptAt": retry.nextTry.UTC()}
 }
 func (s *Server) runFileOperation(ctx context.Context, op fileops.Operation) error {
 	driver, err := s.trees.Open(ctx, op.Root.OwnerID)

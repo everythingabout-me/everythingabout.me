@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"path"
 	"sort"
 	"strings"
@@ -757,7 +758,7 @@ func (a *Actions) accountUnknown(ctx context.Context, root Root, actor Actor, op
 	if err != nil {
 		return op, errors.Join(cause, E("outcome_unknown", err))
 	}
-	defer a.journal.Release(persist, current.Lease)
+	defer releaseLease(persist, a.journal, current.Lease)
 	lease := current.Lease
 	for _, entry := range current.Entries {
 		if entry.State == "applied" && entry.Action == "copy" && entry.Size > 0 {
@@ -770,6 +771,20 @@ func (a *Actions) accountUnknown(ctx context.Context, root Root, actor Actor, op
 	return current, errors.Join(cause, E("outcome_unknown", nil))
 }
 
+// releaseLease is never silent. A release that fails leaves the operation's lease in
+// place, and every later attempt is then refused with operation_in_progress until the
+// lease expires — a failure that looks like a busy worker and is impossible to see
+// without this line.
+type leaseReleaser interface {
+	Release(context.Context, Lease) error
+}
+
+func releaseLease(ctx context.Context, journal leaseReleaser, lease Lease) {
+	if err := journal.Release(ctx, lease); err != nil {
+		slog.Warn("file operation lease not released", "operation", lease.OperationID, "epoch", lease.Epoch, "error", err)
+	}
+}
+
 // finishInterruptedPrepare never reconstructs a manifest. Claim fences a stale
 // preparer before we recheck binding absence: a freeze that won concurrently must
 // be handled by a subsequent Run against that immutable manifest instead.
@@ -780,7 +795,7 @@ func (a *Actions) finishInterruptedPrepare(ctx context.Context, root Root, actor
 	}
 	persist, cancel := durableContext(ctx)
 	defer cancel()
-	defer a.journal.Release(persist, op.Lease)
+	defer releaseLease(persist, a.journal, op.Lease)
 	if _, err = a.journal.ActionBinding(persist, op); err == nil {
 		return op, E("recovery_required", nil)
 	} else if !IsCode(err, "manifest_not_frozen") {
@@ -1042,7 +1057,7 @@ func (a *Actions) settle(ctx context.Context, root Root, actor Actor, op Operati
 	if err != nil {
 		return op, err
 	}
-	defer a.journal.Release(persist, op.Lease)
+	defer releaseLease(persist, a.journal, op.Lease)
 	if uncertainEntries(&op) {
 		return op, E("outcome_unknown", cause)
 	}

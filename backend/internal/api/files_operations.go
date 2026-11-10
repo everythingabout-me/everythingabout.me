@@ -16,6 +16,14 @@ func filesOperationID(r *http.Request) string {
 	return strings.TrimSuffix(p, "/cancel")
 }
 func writeFilesOperation(w http.ResponseWriter, op fileops.Operation, status int, scopes ...*fileRequest) error {
+	return writeFilesOperationWithRetry(w, op, status, nil, scopes...)
+}
+
+// writeFilesOperationWithRetry adds the retry record for an operation whose worker
+// keeps failing. It is the only place a client can learn that an operation is not
+// slow but stuck: without it the resource looks identical to one that is merely
+// still running, and only the server log knows the difference.
+func writeFilesOperationWithRetry(w http.ResponseWriter, op fileops.Operation, status int, retrying map[string]any, scopes ...*fileRequest) error {
 	if len(scopes) > 0 {
 		op.Result = filesScopedResult(op.Result, scopes[0])
 	}
@@ -58,7 +66,7 @@ func writeFilesOperation(w http.ResponseWriter, op fileops.Operation, status int
 	}
 	// Only public workflow data crosses this boundary. Native checkpoints, intents,
 	// guard paths and principal/root identities remain in the journal.
-	return writeFilesJSON(w, status, map[string]any{"id": op.ID, "kind": op.Kind, "state": op.State, "progress": map[string]any{"completed": completed, "total": total, "unit": unit}, "result": result, "error": problem, "cancelRequested": op.CancelRequested, "createdAt": op.CreatedAt.UTC(), "finishedAt": op.FinishedAt})
+	return writeFilesJSON(w, status, map[string]any{"id": op.ID, "kind": op.Kind, "state": op.State, "progress": map[string]any{"completed": completed, "total": total, "unit": unit}, "result": result, "error": problem, "cancelRequested": op.CancelRequested, "retrying": retrying, "createdAt": op.CreatedAt.UTC(), "finishedAt": op.FinishedAt})
 }
 func filesOperationFailure(op fileops.Operation) error {
 	var saved struct {
@@ -89,9 +97,11 @@ func (s *Server) handleFilesGetOperation(w http.ResponseWriter, r *http.Request,
 	if !op.Terminal() {
 		if upload, e := s.filesJournal.GetUpload(r.Context(), root, actor, op.ID); e == nil {
 			if upload.State != "open" {
-				_ = s.queueFileOperation(op)
+				if e := s.queueFileOperation(op); e != nil && !errors.Is(e, errFilesWorkerBusy) {
+					slog.Warn("file operation could not be queued", "operation", op.ID, "cause", errorCauseChain(e))
+				}
 			}
-			return writeFilesOperation(w, op, 200, f)
+			return s.writeFilesOperation(w, op, 200, f)
 		} else if !fileops.IsCode(e, "not_found") {
 			return filesMutationProblem(e)
 		}
@@ -104,7 +114,7 @@ func (s *Server) handleFilesGetOperation(w http.ResponseWriter, r *http.Request,
 			if e == nil {
 				op = updated
 			} else if !fileops.IsCode(e, "operation_in_progress") && !fileops.IsCode(e, "lease_lost") && !fileops.IsCode(e, "outcome_unknown") {
-				slog.Warn("file operation inspection incomplete", "operation", op.ID, "error", e)
+				slog.Warn("file operation inspection incomplete", "operation", op.ID, "code", fileOperationErrorCode(e), "cause", errorCauseChain(e))
 			} else if updated.ID != "" {
 				op = updated
 			}
@@ -112,7 +122,18 @@ func (s *Server) handleFilesGetOperation(w http.ResponseWriter, r *http.Request,
 			return err
 		}
 	}
-	return writeFilesOperation(w, op, 200, f)
+	return s.writeFilesOperation(w, op, 200, f)
+}
+
+// writeFilesOperation attaches the retry record only while the operation is still
+// nonterminal: a terminal operation that failed already explains itself through its
+// Problem, and a stale record must not outlive it.
+func (s *Server) writeFilesOperation(w http.ResponseWriter, op fileops.Operation, status int, scopes ...*fileRequest) error {
+	var retrying map[string]any
+	if !op.Terminal() {
+		retrying = s.fileOperationRetry(op.ID)
+	}
+	return writeFilesOperationWithRetry(w, op, status, retrying, scopes...)
 }
 func (s *Server) handleFilesCancelOperation(w http.ResponseWriter, r *http.Request, f *fileRequest) error {
 	_, root, actor, err := s.fileMutationContext(r.Context(), f)
@@ -135,7 +156,9 @@ func (s *Server) handleFilesCancelOperation(w http.ResponseWriter, r *http.Reque
 				}
 				op = upload.Operation
 			}
-			_ = s.queueFileOperation(op)
+			if e := s.queueFileOperation(op); e != nil && !errors.Is(e, errFilesWorkerBusy) {
+				slog.Warn("file operation could not be queued", "operation", op.ID, "cause", errorCauseChain(e))
+			}
 		} else if !fileops.IsCode(e, "not_found") {
 			return filesMutationProblem(e)
 		}
@@ -149,7 +172,7 @@ func (s *Server) handleFilesCancelOperation(w http.ResponseWriter, r *http.Reque
 	if !op.Terminal() {
 		status = 202
 	}
-	return writeFilesOperation(w, op, status, f)
+	return s.writeFilesOperation(w, op, status, f)
 }
 
 var errFilesWorkerBusy = errors.New("file operation workers are busy")
