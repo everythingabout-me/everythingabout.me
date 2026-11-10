@@ -252,6 +252,20 @@ owner-scoped pending delete identities may remain stored independently. Durable 
 recovery and already accepted Operations are unchanged. Clients retaining session identity and source bytes
 can use the resumable API across reconnects/restarts; the browser does not restore its queue after reload.
 
+An upload waits for a deletion only while that deletion can still finish. The wait is derived from the stored
+record on every attempt and re-read while waiting, never latched from the id once seen: the page drops a
+record as soon as it reads the Operation behind it, and a task that kept only the id sat on "waiting" long
+after that deletion had been reported and forgotten. A record the journal no longer holds (pruned after
+retention) is dropped the same way, because guards live with their Operation, so nothing can be blocking.
+A record left by a delete that ended `failed` or `cancelled` is not a wait either: the Operation is terminal
+and has released its guards, so no later pass will start the upload by itself, and a row promising "it will
+start automatically" would offer no action and no end — the dead end this replaces. Such a row names the
+outcome and offers Continue, which drops the record and retries the allocation, and the server still decides
+the path. The gesture is explicit because a recursive delete that stops part way leaves a consistent but
+smaller subtree: every applied entry is settled and every unapplied one untouched, yet the folder may still
+hold files the deletion was meant to remove. A deletion that is still queued, running, of unknown outcome, or
+whose status cannot be read keeps the automatic wait.
+
 Before allocation, browser tasks acquire an ephemeral Web Lock per owner and normalized target path, retained
 through retryable failures until completion, cancellation or page unmount. Browser destruction releases it.
 A new selection can automatically replace an abandoned `open` session without another confirmation once it

@@ -45,7 +45,17 @@ export interface DeletionWait {
   path: string;
   state: "queued" | "running" | "outcome_unknown" | "failed" | "cancelled";
   statusUnavailable?: boolean;
-  ancestorId?: string;
+  /**
+   * Where this wait was discovered: a stored record the page keeps for an accepted
+   * delete, or the server's own `operation_in_progress` answer.
+   *
+   * The two have different endings. A stored record is dropped by whoever settles it —
+   * the page does that as soon as it reads the Operation — so the queue watches the
+   * record, not just the Operation, and resumes the moment it is gone. A conflict leaves
+   * no record, so its Operation is the only thing that can end the wait, and a terminal
+   * one asks the person instead of ending by itself.
+   */
+  from: "record" | "conflict";
 }
 export interface UploadTask {
   id: string;
@@ -94,6 +104,17 @@ export interface UploadQueue {
   enqueue(entries: UploadEntry[], dir: string, exists: (path: string) => boolean): void;
   cancel(id: string): void;
   retry(id: string): void;
+  /**
+   * Clear a wait whose deletion ended without deleting anything.
+   *
+   * A terminal delete released its guards, so the path is writable again, but the browser
+   * record that named it outlives the Operation. Dropping that record is the only thing
+   * "resume" does; the server still decides whether the path can take a write, and a real
+   * guard answers with its own 409. Without this, a blocked upload had no resolution in
+   * the UI at all: every path into it (retry, refresh, the automatic poll) stopped at the
+   * same record, so the row could only be cancelled.
+   */
+  resume(id: string): void;
 }
 interface Runtime { controller: AbortController; }
 interface PartWaiter { rank: number; number: number; resolve: () => void; }
@@ -140,9 +161,19 @@ function message(error: unknown): string {
   return error instanceof Error ? error.message : t("error.unknown");
 }
 function isOperation(value: Item | FileOperation): value is FileOperation { return "state" in value && "progress" in value; }
+/**
+ * What the row says while it waits for a deletion.
+ *
+ * A deletion that ended `failed` or `cancelled` is not a wait. A terminal Operation has
+ * already released its guards, so nothing is still holding the path and no later moment
+ * will start this upload by itself: saying "waiting, it will begin automatically" left
+ * the row with no action and a promise that could never be kept. The row names the
+ * outcome instead, and the queue offers Continue — the one decision left, because the
+ * folder may still hold what the deletion did not remove.
+ */
 function waitMessage(wait: DeletionWait): string {
   if (wait.statusUnavailable) return t("drive.deletionStatusUnavailable");
-  if (wait.state === "failed" || wait.state === "cancelled") return t("drive.deletionNeedsAttention");
+  if (wait.state === "failed" || wait.state === "cancelled") return t("drive.deletionDidNotFinish", { path: wait.path });
   return t("drive.waitingForDeletion", { path: wait.path });
 }
 async function sha256(blob: Blob): Promise<string> {
@@ -309,10 +340,16 @@ export function useUploadQueue(onUploaded: (task: UploadTask, item: Item) => voi
     try {
       let task = tasks.current.get(id);
       if (!task) return;
-      if (task.waitingFor) { patch(id, { status: "waiting" }); return; }
+      // The stored record is the authority for a wait, never the task's own copy of it:
+      // the page settles a deletion that ended without deleting anything, and a wait
+      // latched on the task would keep this attempt parked behind an Operation nobody is
+      // waiting for anymore. Only the state it already observed is reused, so "Continue"
+      // stays the thing that clears a finished deletion rather than every retry silently
+      // overtaking it.
       const deletion = pendingFileOperation(task.path);
       if (deletion) {
-        const waitingFor: DeletionWait = { operationId: deletion.id, path: deletion.path, state: "running" };
+        const known = task.waitingFor?.operationId === deletion.id ? task.waitingFor.state : "running";
+        const waitingFor: DeletionWait = { ...task.waitingFor, operationId: deletion.id, path: deletion.path, state: known, from: "record" };
         patch(id, { status: "waiting", waitingFor, waitMessage: waitMessage(waitingFor) });
         return;
       }
@@ -655,7 +692,7 @@ export function useUploadQueue(onUploaded: (task: UploadTask, item: Item) => voi
       if (runtime.controller.signal.aborted) return;
       if (error instanceof ApiError && error.code === "operation_in_progress" && error.operationId) {
         const task = tasks.current.get(id);
-        const waitingFor: DeletionWait = { operationId: error.operationId, path: task?.path ?? "", state: "running" };
+        const waitingFor: DeletionWait = { operationId: error.operationId, path: task?.path ?? "", state: "running", from: "conflict" };
         patch(id, { status: "waiting", waitingFor, waitMessage: waitMessage(waitingFor), speed: 0 });
       } else { patch(id, { status: "failed", error: message(error), speed: 0 }); }
     } finally {
@@ -762,6 +799,19 @@ export function useUploadQueue(onUploaded: (task: UploadTask, item: Item) => voi
     publish();
     pumpRef.current();
   }, [cancel, patch, publish]);
+  // Resuming is a decision, so it is a gesture: the task goes back to the queue with its
+  // record gone, and the next attempt asks the server instead of the browser what the
+  // path may take. A deletion that is still queued, running or of unknown outcome is not
+  // resumable from here — it is still the one holding the path.
+  const resume = useCallback((id: string) => {
+    const task = tasks.current.get(id);
+    const wait = task?.waitingFor;
+    if (!task || !wait || (wait.state !== "failed" && wait.state !== "cancelled")) return;
+    settleFileOperation(wait.operationId);
+    patch(id, { status: "queued", waitingFor: undefined, waitMessage: undefined, speed: 0 });
+    publish();
+    pumpRef.current();
+  }, [patch, publish]);
   const enqueue = useCallback((entries: UploadEntry[], dir: string, exists: (path: string) => boolean) => {
     // A selected tree keeps only the folders that stay empty: every other folder is
     // created by the upload that first needs it, inside that upload's request.
@@ -840,7 +890,19 @@ export function useUploadQueue(onUploaded: (task: UploadTask, item: Item) => voi
             if (!mounted.current || !tasks.current.has(task.id)) continue;
             const result = results.get(id)!;
             if (task.waitingFor) {
-              if (result instanceof Error || result.id !== id) {
+              if (task.waitingFor.from === "record" && !pendingFileOperation(task.path)) {
+                // The record is the authority, and it is gone: whoever kept it settled the
+                // deletion and already reported the outcome. A task latched on that id
+                // would otherwise sit on "waiting" for the rest of the page's life.
+                patch(task.id, { status: "queued", waitingFor: undefined, waitMessage: undefined });
+              } else if (result instanceof ApiError && (result.status === 404 || result.status === 410)) {
+                // The server no longer knows this Operation, so nothing can still be waiting
+                // on it (records are pruned after retention). Continuing needs no decision:
+                // the server is the judge of the path, and a real guard answers the next
+                // request with its own 409 and the Operation this queue can then wait on.
+                settleFileOperation(id);
+                patch(task.id, { status: "queued", waitingFor: undefined, waitMessage: undefined });
+              } else if (result instanceof Error || result.id !== id) {
                 const waitingFor = { ...task.waitingFor, statusUnavailable: true };
                 patch(task.id, { waitingFor, waitMessage: waitMessage(waitingFor) });
               } else if (result.state === "succeeded") {
@@ -877,5 +939,5 @@ export function useUploadQueue(onUploaded: (task: UploadTask, item: Item) => voi
     window.addEventListener("beforeunload", beforeUnload);
     return () => window.removeEventListener("beforeunload", beforeUnload);
   }, [hasActiveUploads]);
-  return { tasks: published, hasActiveUploads, enqueue, cancel, retry };
+  return { tasks: published, hasActiveUploads, enqueue, cancel, retry, resume };
 }

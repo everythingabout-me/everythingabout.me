@@ -22,6 +22,15 @@ export interface UploadSummary {
   percent: number;
   cancelIds: string[];
   retryIds: string[];
+  /**
+   * Tasks waiting on a deletion that ended without deleting anything.
+   *
+   * Such a wait cannot end by itself (the Operation is terminal, so its guards are gone
+   * and no worker will finish it later), so the row has to offer the one action that can
+   * clear the browser's record. Naming them here keeps the decision in the row that is
+   * already explaining it, instead of a Retry that would only wait again.
+   */
+  resumeIds: string[];
   waitMessage?: string;
 }
 
@@ -182,6 +191,9 @@ export function buildUploadRows(items: Item[], tasks: UploadTask[], directory: s
           : size > 0 ? Math.floor(loaded / size * 100) : 0,
       cancelIds: cancelable.length === 0 ? [] : row.task?.isDir ? [row.task.id] : cancelable.map((task) => task.id),
       retryIds: failed.map((task) => task.id),
+      resumeIds: waiting
+        .filter((task) => task.waitingFor?.state === "failed" || task.waitingFor?.state === "cancelled")
+        .map((task) => task.id),
       ...(waitingReason?.waitMessage ? { waitMessage: waitingReason.waitMessage } : {}),
     };
   }

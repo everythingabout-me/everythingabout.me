@@ -71,7 +71,7 @@ test("shows only immediate children and aggregates all selected descendants", ()
     folders: 2, completedFolders: 2, items: 5, completedItems: 3,
     progressUnit: "bytes", preparing: false, waitingForSlot: false, failed: 0,
     size: 500, loaded: 220, speed: 50, percent: 44,
-    cancelIds: ["task:health/apple-health"], retryIds: [],
+    cancelIds: ["task:health/apple-health"], retryIds: [], resumeIds: [],
   });
   assert.deepEqual(paths(buildUploadRows([], tasks, "health/apple-health")), [
     "health/apple-health/2015", "health/apple-health/2025",

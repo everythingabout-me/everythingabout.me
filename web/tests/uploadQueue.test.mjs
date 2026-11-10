@@ -276,7 +276,7 @@ test("shared delete Operation polls once, retains Files, frees slots and resumes
   assert.equal(callsOf(server, "part").filter(([, id]) => id !== "session-1").length, 4);
 });
 
-test("failed, cancelled, unknown, unavailable and wrong delete identities never authorize bytes", async (t) => {
+test("a deletion that did not finish, an unknown outcome, an unreadable status and a wrong identity never authorize bytes by themselves", async (t) => {
   const server = uploadServer();
   server.api.createUpload = async () => { server.calls.push(["create"]); throw conflict(); };
   let response = operation("delete-1", "running");
@@ -284,11 +284,24 @@ test("failed, cancelled, unknown, unavailable and wrong delete identities never 
   const harness = await mount(t, server.api);
   enqueue(harness, [entry("folder/file")]);
   await harness.until((queue) => queue.tasks[0]?.status === "waiting");
-  for (const value of [operation("delete-1", "failed"), operation("delete-1", "cancelled"), operation("delete-1", "outcome_unknown"), new TestApiError("missing", 404), new Error("offline"), operation("other", "succeeded"), {}]) {
+  // Every one of these answers leaves the task parked: the bytes wait for the person, not
+  // for a later moment. `failed` and `cancelled` additionally offer Continue, because a
+  // terminal Operation has released its guard and no automatic pass can ever end that
+  // wait; the other answers are still reading the truth and keep retrying.
+  const resumable = (task) => task.waitingFor?.state === "failed" || task.waitingFor?.state === "cancelled";
+  for (const [value, expected] of [
+    [operation("delete-1", "failed"), true],
+    [operation("delete-1", "cancelled"), true],
+    [operation("delete-1", "outcome_unknown"), false],
+    [new Error("offline"), false],
+    [operation("other", "succeeded"), false],
+    [{}, false],
+  ]) {
     response = value;
     const queue = await harness.tick();
     assert.equal(queue.tasks[0].status, "waiting");
     assert.equal(queue.tasks[0].speed, 0);
+    assert.equal(resumable(queue.tasks[0]), expected);
     assertGuard(harness, true);
     assert.equal(callsOf(server, "create").length, 1);
     assert.equal(callsOf(server, "part").length, 0);
@@ -504,22 +517,22 @@ test("same-page retry of a committing session follows its original Operation wit
   assertGuard(harness, false);
 });
 
-test("manual retry of a waiting file must first resolve its exact delete Operation", async (t) => {
+test("manual retry never overtakes a recorded deletion; Continue is the gesture that clears it", async (t) => {
   const server = uploadServer();
-  const create = server.api.createUpload;
-  let first = true;
-  server.api.createUpload = async (...args) => {
-    if (first) { first = false; throw conflict(); }
-    return create(...args);
-  };
   server.api.getOperation = async (id) => operation(id, "failed");
   const harness = await mount(t, server.api);
-  enqueue(harness, [entry("file")]);
-  const queue = await harness.until((queue) => queue.tasks[0]?.status === "waiting");
-  queue.retry(queue.tasks[0].id);
   await harness.settle();
-  assert.equal(harness.render().tasks[0].status, "waiting");
-  assert.equal(callsOf(server, "part").length, 0, "retry cannot bypass the retained exact delete identity");
+  harness.persistence.trackFileOperation(operation("delete-recorded"), "file");
+  enqueue(harness, [entry("file")]);
+  let queue = await harness.until((queue) => queue.tasks[0]?.status === "waiting");
+  await harness.tick();
+  queue = harness.render();
+  assert.equal(queue.tasks[0].waitMessage, "drive.deletionDidNotFinish");
+  queue.retry(queue.tasks[0].id);
+  queue = await harness.settle();
+  assert.equal(queue.tasks[0].status, "waiting", "retry cannot bypass the recorded deletion");
+  assert.equal(callsOf(server, "create").length, 0, "retry allocates nothing while the record stands");
+  assert.equal(callsOf(server, "part").length, 0, "no byte moves before the person decides");
   assert.equal(callsOf(server, "commit").length, 0);
 });
 
@@ -900,6 +913,66 @@ test("hung delete checks time out and allow other exact Operations to progress",
   // this selection does not keep.
   const waiting = (path) => harness.render().tasks.find((task) => task.path === path).waitMessage;
   assert.equal(waiting("stuck"), "drive.deletionStatusUnavailable");
-  assert.equal(waiting("other"), "drive.deletionNeedsAttention");
+  assert.equal(waiting("other"), "drive.deletionDidNotFinish");
   assert.equal(callsOf(server, "part").length, 0);
+});
+
+test("a deletion that ended without deleting waits for a decision and continues on one", async (t) => {
+  const server = uploadServer();
+  server.api.getOperation = async (id) => operation(id, "failed");
+  const harness = await mount(t, server.api);
+  await harness.settle();
+  // The page records an accepted delete so no upload tries that path while it purges.
+  harness.persistence.trackFileOperation(operation("delete-failed"), "Health/file");
+  enqueue(harness, [entry("file", "ab")], "Health");
+  let queue = await harness.until((queue) => queue.tasks[0]?.status === "waiting");
+  const id = queue.tasks[0].id;
+  assert.equal(queue.tasks[0].waitMessage, "drive.waitingForDeletion");
+  queue = await harness.tick();
+  // A terminal deletion has released its guard, so nothing on the server still blocks;
+  // the row says what happened and offers the only decision, instead of promising a
+  // start that no later moment can produce.
+  assert.equal(queue.tasks[0].waitMessage, "drive.deletionDidNotFinish");
+  assert.deepEqual(queue.tasks[0].waitingFor.state, "failed");
+  assert.deepEqual(queue.tasks[0].waitingFor.operationId, "delete-failed");
+  assert.equal(callsOf(server, "create").length, 0, "no allocation is attempted while a deletion is recorded");
+  queue.resume(id);
+  queue = await harness.until(allComplete);
+  assert.equal(queue.tasks[0].id, id);
+  assert.equal(harness.persistence.pendingFileOperation("Health/file"), undefined, "Continue drops the finished deletion");
+  assert.equal(callsOf(server, "create").length, 1);
+  assert.equal(callsOf(server, "abort").length, 0, "a finished deletion is never aborted");
+  assert.equal(callsOf(server, "commit").length, 1);
+});
+
+test("a wait ends when its record is settled, without touching the row", async (t) => {
+  const server = uploadServer();
+  server.api.getOperation = async (id) => operation(id, "running");
+  const harness = await mount(t, server.api);
+  await harness.settle();
+  harness.persistence.trackFileOperation(operation("delete-running"), "Health/file");
+  enqueue(harness, [entry("file", "ab")], "Health");
+  await harness.until((queue) => queue.tasks[0]?.status === "waiting");
+  assert.equal(callsOf(server, "create").length, 0);
+  // The page drops a record as soon as it reads the Operation behind it. The row must
+  // follow the record rather than the id it once latched: nothing else would ever move it.
+  harness.persistence.settleFileOperation("delete-running");
+  await harness.tick();
+  const queue = await harness.until(allComplete);
+  assert.equal(queue.tasks[0].status, "completed");
+});
+
+test("a deletion record the server no longer knows continues without asking", async (t) => {
+  const server = uploadServer();
+  server.api.getOperation = async () => { throw new TestApiError("operation not found", 404, { code: "not_found" }); };
+  const harness = await mount(t, server.api);
+  await harness.settle();
+  harness.persistence.trackFileOperation(operation("delete-pruned"), "Health/file");
+  enqueue(harness, [entry("file", "ab")], "Health");
+  await harness.until((queue) => queue.tasks[0]?.status === "waiting");
+  await harness.tick();
+  const queue = await harness.until(allComplete);
+  assert.equal(queue.tasks[0].status, "completed");
+  assert.equal(harness.persistence.pendingFileOperation("Health/file"), undefined, "a pruned record is dropped");
+  assert.equal(callsOf(server, "create").length, 1);
 });

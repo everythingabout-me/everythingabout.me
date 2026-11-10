@@ -218,10 +218,12 @@ const UploadRow = memo(function UploadRow({
   entry,
   onCancel,
   onRetry,
+  onResume,
 }: {
   entry: UploadRowEntry;
   onCancel: (id: string) => void;
   onRetry: (id: string) => void;
+  onResume: (id: string) => void;
 }) {
   const { upload, task, item, name, path, isDir } = entry;
   if (!upload) return null;
@@ -333,6 +335,15 @@ const UploadRow = memo(function UploadRow({
       )}
       {!completed && (
         <div className={styles.uploadActions}>
+          {upload.resumeIds.length > 0 && (
+            <button
+              className={styles.textBtn}
+              onClick={() => upload.resumeIds.forEach(onResume)}
+              title={t("drive.continueUploadHint")}
+            >
+              {t("drive.continueUpload")}
+            </button>
+          )}
           {upload.retryIds.length > 0 && (
             <button
               className={styles.textBtn}
@@ -614,18 +625,22 @@ export function FilesPage() {
     await Promise.all(known.map(async (entry) => {
       try {
         const operation = await api.getOperation(entry.id);
-        if (operation.state === "succeeded") {
-          settleFileOperation(operation.id);
-          return;
-        }
         const ended = operation.state === "failed" || operation.state === "cancelled" || operation.state === "outcome_unknown";
-        if (operation.kind === "delete" && ended && !notifiedDeleteFailures.current.has(operation.id)) {
-          notifiedDeleteFailures.current.add(operation.id);
-          showToast(t("drive.deleteIncomplete", { path: entry.path }), "error");
-          settleFileOperation(operation.id);
-          reloadView.current();
+        // A record is dropped by whatever settles its Operation, whatever kind it was: the
+        // record names a path, and `pendingFileOperation` matches by path alone, so one
+        // left behind by a move or a commit blocks every later upload there just as a
+        // delete would. Only the report is specific to deletions, the work this page shows.
+        const settled = operation.state === "succeeded" || ended;
+        if (settled) settleFileOperation(operation.id);
+        if (operation.kind === "delete" && ended) {
+          if (!notifiedDeleteFailures.current.has(operation.id)) {
+            notifiedDeleteFailures.current.add(operation.id);
+            showToast(t("drive.deleteIncomplete", { path: entry.path }), "error");
+            reloadView.current();
+          }
           return;
         }
+        if (settled) return;
         active.push({ operation, path: entry.path });
       } catch (error) {
         if (error instanceof ApiError && (error.status === 404 || error.status === 410)) {
@@ -769,6 +784,7 @@ export function FilesPage() {
     enqueue,
     cancel: cancelUpload,
     retry: retryUpload,
+    resume: resumeUpload,
   } = useUploadQueue(handleUploaded);
 
   const uploadBlocker = useBlocker(({ nextLocation }) =>
@@ -1569,6 +1585,7 @@ export function FilesPage() {
                       entry={entry}
                       onCancel={cancelUpload}
                       onRetry={retryUpload}
+                      onResume={resumeUpload}
                     />
                   ))}
                   {Array.from({ length: 4 }).map((_, index) => (
@@ -1598,6 +1615,7 @@ export function FilesPage() {
                         entry={entry}
                         onCancel={cancelUpload}
                         onRetry={retryUpload}
+                        onResume={resumeUpload}
                       />
                     ) : entry.item ? (
                       <ItemRow
