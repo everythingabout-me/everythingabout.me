@@ -138,14 +138,14 @@ func TestConnectPostgresExplicitGrants(t *testing.T) {
 }
 
 func TestTokenPromptExplicitChangeRights(t *testing.T) {
-	granted := tokenPrompt("https://files.example", "secret", &auth.Token{CanRead: true, CanChanges: true, CanSubscribe: true, Prefix: "Apps"})
-	for _, text := range []string{"Access:  read + changes + subscribe", "File change history is explicitly granted", "Live file change subscriptions are explicitly granted", "Scope:   /Apps"} {
+	granted := tokenPrompt("https://files.example", "secret", &auth.Token{CanRead: true, CanChanges: true, CanSubscribe: true, Prefix: "Apps"}, "C")
+	for _, text := range []string{"Granted:  read + changes + subscribe", "Scope:    /Apps", "## Change history", "GET $DRIVE/api/files/changes?cursor=", "## Live changes", "POST $DRIVE/api/files/subscriptions"} {
 		if !strings.Contains(granted, text) {
 			t.Fatalf("prompt missing %q: %s", text, granted)
 		}
 	}
-	old := tokenPrompt("https://files.example", "secret", &auth.Token{CanRead: true, CanWrite: true, CanEvents: true})
-	if strings.Contains(old, "explicitly granted") {
+	old := tokenPrompt("https://files.example", "secret", &auth.Token{CanRead: true, CanWrite: true, CanEvents: true}, "C")
+	if strings.Contains(old, "## Change history") || strings.Contains(old, "## Live changes") {
 		t.Fatal("old token instructions acquired change rights", old)
 	}
 }

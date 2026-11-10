@@ -127,25 +127,28 @@ copy button). The one-liner follows the page language (zh / en); the artifact be
 The page returns Markdown by default, an HTML instruction page for a browser, and `?format=json`.
 
 ```text
-# everythingabout.me
+# Everything About Me
 
-You can access my drive through the Everything About Me API.
+You are connected to a personal drive through the Everything About Me API.
 
-API:     https://everythingabout.me
-Token:   eam_...
-Access:  read + write
-Scope:   Inbox/
-Expires: 2026-10-29T13:45:00Z
+API:      https://everythingabout.me
+Token:    eam_...
+Granted:  read + write
+Scope:    /Inbox
+Expires:  2026-10-29T13:45:00Z
 
-Use it as a Bearer token:
-  curl -H "Authorization: Bearer eam_..." \
-       "https://everythingabout.me/list?path=Inbox"
-
-  curl -X PUT -H "Authorization: Bearer eam_..." \
-       --data-binary @note.md "https://everythingabout.me/api/files/Inbox/note.md"
-
-First call GET /me to confirm the token and its scope.
+## Start here     GET /api/files/me, GET /api/files/capabilities
+## Read           list, metadata, download for this connection's transfer class
+## Write          upload session, parts, commit, create/replace rules
+## Events         POST /events, only when the token can author events
+## Rules          409/412/429/baseline_required/401
 ```
+
+The prompt renders only the grants and the transfer class this connection actually has (A `presigned-parts`
+or C `relay`), so an agent never has to first decide which half of the instructions applies. A write-only
+connection gets no read section; a read-only connection gets no write example. `parents:true` on an upload
+session creates missing ancestor folders, so the prompt no longer asks for a separate `POST /api/files`
+first. It is English because it is an API artifact; the HTML chrome follows the browser's `Accept-Language`.
 
 The URL is a credential, not a bookmark: it contains the token, exactly like the QR. The page sends
 `Cache-Control: no-store`, the request logger redacts `/s/<code>`, and revoking the connection makes the page

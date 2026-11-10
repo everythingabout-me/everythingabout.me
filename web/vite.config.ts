@@ -23,6 +23,17 @@ export default defineConfig({
         target: "http://127.0.0.1:8080",
         changeOrigin: false,
       },
+      // The public API also has resources at the origin root. The generated /s/ instructions
+      // call /me and /events, so without these entries those requests would hit Vite's SPA
+      // fallback in development while working on the single-origin production deployment.
+      "^/me$": {
+        target: "http://127.0.0.1:8080",
+        changeOrigin: false,
+      },
+      "^/events": {
+        target: "http://127.0.0.1:8080",
+        changeOrigin: false,
+      },
     },
   },
   build: {

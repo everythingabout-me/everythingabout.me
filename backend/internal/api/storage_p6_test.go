@@ -41,20 +41,38 @@ func TestP6RetiredRoutesNeverReachLegacyServicesOrSPA(t *testing.T) {
 }
 
 func TestP6GeneratedPromptsUseOnlyUnifiedTransfers(t *testing.T) {
-	for _, prompt := range []string{saveLinkPrompt("https://files.example", "save-secret"), tokenPrompt("https://files.example", "token-secret", &auth.Token{CanRead: true, CanWrite: true, Prefix: "Apps/ +%2F?# "})} {
+	classC := []string{
+		saveLinkPrompt("https://files.example", "save-secret", "C"),
+		tokenPrompt("https://files.example", "token-secret", &auth.Token{CanRead: true, CanWrite: true, Prefix: "Apps/ +%2F?# "}, "C"),
+	}
+	for _, prompt := range classC {
 		for _, obsolete := range []string{"/api/fs/", "https://files.example/upload", "https://files.example/list", "/api/files/Inbox", "returned part URL", "upload to COS"} {
 			if strings.Contains(prompt, obsolete) {
 				t.Fatalf("generated instructions advertise obsolete transfer %q", obsolete)
 			}
 		}
-		for _, required := range []string{"/api/files/content?path=", "If-None-Match: *", "Idempotency-Key:", "/api/files/uploads", "/parts/{number}", "/commit", "/api/files/operations/", "Content-Length", "state is succeeded", "explicitly admitted", "maxSinglePutBytes > 0", "class=\"A\"", "presigned-parts", "/parts/sign", "class=\"C\"", "relay", "POST /api/files/downloads", "Do not add application Authorization"} {
+		for _, required := range []string{"/api/files/content?path=", "If-None-Match: *", "Idempotency-Key:", "/api/files/uploads", "/parts/<number>", "/commit", "/api/files/operations/", "Content-Length", "`state` is `succeeded`", "baseline_required", "maxSinglePutBytes > 0", `"parents":true`, "POST /api/files/downloads", "Fetch `items[].url` from `$DRIVE` with `Authorization: Bearer $TOKEN`"} {
 			if !strings.Contains(prompt, required) {
 				t.Fatalf("generated instructions omit %q", required)
 			}
 		}
+		if strings.Contains(prompt, "presigned-parts") {
+			t.Fatal("class C instructions advertise class A")
+		}
 	}
-	readOnly := tokenPrompt("https://files.example", "secret", &auth.Token{CanRead: true})
-	if strings.Contains(readOnly, "curl -X PUT") || strings.Contains(readOnly, "POST https://files.example/api/files/uploads") {
+
+	classA := tokenPrompt("https://files.example", "token-secret", &auth.Token{CanRead: true, CanWrite: true}, "A")
+	for _, required := range []string{"presigned-parts", "transport.parts", "/parts/sign", "session_required", "Do not add application", "`state` is `succeeded`", `"parents":true`, "do not attach the API token"} {
+		if !strings.Contains(classA, required) {
+			t.Fatalf("class A instructions omit %q", required)
+		}
+	}
+	if strings.Contains(classA, "maxSinglePutBytes > 0") {
+		t.Fatal("class A instructions advertise a single PUT")
+	}
+
+	readOnly := tokenPrompt("https://files.example", "secret", &auth.Token{CanRead: true}, "C")
+	if strings.Contains(readOnly, "## Write") || strings.Contains(readOnly, "/api/files/uploads") {
 		t.Fatal("read-only connection advertised a write example")
 	}
 }

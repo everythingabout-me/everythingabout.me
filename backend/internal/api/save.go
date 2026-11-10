@@ -1,12 +1,9 @@
 package api
 
 import (
-	"fmt"
 	"html/template"
 	"io"
 	"net/http"
-	"net/url"
-	"path"
 	"strings"
 
 	"everythingabout.me/backend/internal/auth"
@@ -44,7 +41,7 @@ func (s *Server) handleSaveLinkPage(w http.ResponseWriter, r *http.Request) erro
 func (s *Server) serveSaveLink(w http.ResponseWriter, r *http.Request, code string, p *auth.Principal) error {
 	base := requestBaseURL(r)
 	linkURL := base + "/s/" + code
-	prompt := saveLinkPrompt(base, code)
+	prompt := saveLinkPrompt(base, code, s.filesTransferClassLabel())
 
 	format := r.URL.Query().Get("format")
 	accept := strings.ToLower(r.Header.Get("Accept"))
@@ -65,13 +62,8 @@ func (s *Server) serveSaveLink(w http.ResponseWriter, r *http.Request, code stri
 	case format == "html" || strings.Contains(accept, "text/html"):
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		w.Header().Set("Cache-Control", "no-store")
-		return linkTemplate.Execute(w, map[string]any{
-			"Title":     "保存链接",
-			"Hint":      "把这个链接发给 agent。它打开后拿到 token 和保存方式，再用文件 API 保存；这个页面本身不接收内容。",
-			"Prompt":    prompt,
-			"LastUsed":  textValue(p.Token.LastUsedAt),
-			"CreatedAt": p.Token.CreatedAt,
-		})
+		copy := linkPageCopyFor(linkPageLang(r), true)
+		return linkTemplate.Execute(w, linkPageData(copy, prompt, p.Token.CreatedAt, p.Token.LastUsedAt))
 	default:
 		w.Header().Set("Content-Type", "text/markdown; charset=utf-8")
 		w.Header().Set("Cache-Control", "no-store")
@@ -84,7 +76,7 @@ func (s *Server) serveSaveLink(w http.ResponseWriter, r *http.Request, code stri
 // prompt always shows the current scope, permissions and expiry.
 func (s *Server) serveTokenLink(w http.ResponseWriter, r *http.Request, plain string, token *auth.Token) error {
 	base := requestBaseURL(r)
-	prompt := tokenPrompt(base, plain, token)
+	prompt := tokenPrompt(base, plain, token, s.filesTransferClassLabel())
 
 	format := r.URL.Query().Get("format")
 	accept := strings.ToLower(r.Header.Get("Accept"))
@@ -110,13 +102,8 @@ func (s *Server) serveTokenLink(w http.ResponseWriter, r *http.Request, plain st
 	case format == "html" || strings.Contains(accept, "text/html"):
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		w.Header().Set("Cache-Control", "no-store")
-		return linkTemplate.Execute(w, map[string]any{
-			"Title":     "连接说明",
-			"Hint":      "把这个链接发给 agent。它打开后拿到 token、范围和权限，再按说明调用 API。",
-			"Prompt":    prompt,
-			"LastUsed":  textValue(token.LastUsedAt),
-			"CreatedAt": token.CreatedAt,
-		})
+		copy := linkPageCopyFor(linkPageLang(r), false)
+		return linkTemplate.Execute(w, linkPageData(copy, prompt, token.CreatedAt, token.LastUsedAt))
 	default:
 		w.Header().Set("Content-Type", "text/markdown; charset=utf-8")
 		w.Header().Set("Cache-Control", "no-store")
@@ -132,164 +119,78 @@ func textValue(value *string) string {
 	return *value
 }
 
-// tokenPrompt is the full instructions behind the one-line Connect prompt. It is English
-// like every API artifact, and it is generated from the row so it cannot go stale.
-func tokenPrompt(base, plain string, token *auth.Token) string {
-	parts := make([]string, 0, 5)
-	if token.CanRead {
-		parts = append(parts, "read")
-	}
-	if token.CanWrite {
-		parts = append(parts, "write")
-	}
-	if token.CanEvents {
-		parts = append(parts, "events")
-	}
-	if token.CanChanges {
-		parts = append(parts, "changes")
-	}
-	if token.CanSubscribe {
-		parts = append(parts, "subscribe")
-	}
-	access := strings.Join(parts, " + ")
-	if access == "" {
-		access = "no access"
-	}
-
-	scope := "the whole drive"
-	root := "/"
-	writePath := "/note.md"
-	if token.Prefix != "" {
-		scope = "/" + token.Prefix
-		root = scope
-		writePath = scope + "/note.md"
-	}
-	expires := "never"
-	if token.ExpiresAt != nil {
-		expires = *token.ExpiresAt
-	}
-
-	prompt := fmt.Sprintf(`# everythingabout.me
-
-You can access my drive through the Everything About Me API.
-
-API:     %s
-Token:   %s
-Access:  %s
-Scope:   %s
-Expires: %s
-
-Use Authorization: Bearer %s on application control requests and class C relayed uploads.
-Class A transfer requests use only their returned scoped provider/edge URL and headers, as described below.
-First call GET /me to confirm the connection and its current permissions.
-PATCH /me manages the Connect identity; POST /events authors events.
-Use the configured API origin for control requests. Bytes move through the returned class grant or class C endpoint; never use provider credentials that the API did not issue.
-`, base, plain, access, scope, expires, plain)
-	if token.CanRead {
-		prompt += fmt.Sprintf(`
-GET /api/files/me confirms file access and scope.
-List the authorized folder:
-  curl -H "Authorization: Bearer %s" "%s/api/files/list?path=%s"
-Read a file with POST /api/files/downloads and fetch the returned grant. On class C, GET /api/files/content?path=<URL-encoded absolute path> streams bytes directly.
-`, plain, base, url.QueryEscape(root))
-	}
-	if token.CanWrite {
-		prompt += unifiedWritePrompt(base, plain, writePath)
-	}
-	if token.CanChanges {
-		prompt += "\nFile change history is explicitly granted. Consult GET /api/files/capabilities for the current change feed contract.\n"
-	}
-	if token.CanSubscribe {
-		prompt += "Live file change subscriptions are explicitly granted within the same file scope.\n"
-	}
-	return prompt
+// linkPageCopy is the chrome of the /s/ page. The prompt itself stays English because it
+// is an API artifact read by an agent; the chrome follows the browser like the rest of
+// the app. The page is server-rendered, so it cannot import the React i18n module; both
+// languages live here, side by side, rather than one hard-coded language.
+type linkPageCopy struct {
+	Lang     string
+	Title    string
+	Hint     string
+	Copy     string
+	Copied   string
+	Created  string
+	LastUsed string
 }
 
-// saveLinkPrompt explains only unified API requests; the link itself is read-only.
-func saveLinkPrompt(base, code string) string {
-	return fmt.Sprintf(`# everythingabout.me
-
-Connected to this drive.
-
-Token: %s
-API: %s
-Authorization: Bearer %s
-
-First call GET /api/files/me and GET /api/files/capabilities?path=%%2F.
-Use this API origin for control requests, relayed/class C parts and Operations; class A part URLs may point at the provider or the optional /api/files/transfer/ relay.
-`, code, base, code) + unifiedWritePrompt(base, code, "/note.md")
+// linkPageLang picks the chrome language from the first language the browser asks for.
+// A missing header gets English, the same default the prompt uses.
+func linkPageLang(r *http.Request) string {
+	for _, item := range strings.Split(r.Header.Get("Accept-Language"), ",") {
+		tag := strings.ToLower(strings.TrimSpace(strings.SplitN(item, ";", 2)[0]))
+		if tag == "" {
+			continue
+		}
+		if strings.HasPrefix(tag, "zh") {
+			return "zh"
+		}
+		return "en"
+	}
+	return "en"
 }
 
-func unifiedWritePrompt(base, token, target string) string {
-	return fmt.Sprintf(`
-The destination parent must exist. Create folders explicitly when needed:
-  POST /api/files
-  Content-Type: application/json
-  Idempotency-Key: <unique-folder-key>
-  {"kind":"folder","path":"<absolute parent path>","parents":true}
+func linkPageCopyFor(lang string, saveLink bool) linkPageCopy {
+	if lang == "zh" {
+		if saveLink {
+			return linkPageCopy{
+				Lang: "zh", Title: "保存链接",
+				Hint: "把这个链接发给 agent。它打开后拿到 token 和写入方式；这个页面本身不接收内容。",
+				Copy: "复制说明", Copied: "已复制", Created: "创建于", LastUsed: "上次使用",
+			}
+		}
+		return linkPageCopy{
+			Lang: "zh", Title: "连接说明",
+			Hint: "把这个链接发给 agent。它打开后拿到 token、范围和权限，再按说明调用 API。",
+			Copy: "复制说明", Copied: "已复制", Created: "创建于", LastUsed: "上次使用",
+		}
+	}
+	if saveLink {
+		return linkPageCopy{
+			Lang: "en", Title: "Save link",
+			Hint: "Send this link to an agent. It opens to the token and write instructions; this page accepts no content itself.",
+			Copy: "Copy instructions", Copied: "Copied", Created: "Created", LastUsed: "Last used",
+		}
+	}
+	return linkPageCopy{
+		Lang: "en", Title: "Connection instructions",
+		Hint: "Send this link to an agent. It opens to the token, scope and permissions, then follows the instructions.",
+		Copy: "Copy instructions", Copied: "Copied", Created: "Created", LastUsed: "Last used",
+	}
+}
 
-If file reads are permitted, after the parent exists check GET /api/files/capabilities?path=%s for admitted write and size limits.
-For a write-only connection, 403 from file introspection means those limits are unavailable;
-create a session with the exact file size and honor its admission result and returned part geometry.
-A rejected admission grants no upload authority. Do not retry with guessed read permissions.
-
-Small content PUT is optional: use the following example only after capabilities reports
-maxSinglePutBytes > 0 and transferClass is "C". Class A connections report maxSinglePutBytes=0;
-use the session flow below for every file, including short text.
-Write-only connections with unavailable capabilities should use sessions as well.
-Save a short text when content PUT is enabled (create only):
-  curl -X PUT -H "Authorization: Bearer %s" \
-       -H "Content-Type: text/markdown" -H "If-None-Match: *" \
-       -H "Idempotency-Key: <unique-write-key>" \
-       --data-binary @note.md "%s/api/files/content?path=%s"
-
-For resumable files within the advertised limits:
-  POST %s/api/files/uploads
-  Authorization: Bearer %s
-  Content-Type: application/json
-  Idempotency-Key: <unique-session-key>
-  {"path":%q,"size":12345,"mediaType":"image/jpeg","condition":{"mode":"create"}}
-
-Use the returned id, class, partSize and partCount. Split exactly at partSize;
-the final part has the exact remainder. The session class is fixed by the connection.
-
-Class A (class="A", transport.kind="presigned-parts"):
-  Each part in transport.parts has {number,size,method,url,headers}. PUT exactly that part to that URL
-  with exactly those headers; the URL binds method, object, upload number and exact length, and no digest.
-  Do not add application Authorization, CSRF or cookie headers to a signed part PUT; never change its host,
-  path or signed query; never follow a redirect. Request more or renew with:
-    POST /api/files/uploads/{id}/parts/sign
-    {"numbers":[<part numbers>]}
-  The response has the same parts shape; a re-signed number keeps its length. There is no per-part
-  application acknowledgement. After an uncertain part request, continue or re-send the same part;
-  GET /api/files/uploads/{id}/parts returns the provider's own listing (number,size,etag).
-  Do not resend after commit has started.
-
-Class C (class="C", transport.kind="relay"):
-  PUT each part with Content-Length and Authorization to
-    /api/files/uploads/{id}/parts/{number}
-  The application
-  computes SHA-256, returns a durable receipt after the bytes are safe, and an identical replay returns
-  the existing receipt. GET /api/files/uploads/{id}/parts returns receipts in acknowledgement order.
-
-Numbers start at 1; a zero-byte file has no parts. After the session reports full coverage:
-  POST /api/files/uploads/{id}/commit
-Commit may return 202 with Location pointing to /api/files/operations/{operationId}.
-Poll that same-origin Operation until state is succeeded; failed, cancelled or
-outcome_unknown is not success. Resume status with GET /api/files/uploads/{id}.
-A 409 operation_in_progress may include operationId: wait for that exact Operation to
-succeed, then retry admission before sending bytes; unavailable status keeps the wait.
-Use Authorization: Bearer on application control requests, relay parts, commit and Operation status.
-Class A part PUTs use only the returned provider URL and headers; the same-origin
-/api/files/transfer/ prefix is an optional edge relay selected by the deployment.
-Read content with POST /api/files/downloads and fetch the returned grant; GET /api/files/content
-serves bytes only on class C.
-Choose a unique path. When file reads are permitted, to replace deliberately read its contentRevision and use
-If-Match: "<contentRevision>" for PUT or condition.mode=replace plus contentRevision
-for a session. A write-only connection must obtain an authorized revision separately or use create-only.
-Never silently overwrite after a conflict. Writes may be disabled until
-the deployment's storage configuration and baseline are explicitly admitted.
-`, url.QueryEscape(path.Dir(target)), token, base, url.QueryEscape(target), base, token, target)
+func linkPageData(copy linkPageCopy, prompt, createdAt string, lastUsed *string) map[string]any {
+	return map[string]any{
+		"Lang":          copy.Lang,
+		"Title":         copy.Title,
+		"Hint":          copy.Hint,
+		"Prompt":        prompt,
+		"CreatedAt":     createdAt,
+		"LastUsed":      textValue(lastUsed),
+		"CopyLabel":     copy.Copy,
+		"CopiedLabel":   copy.Copied,
+		"CreatedLabel":  copy.Created,
+		"LastUsedLabel": copy.LastUsed,
+	}
 }
 
 func requestBaseURL(r *http.Request) string {
@@ -368,7 +269,7 @@ func (s *Server) handleRevokeSaveLink(w http.ResponseWriter, r *http.Request) er
 }
 
 const linkHTML = `<!doctype html>
-<html lang="zh">
+<html lang="{{.Lang}}">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -382,12 +283,13 @@ const linkHTML = `<!doctype html>
   p { color: #6d6a63; margin: 0 0 20px; }
   pre { padding: 18px; border-radius: 12px; background: #fff; border: 1px solid #e4dfd4;
         overflow: auto; white-space: pre-wrap; word-break: break-word;
-        font: 13px/1.65 ui-monospace, SFMono-Regular, Menlo, monospace; }
+        font: 13px/1.7 ui-monospace, SFMono-Regular, Menlo, monospace; }
   button { display: inline-flex; align-items: center; height: 34px; padding: 0 14px;
            border: 1px solid #d8d2c4; border-radius: 999px; background: #fff; color: #1c1c1a;
            font: inherit; font-size: 13px; cursor: pointer; }
   button:hover { background: #f0ece2; }
   .meta { margin-top: 18px; font-size: 12px; color: #8a857a; }
+  time { white-space: nowrap; }
 </style>
 </head>
 <body>
@@ -395,9 +297,24 @@ const linkHTML = `<!doctype html>
   <h1>{{.Title}}</h1>
   <p>{{.Hint}}</p>
   <pre id="prompt">{{.Prompt}}</pre>
-  <button onclick="navigator.clipboard.writeText(document.getElementById('prompt').textContent)">复制说明</button>
-  <p class="meta">创建于 {{.CreatedAt}}{{if .LastUsed}} · 上次使用 {{.LastUsed}}{{end}}</p>
+  <button id="copy" type="button" data-copied="{{.CopiedLabel}}">{{.CopyLabel}}</button>
+  <p class="meta">{{.CreatedLabel}} <time datetime="{{.CreatedAt}}">{{.CreatedAt}}</time>{{if .LastUsed}} · {{.LastUsedLabel}} <time datetime="{{.LastUsed}}">{{.LastUsed}}</time>{{end}}</p>
 </main>
+<script>
+  for (const el of document.querySelectorAll("time[datetime]")) {
+    const at = new Date(el.dateTime);
+    if (!Number.isNaN(at.getTime())) el.textContent = at.toLocaleString();
+  }
+  const copy = document.getElementById("copy");
+  copy.addEventListener("click", async () => {
+    try {
+      await navigator.clipboard.writeText(document.getElementById("prompt").textContent);
+      const original = copy.textContent;
+      copy.textContent = copy.dataset.copied;
+      setTimeout(() => { copy.textContent = original; }, 1600);
+    } catch {}
+  });
+</script>
 </body>
 </html>
 `

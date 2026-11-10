@@ -251,91 +251,78 @@ func TestHandlerRegistersRoutes(t *testing.T) {
 }
 
 func TestSaveLinkPrompt(t *testing.T) {
-	prompt := saveLinkPrompt("https://everythingabout.me", "abcd2345efgh2345")
+	prompt := saveLinkPrompt("https://everythingabout.me", "abcd2345efgh2345", "C")
 	for _, want := range []string{
-		"Token: abcd2345efgh2345",
-		"https://everythingabout.me/api/files/content?path=%2Fnote.md",
+		"Token:    abcd2345efgh2345",
+		"Granted:  read + write",
+		"Scope:    / (the whole drive)",
+		"$DRIVE/api/files/content?path=%2Fnote.md",
 		"Content-Type: text/markdown",
 		"If-None-Match: *",
 		"Idempotency-Key:",
-		"POST https://everythingabout.me/api/files/uploads",
-		"/api/files/uploads/{id}/parts/{number}",
-		"POST /api/files/uploads/{id}/commit",
-		"/api/files/operations/{operationId}",
-		"Authorization: Bearer abcd2345efgh2345",
+		"POST $DRIVE/api/files/uploads",
+		"$DRIVE/api/files/uploads/<id>/parts/<number>",
+		"$DRIVE/api/files/uploads/<id>/commit",
+		"/api/files/operations/<operationId>",
+		`"parents":true`,
 	} {
 		if !strings.Contains(prompt, want) {
 			t.Errorf("prompt is missing %q:\n%s", want, prompt)
 		}
 	}
-	if strings.Contains(prompt, "POST https://everythingabout.me/s/") {
-		t.Errorf("the link page must not be a write endpoint:\n%s", prompt)
+	if strings.Contains(prompt, "presigned-parts") {
+		t.Errorf("class C prompt advertises class A:\n%s", prompt)
+	}
+	if strings.Contains(prompt, "## Events") {
+		t.Errorf("save link advertises events it cannot author:\n%s", prompt)
 	}
 	if strings.Contains(prompt, "confirmation") {
 		t.Errorf("prompt should not tell the agent what to confirm:\n%s", prompt)
 	}
 }
 
-func TestWritePromptCapabilitiesUseExistingParent(t *testing.T) {
-	for _, tc := range []struct{ target, parent string }{
-		{"/note.md", "%2F"},
-		{"/Apps/obsidian/note.md", "%2FApps%2Fobsidian"},
-		{"/Apps/ +%2F?# /note.md", "%2FApps%2F+%2B%252F%3F%23+"},
-	} {
-		t.Run(tc.target, func(t *testing.T) {
-			prompt := unifiedWritePrompt("https://files.example", "test-token", tc.target)
-			check := "If file reads are permitted, after the parent exists check GET /api/files/capabilities?path=" + tc.parent + " for admitted write and size limits."
-			if !strings.Contains(prompt, check) {
-				t.Fatalf("capabilities did not use the exact parent: %s", prompt)
-			}
-			if strings.Index(prompt, check) < strings.Index(prompt, `{"kind":"folder"`) {
-				t.Fatal("capability check precedes parent creation guidance")
-			}
-			if strings.Count(prompt, "/api/files/capabilities?path=") != 1 {
-				t.Fatal("write instructions contain a competing capability target")
-			}
-		})
+func TestPromptCapabilitiesBeforeWrite(t *testing.T) {
+	prompt := tokenPrompt("https://files.example", "test-token", &auth.Token{CanRead: true, CanWrite: true, Prefix: "Apps/ +%2F?# "}, "C")
+	check := "$DRIVE/api/files/capabilities?path=%2FApps%2F+%2B%252F%3F%23+"
+	if !strings.Contains(prompt, check) {
+		t.Fatalf("capabilities did not use the scope root: %s", prompt)
+	}
+	if strings.Index(prompt, check) > strings.Index(prompt, "## Write") {
+		t.Fatal("capabilities check must precede the write section")
+	}
+	if strings.Count(prompt, "/api/files/capabilities?path=") != 1 {
+		t.Fatal("prompt contains a competing capability target")
 	}
 }
 
 func TestTokenPromptWithoutFileReads(t *testing.T) {
-	for _, tc := range []struct {
-		name  string
-		token auth.Token
-	}{
-		{"write-only", auth.Token{CanWrite: true, Prefix: "Apps/writer"}},
-		{"events-only", auth.Token{CanEvents: true}},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			prompt := tokenPrompt("https://files.example", "test-token", &tc.token)
-			if !strings.Contains(prompt, "First call GET /me to confirm the connection and its current permissions.") {
-				t.Fatal("connection bootstrap is missing")
-			}
-			if strings.Contains(prompt, "GET /api/files/me") || strings.Contains(prompt, "List the authorized folder:") {
-				t.Fatal("unreadable file bootstrap is advertised")
-			}
-			if tc.token.CanWrite {
-				for _, required := range []string{"If file reads are permitted", "403 from file introspection means those limits are unavailable", "create a session with the exact file size", "write-only connection must obtain an authorized revision separately or use create-only"} {
-					if !strings.Contains(prompt, required) {
-						t.Fatalf("write-only guidance omits %q", required)
-					}
-				}
-			} else if strings.Contains(prompt, "curl -X PUT") || strings.Contains(prompt, "/api/files/capabilities?") {
-				t.Fatal("events-only connection advertised file requests")
-			}
-		})
+	writeOnly := tokenPrompt("https://files.example", "test-token", &auth.Token{CanWrite: true, Prefix: "Apps/writer"}, "C")
+	for _, unwanted := range []string{"/api/files/me", "/api/files/capabilities", "## Read"} {
+		if strings.Contains(writeOnly, unwanted) {
+			t.Fatalf("write-only prompt advertised %q:\n%s", unwanted, writeOnly)
+		}
+	}
+	for _, required := range []string{"This connection is write-only", "File introspection returns 403", "use a resumable", `"parents":true`} {
+		if !strings.Contains(writeOnly, required) {
+			t.Fatalf("write-only prompt omits %q:\n%s", required, writeOnly)
+		}
+	}
+
+	eventsOnly := tokenPrompt("https://files.example", "test-token", &auth.Token{CanEvents: true}, "C")
+	if strings.Contains(eventsOnly, "/api/files/") || strings.Contains(eventsOnly, "## Read") || strings.Contains(eventsOnly, "## Write") {
+		t.Fatalf("events-only prompt advertised file requests:\n%s", eventsOnly)
+	}
+	for _, required := range []string{"## Events", "POST $DRIVE/events", "external_id"} {
+		if !strings.Contains(eventsOnly, required) {
+			t.Fatalf("events-only prompt omits %q:\n%s", required, eventsOnly)
+		}
 	}
 }
 
 func TestSaveLinkHTML(t *testing.T) {
 	var buf bytes.Buffer
-	err := linkTemplate.Execute(&buf, map[string]any{
-		"Title":     "保存链接",
-		"Hint":      "把这个链接发给 agent。它打开后拿到 token 和保存方式。",
-		"Prompt":    saveLinkPrompt("https://everythingabout.me", "abcd2345efgh2345"),
-		"LastUsed":  "",
-		"CreatedAt": "2026-10-27T23:00:00Z",
-	})
+	copy := linkPageCopyFor("zh", true)
+	err := linkTemplate.Execute(&buf, linkPageData(copy, saveLinkPrompt("https://everythingabout.me", "abcd2345efgh2345", "C"), "2026-10-27T23:00:00Z", nil))
 	if err != nil {
 		t.Fatalf("render failed: %v", err)
 	}
@@ -343,8 +330,34 @@ func TestSaveLinkHTML(t *testing.T) {
 	if !strings.Contains(body, "保存链接") || !strings.Contains(body, "abcd2345efgh2345") {
 		t.Fatalf("unexpected html: %s", body)
 	}
+	if !strings.Contains(body, `<time datetime="2026-10-27T23:00:00Z">`) {
+		t.Fatalf("timestamps should stay machine-readable: %s", body)
+	}
 	if strings.Contains(body, "<content>") {
 		t.Fatal("prompt should be escaped in the html page")
+	}
+}
+
+func TestLinkPageLanguage(t *testing.T) {
+	for _, tc := range []struct {
+		accept string
+		lang   string
+	}{
+		{"zh-CN,zh;q=0.9,en;q=0.8", "zh"},
+		{"en-US,en;q=0.9", "en"},
+		{"fr-FR,fr;q=0.9", "en"},
+		{"", "en"},
+	} {
+		r := httptest.NewRequest(http.MethodGet, "/s/x", nil)
+		if tc.accept != "" {
+			r.Header.Set("Accept-Language", tc.accept)
+		}
+		if got := linkPageLang(r); got != tc.lang {
+			t.Errorf("Accept-Language %q: got %q want %q", tc.accept, got, tc.lang)
+		}
+	}
+	if got := linkPageCopyFor("en", false).Title; got != "Connection instructions" {
+		t.Fatalf("unexpected English title: %q", got)
 	}
 }
 
@@ -408,25 +421,25 @@ func TestTokenPrompt(t *testing.T) {
 		CanEvents: true,
 		ExpiresAt: &expires,
 	}
-	prompt := tokenPrompt("https://everythingabout.me", "eam_ab12cd34ef56_secret", scoped)
+	prompt := tokenPrompt("https://everythingabout.me", "eam_ab12cd34ef56_secret", scoped, "C")
 	for _, want := range []string{
-		"API:     https://everythingabout.me",
-		"Token:   eam_ab12cd34ef56_secret",
-		"Access:  read + write + events",
-		"Scope:   /Apps/obsidian",
-		"Expires: 2026-10-29T13:45:00.000Z",
+		"API:      https://everythingabout.me",
+		"Token:    eam_ab12cd34ef56_secret",
+		"Granted:  read + write + events",
+		"Scope:    /Apps/obsidian",
+		"Expires:  2026-10-29T13:45:00.000Z",
 		"/api/files/list?path=%2FApps%2Fobsidian",
 		"/api/files/content?path=%2FApps%2Fobsidian%2Fnote.md",
-		"First call GET /me",
-		"GET /api/files/me confirms file access and scope.",
+		"If `write` is false, stop and tell the owner",
+		"## Events",
 	} {
 		if !strings.Contains(prompt, want) {
 			t.Errorf("the prompt is missing %q:\n%s", want, prompt)
 		}
 	}
 
-	whole := tokenPrompt("https://everythingabout.me", "eam_plain", &auth.Token{CanRead: true})
-	for _, want := range []string{"Access:  read\n", "Scope:   the whole drive", "Expires: never", `"https://everythingabout.me/api/files/list?path=%2F"`} {
+	whole := tokenPrompt("https://everythingabout.me", "eam_plain", &auth.Token{CanRead: true}, "A")
+	for _, want := range []string{"Granted:  read\n", "Scope:    / (the whole drive)", "Expires:  never", "$DRIVE/api/files/list?path=%2F", "409 `grant_required`"} {
 		if !strings.Contains(whole, want) {
 			t.Errorf("the whole-drive prompt is missing %q:\n%s", want, whole)
 		}
