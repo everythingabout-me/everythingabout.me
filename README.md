@@ -29,8 +29,9 @@ Every queued file starts at once and their parts share one global pool of eight 
 is on takes as many of the eight as it has parts to fill, and later files join on the slots it leaves.
 Serving order is the order the list shows — folders first, then name — and parts ascend inside a file, so the row at the
 top finishes first, then the next.
-A started file keeps its uploading status even while it holds no part slot: its row names that wait instead of
-returning to queued, because a status that moves backwards on a file that already sent bytes reads as a restart.
+A file waiting its turn behind the queue is queued, even though its session is open, because it has sent nothing.
+A file that already sent bytes and then waits keeps its uploading status and names the wait: a status that moves
+backwards reads as a restart.
 See [transfer protocol](docs/design/transfer-protocol.md) for the exact boundaries.
 Object connections need no bucket versioning: revisions use current-object ETags and operation-specific
 conditions. COS ignores PUT If-Match, so admitted replacement rechecks ETag under gateway coordination;

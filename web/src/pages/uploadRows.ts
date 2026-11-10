@@ -56,27 +56,18 @@ function compareRows(a: UploadRowEntry, b: UploadRowEntry): number {
 }
 
 /**
- * Whether this row's started files are all waiting for a slot held by another file.
+ * The state a row may show for one task.
  *
- * The pool hands every free slot to the earliest-started file, so a batch of large files
- * serializes: a file that has already sent a good part of itself can hold no slot for a
- * long stretch while an earlier file streams. That file is not queued — it keeps its
- * bytes, its percentage and its open session — and a status that moves backwards reads as
- * a restart. The row keeps saying uploading and this flag lets it name the wait beside the
- * status, because "Uploading · 0 B/s" alone is indistinguishable from a stalled transfer.
- *
- * The wait is only named when a slot is actually held elsewhere. A started file that holds
- * none while the pool is empty is still claiming its path, allocating or reading receipts;
- * blaming "another file" there would state something false.
+ * A started file with no part slot is waiting its turn: the pool serves the file ahead of
+ * it in the queue first, so nothing moves for it — and nothing has been sent, which is
+ * exactly what a person calls "queued". The exception is a file that has already sent
+ * bytes and then gave its slot up to a file ahead of it: calling that queued would read as
+ * a restart, so it keeps its uploading status, and its row names the wait from the slots
+ * it holds instead of showing "0 B/s", which alone reads as a stalled transfer.
  */
-function waitsForSlot(files: UploadTask[], poolHeldElsewhere: boolean): boolean {
-  let started = false;
-  for (const task of files) {
-    if (task.status !== "uploading") continue;
-    started = true;
-    if (task.activeParts > 0) return false;
-  }
-  return started && poolHeldElsewhere;
+function visibleStatus(task: UploadTask): UploadStatus {
+  if (task.isDir || task.status !== "uploading") return task.status;
+  return task.activeParts > 0 || task.loaded > 0 ? "uploading" : "queued";
 }
 
 /** Project every selected descendant onto its immediate child in the browsed directory. */
@@ -145,9 +136,9 @@ export function buildUploadRows(items: Item[], tasks: UploadTask[], directory: s
       task.status === "uploading" || task.status === "finalizing" || task.status === "completed");
     const preparing = folders.length > 1 && completedFolders < folders.length && !fileStarted && failed.length === 0;
     const status: UploadStatus = failed.length ? "failed"
-      : pending.some((task) => task.status === "uploading") ? "uploading"
-        : pending.some((task) => task.status === "finalizing")
-          ? row.isDir && pending.some((task) => task.status === "queued") ? "uploading" : "finalizing"
+      : pending.some((task) => visibleStatus(task) === "uploading") ? "uploading"
+        : pending.some((task) => visibleStatus(task) === "finalizing")
+          ? row.isDir && pending.some((task) => visibleStatus(task) === "queued") ? "uploading" : "finalizing"
           : waiting.length ? "waiting" : pending.length ? "queued" : "completed";
     const cancelable = pending.filter((task) => !task.cancelRequested);
     row.upload = {
@@ -160,11 +151,15 @@ export function buildUploadRows(items: Item[], tasks: UploadTask[], directory: s
       completedItems,
       progressUnit,
       preparing,
-      waitingForSlot: waitsForSlot(files, slotHeldElsewhere),
+      // A row that still says uploading while none of its own files holds a slot is
+      // waiting for another file to finish; only then is the wait worth naming.
+      waitingForSlot: status === "uploading" && slotHeldElsewhere
+        && files.some((task) => task.status === "uploading" && task.activeParts === 0)
+        && files.every((task) => task.status !== "uploading" || task.activeParts === 0),
       failed: failed.length,
       size,
       loaded,
-      speed: files.reduce((sum, task) => sum + (task.status === "uploading" ? task.speed : 0), 0),
+      speed: files.reduce((sum, task) => sum + (visibleStatus(task) === "uploading" ? task.speed : 0), 0),
       percent: pending.length === 0 ? 100
         : progressUnit === "items" ? (items > 0 ? Math.floor(completedItems / items * 100) : 0)
           : size > 0 ? Math.floor(loaded / size * 100) : 0,

@@ -242,21 +242,22 @@ test("only the newest task for a repeated path contributes to counts", () => {
   assert.equal(rows[0].upload.loaded, 5);
 });
 
-test("a started file waiting for a part slot stays uploading and names the wait", () => {
+test("a file waiting its turn is queued, and a file that already sent bytes keeps uploading", () => {
   const tasks = [
     task("health/a.mov", { status: "uploading", activeParts: 4, loaded: 40, speed: 24 }),
     task("health/b.mov", { status: "uploading", loaded: 0 }),
     task("health/c.mov", { status: "uploading", loaded: 0 }),
   ];
   const rows = buildUploadRows([], tasks, "health");
-  // A slot holder is moving; the others are started but starved by the pool. None of them
-  // may fall back to the pre-start word: their bytes are retained, and a queued badge on a
-  // file that already sent some of itself reads as a restart.
-  assert.deepEqual(rows.map((row) => row.upload.status), ["uploading", "uploading", "uploading"]);
-  assert.deepEqual(rows.map((row) => row.upload.waitingForSlot), [false, true, true]);
+  // Only the head of the queue moves. The files behind it have sent nothing, so they are
+  // queued — the word a person uses for "waiting its turn" — and say nothing about
+  // another file.
+  assert.deepEqual(rows.map((row) => row.upload.status), ["uploading", "queued", "queued"]);
+  assert.deepEqual(rows.map((row) => row.upload.waitingForSlot), [false, false, false]);
   assert.deepEqual(rows.map((row) => row.upload.speed), [24, 0, 0]);
-  // A file that yields its slot halfway keeps its bytes and percentage, and names the wait
-  // while a sibling holds the pool.
+  // A file that has sent bytes only ever waits if a file ahead of it in the queue kept the
+  // pool: calling that queued would read as a restart, so it keeps uploading, names the
+  // wait, and keeps its percentage.
   const yielded = buildUploadRows([], [
     task("health/d.mov", { status: "uploading", loaded: 51 }),
     task("health/e.mov", { status: "uploading", activeParts: 2, speed: 30 }),
@@ -264,30 +265,26 @@ test("a started file waiting for a part slot stays uploading and names the wait"
   assert.equal(yielded.upload.status, "uploading");
   assert.equal(yielded.upload.waitingForSlot, true);
   assert.equal(yielded.upload.percent, 51);
-  // A lone started file owns no slot yet only while it is claiming or allocating: nothing
-  // else holds the pool, so it must not blame another file for the wait.
+  // A lone file that has sent nothing is only claiming or allocating: queued, and it does
+  // not blame another file for a wait the pool is not causing.
   const starting = buildUploadRows([], [task("health/starting.mov", { status: "uploading" })], "health")[0];
-  assert.equal(starting.upload.status, "uploading");
+  assert.equal(starting.upload.status, "queued");
   assert.equal(starting.upload.waitingForSlot, false);
-  const batch = (activeParts) => tasks.map((entry) => ({
+  const batch = (loaded) => tasks.map((entry) => ({
     ...entry, dir: "health/batch", path: `health/batch/${entry.name.slice("health/".length)}`,
-    activeParts: typeof activeParts === "function" ? activeParts(entry) : activeParts,
+    loaded: typeof loaded === "function" ? loaded(entry) : loaded, activeParts: 0,
   }));
-  // A batch whose every started file waits behind a file outside it is one wait, not a
-  // per-file accident.
+  // A whole folder waiting its turn is queued; once one of its files has bytes it reports
+  // the transfer with the wait named, not the pre-start word.
   const outside = task("health/zzz-pool.mov", { status: "uploading", activeParts: 8, speed: 40 });
-  const folderRows = buildUploadRows([], [folder("health/batch"), ...batch(0), outside], "health");
-  assert.equal(folderRows[0].upload.status, "uploading");
-  assert.equal(folderRows[0].upload.waitingForSlot, true);
-  // One moving file makes the whole row's wait meaningless: bytes are flowing.
-  const mixedFolder = buildUploadRows([], [folder("health/batch"),
-    ...batch((entry) => entry.name === "health/a.mov" ? 2 : 0)], "health");
-  assert.equal(mixedFolder[0].upload.waitingForSlot, false);
-  // A file that has not been started yet is still queued, and a folder task is not a byte
-  // transfer at all: creating it is its own work, never a slot wait.
-  const notStarted = buildUploadRows([], [task("health/f.mov")], "health")[0];
-  assert.equal(notStarted.upload.status, "queued");
-  assert.equal(notStarted.upload.waitingForSlot, false);
+  const waitingBatch = buildUploadRows([], [folder("health/batch"), ...batch(0), outside], "health")[0];
+  assert.equal(waitingBatch.upload.status, "queued");
+  assert.equal(waitingBatch.upload.waitingForSlot, false);
+  const partialBatch = buildUploadRows([], [folder("health/batch"),
+    ...batch((entry) => (entry.name === "health/a.mov" ? 40 : 0)), outside], "health")[0];
+  assert.equal(partialBatch.upload.status, "uploading");
+  assert.equal(partialBatch.upload.waitingForSlot, true);
+  // A folder task is not a byte transfer: creating it is its own work, never a slot wait.
   const making = buildUploadRows([], [folder("health/empty", "uploading")], "health")[0];
   assert.equal(making.upload.status, "uploading");
   assert.equal(making.upload.waitingForSlot, false);

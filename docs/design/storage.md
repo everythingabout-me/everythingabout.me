@@ -235,11 +235,11 @@ selection is queued the way the list shows it — folders first, then name — n
 drop. The list is name-sorted, so serving the drop order lets a file further down the list stream while the one
 above it waits, which reads as the queue picking at random.
 
-A started file that is not at the head may hold no slot at all while the file ahead of it still has parts. The
-queue keeps reporting such a file as uploading and uses its held-slot count to name the wait beside the status,
-rather than moving it back to "queued": a file that already sent bytes keeps its bytes, its percentage and its
-open session, so a status that goes backwards reads as a restart, and "Uploading · 0 B/s" alone reads as a
-stall. Only a task that has not been started yet is queued.
+A started file that is not at the head may hold no slot at all while the file ahead of it still has parts. It has
+sent nothing, so it is queued — the word a person uses for waiting its turn — even though its session is open.
+The one exception is a file that already sent bytes and then gave its slot up to a file ahead of it: that file
+keeps its uploading status, keeps its percentage, and names the wait from the slots it holds, because a status
+that goes backwards reads as a restart and "Uploading · 0 B/s" alone reads as a stall.
 
 After an uncertain part request the client asks the session what the provider or relay holds before
 resending; class C receipt hashes are verified against
