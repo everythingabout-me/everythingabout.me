@@ -690,3 +690,55 @@ func TestActionFailureProblemNamesTheStoppingEntryAndItsCause(t *testing.T) {
 		t.Fatalf("provider text reached the client-visible detail: %s", problem)
 	}
 }
+
+// Accepting a recursive delete must not walk the subtree: the guard already conceals
+// it, and the manifest can be collected by the worker that owns the purge. Walking
+// here made the confirmation proportional to the folder — 20s for 48 subfolders —
+// for a set the client never needed to see.
+func TestDeleteAcceptsWithoutWalkingThenFreezesOnce(t *testing.T) {
+	pool := isolatedPostgres(t)
+	p, r, actor := seedOwner(t, pool, provenBaseline(3, 3, 100, 100))
+	n := newActionNative(r)
+	n.put("victims", storage.Folder, "")
+	n.put("victims/a", storage.File, "abc")
+	a := actionCoordinator(t, p, nil)
+	req := ActionRequest{Root: r, Actor: actor, Kind: "delete", From: "victims", Recursive: true, IdempotencyKey: "delete-deferred"}
+	op, replayed, err := a.Prepare(context.Background(), req, n)
+	if err != nil || replayed {
+		t.Fatalf("prepare replay=%v: %v", replayed, err)
+	}
+	if n.lists != 0 {
+		t.Fatalf("acceptance walked the subtree: %d listings", n.lists)
+	}
+	if op.Terminal() {
+		t.Fatalf("acceptance settled the operation: %+v", op)
+	}
+	if _, err = a.journal.ActionBinding(context.Background(), op); !IsCode(err, "manifest_not_frozen") {
+		t.Fatalf("acceptance froze a manifest: %v", err)
+	}
+	// The worker collects exactly one manifest and purges from it.
+	out := runAction(t, a, op, actor, n)
+	if out.State != Succeeded || n.data["victims/a"] != "" {
+		t.Fatalf("purge state=%s data=%v", out.State, n.data)
+	}
+	if n.lists == 0 {
+		t.Fatal("worker never captured the subtree")
+	}
+	lists := n.lists
+	if again := runAction(t, a, out, actor, n); again.State != Succeeded || n.lists != lists {
+		t.Fatalf("replay re-captured: state=%s lists=%d want=%d", again.State, n.lists, lists)
+	}
+}
+
+// A path that does not exist still answers synchronously: acceptance resolves the
+// target, so a typo is a 404 rather than an accepted operation that fails later.
+func TestDeleteAcceptanceStillResolvesTheTarget(t *testing.T) {
+	pool := isolatedPostgres(t)
+	p, r, actor := seedOwner(t, pool, provenBaseline(0, 0, 100, 100))
+	n := newActionNative(r)
+	a := actionCoordinator(t, p, nil)
+	_, _, err := a.Prepare(context.Background(), ActionRequest{Root: r, Actor: actor, Kind: "delete", From: "absent", Recursive: true}, n)
+	if !storage.IsCode(err, "not_found") {
+		t.Fatalf("missing target accepted: %v", err)
+	}
+}

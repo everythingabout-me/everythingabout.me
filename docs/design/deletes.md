@@ -16,11 +16,11 @@ The current design puts both on the request path. Before it answers `202`, `Prep
 (capture, then a consistency re-read) and freezes one manifest entry per object, because the deletion set must
 be decided before it can be concealed and before it can be journaled.
 
-Measured on one real folder of 48 subfolders: one walk is 144 COS requests after the latest listing fixes, 376
-before them; a delete paid three passes (two walks plus a per-entry `Stat`), so the same folder took 20s to
-answer `20s` on the old code and 10.4s after the listing fixes. The 103-entry folder that started this
-investigation took 23.6s. A mainstream drive answers the same click in 100–300ms, because the thing it deletes
-is its own metadata tree, not somebody else's objects.
+Measured on one real folder of 48 subfolders: a single walk is 144 COS requests after the latest listing
+fixes, 376 before them, and a delete paid three passes (two walks plus a per-entry `Stat`). Acceptance of that
+folder took 20.0s (752 requests) before the listing fixes and 10.4s (288 requests) after them; the 103-entry
+folder that started this investigation took 23.6s. A mainstream drive answers the same click in 100–300ms,
+because the thing it deletes is its own metadata tree, not somebody else's objects.
 
 ## Decision
 
@@ -135,6 +135,10 @@ delete.
 
 - [x] Listing/resolve cost fixes that made a pass cost one request per folder instead of one per entry and per
       path segment (already on `main`).
+- [x] Acceptance stops walking: it resolves the target and answers `202`, and the worker collects the manifest
+      before the first native deletion. The confirmation is now `O(1)` in the subtree; the guard, the frozen
+      manifest and the per-entry settlement are unchanged, so a path deleted and re-created before the purge
+      finishes is still `409` until step 2 lands.
 - [ ] Acceptance transaction (step 2) and prefix purge (step 3) for `delete`.
 - [ ] Purge liveness: skip paths with a non-terminal upload, treat `412` as `adopted`, resume by re-walking.
 - [ ] Operation resource: `deleting` phase with a remaining count, replacing the per-entry manifest progress.
@@ -143,6 +147,7 @@ delete.
 - [ ] `move`/`copy` keep the frozen manifest: their effects are conditional on both endpoints and a re-walk
       cannot reconstruct "what the user meant" the way a prefix can.
 
-Until the acceptance transaction lands, the delete path keeps the frozen manifest: acceptance is still
-proportional to the subtree. The paragraph in [api.md](../api/api.md#deleting) describes what the server does
-today, and is updated by the same change that lands step 2.
+Until the acceptance transaction lands, the delete path keeps the frozen manifest and the guard: the manifest is
+collected by the worker, so the confirmation is fast, but the subtree stays fenced (`409 operation_in_progress`)
+until the purge finishes. The paragraph in [api.md](../api/api.md) describes what the server does today, and is
+updated by the same change that lands step 2.

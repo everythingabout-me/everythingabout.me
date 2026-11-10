@@ -229,6 +229,20 @@ func (a *Actions) Prepare(ctx context.Context, req ActionRequest, native NativeA
 	if err = a.options.Validate(work, native, req); err != nil {
 		return fail(err)
 	}
+	// A deletion is the one action whose captured set can be collected after it is
+	// accepted: the guard taken by Begin already conceals the subtree from every read,
+	// and the native purge is background work either way. Walking before answering made
+	// the confirmation proportional to the subtree — two passes plus a per-entry check,
+	// 20.0s for 48 subfolders — while the client only needed to know its decision was
+	// final. The target is still resolved here, so a missing path or a stale revision
+	// answers synchronously instead of becoming an accepted operation that fails later.
+	if req.Kind == "delete" {
+		if _, err = observe(work, native, req.From); err != nil {
+			return fail(err)
+		}
+		saved, readErr := a.journal.Get(work, req.Root, req.Actor, op.ID)
+		return saved, false, readErr
+	}
 	binding, manifest, reservation, err := captureAction(work, req, native)
 	if err != nil {
 		return fail(err)
@@ -687,6 +701,16 @@ func (a *Actions) Run(ctx context.Context, root Root, actor Actor, id string, na
 		return op, err
 	}
 	binding, err := a.journal.ActionBinding(ctx, op)
+	if IsCode(err, "manifest_not_frozen") && op.Kind == "delete" {
+		// The accepted deletion has no manifest yet: this worker collects it, under the
+		// guard Prepare already took. Re-collecting is safe — the walk only observes, and
+		// nothing has been deleted yet — so a crash between acceptance and freeze costs a
+		// second walk instead of an operation that can never proceed.
+		if op, err = a.captureDeferred(ctx, root, actor, op, native); err != nil {
+			return op, err
+		}
+		binding, err = a.journal.ActionBinding(ctx, op)
+	}
 	if IsCode(err, "manifest_not_frozen") {
 		return a.finishInterruptedPrepare(ctx, root, actor, op.ID)
 	}
@@ -763,6 +787,52 @@ func (a *Actions) Run(ctx context.Context, root Root, actor Actor, id string, na
 		}
 	}
 	return a.settle(ctx, root, actor, op, binding, native, cause)
+}
+
+// captureDeferred freezes the manifest an accepted deletion did not collect. It runs
+// the same capture and consistency re-read Prepare used to run inline, so the frozen
+// set is identical; only its position moved, from the request that returns 202 to the
+// worker that owns the purge.
+func (a *Actions) captureDeferred(ctx context.Context, root Root, actor Actor, op Operation, native NativeActions) (Operation, error) {
+	req, err := actionRequest(op)
+	if err != nil {
+		return op, err
+	}
+	op, err = a.journal.Claim(ctx, root, actor, op.ID, a.options.LeaseTTL)
+	if err != nil {
+		return op, err
+	}
+	work, stop := a.service.keepLease(ctx, op.Lease)
+	defer stop()
+	fail := func(cause error) (Operation, error) {
+		persist, cancel := durableContext(ctx)
+		defer cancel()
+		if finishErr := a.journal.FinishWithoutEffect(persist, op.Lease, Failed, problem(actionErrorCode(cause), cause, &op)); finishErr != nil {
+			return op, errors.Join(cause, finishErr)
+		}
+		saved, readErr := a.journal.Get(persist, root, actor, op.ID)
+		return saved, errors.Join(cause, readErr)
+	}
+	if err = a.options.Authorize(work, op); err != nil {
+		return fail(err)
+	}
+	if err = a.options.Validate(work, native, req); err != nil {
+		return fail(err)
+	}
+	binding, manifest, reservation, err := captureAction(work, req, native)
+	if err != nil {
+		return fail(err)
+	}
+	if err = validateCapture(work, req, native, binding, manifest); err != nil {
+		return fail(err)
+	}
+	if err = a.options.Validate(work, native, req); err != nil {
+		return fail(err)
+	}
+	if err = a.journal.FreezeAction(work, op.Lease, binding, manifest, reservation); err != nil {
+		return fail(err)
+	}
+	return a.journal.Get(work, root, actor, op.ID)
 }
 
 func (a *Actions) accountUnknown(ctx context.Context, root Root, actor Actor, op Operation, cause error) (Operation, error) {
