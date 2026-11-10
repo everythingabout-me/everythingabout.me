@@ -32,13 +32,23 @@ func (f *fakeStore) Authority(context.Context) (Connection, bool, error) {
 	return Connection{}, false, nil
 }
 
-func (f *fakeStore) ByName(_ context.Context, name string) (Connection, bool, error) {
+func (f *fakeStore) ByName(_ context.Context, ownerID, name string) (Connection, bool, error) {
 	for _, c := range f.rows {
-		if c.Name == name {
+		if c.Name == name && (c.OwnerID == ownerID || c.OwnerID == "") {
 			return c, true, nil
 		}
 	}
 	return Connection{}, false, nil
+}
+
+func (f *fakeStore) Visible(_ context.Context, ownerID string) ([]Connection, error) {
+	var out []Connection
+	for _, c := range f.rows {
+		if c.OwnerID == ownerID || c.OwnerID == "" {
+			out = append(out, c)
+		}
+	}
+	return out, nil
 }
 
 func (f *fakeStore) OwnerConnection(_ context.Context, owner string) (string, bool, error) {

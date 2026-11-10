@@ -78,6 +78,17 @@ func (r *Resolver) Binding(ownerID string) (storage.Config, error) {
 	return e.backend.Binding(ownerID)
 }
 
+// OpenConnection opens a named connection for an owner without going through the
+// owner's binding. Backup runs use it to reach a destination the owner does not
+// live on.
+func (r *Resolver) OpenConnection(ctx context.Context, ownerID, name string) (storage.Driver, error) {
+	e, err := r.entryNamed(ctx, ownerID, name)
+	if err != nil {
+		return nil, err
+	}
+	return e.backend.Open(ctx, ownerID)
+}
+
 // Connection reports the row an owner resolves to. Maintenance commands use it to
 // explain a decision instead of repeating the resolution rules.
 func (r *Resolver) Connection(ctx context.Context, ownerID string) (Connection, error) {
@@ -97,13 +108,13 @@ func (r *Resolver) entryFor(ctx context.Context, ownerID string) (*entry, error)
 		return nil, storage.NewError("closed", "", nil)
 	}
 	if known {
-		return r.entryNamed(ctx, name)
+		return r.entryNamed(ctx, ownerID, name)
 	}
 	name, err := r.ownerConnection(ctx, ownerID)
 	if err != nil {
 		return nil, err
 	}
-	e, err := r.entryNamed(ctx, name)
+	e, err := r.entryNamed(ctx, ownerID, name)
 	if err != nil {
 		return nil, err
 	}
@@ -137,15 +148,16 @@ func (r *Resolver) ownerConnection(ctx context.Context, ownerID string) (string,
 	return authority.Name, nil
 }
 
-func (r *Resolver) entryNamed(ctx context.Context, name string) (*entry, error) {
+func (r *Resolver) entryNamed(ctx context.Context, ownerID, name string) (*entry, error) {
+	cacheKey := ownerID + "\x00" + name
 	r.mu.Lock()
-	if e, ok := r.entries[name]; ok {
+	if e, ok := r.entries[cacheKey]; ok {
 		r.mu.Unlock()
 		return e, nil
 	}
 	r.mu.Unlock()
 
-	c, ok, err := r.store.ByName(ctx, name)
+	c, ok, err := r.store.ByName(ctx, ownerID, name)
 	if err != nil {
 		return nil, err
 	}
@@ -168,12 +180,12 @@ func (r *Resolver) entryNamed(ctx context.Context, name string) (*entry, error) 
 	}
 	e := &entry{conn: c, backend: backend}
 	r.mu.Lock()
-	if existing, ok := r.entries[name]; ok {
+	if existing, ok := r.entries[cacheKey]; ok {
 		r.mu.Unlock()
 		backend.Close()
 		return existing, nil
 	}
-	r.entries[name] = e
+	r.entries[cacheKey] = e
 	r.mu.Unlock()
 	return e, nil
 }

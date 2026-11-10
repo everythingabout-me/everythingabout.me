@@ -15,14 +15,20 @@ import (
 // runStorageConnection manages the storage_connections rows: adding a provider is
 // an INSERT, so it is a command rather than a deployment edit.
 //
-//	eam storage-connection list
+//	eam storage-connection list [--owner email-or-UUID]
 //	eam storage-connection add --name backup-nas --backend local --role backup \
 //	    --local-content-root /srv/backup/content --local-system-root /srv/backup/system
+//	eam storage-connection add --owner you@example.com --name my-cos --backend cos --role backup ...
+//
+// Without --owner a connection is the deployment default that every account may
+// use. With --owner it belongs to that account alone; such a connection may only
+// be a COS bucket, because a local root would hand an account arbitrary host paths
+// and a custom S3 endpoint would turn this process into an outbound request proxy.
 func runStorageConnection(args []string) error {
 	if len(args) == 0 {
 		return fmt.Errorf(`usage:
-  eam storage-connection list
-  eam storage-connection add --name NAME --backend cos|s3|local --role authority|backup [flags]
+  eam storage-connection list [--owner email-or-UUID]
+  eam storage-connection add [--owner email-or-UUID] --name NAME --backend cos|s3|local --role authority|backup [flags]
 
 cos flags:   --cos-bucket --cos-region --cos-secret-id --cos-secret-key
 s3 flags:    --s3-endpoint --s3-region --s3-bucket --s3-access-key-id --s3-secret-access-key [--s3-path-style] [--s3-content-prefix] [--s3-system-prefix]
@@ -31,7 +37,7 @@ common:      [--transfer-class] [--coordinated-writes=false] [--admission-file] 
 	}
 	switch args[0] {
 	case "list":
-		return runStorageConnectionList()
+		return runStorageConnectionList(args[1:])
 	case "add":
 		return runStorageConnectionAdd(args[1:])
 	default:
@@ -39,7 +45,12 @@ common:      [--transfer-class] [--coordinated-writes=false] [--admission-file] 
 	}
 }
 
-func runStorageConnectionList() error {
+func runStorageConnectionList(args []string) error {
+	fs := flag.NewFlagSet("storage-connection list", flag.ContinueOnError)
+	owner := fs.String("owner", "", "scope to one account (email or UUID) plus the deployment default")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
 	ctx := context.Background()
 	cfg, err := config.Load()
 	if err != nil {
@@ -50,7 +61,20 @@ func runStorageConnectionList() error {
 		return err
 	}
 	defer db.Close()
-	rows, err := connections.NewPostgresStore(db).Connections(ctx)
+	connStore := connections.NewPostgresStore(db)
+	var rows []connections.Connection
+	if *owner != "" {
+		ownerID, err := resolveOwnerID(ctx, db, *owner)
+		if err != nil {
+			return err
+		}
+		rows, err = connStore.Visible(ctx, ownerID)
+		if err != nil {
+			return err
+		}
+	} else {
+		rows, err = connStore.Connections(ctx)
+	}
 	if err != nil {
 		return err
 	}
@@ -80,6 +104,7 @@ func connectionLocation(c connections.Connection) string {
 
 func runStorageConnectionAdd(args []string) error {
 	fs := flag.NewFlagSet("storage-connection add", flag.ContinueOnError)
+	owner := fs.String("owner", "", "email or UUID: give the connection to one account instead of making it the deployment default")
 	name := fs.String("name", "", "connection name; owner bindings are written as name:digest")
 	backend := fs.String("backend", "", "cos, s3 or local")
 	role := fs.String("role", connections.RoleAuthority, "authority or backup")
@@ -115,10 +140,22 @@ func runStorageConnectionAdd(args []string) error {
 	if err != nil {
 		return err
 	}
+	db, err := store.Open(ctx, cfg.DatabaseURL)
+	if err != nil {
+		return err
+	}
+	defer db.Close()
 	// Defaults follow the configured deployment so an operator does not restate the
 	// write protocol for every new connection.
+	var ownerID string
+	if *owner != "" {
+		ownerID, err = resolveOwnerID(ctx, db, *owner)
+		if err != nil {
+			return err
+		}
+	}
 	c := connections.Connection{
-		Name: *name, Backend: *backend, Role: *role, Generation: *generation, Enabled: true,
+		OwnerID: ownerID, Name: *name, Backend: *backend, Role: *role, Generation: *generation, Enabled: true,
 		Config: connections.Spec{
 			CoordinatedWrites: *coordinated,
 			TransferClass:     *transferClass,
@@ -155,11 +192,6 @@ func runStorageConnectionAdd(args []string) error {
 	if err := c.Validate(); err != nil {
 		return err
 	}
-	db, err := store.Open(ctx, cfg.DatabaseURL)
-	if err != nil {
-		return err
-	}
-	defer db.Close()
 	if err := connections.NewPostgresStore(db).Insert(ctx, c); err != nil {
 		return err
 	}

@@ -17,7 +17,8 @@ import (
 type Store interface {
 	Connections(ctx context.Context) ([]Connection, error)
 	Authority(ctx context.Context) (Connection, bool, error)
-	ByName(ctx context.Context, name string) (Connection, bool, error)
+	ByName(ctx context.Context, ownerID, name string) (Connection, bool, error)
+	Visible(ctx context.Context, ownerID string) ([]Connection, error)
 	OwnerConnection(ctx context.Context, ownerID string) (string, bool, error)
 	Insert(ctx context.Context, c Connection) error
 }
@@ -47,8 +48,32 @@ func (p postgresStore) Authority(ctx context.Context) (Connection, bool, error) 
 	return p.one(ctx, `select `+connectionColumns+` from storage_connections where role='authority' and enabled order by created_at limit 1`)
 }
 
-func (p postgresStore) ByName(ctx context.Context, name string) (Connection, bool, error) {
-	return p.one(ctx, `select `+connectionColumns+` from storage_connections where name=$1`, name)
+// ByName always resolves for one owner: that owner's own row wins over the shared
+// default with the same name, which is what makes two accounts able to call their
+// connection the same thing.
+func (p postgresStore) ByName(ctx context.Context, ownerID, name string) (Connection, bool, error) {
+	return p.one(ctx, `select `+connectionColumns+` from storage_connections
+		where name=$2 and (owner_id=nullif($1,'')::uuid or owner_id is null)
+		order by owner_id nulls last limit 1`, ownerID, name)
+}
+
+// Visible is what an account may see: its own rows plus the deployment default.
+func (p postgresStore) Visible(ctx context.Context, ownerID string) ([]Connection, error) {
+	rows, err := p.db.Pool().Query(ctx, `select `+connectionColumns+` from storage_connections
+		where owner_id=nullif($1,'')::uuid or owner_id is null order by owner_id nulls last, name`, ownerID)
+	if err != nil {
+		return nil, fmt.Errorf("read visible storage connections for owner %s: %w", ownerID, err)
+	}
+	defer rows.Close()
+	var out []Connection
+	for rows.Next() {
+		c, err := scanConnection(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, c)
+	}
+	return out, rows.Err()
 }
 
 func (p postgresStore) one(ctx context.Context, query string, args ...any) (Connection, bool, error) {
@@ -98,17 +123,17 @@ func (p postgresStore) Insert(ctx context.Context, c Connection) error {
 		admission = []byte(c.Admission)
 	}
 	_, err = p.db.Pool().Exec(ctx, `
-		insert into storage_connections(name, backend, role, identity, config, secret, generation, admission, enabled)
-		values($1,$2,$3,$4,$5,$6,$7,$8,true)
+		insert into storage_connections(owner_id, name, backend, role, identity, config, secret, generation, admission, enabled)
+		values(nullif($1,'')::uuid,$2,$3,$4,$5,$6,$7,$8,$9,true)
 		on conflict (identity) do nothing`,
-		c.Name, c.Backend, c.Role, c.Identity, config, secret, c.Generation, admission)
+		c.OwnerID, c.Name, c.Backend, c.Role, c.Identity, config, secret, c.Generation, admission)
 	if err != nil {
 		return fmt.Errorf("insert storage connection %q (identity %s): %w", c.Name, c.Identity, err)
 	}
 	return nil
 }
 
-const connectionColumns = `id::text, name, backend, role, identity, config, secret, generation, admission, enabled`
+const connectionColumns = `id::text, coalesce(owner_id::text, ''), name, backend, role, identity, config, secret, generation, admission, enabled`
 
 type scanner interface{ Scan(...any) error }
 
@@ -117,7 +142,7 @@ func scanConnection(row scanner) (Connection, error) {
 		c                  Connection
 		config, secret, ad []byte
 	)
-	if err := row.Scan(&c.ID, &c.Name, &c.Backend, &c.Role, &c.Identity, &config, &secret, &c.Generation, &ad, &c.Enabled); err != nil {
+	if err := row.Scan(&c.ID, &c.OwnerID, &c.Name, &c.Backend, &c.Role, &c.Identity, &config, &secret, &c.Generation, &ad, &c.Enabled); err != nil {
 		return Connection{}, err
 	}
 	if err := json.Unmarshal(config, &c.Config); err != nil {

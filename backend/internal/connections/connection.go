@@ -28,7 +28,10 @@ const (
 
 // Connection is one row of storage_connections.
 type Connection struct {
-	ID         string
+	ID string
+	// OwnerID is empty for the deployment default every account may use, and set
+	// for a connection one account added for itself.
+	OwnerID    string
 	Name       string
 	Backend    string
 	Role       string
@@ -103,6 +106,7 @@ var ErrNotFound = errors.New("storage connection not found")
 // row; the name is excluded so two rows cannot claim the same tree.
 func (c Connection) ComputeIdentity() (string, error) {
 	shape := struct {
+		Owner        string
 		Backend      string
 		COSBucket    string
 		COSRegion    string
@@ -116,6 +120,7 @@ func (c Connection) ComputeIdentity() (string, error) {
 		LocalSystem  string
 		LocalCase    bool
 	}{
+		Owner:        c.OwnerID,
 		Backend:      c.Backend,
 		COSBucket:    c.Config.COS.Bucket,
 		COSRegion:    c.Config.COS.Region,
@@ -156,6 +161,13 @@ func (c Connection) Validate() error {
 		return fmt.Errorf("storage connection %q: generation must be positive, got %d", c.Name, c.Generation)
 	}
 	missing := func(what string) error { return fmt.Errorf("storage connection %q: %s is empty", c.Name, what) }
+	// A user-supplied connection may only name a COS bucket: `local` would let an
+	// account read and write arbitrary paths on the host, and `s3` would let it point
+	// this process at any endpoint it likes, which is an SSRF primitive rather than a
+	// storage choice. Both stay operator-only.
+	if c.OwnerID != "" && c.Backend != "cos" {
+		return fmt.Errorf("storage connection %q: an account may only add a cos connection, got backend %q", c.Name, c.Backend)
+	}
 	switch c.Backend {
 	case "cos":
 		if c.Config.COS.Bucket == "" {
