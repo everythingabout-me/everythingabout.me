@@ -72,7 +72,10 @@ func (b cosTreeBackend) List(ctx context.Context, prefix, cursor string) (object
 				return objecttree.NativePage{}, storage.NewError("invalid_backend_response", "", err)
 			}
 		}
-		page.Objects = append(page.Objects, objecttree.Object{Key: obj.Key, Size: obj.Size, ModifiedAt: modified})
+		// A native listing already answers each entry's ETag. Dropping it here made every
+		// listed child cost another HEAD to recover it, which turned one folder listing
+		// into one request per child.
+		page.Objects = append(page.Objects, objecttree.Object{Key: obj.Key, Size: obj.Size, ModifiedAt: modified, ETag: obj.ETag})
 	}
 	// COS's native delimiter listing supplies NextMarker. Do not synthesize one:
 	// doing so can skip common prefixes or hide an incomplete native response.
@@ -112,7 +115,10 @@ func cosTreeObject(key string, header http.Header) (objecttree.Object, error) {
 			return objecttree.Object{}, storage.NewError("invalid_backend_response", "", err)
 		}
 	}
-	return objecttree.Object{Key: key, Size: size, ModifiedAt: modified, MediaType: header.Get("Content-Type"), VersionID: header.Get("x-cos-version-id")}, nil
+	// The ETag is kept exactly as COS spells it (quoted): the same bytes go back in
+	// If-Match, and a listing reports the identical value, so a revision captured
+	// from either place compares equal.
+	return objecttree.Object{Key: key, Size: size, ModifiedAt: modified, MediaType: header.Get("Content-Type"), VersionID: header.Get("x-cos-version-id"), ETag: header.Get("ETag")}, nil
 }
 func cosTreeError(ctx context.Context, err error, versioned bool) error {
 	if ctx.Err() != nil {

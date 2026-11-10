@@ -26,12 +26,19 @@ import (
 // Object is metadata supplied by a native HEAD, list or GET. VersionID is the
 // provider's immutable version id, and is empty unless the provider retains
 // versions. It is never the revision a conditional effect compares.
+//
+// ETag is the object's current ETag exactly as the provider spells it (object
+// stores quote it), because it is also what a conditional request must send. A
+// delimiter listing already reports one per entry, so carrying it here is the
+// difference between one listing per folder and one extra HEAD per child: a
+// folder of a thousand files used to cost a thousand and one native requests.
 type Object struct {
 	Key        string
 	Size       int64
 	ModifiedAt time.Time
 	MediaType  string
 	VersionID  string
+	ETag       string
 }
 type NativePage struct {
 	Objects   []Object
@@ -195,7 +202,7 @@ func (t *Tree) children(ctx context.Context, path storage.Path) ([]storage.Entry
 		if len(entries) >= maxDirectoryEntries {
 			return fail("resource_limit", path)
 		}
-		entry := storage.Entry{Path: child, Kind: kind, NativeRef: []byte(t.key(child))}
+		entry := storage.Entry{Path: child, Kind: kind, NativeRef: []byte(t.key(child)), NativeETag: listETag(obj.ETag)}
 		if !folder {
 			if obj.Size < 0 {
 				return fail("invalid_backend_response", child)
@@ -336,8 +343,9 @@ func parentPathOf(p storage.Path) storage.Path {
 	return ""
 }
 func (t *Tree) entry(path storage.Path, obj Object) storage.Entry {
-	return storage.Entry{Path: path, Kind: storage.File, NativeRef: []byte(t.key(path)), Revision: versionToken(obj.VersionID), Size: obj.Size, ModifiedAt: obj.ModifiedAt, MediaType: obj.MediaType}
+	return storage.Entry{Path: path, Kind: storage.File, NativeRef: []byte(t.key(path)), Revision: versionToken(obj.VersionID), NativeETag: listETag(obj.ETag), Size: obj.Size, ModifiedAt: obj.ModifiedAt, MediaType: obj.MediaType}
 }
+
 // versionToken encodes a provider version id as this tree's revision token. A
 // provider that retains no versions yields no token; the mutation driver then
 // derives its revision from the object ETag instead.
@@ -347,6 +355,18 @@ func versionToken(v string) []byte {
 	}
 	return []byte("native-version:" + v)
 }
+
+// listETag is the ETag a listing already answered for one entry, or nil when the
+// provider reported none (a common prefix has no object behind it). It travels as
+// native evidence, never as this tree's Revision: a read driver's revision names a
+// retained version, and an ETag is not one.
+func listETag(etag string) []byte {
+	if etag == "" || etag == "null" || len(etag) > 1024 || strings.ContainsAny(etag, "\r\n\x00") {
+		return nil
+	}
+	return []byte(etag)
+}
+
 func parseVersionToken(v []byte) (string, error) {
 	if len(v) == 0 {
 		return "", nil
@@ -411,7 +431,12 @@ func (t *Tree) List(ctx context.Context, path storage.Path, request storage.Page
 			return storage.Page{}, err
 		}
 	}
-	entry, err := t.resolve(ctx, path)
+	// Stat settles this path with one listing of its parent; resolve walked from the
+	// root, which made every List cost one native request per path segment. A walk of
+	// a five-deep tree therefore paid five requests per folder just to learn that the
+	// folder its parent had already listed still exists — and a capture walks every
+	// folder of the subtree.
+	entry, err := t.Stat(ctx, path)
 	if err != nil {
 		return storage.Page{}, err
 	}

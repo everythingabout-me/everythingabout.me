@@ -85,3 +85,45 @@ func (r *stringReader) Read(p []byte) (int, error) {
 	r.value = r.value[n:]
 	return n, nil
 }
+
+// A listing's ETag is native evidence about the entry it belongs to, and it is not
+// this tree's Revision: a read driver's revision names a retained version, and a
+// caller may hand a revision back as ReadOptions.PinnedVersion. Reporting the ETag as
+// a revision would make that round trip fail with "unsupported"; reporting it as
+// evidence lets the mutation driver build its own revision without a HEAD per child.
+type etagBackend struct{ objects []Object }
+
+func (b *etagBackend) Head(context.Context, string) (Object, error) { panic("unexpected HEAD") }
+func (b *etagBackend) Get(context.Context, string, string, string) (Response, error) {
+	panic("unexpected GET")
+}
+func (b *etagBackend) List(_ context.Context, prefix, _ string) (NativePage, error) {
+	page := NativePage{}
+	for _, object := range b.objects {
+		page.Objects = append(page.Objects, object)
+	}
+	return page, nil
+}
+
+func TestListCarriesTheNativeETagAsEvidenceNotAsRevision(t *testing.T) {
+	backend := &etagBackend{objects: []Object{{Key: "drive/alice/a.txt", Size: 3, ETag: `"etag-a"`}, {Key: "drive/alice/folder/", Size: 0, ETag: `"etag-folder"`}}}
+	tree, err := Bind(backend, storage.Config{OwnerID: "alice", ConnectionID: "test", Generation: 1, ContentRoot: "drive/alice", SystemRoot: "system/alice"}, make([]byte, 32))
+	if err != nil {
+		t.Fatal(err)
+	}
+	page, err := tree.List(context.Background(), "", storage.PageRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(page.Entries) != 2 {
+		t.Fatalf("entries=%+v", page.Entries)
+	}
+	for _, entry := range page.Entries {
+		if len(entry.Revision) != 0 {
+			t.Fatalf("%s invented revision %q", entry.Path, entry.Revision)
+		}
+		if len(entry.NativeETag) == 0 || entry.NativeETag[0] != '"' {
+			t.Fatalf("%s lost its native ETag: %q", entry.Path, entry.NativeETag)
+		}
+	}
+}

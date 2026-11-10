@@ -316,8 +316,19 @@ from HEAD. This is not a claim that ETags are useless — the same fixture also 
 object, which guards a different rule: an ETag is not an *identity*. Identity is the key (`NativeRef`) plus
 what the driver proves about the content; a revision is only what a conditional effect compares.
 
-Trusting a listing's ETag would be a per-connection decision, taken on evidence for that endpoint, exactly
-like the other admission capabilities — not a default that a provider is assumed to satisfy.
+Trusting a listing's ETag is therefore a per-connection decision, taken on evidence for that endpoint,
+exactly like the other admission capabilities — not a default that a provider is assumed to satisfy. That
+decision is `listingETag` in the admission evidence, and it changes nothing about the rule above: the tree
+still takes its own revision only from HEAD/GET. What it admits is narrower — the *coordinator* may build
+its revision from the ETag a listing already reported instead of heading each listed child, which it does
+only after a probe compared the two channels byte for byte on that bucket (multipart and zero-byte markers
+included, since those are the ones a provider is most likely to spell differently).
+
+The cost that justifies asking for the evidence: an unproven connection pays one HEAD per listed entry, so
+a capture, its consistency re-read and a per-entry check of a 103-entry folder cost roughly 430 requests,
+and a folder of a thousand files costs a thousand per pass. Which is also why the flag is opt-in rather than
+assumed: on an endpoint where the two spellings disagree, the same shortcut turns every captured entry into
+`target_changed` — a wrong answer, not a slow one.
 
 The object mutation driver derives `Revision` from the current object's ETag and sends every conditional
 effect with native `If-Match` / `If-None-Match` where the provider enforces them (COS ignores `If-Match`

@@ -336,13 +336,16 @@ ID lookup conceals the path and its captured subtree while the native purge runs
 operation that deleted nothing makes it visible again. Reusing that path before the operation is terminal is
 `409 operation_in_progress`, not a silent overwrite. Recursive deletion can partially succeed and must
 journal each captured entry; never
-rescan and remove new external additions. Acceptance is proportional to the subtree: the
-server lists every folder twice (capture, then a consistency re-read) before it freezes the
-manifest, so a flat folder of several hundred subfolders can take tens of seconds to answer.
-That work is bounded by the page/entry limits, not by a request deadline — a wall clock here
-aborts exactly the folders that need the time and reports an unactionable failure — so a
-client must treat the confirmation as the decision and report acceptance and completion
-asynchronously rather than in the dialog. Provider backup/version retention is separate and secure erasure is
+rescan and remove new external additions. Acceptance is proportional to the folders in the
+subtree, not to its entries: the server walks it twice (capture, then a consistency re-read)
+before it freezes the manifest, and one pass costs one listing per folder plus one native
+observation per folder whose marker the listing cannot name — a common prefix carries no
+identity of its own. Entries are not read one by one: a connection admitted with listing-ETag
+evidence answers every listed child from the listing, and one without it pays one HEAD per
+entry per pass. That work is bounded by the page/entry limits, not by a request deadline — a
+wall clock here aborts exactly the folders that need the time and reports an unactionable
+failure — so a client must treat the confirmation as the decision and report acceptance and
+completion asynchronously rather than in the dialog. Provider backup/version retention is separate and secure erasure is
 not promised. Temporary transfer cleanup is background work, not deletion of authoritative user content.
 
 Completed rename/move returns `200` file/folder metadata; copy returns `201`; deletion returns `204`. Slow

@@ -608,11 +608,25 @@ func comparePathFromNative(native NativeActions, p storage.Path) string {
 	return comparePath(Root{CaseSensitive: native.StorageNameRules().CaseSensitive}, p)
 }
 func validateCapture(ctx context.Context, req ActionRequest, native NativeActions, b actionBinding, manifest []ManifestEntry) error {
-	// Re-read every captured identity and every future target at once: one capture
-	// of a deep folder otherwise spends a round trip per path, one after another.
+	// Re-read the anchors and every future target at once: one capture of a deep
+	// folder otherwise spends a round trip per path, one after another.
+	//
+	// Captured sources are deliberately not in this list. The re-read below already
+	// compares every one of them, path for path, against a fresh walk, and that walk
+	// now carries each entry's ETag — so a per-entry Stat here adds a second full
+	// pass over the subtree and answers the same question (a delete of 103 entries
+	// spent 103 HEADs on it). The anchors stay: they are the parent chain the walk
+	// starts from, so the walk cannot prove them, and there are only depth-many.
 	checks := make([]nativeCheck, 0, len(b.Anchors)+len(b.Sources)+1+len(manifest))
-	for _, old := range append(append([]storage.Entry(nil), b.Anchors...), b.Sources...) {
+	for _, old := range b.Anchors {
 		checks = append(checks, nativeCheck{expected: old})
+	}
+	// A native tree move binds one folder and skips the re-read below, so its single
+	// source is the only identity anything would otherwise check.
+	if b.Strategy == nativeTreeMoveStrategy {
+		for _, source := range b.Sources {
+			checks = append(checks, nativeCheck{expected: source})
+		}
 	}
 	if b.Existing != nil {
 		checks = append(checks, nativeCheck{expected: *b.Existing})

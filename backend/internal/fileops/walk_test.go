@@ -125,3 +125,82 @@ func TestSnapshotActionTreeBoundsPages(t *testing.T) {
 		t.Fatalf("wide capture past the page limit: %v", err)
 	}
 }
+
+// countingWalk records what one capture and its consistency re-read actually ask the
+// provider for, one call at a time.
+type countingWalk struct {
+	*walkNative
+	stats, lists int
+}
+
+func (c *countingWalk) Stat(ctx context.Context, p storage.Path) (storage.Entry, error) {
+	c.stats++
+	return c.walkNative.Stat(ctx, p)
+}
+func (c *countingWalk) List(ctx context.Context, p storage.Path, q storage.PageRequest) (storage.Page, error) {
+	c.lists++
+	return c.walkNative.List(ctx, p, q)
+}
+
+func countingTree(t *testing.T, files int) *countingWalk {
+	t.Helper()
+	native := &countingWalk{walkNative: newWalkNative()}
+	for f := 0; f < 3; f++ {
+		folder := native.addFolder("", fmt.Sprintf("f%d", f))
+		for i := 0; i < files; i++ {
+			p := storage.Path(string(folder) + fmt.Sprintf("/n%d", i))
+			native.tree[folder] = append(native.tree[folder], storage.Entry{Path: p, Kind: storage.File, Size: 10, Revision: []byte("native-etag:\"e" + string(p) + "\"")})
+		}
+	}
+	return native
+}
+
+// The consistency re-read already compares every captured source against a fresh walk,
+// and that walk carries each entry's ETag. A per-source Stat on top of it is a second
+// pass over the same subtree answering the same question: one HEAD per entry of every
+// recursive delete, which is what made a 103-entry delete take 24 seconds to answer.
+func TestValidateCaptureReReadsTheWalkWithoutStattingEverySource(t *testing.T) {
+	ctx := context.Background()
+	for _, test := range []struct {
+		name    string
+		mutate  func(*countingWalk)
+		wantErr string
+	}{
+		{name: "unchanged", mutate: func(*countingWalk) {}},
+		{
+			name: "one file changed",
+			mutate: func(native *countingWalk) {
+				folder := storage.Path("f1")
+				native.tree[folder][2] = storage.Entry{Path: native.tree[folder][2].Path, Kind: storage.File, Size: 10, Revision: []byte(`native-etag:"rewritten"`)}
+			},
+			wantErr: "target_changed",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			native := countingTree(t, 4)
+			req := ActionRequest{Kind: "delete", From: "", Recursive: true, Root: Root{CaseSensitive: true}, Actor: Actor{ID: "owner:t", CanWrite: true}}
+			binding, manifest, _, err := captureAction(ctx, req, native)
+			if err != nil {
+				t.Fatal(err)
+			}
+			native.stats, native.lists = 0, 0
+			test.mutate(native)
+			err = validateCapture(ctx, req, native, binding, manifest)
+			if test.wantErr != "" {
+				if !IsCode(err, test.wantErr) {
+					t.Fatalf("err=%v want %s", err, test.wantErr)
+				}
+			} else if err != nil {
+				t.Fatal(err)
+			}
+			// One Stat for the walk's own root, plus the captured anchor chain. A Stat
+			// per source is what this test exists to keep out of the re-read.
+			if limit := len(binding.Anchors) + 1; native.stats > limit {
+				t.Fatalf("re-read issued %d Stats, want at most %d (anchors plus the walk root)", native.stats, limit)
+			}
+			if native.lists == 0 {
+				t.Fatal("re-read did not walk the tree")
+			}
+		})
+	}
+}

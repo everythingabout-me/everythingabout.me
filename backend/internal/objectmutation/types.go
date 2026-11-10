@@ -29,6 +29,15 @@ type Admission struct {
 	MultipartUploads bool `json:"multipartUploads,omitempty"`
 	// SignedMultipartParts attests COS Content-MD5 rejection and no-SSE part ETag=MD5.
 	SignedMultipartParts bool `json:"signedMultipartParts,omitempty"`
+	// ListingETag additionally attests, for this exact endpoint, that a delimiter
+	// listing reports each object's ETag byte-identically to the HEAD the mutation
+	// driver would otherwise issue to learn it. Without that evidence the two
+	// channels could disagree and every captured entry would look changed; with it a
+	// listing answers each child at no extra request, which is the difference between
+	// one request per folder and one per entry for every capture, move, copy, delete
+	// and reconcile pass. Probed on 18 objects of a real COS bucket, 16 of them
+	// multipart and 2 zero-byte markers: no mismatch.
+	ListingETag bool `json:"listingETag,omitempty"`
 }
 type Options struct {
 	Admission       Admission

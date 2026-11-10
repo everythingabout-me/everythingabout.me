@@ -36,10 +36,18 @@ type Entry struct {
 	// ContentIdentity is private driver-proven identity independent of pathname.
 	// Only admitted coordinated/versioned drivers may supply it; it is not an app file ID.
 	ContentIdentity []byte
-	Size            int64
-	ModifiedAt      time.Time
-	MediaType       string
-	Digest          *Digest
+	// NativeETag is the provider's current ETag for this entry, spelled exactly as
+	// the provider writes it, set only when the observation that produced the entry
+	// already carried it. It exists because the
+	// mutation driver's revision is an ETag: without this field it re-reads every
+	// listed child with its own HEAD to recover a value the listing had already
+	// answered, which is one extra request per entry per listing. A driver that has
+	// no ETag to offer leaves it nil and nothing changes.
+	NativeETag []byte
+	Size       int64
+	ModifiedAt time.Time
+	MediaType  string
+	Digest     *Digest
 }
 type PageRequest struct {
 	Cursor string

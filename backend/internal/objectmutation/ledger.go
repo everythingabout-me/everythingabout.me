@@ -16,20 +16,20 @@ import (
 )
 
 type ledger struct {
-	Format        int
-	Binding       string
-	Kind          string
-	ID            string
-	Intent        storage.WriteIntent
-	Effect        *storage.EffectIntent
-	Attempt       string
-	Phase         string
-	Digest        *storage.Digest
+	Format         int
+	Binding        string
+	Kind           string
+	ID             string
+	Intent         storage.WriteIntent
+	Effect         *storage.EffectIntent
+	Attempt        string
+	Phase          string
+	Digest         *storage.Digest
 	ParentRevision []byte
-	ExpectedETag  string
-	Result        *storage.MutationResult
-	MetadataReady bool
-	Native        *nativeStage
+	ExpectedETag   string
+	Result         *storage.MutationResult
+	MetadataReady  bool
+	Native         *nativeStage
 	// Provider marks a copy performed inside the storage provider, which has no
 	// spool payload and resolves a lost reply from the target's intent marker.
 	Provider bool
@@ -294,6 +294,18 @@ func (d *Driver) inspect(ctx context.Context, kind, id string, in *storage.Write
 		}
 		return storage.Inspection{State: storage.OutcomeUnknown, Evidence: d.receipt(r)}, nil
 	case "ready":
+		if r.Kind == "delete" {
+			// A delete at "ready" proved its identity and never journaled "publishing",
+			// which precedes the only remote request: nothing was issued, so it is not
+			// applied. It also has no spool file to verify — reading one fails the
+			// inspection, and a failing inspection leaves the entry unknown forever,
+			// which is how one lost checkpoint pinned a whole recursive delete.
+			r.Phase = "not_applied"
+			if err = d.save(r); err != nil {
+				return storage.Inspection{}, err
+			}
+			return storage.Inspection{State: storage.NotApplied, Evidence: d.receipt(r)}, nil
+		}
 		if r.Native == nil && !r.Provider {
 			file, err := d.verifiedSpool(ctx, r)
 			if err != nil {
@@ -799,7 +811,16 @@ func (d *Driver) Remove(ctx context.Context, in storage.Mutation, cp storage.Che
 	if r.Phase == "applied" && r.Result != nil {
 		return cloneResult(*r.Result), nil
 	}
-	if r.Phase != "new" {
+	// "publishing" is journaled before the one remote request, so it is the only
+	// phase in which a delete may already exist. That one stays unresolved by
+	// design: a HEAD cannot attribute a deletion that may have been someone else's.
+	// Every other phase proves no request was issued, and refusing them made a
+	// delete that merely failed to save its checkpoint permanently unresolvable —
+	// the retry below then never even reached the provider. Restarting revalidates
+	// the whole identity first, so a path that moved on still fails with its own
+	// code instead of being deleted on trust.
+	switch r.Phase {
+	case "applied", "publishing", "unknown":
 		return storage.MutationResult{}, fail("outcome_unknown", in.Path)
 	}
 	current, err := d.Stat(ctx, in.Path)
