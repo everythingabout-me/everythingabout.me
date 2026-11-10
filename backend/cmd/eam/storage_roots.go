@@ -10,7 +10,7 @@ import (
 
 	"everythingabout.me/backend/internal/filechanges"
 	"everythingabout.me/backend/internal/fileops"
-	"everythingabout.me/backend/internal/storagebackend"
+	"everythingabout.me/backend/internal/storage"
 	"everythingabout.me/backend/internal/store"
 )
 
@@ -146,8 +146,8 @@ func (p postgresRootStore) ResetChangeRoot(ctx context.Context, owner, namespace
 // deliberately cheap: a couple of statements per changed owner and no native
 // enumeration, because deployments have many owners and scanning them at startup
 // is not affordable.
-func adoptStorageRoots(ctx context.Context, db *store.DB, backend *storagebackend.Backend) error {
-	if db == nil || backend == nil {
+func adoptStorageRoots(ctx context.Context, db *store.DB, source bindingSource) error {
+	if db == nil || source == nil {
 		return nil
 	}
 	var present string
@@ -159,13 +159,20 @@ func adoptStorageRoots(ctx context.Context, db *store.DB, backend *storagebacken
 		return nil
 	}
 	return adoptRoots(ctx, newRootStore(db), func(owner string) (fileops.Root, error) {
-		return bindingRoot(backend, owner)
+		return bindingRoot(source, owner)
 	})
 }
 
-// bindingRoot derives the tree the current configuration selects for one owner.
-func bindingRoot(backend *storagebackend.Backend, owner string) (fileops.Root, error) {
-	binding, err := backend.Binding(owner)
+// bindingSource is the part of a storage factory this file needs: where an
+// owner's tree lives. Both the environment-built backend and the connection
+// resolver satisfy it.
+type bindingSource interface {
+	Binding(string) (storage.Config, error)
+}
+
+// bindingRoot derives the tree the current binding selects for one owner.
+func bindingRoot(source bindingSource, owner string) (fileops.Root, error) {
+	binding, err := source.Binding(owner)
 	if err != nil {
 		return fileops.Root{}, err
 	}
@@ -239,8 +246,8 @@ func rootOwners(budgets map[string]fileops.Root, heads map[string]string) []stri
 
 // inspectStorageRoots is the read-only form used by `eam doctor`: it reports the
 // same disagreement the server would adopt, without changing anything.
-func inspectStorageRoots(ctx context.Context, db *store.DB, backend *storagebackend.Backend) error {
-	if db == nil || backend == nil {
+func inspectStorageRoots(ctx context.Context, db *store.DB, source bindingSource) error {
+	if db == nil || source == nil {
 		return nil
 	}
 	store := newRootStore(db)
@@ -253,7 +260,7 @@ func inspectStorageRoots(ctx context.Context, db *store.DB, backend *storageback
 		return fmt.Errorf("inspect storage roots: %w", err)
 	}
 	problems := rootProblems(budgets, heads, func(owner string) (fileops.Root, error) {
-		return bindingRoot(backend, owner)
+		return bindingRoot(source, owner)
 	})
 	if len(problems) == 0 {
 		return nil

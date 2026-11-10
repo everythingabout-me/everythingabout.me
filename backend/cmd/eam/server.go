@@ -14,6 +14,7 @@ import (
 
 	"everythingabout.me/backend/internal/api"
 	"everythingabout.me/backend/internal/config"
+	"everythingabout.me/backend/internal/connections"
 	"everythingabout.me/backend/internal/storagebackend"
 	"everythingabout.me/backend/internal/store"
 	"everythingabout.me/backend/internal/webui"
@@ -54,15 +55,24 @@ func runServer(args []string) error {
 		slog.Warn("coordinated object writes are disabled", "reason", problem)
 	}
 
-	// The configured tree wins: when it changed, adopt it and invalidate the derived
-	// view instead of refusing to start. This is a constant number of statements per
-	// changed owner, with no native enumeration.
-	if err := adoptStorageRoots(ctx, db, backend); err != nil {
+	// Connections are data. The environment seeds the first authority row of a fresh
+	// database and is not consulted again for an owner that already has a binding, so
+	// adding a provider is an INSERT instead of a deployment edit.
+	connStore := connections.NewPostgresStore(db)
+	resolver := connections.NewResolver(*cfg, connStore)
+	defer resolver.Close()
+	if err := resolver.Seed(ctx); err != nil {
+		return fmt.Errorf("seed storage connections: %w", err)
+	}
+	// The row a binding names is authoritative: when it changed, adopt it and
+	// invalidate the derived view instead of refusing to start. This is a constant
+	// number of statements per changed owner, with no native enumeration.
+	if err := adoptStorageRoots(ctx, db, resolver); err != nil {
 		return err
 	}
 
 	apiServer := api.New(cfg, db, backend.Legacy(), webui.New(cfg.WebDir))
-	apiServer.SetStorageFactory(backend)
+	apiServer.SetStorageFactory(resolver)
 	server := &http.Server{
 		Addr:              cfg.Addr,
 		Handler:           apiServer.Handler(),

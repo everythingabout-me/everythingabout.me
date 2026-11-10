@@ -44,6 +44,8 @@ func main() {
 		err = runDoctor(args)
 	case "reconcile":
 		err = runReconcile(args)
+	case "storage-connection":
+		err = runStorageConnection(args)
 	case "storage-admit":
 		err = runStorageAdmit(args)
 	case "storage-baseline":
@@ -81,6 +83,8 @@ usage:
   eam migrate                      create tables / run sql/*.sql
   eam doctor [--owner-id UUID] [--write]  check config, database, selected storage
   eam reconcile --owner email-or-UUID [--inventory inventory.csv] [--dry-run]
+  eam storage-connection list
+  eam storage-connection add --name NAME --backend cos|s3|local --role authority|backup [flags]
   eam storage-admit --owner-id UUID --writers-quiesced --evidence proof.json [--physical-limit N] [--dry-run]
   eam storage-baseline --owner-id UUID --output new-baseline.json [--writers-quiesced]
   eam storage-baseline --input baseline.json --output recheck.json [--quota-bytes N]

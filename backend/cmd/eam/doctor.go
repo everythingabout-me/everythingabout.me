@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"everythingabout.me/backend/internal/config"
+	"everythingabout.me/backend/internal/connections"
 	"everythingabout.me/backend/internal/cos"
 	"everythingabout.me/backend/internal/storage"
 	"everythingabout.me/backend/internal/storagebackend"
@@ -162,7 +163,9 @@ func checkStorageRoots(ctx context.Context, cfg *config.Config, db *store.DB, ch
 		checks.warn("owner roots not compared: database unavailable")
 		return
 	}
-	if err := inspectStorageRoots(ctx, db, backend); err != nil {
+	resolver := connections.NewResolver(*cfg, connections.NewPostgresStore(db))
+	defer resolver.Close()
+	if err := inspectStorageRoots(ctx, db, resolver); err != nil {
 		checks.warn(err.Error() + " (the server adopts the configured tree at startup)")
 		return
 	}
