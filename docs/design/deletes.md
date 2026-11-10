@@ -139,9 +139,14 @@ delete.
       before the first native deletion. The confirmation is now `O(1)` in the subtree; the guard, the frozen
       manifest and the per-entry settlement are unchanged, so a path deleted and re-created before the purge
       finishes is still `409` until step 2 lands.
-- [ ] Acceptance transaction (step 2) and prefix purge (step 3) for `delete`.
-- [ ] Purge liveness: skip paths with a non-terminal upload, treat `412` as `adopted`, resume by re-walking.
-- [ ] Operation resource: `deleting` phase with a remaining count, replacing the per-entry manifest progress.
+- [x] Acceptance transaction (step 2) and prefix purge (step 3) for `delete`: the acceptance removes the
+      rows, records one subtree change fact and refunds the quota in its own transaction; the purge walks the
+      prefix and deletes what no live row and no later write claims, re-walking on resume.
+- [x] Purge liveness: a path with a live index row or an observation after `AcceptedAt` is adopted, a delete
+      that comes back `changed`/`precondition_failed` is adopted rather than fatal, and a folder that gained a
+      child during a pass is retried (bounded).
+- [ ] Operation resource: expose `purged`/`adopted` while the purge runs. Today the result appears when the
+      purge finishes; a client sees `running` in between.
 - [ ] Tombstone object (`__eam_system__/<owner>/tombstones/<operation>`) so a rebuild after index loss does not
       resurrect a half-purged delete. Same predicate as the worker; the tombstone is the durable copy.
 - [ ] `move`/`copy` keep the frozen manifest: their effects are conditional on both endpoints and a re-walk

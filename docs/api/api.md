@@ -336,16 +336,15 @@ ID lookup conceals the path and its captured subtree while the native purge runs
 operation that deleted nothing makes it visible again. Reusing that path before the operation is terminal is
 `409 operation_in_progress`, not a silent overwrite. Recursive deletion can partially succeed and must
 journal each captured entry; never
-rescan and remove new external additions after that capture. Acceptance itself is `O(1)` in the size of the
-subtree: it resolves the target (its parent's listing and its own marker) and answers, while the capture and the
-consistency re-read that freeze the manifest run in the worker that owns the purge, before the first native
-deletion. The captured set is therefore what the subtree held when the worker started rather than when the
-client clicked; the two differ only by writes that arrived in between, and the pending deletion still refuses
-those with `409 operation_in_progress`. A pass costs one listing per folder plus one native observation per
-folder whose marker the listing cannot name — a common prefix carries no identity of its own — so a large
-folder costs the worker time, never the request. That work is bounded by the page/entry limits, not by a
-request deadline: a wall clock there aborts exactly the folders that need the time and reports an unactionable
-failure. Provider backup/version retention is separate and secure erasure is
+remove external additions at all — the deletion set is the subtree that was accepted, minus anything the index
+holds as live again. Acceptance is `O(1)` in the size of the subtree: it resolves the target and then settles
+the deletion in one database transaction — the rows leave the index, one subtree change fact is recorded, the
+quota is refunded — and the `202` is that commit. The bytes leave the provider afterwards, by a purge that
+walks the prefix and deletes every object whose path has no live index row and which was not observed after the
+acceptance; a path the user re-created in the meantime is their new content and is left alone. Because the rows
+are gone when the response arrives, the name is free at once: a folder deleted and re-created in the same second
+gets an ordinary create, not `409 operation_in_progress`. A purge that cannot finish (provider down, throttled)
+does not fail the deletion — the index already recorded it — and it resumes from a re-walk. Provider backup/version retention is separate and secure erasure is
 not promised. Temporary transfer cleanup is background work, not deletion of authoritative user content.
 
 Completed rename/move returns `200` file/folder metadata; copy returns `201`; deletion returns `204`. Slow

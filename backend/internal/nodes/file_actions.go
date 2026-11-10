@@ -9,12 +9,14 @@ import (
 	"strings"
 	"time"
 
+	"everythingabout.me/backend/internal/filechanges"
 	fc "everythingabout.me/backend/internal/filecontract"
 	"everythingabout.me/backend/internal/fileops"
 	"everythingabout.me/backend/internal/filerevision"
 	"everythingabout.me/backend/internal/paths"
 	"everythingabout.me/backend/internal/storage"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 // CommitFileAction settles only the finite journal's proven native effects. It
@@ -410,4 +412,124 @@ func settledMetadata(ctx context.Context, tx pgx.Tx, root fileops.Root, entry st
 		return fc.Metadata{}, fileops.E("invalid_native_result", nil)
 	}
 	return IndexedMetadata(fileRootNamespace(root), *record)
+}
+
+// CommitPrefixDelete settles an accepted recursive deletion in the transaction that
+// accepts it: the subtree leaves the index, the change feed records one subtree
+// deletion, the content revisions and stale generations go with the rows, and the bytes
+// it removed are returned so the journal refunds them in the same commit.
+//
+// Doing this before the bytes leave the provider is what makes the deletion final at
+// `202`: every read resolves through these rows, so once they commit the subtree is
+// gone for the user even while the purge is still running. It is also what frees the
+// namespace: there is no concealed-but-live row for a re-creation to collide with.
+func CommitPrefixDelete(ctx context.Context, tx pgx.Tx, op fileops.Operation) (int64, json.RawMessage, error) {
+	var request fileops.ActionRequest
+	if json.Unmarshal(op.Intent, &request) != nil || request.Kind != "delete" || request.From == "" {
+		return 0, nil, fileops.E("invalid_intent", nil)
+	}
+	namespace := fileRootNamespace(op.Root)
+	if _, err := filechanges.BindRoot(ctx, tx, op.Root.OwnerID, namespace); err != nil {
+		return 0, nil, err
+	}
+	if _, err := tx.Exec(ctx, configureNameComparisonSQL, op.Root.OwnerID, nameComparisonVersion(op.Root.CaseSensitive)); err != nil {
+		return 0, nil, fmt.Errorf("configure root name comparison: %w", err)
+	}
+	path := string(request.From)
+	before, err := captureFileState(ctx, tx, op.Root.OwnerID, namespace, path)
+	if err != nil {
+		return 0, nil, err
+	}
+	if before.metadata == nil {
+		return 0, nil, storage.NewError("not_found", request.From, nil)
+	}
+	pattern := EscapeLike(path) + "/%"
+	rows, err := tx.Query(ctx, `select id::text, size from file_entries where owner_id=$1::uuid and path=$2`, op.Root.OwnerID, path)
+	if err != nil {
+		return 0, nil, err
+	}
+	ids := make([]string, 0, 64)
+	var removed int64
+	for rows.Next() {
+		var id string
+		var size int64
+		if err = rows.Scan(&id, &size); err != nil {
+			rows.Close()
+			return 0, nil, err
+		}
+		ids = append(ids, id)
+		removed += size
+	}
+	rows.Close()
+	if err = rows.Err(); err != nil {
+		return 0, nil, err
+	}
+	descendants, err := tx.Query(ctx, `select id::text, size from file_entries where owner_id=$1::uuid and path like $2`, op.Root.OwnerID, pattern)
+	if err != nil {
+		return 0, nil, err
+	}
+	for descendants.Next() {
+		var id string
+		var size int64
+		if err = descendants.Scan(&id, &size); err != nil {
+			descendants.Close()
+			return 0, nil, err
+		}
+		ids = append(ids, id)
+		removed += size
+	}
+	descendants.Close()
+	if err = descendants.Err(); err != nil {
+		return 0, nil, err
+	}
+	if len(ids) > 0 {
+		if _, err = tx.Exec(ctx, `delete from nodes where owner_id=$1::uuid and id=any($2::uuid[])`, op.Root.OwnerID, ids); err != nil {
+			return 0, nil, fmt.Errorf("settle prefix deletion: %w", err)
+		}
+	}
+	if _, err = tx.Exec(ctx, `delete from file_content_generations where owner_id=$1::uuid and root_namespace=$2 and (path=$3 or path like $4)`, op.Root.OwnerID, namespace, path, pattern); err != nil {
+		return 0, nil, err
+	}
+	// One subtree fact, not one per object: the feed's contract already lets a single
+	// change retire a whole folder, and a deletion does not need to page the feed for
+	// every file inside it.
+	if err = settleFileChanges(ctx, tx, op, []fileEffectCapture{{key: op.ID + ":subtree", source: path, subtree: true, before: before}}); err != nil {
+		return 0, nil, err
+	}
+	result, err := json.Marshal(fc.DeleteResult{Deleted: true})
+	return removed, result, err
+}
+
+// LiveFilePaths answers which of these paths the index still holds. The purge must not
+// delete a path a user re-created after the deletion was accepted, and the provider's
+// own clock is not authoritative for the user's intent.
+func LiveFilePaths(ctx context.Context, pool *pgxpool.Pool, owner string, paths []storage.Path) ([]bool, error) {
+	live := make([]bool, len(paths))
+	if len(paths) == 0 {
+		return live, nil
+	}
+	values := make([]string, len(paths))
+	for i, path := range paths {
+		values[i] = string(path)
+	}
+	rows, err := pool.Query(ctx, `select path from file_entries where owner_id=$1::uuid and path=any($2)`, owner, values)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	found := make(map[string]bool, len(paths))
+	for rows.Next() {
+		var path string
+		if err = rows.Scan(&path); err != nil {
+			return nil, err
+		}
+		found[path] = true
+	}
+	if err = rows.Err(); err != nil {
+		return nil, err
+	}
+	for i, path := range paths {
+		live[i] = found[string(path)]
+	}
+	return live, nil
 }

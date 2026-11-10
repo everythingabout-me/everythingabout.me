@@ -140,7 +140,34 @@ type Operation struct {
 	ChargedLogical     int64
 	ChargedPhysical    int64
 	Lease              Lease
+	// Purge marks a recursive deletion whose index settlement already happened: the
+	// subtree left the index when the deletion was accepted, and what remains is the
+	// native purge of bytes. It carries what the purge needs to decide, in one place,
+	// because a re-walk after a restart must reach the same answer as the first pass.
+	Purge *PurgeState `json:",omitempty"`
 }
+
+// PurgeState is the durable intent of an accepted prefix deletion. The index rows are
+// already gone; this is the only surviving description of what still has to leave the
+// provider, and it is deliberately not a per-object manifest: a re-walk is idempotent,
+// and an object that appeared after AcceptedAt belongs to somebody else's newer intent.
+type PurgeState struct {
+	Path       storage.Path
+	AcceptedAt time.Time
+	Deleted    int64
+	Adopted    int64
+}
+
+// PrefixDeleteCommit settles one accepted prefix deletion inside the accepting
+// transaction: it removes the subtree's index rows, records the change facts and
+// returns the bytes it removed so the journal can refund them in the same commit.
+// Returning without error means the user's deletion is final.
+type PrefixDeleteCommit func(context.Context, pgx.Tx, Operation) (int64, json.RawMessage, error)
+
+// LivePaths reports which of these paths the index still holds as live entries. The
+// purge uses it to leave alone anything a user re-created after accepting the
+// deletion: the provider's own clock cannot be trusted to tell those apart.
+type LivePaths func(context.Context, Root, []storage.Path) ([]bool, error)
 
 func (o Operation) Terminal() bool {
 	return o.State == Succeeded || o.State == Failed || o.State == Cancelled

@@ -648,7 +648,7 @@ func randomFilesKey() string {
 	return "request-" + hex.EncodeToString(b[:])
 }
 func (s *Server) filesActions(r *http.Request, f *fileRequest, native fileops.NativeActions) (*fileops.Actions, error) {
-	return fileops.NewActions(s.filesJournal, fileops.ActionsOptions{Authorize: s.filesMutationAuthorize(r, f, native), Commit: nodes.CommitFileAction, Validate: func(ctx context.Context, n fileops.NativeActions, req fileops.ActionRequest) error {
+	return fileops.NewActions(s.filesJournal, fileops.ActionsOptions{Authorize: s.filesMutationAuthorize(r, f, native), Commit: nodes.CommitFileAction, PrefixCommit: nodes.CommitPrefixDelete, LivePaths: s.filesLivePaths, Validate: func(ctx context.Context, n fileops.NativeActions, req fileops.ActionRequest) error {
 		encoded, err := json.Marshal(req)
 		if err != nil {
 			return err
@@ -999,4 +999,11 @@ func (s *Server) filesPutRecovery(r *http.Request, f *fileRequest, native fileop
 	return fileops.NewService(s.filesJournal, fileops.ServiceOptions{Authorize: s.filesMutationAuthorize(r, f, native), Commit: nodes.CommitStagedFile, PhysicalDelta: func(op fileops.Operation, _ storage.MutationResult) (int64, error) {
 		return fileops.PhysicalDelta(op.Root, op.Reservation.NewBytes, op.Reservation.OldBytes), nil
 	}})
+}
+
+// filesLivePaths answers, for the purge, which of these paths the index still holds. A
+// re-created path is the user's new content: the purge skips it, because deleting it
+// would lose bytes the user can see.
+func (s *Server) filesLivePaths(ctx context.Context, root fileops.Root, paths []storage.Path) ([]bool, error) {
+	return nodes.LiveFilePaths(ctx, s.db.Pool(), root.OwnerID, paths)
 }

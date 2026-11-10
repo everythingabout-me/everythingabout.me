@@ -22,6 +22,13 @@ type ActionsOptions struct {
 	Authorize Authorize
 	Validate  ActionValidation
 	Commit    IndexCommit
+	// PrefixCommit settles one recursive deletion in the transaction that accepts it.
+	// It is required for `delete`: without it there is nothing that can make the
+	// user's decision true before the purge, so the operation refuses to be accepted.
+	PrefixCommit PrefixDeleteCommit
+	// LivePaths answers which of these paths the index still holds. The purge uses it to
+	// leave a path alone that a user re-created after accepting the deletion.
+	LivePaths LivePaths
 	LeaseTTL  time.Duration
 }
 type Actions struct {
@@ -229,19 +236,18 @@ func (a *Actions) Prepare(ctx context.Context, req ActionRequest, native NativeA
 	if err = a.options.Validate(work, native, req); err != nil {
 		return fail(err)
 	}
-	// A deletion is the one action whose captured set can be collected after it is
-	// accepted: the guard taken by Begin already conceals the subtree from every read,
-	// and the native purge is background work either way. Walking before answering made
-	// the confirmation proportional to the subtree — two passes plus a per-entry check,
-	// 20.0s for 48 subfolders — while the client only needed to know its decision was
-	// final. The target is still resolved here, so a missing path or a stale revision
-	// answers synchronously instead of becoming an accepted operation that fails later.
+	// A deletion settles the index in the transaction that accepts it, and purges bytes
+	// afterwards. Walking the subtree first made the confirmation proportional to it —
+	// two passes plus a per-entry check, 20.0s for 48 subfolders — for a deletion set the
+	// client never needed to see. The target is still observed here, so a missing path or
+	// a stale revision answers synchronously instead of becoming an accepted operation
+	// that fails later.
 	if req.Kind == "delete" {
-		if _, err = observe(work, native, req.From); err != nil {
-			return fail(err)
+		accepted, acceptErr := a.acceptDelete(work, req, op, native)
+		if acceptErr != nil {
+			return fail(acceptErr)
 		}
-		saved, readErr := a.journal.Get(work, req.Root, req.Actor, op.ID)
-		return saved, false, readErr
+		return accepted, false, nil
 	}
 	binding, manifest, reservation, err := captureAction(work, req, native)
 	if err != nil {
@@ -699,6 +705,11 @@ func (a *Actions) Run(ctx context.Context, root Root, actor Actor, id string, na
 	req, err := actionRequest(op)
 	if err != nil {
 		return op, err
+	}
+	if op.Purge != nil {
+		// The index already forgot this subtree when the deletion was accepted; all that
+		// is left is the bytes, and a re-walk is how it resumes.
+		return a.purgePrefix(ctx, root, actor, op, native)
 	}
 	binding, err := a.journal.ActionBinding(ctx, op)
 	if IsCode(err, "manifest_not_frozen") && op.Kind == "delete" {

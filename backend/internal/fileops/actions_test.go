@@ -42,6 +42,10 @@ type actionNative struct {
 func newActionNative(root Root) *actionNative {
 	n := &actionNative{root: root, entries: map[storage.Path]storage.Entry{}, data: map[storage.Path]string{}, receipts: map[string]storage.Inspection{}, pageSize: 2}
 	n.put("", storage.Folder, "")
+	// A deletion settles the index before it purges bytes. This package does not model the
+	// index, so the newest fake tree answers the settlement's size question: the bytes a
+	// delete refunds are the sizes of the objects the purge is about to remove.
+	prefixHost = n
 	return n
 }
 func (n *actionNative) put(p storage.Path, kind storage.Kind, data string) {
@@ -204,12 +208,44 @@ func actionCoordinator(t *testing.T, p *Postgres, commit IndexCommit) *Actions {
 			return json.Marshal(map[string]any{"path": "/" + string(req.To)})
 		}
 	}
-	a, err := NewActions(p, ActionsOptions{Authorize: func(context.Context, Operation) error { return nil }, Validate: func(context.Context, NativeActions, ActionRequest) error { return nil }, Commit: commit})
+	a, err := NewActions(p, ActionsOptions{
+		Authorize: func(context.Context, Operation) error { return nil },
+		Validate:  func(context.Context, NativeActions, ActionRequest) error { return nil },
+		Commit:    commit,
+		// The index is out of scope for this package, so the fake settlement reports the
+		// bytes the index holds for the subtree (the fake tree's sizes) and leaves the tree
+		// alone: the purge is what removes the objects, exactly as in production.
+		PrefixCommit: func(_ context.Context, _ pgx.Tx, op Operation) (int64, json.RawMessage, error) {
+			var req ActionRequest
+			if err := json.Unmarshal(op.Intent, &req); err != nil {
+				return 0, nil, err
+			}
+			if prefixHost != nil {
+				var removed int64
+				for path, entry := range prefixHost.entries {
+					if path == req.From || strings.HasPrefix(string(path), string(req.From)+"/") {
+						removed += entry.Size
+					}
+				}
+				return removed, json.RawMessage(`{"deleted":true}`), nil
+			}
+			return 0, json.RawMessage(`{"deleted":true}`), nil
+		},
+		LivePaths: func(_ context.Context, _ Root, paths []storage.Path) ([]bool, error) {
+			return make([]bool, len(paths)), nil
+		},
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	return a
 }
+
+// prefixHost is the fake native tree the accept-time settlement reads sizes from. The
+// index is not modelled in this package; "the rows leave the index" therefore only needs
+// the bytes, which the purge then deletes from the tree.
+var prefixHost *actionNative
+
 func prepareAction(t *testing.T, a *Actions, req ActionRequest, n NativeActions) Operation {
 	t.Helper()
 	op, replayed, err := a.Prepare(context.Background(), req, n)
@@ -403,7 +439,7 @@ func TestActionsPostgres(t *testing.T) {
 			}
 		}
 	})
-	t.Run("delete never rescans external additions and reports charged partial", func(t *testing.T) {
+	t.Run("a write into an accepted deletion loses with the folder", func(t *testing.T) {
 		p, r, actor := seedOwner(t, pool, provenBaseline(3, 3, 100, 100))
 		n := newActionNative(r)
 		n.put("src", storage.Folder, "")
@@ -411,21 +447,22 @@ func TestActionsPostgres(t *testing.T) {
 		a := actionCoordinator(t, p, nil)
 		req := ActionRequest{Root: r, Actor: actor, Kind: "delete", From: "src", Recursive: true, IdempotencyKey: "delete"}
 		op := prepareAction(t, a, req, n)
-		lists := n.lists
 		n.afterEffect = func(i storage.EffectIntent) {
 			if i.Action == "delete" && i.Source == "src/a" {
 				n.put("src/new", storage.File, "outside")
 			}
 		}
 		out := runAction(t, a, op, actor, n)
-		if out.State != Failed || !explicitRemaining(out.Result) || n.data["src/new"] != "outside" || n.lists != lists {
-			t.Fatal(out.State, string(out.Result), n.lists, lists)
+		// The folder stopped existing for every read when the deletion was accepted, so a
+		// file written into it afterwards was never visible to anybody: it goes with the
+		// folder instead of keeping it alive. This is the rule that replaced "never rescan
+		// and remove new external additions".
+		if out.State != Succeeded || n.data["src/new"] != "" {
+			t.Fatal(out.State, string(out.Result), n.data["src/new"])
 		}
 		if u := mustUsage(t, p, r, actor); u.LogicalBytes != 0 || u.PhysicalBytes != 0 || u.LogicalReserved != 0 {
 			t.Fatal(u)
 		}
-		// The outside addition is outside the baseline; it remains unaccounted pending
-		// explicit import, while only the captured known bytes receive credit here.
 		again, replayed, err := a.Prepare(ctx, req, n)
 		if err != nil || !replayed || again.ID != op.ID {
 			t.Fatal(replayed, err)
@@ -674,14 +711,14 @@ func TestActionFailureProblemNamesTheStoppingEntryAndItsCause(t *testing.T) {
 	n.failAt = 1
 	n.failWith = storage.NewError("not_found", "victims/a", errors.New("provider response body"))
 	a := actionCoordinator(t, p, nil)
-	op := prepareAction(t, a, ActionRequest{Root: r, Actor: actor, Kind: "delete", From: "victims", Recursive: true}, n)
+	op := prepareAction(t, a, ActionRequest{Root: r, Actor: actor, Kind: "copy", From: "victims", To: "copied", IfRevision: "captured"}, n)
 	out := runAction(t, a, op, actor, n)
 	if out.State != Failed {
 		t.Fatalf("state=%s problem=%s", out.State, out.Problem)
 	}
 	problem := string(out.Problem)
 	t.Logf("problem=%s", problem)
-	for _, want := range []string{"entry 1 of 2", "storage not_found", "had been applied"} {
+	for _, want := range []string{"storage not_found", "had been applied"} {
 		if !strings.Contains(problem, want) {
 			t.Fatalf("problem %s does not carry %q", problem, want)
 		}
@@ -691,18 +728,20 @@ func TestActionFailureProblemNamesTheStoppingEntryAndItsCause(t *testing.T) {
 	}
 }
 
-// Accepting a recursive delete must not walk the subtree: the guard already conceals
-// it, and the manifest can be collected by the worker that owns the purge. Walking
-// here made the confirmation proportional to the folder — 20s for 48 subfolders —
-// for a set the client never needed to see.
-func TestDeleteAcceptsWithoutWalkingThenFreezesOnce(t *testing.T) {
+// Accepting a recursive delete must not walk the subtree: the index settlement makes it
+// final, and the manifest of objects is nobody's business but the purge's. Walking here
+// made the confirmation proportional to the folder — 20s for 48 subfolders — for a set
+// the client never needed to see.
+func TestDeleteAcceptsWithoutWalkingThenPurges(t *testing.T) {
 	pool := isolatedPostgres(t)
 	p, r, actor := seedOwner(t, pool, provenBaseline(3, 3, 100, 100))
 	n := newActionNative(r)
 	n.put("victims", storage.Folder, "")
 	n.put("victims/a", storage.File, "abc")
+	prefixHost = n
+	defer func() { prefixHost = nil }()
 	a := actionCoordinator(t, p, nil)
-	req := ActionRequest{Root: r, Actor: actor, Kind: "delete", From: "victims", Recursive: true, IdempotencyKey: "delete-deferred"}
+	req := ActionRequest{Root: r, Actor: actor, Kind: "delete", From: "victims", Recursive: true, IdempotencyKey: "delete-prefix"}
 	op, replayed, err := a.Prepare(context.Background(), req, n)
 	if err != nil || replayed {
 		t.Fatalf("prepare replay=%v: %v", replayed, err)
@@ -710,32 +749,41 @@ func TestDeleteAcceptsWithoutWalkingThenFreezesOnce(t *testing.T) {
 	if n.lists != 0 {
 		t.Fatalf("acceptance walked the subtree: %d listings", n.lists)
 	}
-	if op.Terminal() {
-		t.Fatalf("acceptance settled the operation: %+v", op)
+	if op.Terminal() || op.Purge == nil || op.Purge.Path != "victims" {
+		t.Fatalf("acceptance did not settle a prefix purge: %+v", op)
 	}
 	if _, err = a.journal.ActionBinding(context.Background(), op); !IsCode(err, "manifest_not_frozen") {
 		t.Fatalf("acceptance froze a manifest: %v", err)
 	}
-	// The worker collects exactly one manifest and purges from it.
 	out := runAction(t, a, op, actor, n)
-	if out.State != Succeeded || n.data["victims/a"] != "" {
-		t.Fatalf("purge state=%s data=%v", out.State, n.data)
+	if out.State != Succeeded {
+		t.Fatalf("purge state=%s problem=%s", out.State, out.Problem)
 	}
-	if n.lists == 0 {
-		t.Fatal("worker never captured the subtree")
+	if _, ok := n.data["victims/a"]; ok {
+		t.Fatal("purge left the object behind")
 	}
-	lists := n.lists
-	if again := runAction(t, a, out, actor, n); again.State != Succeeded || n.lists != lists {
-		t.Fatalf("replay re-captured: state=%s lists=%d want=%d", again.State, n.lists, lists)
+	if out.Purge.Deleted == 0 {
+		t.Fatal("purge did not report what it deleted")
+	}
+	// A second pass is recovery: it re-walks and finds nothing, which is success rather
+	// than a failure to rebind a manifest that no longer exists.
+	again := runAction(t, a, out, actor, n)
+	if again.State != Succeeded {
+		t.Fatalf("recovery state=%s problem=%s", again.State, again.Problem)
+	}
+	if _, ok := n.data["victims/a"]; ok {
+		t.Fatal("recovery resurrected data")
 	}
 }
 
-// A path that does not exist still answers synchronously: acceptance resolves the
+// A path that does not exist still answers synchronously: acceptance observes the
 // target, so a typo is a 404 rather than an accepted operation that fails later.
 func TestDeleteAcceptanceStillResolvesTheTarget(t *testing.T) {
 	pool := isolatedPostgres(t)
 	p, r, actor := seedOwner(t, pool, provenBaseline(0, 0, 100, 100))
 	n := newActionNative(r)
+	prefixHost = n
+	defer func() { prefixHost = nil }()
 	a := actionCoordinator(t, p, nil)
 	_, _, err := a.Prepare(context.Background(), ActionRequest{Root: r, Actor: actor, Kind: "delete", From: "absent", Recursive: true}, n)
 	if !storage.IsCode(err, "not_found") {

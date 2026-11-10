@@ -39,7 +39,44 @@ func TestActionsLocalPostgres(t *testing.T) {
 			}
 			return json.Marshal(map[string]any{"path": "/" + string(native.Entry.Path)})
 		}
-		service, err := fileops.NewActions(fixture.journal, fileops.ActionsOptions{Authorize: func(context.Context, fileops.Operation) error { return nil }, Validate: func(context.Context, fileops.NativeActions, fileops.ActionRequest) error { return nil }, Commit: commit})
+		// This suite exercises native bytes only: the index settlement is modelled as a
+		// no-op refund, so the purge is what removes the tree.
+		service, err := fileops.NewActions(fixture.journal, fileops.ActionsOptions{
+			Authorize: func(context.Context, fileops.Operation) error { return nil },
+			Validate:  func(context.Context, fileops.NativeActions, fileops.ActionRequest) error { return nil },
+			Commit:    commit,
+			// The index is modelled by the native tree here: every object under the prefix is
+			// a row holding its size, so the refund is what the purge is about to remove.
+			PrefixCommit: func(ctx context.Context, _ pgx.Tx, op fileops.Operation) (int64, json.RawMessage, error) {
+				var req fileops.ActionRequest
+				if err := json.Unmarshal(op.Intent, &req); err != nil {
+					return 0, nil, err
+				}
+				var removed int64
+				stack := []storage.Path{req.From}
+				for len(stack) > 0 {
+					dir := stack[len(stack)-1]
+					stack = stack[:len(stack)-1]
+					page, err := native.List(ctx, dir, storage.PageRequest{Limit: 1000})
+					if err != nil {
+						if storage.IsCode(err, "not_found") {
+							continue
+						}
+						return 0, nil, err
+					}
+					for _, entry := range page.Entries {
+						removed += entry.Size
+						if entry.Kind == storage.Folder {
+							stack = append(stack, entry.Path)
+						}
+					}
+				}
+				return removed, json.RawMessage(`{"deleted":true}`), nil
+			},
+			LivePaths: func(_ context.Context, _ fileops.Root, paths []storage.Path) ([]bool, error) {
+				return make([]bool, len(paths)), nil
+			},
+		})
 		if err != nil {
 			t.Fatal(err)
 		}
