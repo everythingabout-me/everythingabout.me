@@ -1,7 +1,8 @@
 # Backup by whole-tree snapshots
 
-> Status: connections (§7–§8) are implemented by `sql/035_storage_connections.sql` and
-> `internal/connections`; the snapshot job (§1–§5, §9) and the restore command (§6) are not built yet.
+> Status: connections (§7–§8) and the snapshot/prune/restore commands (§1–§6) are implemented
+> (`sql/035`–`sql/037`, `internal/connections`, `internal/snapshot`, `eam backup`). What is still
+> missing is the user surface (§11): a status/restore page and editing the policy in §4 from the UI.
 > This replaces the earlier framing in which application metadata was part of the backup. Per `AGENTS.md` (*Bytes are the source of truth*), a backup is a
 > storage-layer artifact: the user's content survives because the storage layer holds copies of the tree.
 > Postgres is a read cache; losing it is a rebuild cost for the operator, never a loss for the user.
@@ -114,6 +115,10 @@ and the index is the cache.
 
 **Single file** — no command. Open the snapshot directory with any file tool.
 
+Implemented as `eam backup restore --owner ... --date ... [--to restore-<date>]`: it copies the
+snapshot into a new path on the authority connection and refuses to overwrite anything, then points the
+operator at `reconcile`. Rebinding that path as the owner's content root is still an operator step.
+
 **The snapshot is never the live tree.** Restore materializes a separate copy and binds that; binding the
 live tree directly to the backup directory would let one bug write into history. Materializing by hardlink
 is allowed only while every writer replaces files instead of modifying them in place, which this service
@@ -158,6 +163,12 @@ Rules, each answering a specific failure:
   first row (idempotent insert by identity), so a wiped database still bootstraps to today's behavior.
 - **One `authority` row per owner, zero or more `backup` rows.** Authority is what the binding names;
   backups are never on the write path and their failure never fails a user request.
+- **`owner_id is null` is the deployment default every account may use; a set owner is that account's
+  own connection.** Resolution always happens for a known owner, so a user row wins over a default with
+  the same name and two accounts may both call their connection "nas".
+- **An account may only add a `cos` connection.** A `local` row would let an account read and write
+  arbitrary host paths, and an `s3` row would let it point this process at any endpoint — an outbound
+  request primitive rather than a storage choice. Both remain operator-only.
 
 ## 8. Runtime
 
