@@ -111,6 +111,37 @@ test("Problem errors preserve code and operation identity without cookie fallbac
   assert.equal(count, 1);
 });
 
+// A 429 with Retry-After is admission control: the handler never ran, so the request is
+// replayed once the window reopens instead of becoming a failed page load or upload file.
+test("a rate-limited request waits for Retry-After and is replayed", async (t) => {
+  const { api } = await client();
+  let count = 0;
+  mockFetch(t, async () => {
+    count++;
+    if (count === 1) return new Response(JSON.stringify(problem(429, "rate_limited")), {
+      status: 429, headers: { "Content-Type": "application/problem+json", "Retry-After": "0" },
+    });
+    return json(resource("/Photos"));
+  });
+  const item = await api.metadata("/Photos");
+  assert.equal(item.path, "/Photos");
+  assert.equal(count, 2);
+});
+
+// Without Retry-After the refusal came from an upload session's own byte budget, which the
+// queue that owns the session backs off from; it must still see the error.
+test("a 429 without Retry-After is not replayed", async (t) => {
+  const { api, FileApiError } = await client();
+  let count = 0;
+  mockFetch(t, async () => { count++; return json(problem(429, "rate_limited"), 429); });
+  await assert.rejects(api.metadata("/Photos"), (error) => {
+    assert.ok(error instanceof FileApiError);
+    assert.equal(error.status, 429);
+    return true;
+  });
+  assert.equal(count, 1);
+});
+
 test("cookie mutations acquire CSRF once and use unified path and revision contracts", async (t) => {
   const { api } = await client();
   const calls = [];

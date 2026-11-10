@@ -376,7 +376,10 @@ func (s *Server) handleFilesCapabilities(w http.ResponseWriter, r *http.Request,
 		"atomicCreate": d.AtomicCreate, "downloads": downloadsReady,
 		"thumbnails": false, "uploads": uploadsReady, "checksums": checksums, "sourceModifiedAt": ready && s.cfg.BackendName() == "local",
 		"maxFileBytes": maxFile, "maxSinglePutBytes": singlePut, "maxPartBytes": partBytes,
-		"pagination":           map[string]any{"defaultLimit": filesDefaultLimit, "maxLimit": filesMaxLimit},
+		"pagination": map[string]any{"defaultLimit": filesDefaultLimit, "maxLimit": filesMaxLimit},
+		// The budget a bulk client has to stay under, so an importer can pace itself instead
+		// of discovering it from 429s. See filesRatePerMinute for why it is this large.
+		"rateLimit":            map[string]any{"perMinute": filesRatePerMinute},
 		"names":                map[string]any{"caseSensitive": d.Names.CaseSensitive, "maxSegmentBytes": d.Names.MaxSegmentBytes, "maxPathBytes": d.Names.MaxPathBytes, "maxDepth": d.Names.MaxDepth},
 		"sessionExpirySeconds": idleExpiry, "sessionMaxLifetimeSeconds": maxLifetime, "maxUploadParts": filesUploadMaxParts, "terminalRetentionSeconds": retention, "quota": quota, "reservations": reservations,
 	})

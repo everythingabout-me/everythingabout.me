@@ -13,6 +13,7 @@ import (
 	"everythingabout.me/backend/internal/config"
 	"everythingabout.me/backend/internal/jobs"
 	"everythingabout.me/backend/internal/nodes"
+	"everythingabout.me/backend/internal/ratelimit"
 )
 
 func TestIsAPIPath(t *testing.T) {
@@ -208,6 +209,24 @@ func TestCapabilities(t *testing.T) {
 	}
 	if async, ok := got["async"].(map[string]any); !ok || async["value"] != "respond-async" {
 		t.Errorf("unexpected async field: %v", got["async"])
+	}
+}
+
+// The two budgets must not be the same bucket. Sharing one would let a page's ordinary API
+// calls spend the file API's larger budget, and an import spend the account API's 600.
+func TestFileAPIBudgetIsSeparateFromTheAPIBudget(t *testing.T) {
+	s := &Server{limiter: ratelimit.New()}
+	r := httptest.NewRequest(http.MethodGet, "/api/files/list", nil)
+	for i := 0; i < apiRatePerMinute; i++ {
+		if err := s.limitAPI(httptest.NewRecorder(), r, "api", apiRatePerMinute); err != nil {
+			t.Fatalf("request %d inside the API budget was refused: %v", i+1, err)
+		}
+	}
+	if err := s.limitAPI(httptest.NewRecorder(), r, "api", apiRatePerMinute); err == nil {
+		t.Fatal("the API budget admitted a request past its limit")
+	}
+	if err := s.limitAPI(httptest.NewRecorder(), r, "files", filesRatePerMinute); err != nil {
+		t.Fatalf("the file API inherited the spent API budget: %v", err)
 	}
 }
 

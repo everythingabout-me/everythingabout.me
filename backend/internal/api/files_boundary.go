@@ -292,7 +292,7 @@ func (s *Server) fileWrapWithAudit(fn fileHandler, persist filesAuditRecorder) h
 				}
 			}
 			if s.limiter != nil {
-				if err = s.limitAPI(w, r); err != nil {
+				if err = s.limitAPI(w, r, "files", filesRatePerMinute); err != nil {
 					return err
 				}
 			}

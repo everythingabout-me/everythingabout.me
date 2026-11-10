@@ -368,6 +368,8 @@ export interface FileCapabilities {
   maxSinglePutBytes: number;
   maxPartBytes: number | null;
   pagination: { defaultLimit: number; maxLimit: number };
+  /** This client's request budget; stay under it rather than discovering it through 429s. */
+  rateLimit: { perMinute: number };
   names: { caseSensitive: boolean; maxSegmentBytes: number; maxPathBytes: number; maxDepth: number };
   sessionExpirySeconds: number | null;
   sessionMaxLifetimeSeconds: number | null;
@@ -703,16 +705,79 @@ async function fileCSRF(): Promise<string> {
   return csrfRequest;
 }
 
+// A 429 that carries Retry-After is the service's admission control, not a verdict on the
+// request: the handler never ran, so replaying it cannot repeat an effect. The wait belongs
+// here, at the one exit every file request passes through, because it is also the only place
+// that can make an upload's eight workers and a polling page agree on when the client may
+// speak again. Without that agreement each worker retried on its own, and during a 23k-file
+// import those retries kept the window closed: every control request — including the
+// capabilities probe each queued file asks for — became a permanent per-file failure while
+// the log filled with the same rejection.
+const RATE_LIMIT_RETRIES = 3;
+// Longer than a one-minute window, short enough that a service insisting on a longer wait
+// cannot park a page load forever.
+const RATE_LIMIT_MAX_WAIT_MS = 90_000;
+/** When the service last said this client may not speak until a certain moment. */
+let rateLimitUntil = 0;
+
+function retryAfterDelay(header: string | null): number | undefined {
+  if (header === null) return undefined;
+  const value = header.trim();
+  if (value === "") return undefined;
+  const seconds = Number(value);
+  if (Number.isFinite(seconds) && seconds >= 0) return Math.ceil(seconds * 1000);
+  const at = Date.parse(value);
+  return Number.isFinite(at) ? Math.max(0, at - Date.now()) : undefined;
+}
+
+function sleep(ms: number, signal?: AbortSignal | null): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) { reject(new DOMException("The request was canceled.", "AbortError")); return; }
+    const abort = () => { clearTimeout(timer); reject(new DOMException("The request was canceled.", "AbortError")); };
+    const timer = setTimeout(() => { signal?.removeEventListener("abort", abort); resolve(); }, ms);
+    signal?.addEventListener("abort", abort, { once: true });
+  });
+}
+
+async function awaitRateGate(signal?: AbortSignal | null): Promise<void> {
+  const wait = rateLimitUntil - Date.now();
+  // A shared window reopens for everyone at once; the jitter only keeps the first requests of
+  // eight workers from hitting it in the same millisecond.
+  if (wait > 0) await sleep(wait + Math.random() * 250, signal);
+}
+
+/** Record the service's retry-after. No header means an upload session's own byte budget,
+ * which the caller that owns that session backs off from, not this client-wide gate. */
+function holdRateLimit(header: string | null): number | undefined {
+  const wait = retryAfterDelay(header);
+  if (wait === undefined) return undefined;
+  const bounded = Math.min(wait, RATE_LIMIT_MAX_WAIT_MS);
+  rateLimitUntil = Math.max(rateLimitUntil, Date.now() + bounded);
+  return bounded;
+}
+
 async function fileRequest<T>(url: string, init?: RequestInit): Promise<T> {
   const headers = new Headers(init?.headers);
   if (init?.method && !["GET", "HEAD"].includes(init.method)) {
     headers.set("X-CSRF-Token", await fileCSRF());
   }
-  const response = await fetch(url, { ...init, headers, credentials: "same-origin" });
-  if (response.status === 401 || response.status === 403) forgetSession();
-  if (response.status === 204) return undefined as T;
-  const payload: unknown = await response.json().catch(() => { throw httpError(response.status); });
-  return filePayload<T>(payload, response.status);
+  for (let attempt = 0; ; attempt++) {
+    await awaitRateGate(init?.signal);
+    const response = await fetch(url, { ...init, headers, credentials: "same-origin" });
+    if (response.status === 429) {
+      // Record the window even on the last attempt: the request that gives up must not let
+      // the next one walk into the same closed window.
+      const wait = holdRateLimit(response.headers.get("Retry-After"));
+      if (wait !== undefined && attempt < RATE_LIMIT_RETRIES) {
+        void response.body?.cancel();
+        continue;
+      }
+    }
+    if (response.status === 401 || response.status === 403) forgetSession();
+    if (response.status === 204) return undefined as T;
+    const payload: unknown = await response.json().catch(() => { throw httpError(response.status); });
+    return filePayload<T>(payload, response.status);
+  }
 }
 
 function filePost<T>(resource: string, body?: unknown, headers?: HeadersInit, signal?: AbortSignal): Promise<T> {
@@ -787,6 +852,9 @@ async function uploadPresignedPart(grant: FileUploadPartGrant, blob: Blob, signa
 async function uploadRelayPart(id: string, number: number, blob: Blob, signal?: AbortSignal,
   onProgress?: (progress: UploadProgress) => void): Promise<FileUploadReceipt> {
   const token = await fileCSRF();
+  // A part shares the client-wide wait as well: while a budget window is closed, sending it
+  // anyway only earns the same refusal the queue would then have to back off from.
+  await awaitRateGate(signal);
   if (signal?.aborted) throw new DOMException("Upload canceled", "AbortError");
   return new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest();
@@ -807,6 +875,7 @@ async function uploadRelayPart(id: string, number: number, blob: Blob, signal?: 
     };
     xhr.onload = () => {
       if (xhr.status === 401 || xhr.status === 403) forgetSession();
+      if (xhr.status === 429) holdRateLimit(xhr.getResponseHeader("Retry-After"));
       try { finish(undefined, filePayload<FileUploadReceipt>(JSON.parse(xhr.responseText), xhr.status)); }
       catch (error) { finish(error instanceof ApiError ? error : httpError(xhr.status)); }
     };

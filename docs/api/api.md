@@ -643,8 +643,12 @@ part listing (number, size, provider ETag). Class B progress is the provider off
 
 The browser starts every queued task and shares one global pool of eight byte requests across them; the
 server publishes no per-session limit, so that pool is the only client-side bound. A freed slot goes to the
-earliest-started file's next part. Transient part failures have bounded backoff; a `429 rate_limited` answer
-means a bounded receiver queue is full, so the part waits and retries without spending a failed attempt.
+earliest-started file's next part. Transient part failures have bounded backoff. A `429` has two sources and
+they differ in one header: the client's request budget answers with `Retry-After`, applies to every request
+(not only parts), and means "stop sending, then continue"; a full byte-admission queue answers without it,
+so the part waits and retries without spending a failed attempt. A client must share the budgeted wait
+between its concurrent requests instead of retrying each one on its own — the retries of an import otherwise
+keep the window shut and turn every later control request into a permanent failure.
 After an uncertain request, the client asks the session (or part listing) what is held before resending. The browser queue lives only in memory for the current Files
 page/document and survives folder navigation; refresh/close discards it.
 
@@ -834,7 +838,12 @@ application journal changes/reservations, not exact quota state across unsynchro
 | 502 / 503 / 504 | storage_failure / temporarily_unavailable, storage_outcome_unknown, edgeone_route_required, snapshot_too_large, snapshot_incomplete, audit_unavailable, change_root_reset_required / storage_timeout |
 | 507 | quota_exceeded, staging_full |
 
-Retry transient requests with backoff/jitter and Retry-After. Resolve ambiguous mutations through their
+Retry transient requests with backoff/jitter and Retry-After. A `Retry-After` `429` comes from a per-client
+request budget counted in process memory, so several instances each admit their own share. The file API keeps
+a budget separate from the account/legacy API's 600/min: an upload is a stream of ordinary requests (create,
+part listing, parts, commit), so the file budget is sized not to throttle a browser import — 12,000/min —
+while a client that keeps looping against one endpoint still trips it. A refused request never reached a
+handler, so replaying it cannot repeat an effect. Resolve ambiguous mutations through their
 session/operation/idempotency identity rather than assuming a timeout means nothing happened. Every failed
 file request logs one line carrying the body's `requestId`, the problem code and the private driver cause,
 so a reported failure is traceable from the id alone; the cause is never copied into the response.

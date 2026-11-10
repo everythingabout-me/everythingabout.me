@@ -224,7 +224,7 @@ func (s *Server) api(fn handlerFunc) http.HandlerFunc {
 			writeAPIError(w, err)
 			return
 		}
-		if err := s.limitAPI(w, r); err != nil {
+		if err := s.limitAPI(w, r, "api", apiRatePerMinute); err != nil {
 			writeAPIError(w, err)
 			return
 		}
@@ -234,18 +234,36 @@ func (s *Server) api(fn handlerFunc) http.HandlerFunc {
 	}
 }
 
+// apiRatePerMinute bounds the account and legacy API surfaces: a page or a script that loops
+// there is doing something wrong by construction.
 const apiRatePerMinute = 600
 
+// filesRatePerMinute bounds the unified file API, which carries a different workload: an
+// upload is a stream of ordinary requests, not a loop. The browser client keeps eight files
+// in flight and each file costs a create, a part listing, its parts and a commit — four
+// requests for a one-part file, so a 23k-file import issues ~95k requests and, at a normal
+// round trip, tens to a couple of hundred requests per second.
+//
+// The 600/min of the shared budget refused that import: the window closed ~14 seconds in and
+// every control request afterwards failed, while the client's immediate retries kept the
+// window shut. A budget above what that client can sustain on a 40 ms link (12,000/min is
+// 200/s) leaves a healthy upload unthrottled and still cuts off the failure this replaces,
+// which issued ~375 requests per second against one endpoint. Both bounds are in memory per
+// process (internal/ratelimit), so several instances would each admit this much.
+const filesRatePerMinute = 12_000
+
 // limitAPI does coarse rate limiting per token (per IP without one), plus a Retry-After.
-func (s *Server) limitAPI(w http.ResponseWriter, r *http.Request) error {
+// scope keeps budgets apart: sharing a bucket between them would let file traffic with a
+// larger budget exhaust the smaller one for every other API call from the same client.
+func (s *Server) limitAPI(w http.ResponseWriter, r *http.Request, scope string, perMinute int) error {
 	key := "ip:" + httpx.ClientIP(r)
 	if header := strings.TrimSpace(r.Header.Get("Authorization")); strings.HasPrefix(header, "Bearer ") {
 		if id, _, ok := auth.ParseToken(strings.TrimPrefix(header, "Bearer ")); ok {
 			key = "tok:" + id
 		}
 	}
-	allowed, retryAfter := s.limiter.Allow("api:"+key, apiRatePerMinute, time.Minute)
-	w.Header().Set("X-RateLimit-Limit", fmt.Sprint(apiRatePerMinute))
+	allowed, retryAfter := s.limiter.Allow(scope+":"+key, perMinute, time.Minute)
+	w.Header().Set("X-RateLimit-Limit", fmt.Sprint(perMinute))
 	if !allowed {
 		w.Header().Set("Retry-After", fmt.Sprint(retryAfter))
 		return httpx.TooManyRequests(fmt.Sprintf("too many requests; retry in %d seconds", retryAfter))
