@@ -1,5 +1,6 @@
+/* Spacing belongs to the account page's grid gap, not to each panel. */
 .section {
-  margin: 0 0 20px;
+  margin: 0;
   padding: 22px 24px;
   border: 1px solid var(--border);
   border-radius: 14px;

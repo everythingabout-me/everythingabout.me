@@ -13,15 +13,17 @@ export function AccountPage() {
     <div className={styles.page}>
       <title>{t("meta.accountTitle")}</title>
       <AppHeader user={summary.user} />
-      <main className={styles.main}>
+      <main className={styles.accountMain}>
         <AccountPanel
           user={summary.user}
           legacyCount={summary.legacyCount}
           saveLinks={summary.saveLinks}
           activity={summary.activity}
         />
-        <DrivesPanel data={storage} />
-        <BackupsPanel data={storage} />
+        <div className={styles.accountPanels}>
+          <DrivesPanel data={storage} />
+          <BackupsPanel data={storage} />
+        </div>
       </main>
     </div>
   );

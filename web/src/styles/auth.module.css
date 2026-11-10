@@ -694,6 +694,42 @@
   }
 }
 
+/* ---------- Account page layout ---------- */
+
+/*
+ * The account page is a column, not the centred single-card auth screen: reusing .main made
+ * the settings card, drives and backups three flex siblings on one row, squeezing the card
+ * to ~400px and dropping the short panels into the vertical middle of the tallest one.
+ */
+.accountMain {
+  flex: 1;
+  width: 100%;
+  max-width: var(--page-width);
+  margin: 0 auto;
+  padding: 26px 24px 64px;
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
+/* Drives and backups are peers; two columns above 760px, stacked below. */
+.accountPanels {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 20px;
+  align-items: start;
+}
+
+@media (max-width: 760px) {
+  .accountMain {
+    padding: 20px 16px 48px;
+  }
+
+  .accountPanels {
+    grid-template-columns: 1fr;
+  }
+}
+
 /* ---------- Save links ---------- */
 
 .saveLinksHead {
