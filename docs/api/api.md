@@ -838,12 +838,15 @@ application journal changes/reservations, not exact quota state across unsynchro
 | 502 / 503 / 504 | storage_failure / temporarily_unavailable, storage_outcome_unknown, edgeone_route_required, snapshot_too_large, snapshot_incomplete, audit_unavailable, change_root_reset_required / storage_timeout |
 | 507 | quota_exceeded, staging_full |
 
-Retry transient requests with backoff/jitter and Retry-After. A `Retry-After` `429` comes from a per-client
-request budget counted in process memory, so several instances each admit their own share. The file API keeps
-a budget separate from the account/legacy API's 600/min: an upload is a stream of ordinary requests (create,
-part listing, parts, commit), so the file budget is sized not to throttle a browser import — 12,000/min —
-while a client that keeps looping against one endpoint still trips it. A refused request never reached a
-handler, so replaying it cannot repeat an effect. Resolve ambiguous mutations through their
+Retry transient requests with backoff/jitter and Retry-After. A `Retry-After` `429` comes from a per-principal
+request budget counted in process memory, so several instances each admit their own share. A budget is a token
+bucket, not a fixed window: it refills continuously, so a client that keeps working settles at the configured
+rate instead of stalling until the minute turns over. The file API's budget is keyed by owner — an address is
+not a user, and a NAT or office network must not let one person's import throttle another's — and it is
+separate from the account/legacy API's 600/min per token or address. An upload is a stream of ordinary
+requests (create, parts, commit: four for a one-part file), so the file budget is sized not to throttle a
+browser import — 12,000/min, advertised in capabilities — while a client that keeps looping against one
+endpoint still trips it. A refused request never reached a handler, so replaying it cannot repeat an effect. Resolve ambiguous mutations through their
 session/operation/idempotency identity rather than assuming a timeout means nothing happened. Every failed
 file request logs one line carrying the body's `requestId`, the problem code and the private driver cause,
 so a reported failure is traceable from the id alone; the cause is never copied into the response.
@@ -887,9 +890,11 @@ atomically install the view and changesCursor. DELETE the snapshot returns 204 a
 including after expiry when the same policy still owns it.
 
 Current creation is synchronous and bounded to 100,000 entries including the target, 64 MiB serialized metadata,
-25 seconds per request with a 20-second SQL statement timeout, ten active snapshots per principal and a 24-hour
-lifetime. There is no asynchronous snapshot Operation. Oversize returns 503 snapshot_too_large; timeout,
-serialization and lock failures return 503 temporarily_unavailable. Admission overflow is 409 snapshot_limit.
+a 20-second statement timeout inside the capture transaction, ten active snapshots per principal and a 24-hour
+lifetime. There is no per-request clock: the work is bounded by the entry and byte caps, and the one statement
+that could run long is bounded in the database instead of by a timer that fires on the largest baselines.
+There is no asynchronous snapshot Operation. Oversize returns 503 snapshot_too_large; a statement past its
+timeout, serialization and lock failures return 503 temporarily_unavailable. Admission overflow is 409 snapshot_limit.
 Started/unknown overlapping native work returns 409 operation_in_progress; an incomplete saved baseline returns
 503 snapshot_incomplete. Expiry returns 410 snapshot_expired. Native bytes are not frozen by this index snapshot.
 

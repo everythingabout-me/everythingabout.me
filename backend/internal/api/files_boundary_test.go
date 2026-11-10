@@ -7,7 +7,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
-	"time"
 
 	"everythingabout.me/backend/internal/auth"
 	"everythingabout.me/backend/internal/config"
@@ -159,22 +158,24 @@ func TestFilesRouterRetiresWildcardAndUsesProblems(t *testing.T) {
 		}
 	}
 }
-func TestFilesBoundaryDeadlineAndStartedResponse(t *testing.T) {
-	for _, target := range []string{"/api/files/search?q=a", "/api/files/content?path=%2Fa"} {
+func TestFilesBoundaryHasNoWallClockAndStartedResponse(t *testing.T) {
+	// A request must not carry a deadline of this service's own choosing: the client's
+	// disconnect cancels it, and the work itself is bounded by pages, entries and provider
+	// budgets. A clock here is how a 776-folder delete and a 23k-file import both died.
+	for _, method := range []string{"GET", "HEAD", "POST", "DELETE"} {
 		driver := &boundaryDriver{}
 		s := &Server{cfg: &config.Config{}, filesAuth: &boundaryAuth{principal: &auth.Principal{User: &auth.User{ID: "owner"}}}, trees: &boundaryFactory{driver: driver}}
 		w := httptest.NewRecorder()
 		s.fileWrap(func(w http.ResponseWriter, r *http.Request, _ *fileRequest) error {
-			deadline, ok := r.Context().Deadline()
-			if r.URL.Path == "/api/files/content" {
-				if ok {
-					t.Fatal("byte stream has metadata cutoff")
-				}
-			} else if !ok || time.Until(deadline) > 30*time.Second || time.Until(deadline) < 25*time.Second {
-				t.Fatal("metadata request has no bounded deadline")
+			if deadline, ok := r.Context().Deadline(); ok {
+				t.Fatalf("%s carries a wall clock that ends at %s", r.URL.Path, deadline)
 			}
 			return writeFilesJSON(w, 200, map[string]bool{"read": true})
-		})(w, httptest.NewRequest("GET", target, nil))
+		})(w, func() *http.Request {
+			r := httptest.NewRequest(method, "/api/files/search?q=a", nil)
+			r.Header.Set("Authorization", "Bearer valid")
+			return r
+		}())
 		if w.Code != 200 || !driver.closed {
 			t.Fatal("request did not settle")
 		}

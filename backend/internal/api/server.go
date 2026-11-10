@@ -224,7 +224,7 @@ func (s *Server) api(fn handlerFunc) http.HandlerFunc {
 			writeAPIError(w, err)
 			return
 		}
-		if err := s.limitAPI(w, r, "api", apiRatePerMinute); err != nil {
+		if err := s.limitAPI(w, r, "api", "", apiRatePerMinute); err != nil {
 			writeAPIError(w, err)
 			return
 		}
@@ -252,14 +252,23 @@ const apiRatePerMinute = 600
 // process (internal/ratelimit), so several instances would each admit this much.
 const filesRatePerMinute = 12_000
 
-// limitAPI does coarse rate limiting per token (per IP without one), plus a Retry-After.
-// scope keeps budgets apart: sharing a bucket between them would let file traffic with a
-// larger budget exhaust the smaller one for every other API call from the same client.
-func (s *Server) limitAPI(w http.ResponseWriter, r *http.Request, scope string, perMinute int) error {
-	key := "ip:" + httpx.ClientIP(r)
-	if header := strings.TrimSpace(r.Header.Get("Authorization")); strings.HasPrefix(header, "Bearer ") {
-		if id, _, ok := auth.ParseToken(strings.TrimPrefix(header, "Bearer ")); ok {
-			key = "tok:" + id
+// limitAPI does coarse rate limiting per principal, plus a Retry-After. scope keeps budgets
+// apart: sharing a bucket between them would let file traffic with a larger budget exhaust
+// the smaller one for every other API call from the same client.
+//
+// subject names the principal when the request has already been authenticated. The file API
+// passes the owner, because an address is not a user: everyone behind one NAT, office or
+// mobile carrier shared a single bucket, so one person's import throttled their colleagues.
+// The account and legacy surfaces authenticate inside the handler, so they keep the token
+// or the client address.
+func (s *Server) limitAPI(w http.ResponseWriter, r *http.Request, scope, subject string, perMinute int) error {
+	key := subject
+	if key == "" {
+		key = "ip:" + httpx.ClientIP(r)
+		if header := strings.TrimSpace(r.Header.Get("Authorization")); strings.HasPrefix(header, "Bearer ") {
+			if id, _, ok := auth.ParseToken(strings.TrimPrefix(header, "Bearer ")); ok {
+				key = "tok:" + id
+			}
 		}
 	}
 	allowed, retryAfter := s.limiter.Allow(scope+":"+key, perMinute, time.Minute)

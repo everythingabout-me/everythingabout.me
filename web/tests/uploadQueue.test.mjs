@@ -187,7 +187,9 @@ for (const status of ["queued", "waiting", "uploading", "finalizing", "failed", 
 
 test("receipt pagination must have one watermark and validate every resumed part before sending bytes", async (t) => {
   for (const scenario of ["changed watermark", "duplicate receipt", "wrong hash", "wrong size"]) {
-    const server = uploadServer();
+    // A resumed session: the server reports one part already held, so the queue must list
+    // receipts and validate them before sending anything.
+    const server = uploadServer(2, { resumeParts: 1 });
     server.api.uploadParts = async (id, cursor) => {
       const receipt = { number: 1, size: 2, sha256: digest("ab") };
       if (scenario === "wrong hash") receipt.sha256 = digest("xx");
@@ -543,7 +545,7 @@ test("consistent receipt pages skip every saved part, including noncontiguous nu
     const session = await create(...args);
     server.receipts.get(session.id).set(1, { number: 1, size: 2, sha256: digest("ab") });
     server.receipts.get(session.id).set(3, { number: 3, size: 1, sha256: digest("e") });
-    return session;
+    return { ...session, receivedParts: 2, receivedBytes: 3 };
   };
   server.api.uploadParts = async (id, cursor) => {
     server.calls.push(["receipts", id, cursor]);
@@ -906,7 +908,7 @@ test("hung delete checks time out and allow other exact Operations to progress",
   enqueue(harness, [entry("stuck"), entry("other")]);
   await harness.until((queue) => queue.tasks.every((task) => task.status === "waiting"));
   await harness.tick();
-  await harness.tick(15000);
+  await harness.tick(60000);
   assert.equal(stuckSignal.aborted, true);
   assert.ok(callsOf(server, "operation").some(([, id]) => id === "delete-other"));
   // Rows are looked up by path, not position: the queue publishes in row order, which

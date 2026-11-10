@@ -11,7 +11,11 @@ import (
 	fc "everythingabout.me/backend/internal/filecontract"
 )
 
-const uploadPartReadIdleTimeout = 60 * time.Second
+// uploadPartReadIdleTimeout is per network read, not per part: it fires only when a part
+// body stops delivering bytes entirely. A phone on a bad link can stall for most of a minute
+// in TCP retransmission and still finish, and the cost of waiting is one held spool slot,
+// so the bound sits above a normal carrier stall rather than at LAN patience.
+const uploadPartReadIdleTimeout = 120 * time.Second
 
 var uploadGatewayPartPath = regexp.MustCompile(`^/api/files/uploads/[^/]+/parts/[0-9]+$`)
 

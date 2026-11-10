@@ -263,8 +263,10 @@ func (s *Server) captureChangeSnapshot(w http.ResponseWriter, r *http.Request, f
 	if filter.Kind != "file" && filter.Kind != "folder" || filter.Kind == "file" && filter.Recursive {
 		return fc.NewProblem(400, "invalid_request", "Specify a file or folder snapshot filter.")
 	}
-	ctx, cancel := context.WithTimeout(r.Context(), 25*time.Second)
-	defer cancel()
+	// No request clock: the work is bounded by the entry and byte caps and by the
+	// per-statement timeout set on the transaction below, which is where the only
+	// unbounded statement lives. A 25s total used to fail exactly the largest baselines.
+	ctx := r.Context()
 	// First use may establish a previously unbound owner, but an existing
 	// namespace never follows config changes without an explicit operator reset.
 	binding, err := s.db.Pool().BeginTx(ctx, pgx.TxOptions{})

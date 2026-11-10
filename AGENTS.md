@@ -103,6 +103,11 @@ Common commands:
 - **Do not bound request-scoped work with a wall clock.** Bound the work itself (entry/page limits, a
   per-request provider timeout) and let the request context be the only deadline. A timer on top produces a
   failure the response cannot explain, and it fires exactly when the library is large enough to matter.
+  The same applies to every other budget: it is **computed from the work it admits**, never picked as a round
+  number. A request count comes from the client's legitimate rate (requests per file × concurrency), a byte
+  budget from size ÷ a pessimistic transfer rate, a memory bound from bytes per entry × entries. If the
+  product's own workflow can reach a budget, the budget is wrong — 600 requests/minute could not survive the
+  first minute of a 23k-file import, and a 30-second clock aborted the recursive delete that needed 58.
 - The current runtime uses `{ok:true,data}` / `{ok:false,error}` (`internal/httpx`). The replacement file API
   uses plain JSON resources and Problem Details as specified in `docs/api/api.md`.
 - **Everything in this repo is written in English** — comments, docs, SQL comments, Makefile and scripts,
@@ -145,7 +150,7 @@ Common commands:
   I/O or new index locks after acquiring the short owner-head lock. Retain effect receipts across feed pruning.
   lastChangedAt/changeToken are optional observed-index markers, not native validators or cursors.
 - Incremental clients use immutable change-snapshots plus changes cursors, not ordinary list pagination.
-  Snapshots are synchronous and bounded (100k entries/64 MiB/25 seconds/24 hours); no async snapshot Operation.
+  Snapshots are synchronous and bounded (100k entries/64 MiB/24 hours, plus a per-statement SQL timeout); no async snapshot Operation.
   Tokens need explicit changes+read, and subscribe additionally for SSE; old tokens/save links gain neither.
   PolicyVersion advances on actual policy edits/revoke, never name-only edits. SSE wakeups do not acknowledge
   consumer progress. Webhooks are deferred. GET /api/audit requires owner cookie, not app permissions.
@@ -165,7 +170,8 @@ Common commands:
 - Long operations (move / copy) always use `Prefer: respond-async` and return `202 + Location`; do not invent a
   second "task" concept.
 - Rate limiting is in-process memory (`internal/ratelimit`), so multiple instances each keep their own count;
-  know that before changing it.
+  know that before changing it. It is a token bucket (continuous refill, no minute-turnover cliff), the file
+  API's budget is keyed by owner (an address is not a user), and the account/legacy budget by token or address.
 - The timeline organizer is started separately with `StartTimeline(ctx)` after the server starts; the sweeper
   scans for increments roughly every 20 minutes, and `POST /api/timeline/rebuild` is the manual full rebuild.
 

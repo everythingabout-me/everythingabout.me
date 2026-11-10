@@ -3,7 +3,6 @@ package s3storage
 import (
 	"context"
 	"io"
-	"time"
 
 	"everythingabout.me/backend/internal/objectmutation"
 	"everythingabout.me/backend/internal/storage"
@@ -16,7 +15,7 @@ import (
 var _ objectmutation.MultipartBackend = (*mutationBackend)(nil)
 
 func (b *mutationBackend) BeginMultipart(ctx context.Context, in objectmutation.Put) (string, error) {
-	ctx, cancel := context.WithTimeout(ctx, 60*time.Second)
+	ctx, cancel := mutationMetadata(ctx)
 	defer cancel()
 	out, err := b.client.CreateMultipartUpload(ctx, &s3.CreateMultipartUploadInput{Bucket: aws.String(b.bucket), Key: aws.String(in.Key), ContentType: aws.String(in.MediaType), Metadata: cloneMutationMetadata(in.Metadata)})
 	if err != nil {
@@ -28,7 +27,7 @@ func (b *mutationBackend) BeginMultipart(ctx context.Context, in objectmutation.
 	return aws.ToString(out.UploadId), nil
 }
 func (b *mutationBackend) PutPart(ctx context.Context, key, id string, number int, body io.Reader, size int64) (string, error) {
-	ctx, cancel := context.WithTimeout(ctx, 60*time.Second)
+	ctx, cancel := mutationTransferBudget(ctx, size)
 	defer cancel()
 	// The body is a single-pass stream whose digest is finalized during transport.
 	// Keep SigV4 request authentication without the SDK's pre-signing body rewind.
@@ -44,7 +43,7 @@ func (b *mutationBackend) PutPart(ctx context.Context, key, id string, number in
 	return aws.ToString(out.ETag), nil
 }
 func (b *mutationBackend) CompleteMultipart(ctx context.Context, in objectmutation.Put, id string, parts []objectmutation.NativePart) (objectmutation.Object, error) {
-	ctx, cancel := context.WithTimeout(ctx, 60*time.Second)
+	ctx, cancel := mutationMetadata(ctx)
 	defer cancel()
 	manifest := &types.CompletedMultipartUpload{}
 	for _, p := range parts {
@@ -70,7 +69,7 @@ var _ objectmutation.MultipartInspector = (*mutationBackend)(nil)
 // missing session (NoSuchUpload) is the terminal observation that none of its parts can
 // ever be completed, read, or replayed; any other failure leaves the allocation unknown.
 func (b *mutationBackend) InspectMultipart(ctx context.Context, key, id string) (objectmutation.MultipartState, error) {
-	ctx, cancel := context.WithTimeout(ctx, 60*time.Second)
+	ctx, cancel := mutationMetadata(ctx)
 	defer cancel()
 	out, err := b.client.ListParts(ctx, &s3.ListPartsInput{Bucket: aws.String(b.bucket), Key: aws.String(key), UploadId: aws.String(id)})
 	if err != nil {
@@ -87,7 +86,7 @@ func (b *mutationBackend) InspectMultipart(ctx context.Context, key, id string) 
 }
 
 func (b *mutationBackend) AbortMultipart(ctx context.Context, key, id string) error {
-	ctx, cancel := context.WithTimeout(ctx, 60*time.Second)
+	ctx, cancel := mutationMetadata(ctx)
 	defer cancel()
 	_, err := b.client.AbortMultipartUpload(ctx, &s3.AbortMultipartUploadInput{Bucket: aws.String(b.bucket), Key: aws.String(key), UploadId: aws.String(id)})
 	if err != nil {

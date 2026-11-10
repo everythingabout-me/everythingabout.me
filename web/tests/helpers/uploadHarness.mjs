@@ -82,6 +82,14 @@ export function uploadServer(partSize = 2, options = {}) {
   const sessions = new Map();
   const keys = new Map();
   const receipts = new Map();
+  // The real server reports how much a session already holds, authoritative for both
+  // classes (class A from the provider's listing). The queue uses it to skip a listing that
+  // can only be empty on a session it just created.
+  const progress = (id) => {
+    const session = sessions.get(id);
+    const parts = [...receipts.get(id).values()];
+    return { ...session, receivedParts: parts.length, receivedBytes: parts.reduce((sum, part) => sum + part.size, 0) };
+  };
   const api = {
     me: async () => ({ id: "owner-a" }),
     capabilities: async () => ({ sourceModifiedAt: false, transferClass: "C", transferKind: "relay" }),
@@ -96,12 +104,18 @@ export function uploadServer(partSize = 2, options = {}) {
         : { kind: "relay", url: `/api/files/uploads/${id}/parts` };
       const session = { id, class: classA ? "A" : "C", transport, path: input.path, state: "open", size: input.size, partSize, partCount: Math.ceil(input.size / partSize), ordering: "any", operationId: `commit-${id}`, result: null };
       sessions.set(id, session); keys.set(key, id); receipts.set(id, new Map());
-      return { ...session };
+      // A resumed session can already hold parts; declare them so the client is expected to
+      // list and validate receipts rather than assume the session is empty.
+      for (let number = 1; number <= (options.resumeParts ?? 0); number++) {
+        const size = number === session.partCount ? input.size - (number - 1) * partSize : partSize;
+        receipts.get(id).set(number, { number, size, sha256: digest(String.fromCharCode(96 + number)) });
+      }
+      return progress(id);
     },
     uploadStatus: async (id) => {
       calls.push(["status", id]);
       if (!sessions.has(id)) throw new TestApiError("upload not found", 404, { code: "not_found" });
-      return { ...sessions.get(id) };
+      return progress(id);
     },
     uploadParts: async (id, cursor) => {
       calls.push(classA ? ["providerParts", id, cursor] : ["receipts", id, cursor]);
@@ -181,9 +195,11 @@ export async function setup(overrides = {}, options = {}) {
     return event;
   };
   const same = (a, b) => a && b && a.length === b.length && a.every((value, i) => Object.is(value, b[i]));
-  // Only the queue's documented waits may be scheduled: the page publish cadence at 100, part retries 250/500,
-  // receiver-busy backoff up to 2000, the operation poll at 2000 and the 15 s status deadline.
-  const schedule = (callback, delay, repeat) => { assert.ok([100, 250, 500, 1000, 2000, 15000].includes(delay), `unexpected timer ${delay}`); timers.set(++timerId, { callback, delay, repeat }); return timerId; };
+  // Only the queue's documented waits may be scheduled: the page publish cadence at 100, part retries
+  // 250/500/1000/2000/4000/8000 (capped), receiver-busy backoff, the operation poll at 2000 and the 60 s
+  // status deadline that must outlast a request-budget wait.
+  const allowed = [100, 250, 500, 1000, 2000, 4000, 8000, 60000];
+  const schedule = (callback, delay, repeat) => { assert.ok(allowed.includes(delay), `unexpected timer ${delay}`); timers.set(++timerId, { callback, delay, repeat }); return timerId; };
   const runtime = {
     api: { me: async () => ({ id: owner }), ...overrides }, ApiError: TestApiError, FileApiError: TestFileApiError,
     localStorage: storage, crypto: webcrypto, window, navigator,

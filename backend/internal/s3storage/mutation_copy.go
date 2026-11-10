@@ -27,7 +27,7 @@ func (b *mutationBackend) CopyObject(ctx context.Context, in objectmutation.Copy
 	if err := validateMutationCopy(in); err != nil {
 		return objectmutation.Object{}, err
 	}
-	ctx, cancel := context.WithTimeout(ctx, 60*time.Second)
+	ctx, cancel := mutationTransferBudget(ctx, in.Size)
 	defer cancel()
 	input := &s3.CopyObjectInput{
 		Bucket:            aws.String(b.bucket),
@@ -63,7 +63,7 @@ func (b *mutationBackend) CopyPart(ctx context.Context, key, uploadID string, nu
 	if key == "" || uploadID == "" || number < 1 || source == "" || sourceETag == "" || offset < 0 || length <= 0 {
 		return "", storage.NewError("invalid_request", storage.Path(key), nil)
 	}
-	ctx, cancel := context.WithTimeout(ctx, 60*time.Second)
+	ctx, cancel := mutationTransferBudget(ctx, length)
 	defer cancel()
 	out, err := b.client.UploadPartCopy(ctx, &s3.UploadPartCopyInput{
 		Bucket:            aws.String(b.bucket),

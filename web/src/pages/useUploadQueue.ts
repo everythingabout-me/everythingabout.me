@@ -25,8 +25,13 @@ const START_POOL_SIZE = 8;
 // state stays authoritative in the ref; the screen catches up ten times a second,
 // which is faster than the eye separates, and gestures publish immediately.
 const PUBLISH_INTERVAL_MS = 100;
-const PART_UPLOAD_ATTEMPTS = 3;
+// A phone on a bad link is the normal case, not an exception: five attempts with a delay
+// that grows to eight seconds rides out roughly fifteen seconds of outage, and the same
+// waiting applies both to a transient failure and to a part the service asked us to retry.
+// The delay is capped so a long outage ends in a reported failure instead of a silent stall.
+const PART_UPLOAD_ATTEMPTS = 5;
 const PART_RETRY_DELAY_MS = 250;
+const PART_RETRY_MAX_DELAY_MS = 8000;
 // A 429 means every receive slot is busy, which is the receiver asking this part to
 // wait rather than a lost part: retry without spending a transfer attempt.
 const PART_BUSY_WAITS = 60;
@@ -386,6 +391,10 @@ export function useUploadQueue(onUploaded: (task: UploadTask, item: Item) => voi
         pathClaims.current.set(id, release);
       }
       let session: FileUploadSession;
+      // True only when this attempt allocated the session. A session that was just created
+      // reports how much it holds; one this attempt resumed may already carry parts whose
+      // receipts were never seen, so only the first case may trust that count.
+      let allocated = false;
       if (task.uploadId) {
         session = await api.uploadStatus(task.uploadId, signal);
       } else {
@@ -450,6 +459,7 @@ export function useUploadQueue(onUploaded: (task: UploadTask, item: Item) => voi
           }
           throw error;
         }
+        allocated = true;
         patch(id, { uploadId: session.id, allocationRejected: false });
       }
       if (signal.aborted) return;
@@ -518,7 +528,13 @@ export function useUploadQueue(onUploaded: (task: UploadTask, item: Item) => voi
         } while (next);
         return result;
       };
-      for (const [number, size] of await readParts(signal)) known.set(number, size);
+      // A session this attempt created holds exactly what it reported, so an empty one needs
+      // no listing: one request saved per file, a quarter of a 23k-file import's traffic.
+      // Anything else lists, because receipts the client never saw are the only way it can
+      // know what is already durable.
+      if (!allocated || session.receivedParts > 0) {
+        for (const [number, size] of await readParts(signal)) known.set(number, size);
+      }
       if (signal.aborted) return;
       let received = [...known.values()].reduce((sum, size) => sum + size, 0);
       patch(id, { loaded: received, speed: 0 });
@@ -580,7 +596,8 @@ export function useUploadQueue(onUploaded: (task: UploadTask, item: Item) => voi
         const retryDelay = (attempt: number) => new Promise<void>((resolve, reject) => {
           if (batch.signal.aborted) { reject(new DOMException("Upload canceled", "AbortError")); return; }
           const abort = () => { clearTimeout(timer); deadlines.current.delete(timer); reject(new DOMException("Upload canceled", "AbortError")); };
-          const timer = setTimeout(() => { deadlines.current.delete(timer); batch.signal.removeEventListener("abort", abort); resolve(); }, PART_RETRY_DELAY_MS * 2 ** attempt);
+          const timer = setTimeout(() => { deadlines.current.delete(timer); batch.signal.removeEventListener("abort", abort); resolve(); },
+            Math.min(PART_RETRY_MAX_DELAY_MS, PART_RETRY_DELAY_MS * 2 ** attempt));
           deadlines.current.add(timer);
           batch.signal.addEventListener("abort", abort, { once: true });
         });
@@ -881,7 +898,9 @@ export function useUploadQueue(onUploaded: (task: UploadTask, item: Item) => voi
             if (!results.has(id)) {
               const timeout = new AbortController();
               const abort = () => timeout.abort(); controller.signal.addEventListener("abort", abort, { once: true });
-              const deadline = setTimeout(() => timeout.abort(), 15000);
+              // Longer than a request budget window, because that request may now wait for
+              // Retry-After before it is even sent.
+              const deadline = setTimeout(() => timeout.abort(), 60000);
               deadlines.current.add(deadline);
               try { results.set(id, await api.getOperation(id, timeout.signal)); }
               catch (error) { results.set(id, error instanceof Error ? error : new Error(message(error))); }

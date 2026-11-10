@@ -12,7 +12,6 @@ import (
 	"regexp"
 	"sort"
 	"strings"
-	"time"
 
 	"everythingabout.me/backend/internal/auth"
 	"everythingabout.me/backend/internal/filechanges"
@@ -26,11 +25,6 @@ type FilesAuthenticator interface {
 	FileCSRFToken(*http.Request) string
 	ValidateFileCSRF(*http.Request, string) bool
 }
-
-// filesMetadataDeadline bounds one metadata read. Reads are the only requests whose work
-// does not grow with the drive, so a clock is the right bound for them; a mutation must be
-// bounded by its own page and entry limits instead (see fileWrapWithAudit).
-const filesMetadataDeadline = 30 * time.Second
 
 func writeFilesJSON(w http.ResponseWriter, status int, value any) error {
 	w.Header().Set("Content-Type", "application/json")
@@ -226,18 +220,16 @@ func (s *Server) fileWrapWithAudit(fn fileHandler, persist filesAuditRecorder) h
 	return func(w http.ResponseWriter, r *http.Request) {
 		clearReadDeadline := partReadIdle(w, r, uploadPartReadIdleTimeout)
 		defer clearReadDeadline()
-		// Only a metadata read gets a wall clock: its work is bounded and small by
-		// construction (one page, one observation). A mutation's work is proportional to
-		// the tree it captures — up to maxActionPages listings, twice — so a timer here
-		// fires exactly on the large folders that need the time: the old blanket cutoff
-		// aborted a 776-folder recursive delete mid-capture and reported "backend_error"
-		// with no cause. Mutations bound the work itself and keep the request context as
-		// their only deadline.
-		if (r.Method == http.MethodGet || r.Method == http.MethodHead) && r.URL.Path != fc.Base+"/content" {
-			ctx, cancel := context.WithTimeout(r.Context(), filesMetadataDeadline)
-			defer cancel()
-			r = r.WithContext(ctx)
-		}
+		// No request here gets a wall clock, read or mutation. A mutation's work is
+		// proportional to the tree it captures, so a timer fires exactly on the folders
+		// large enough to need the time: a blanket 30s cutoff aborted a 776-folder
+		// recursive delete mid-capture and reported "backend_error" with no cause. A read's
+		// work is proportional to its page, and the indexed routes never touch storage at
+		// all, so the same clock could only ever fire on a slow query and then blame the
+		// storage. The request context is the only deadline: the client's disconnect
+		// cancels it, a native call carries its own per-request provider budget, and a
+		// single unbounded statement is bounded where it runs (for example the snapshot's
+		// statement_timeout).
 		response := &filesResponseWriter{ResponseWriter: w}
 		w = response
 		var audit *filechanges.Audit
@@ -292,7 +284,7 @@ func (s *Server) fileWrapWithAudit(fn fileHandler, persist filesAuditRecorder) h
 				}
 			}
 			if s.limiter != nil {
-				if err = s.limitAPI(w, r, "files", filesRatePerMinute); err != nil {
+				if err = s.limitAPI(w, r, "files", "u:"+principal.User.ID, filesRatePerMinute); err != nil {
 					return err
 				}
 			}

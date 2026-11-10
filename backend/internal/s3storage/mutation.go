@@ -25,6 +25,35 @@ type mutationBackend struct {
 
 var _ objectmutation.Backend = (*mutationBackend)(nil)
 
+// A copy, an upload or a part write lasts as long as its bytes take, so it cannot share one
+// fixed deadline with a metadata request. A flat 60 seconds on every call made a large
+// provider-side copy fail with an error that named the clock instead of the bytes. These
+// mirror the COS driver's budgets, which is the reason both drivers now behave the same at
+// large sizes.
+const (
+	mutationMetadataBudget    = 5 * time.Minute
+	mutationMinBytesPerSecond = 5 << 20
+	mutationMaxTransferBudget = 6 * time.Hour
+)
+
+// mutationMetadata bounds one request whose duration does not scale with object size.
+func mutationMetadata(ctx context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(ctx, mutationMetadataBudget)
+}
+
+// mutationTransferBudget adds the time size bytes need at a deliberately pessimistic
+// provider rate, so a healthy transfer never hits it and a stalled connection still does.
+func mutationTransferBudget(ctx context.Context, size int64) (context.Context, context.CancelFunc) {
+	budget := mutationMetadataBudget
+	if size > 0 {
+		budget += time.Duration(size/mutationMinBytesPerSecond) * time.Second
+	}
+	if budget > mutationMaxTransferBudget {
+		budget = mutationMaxTransferBudget
+	}
+	return context.WithTimeout(ctx, budget)
+}
+
 func (f *Factory) MutationBackend() (objectmutation.Backend, error) {
 	if f == nil || f.backend == nil || f.backend.client == nil || f.backend.bucket == "" {
 		return nil, storage.NewError("invalid_config", "", nil)
@@ -48,7 +77,7 @@ func (c mutationHTTPClient) Do(r *http.Request) (*http.Response, error) {
 }
 
 func (b *mutationBackend) Head(ctx context.Context, key string) (objectmutation.Object, error) {
-	ctx, cancel := context.WithTimeout(ctx, 60*time.Second)
+	ctx, cancel := mutationMetadata(ctx)
 	defer cancel()
 	out, err := b.client.HeadObject(ctx, &s3.HeadObjectInput{Bucket: aws.String(b.bucket), Key: aws.String(key)})
 	if err != nil {
@@ -63,21 +92,20 @@ func (b *mutationBackend) Open(ctx context.Context, key, etag string) (io.ReadCl
 	if etag == "" {
 		return nil, storage.NewError("unsupported", storage.Path(key), nil)
 	}
-	work, cancel := context.WithTimeout(ctx, 60*time.Second)
-	out, err := b.client.GetObject(work, &s3.GetObjectInput{Bucket: aws.String(b.bucket), Key: aws.String(key), IfMatch: aws.String(etag)})
+	// The body streams for as long as its bytes take, so the caller's context is the only
+	// deadline here: a fixed clock on the response is the same mistake this driver already
+	// made on mutations, and it fires exactly on the files big enough to need the time.
+	out, err := b.client.GetObject(ctx, &s3.GetObjectInput{Bucket: aws.String(b.bucket), Key: aws.String(key), IfMatch: aws.String(etag)})
 	if err != nil {
-		mapped := mutationReadError(work, key, err, true)
-		cancel()
-		return nil, mapped
+		return nil, mutationReadError(ctx, key, err, true)
 	}
 	if out.Body == nil || out.ContentLength == nil || *out.ContentLength < 0 || aws.ToString(out.ETag) != etag || out.ContentRange != nil {
 		if out.Body != nil {
 			out.Body.Close()
 		}
-		cancel()
 		return nil, storage.NewError("changed", storage.Path(key), nil)
 	}
-	return &mutationBody{ReadCloser: out.Body, cancel: cancel, remaining: *out.ContentLength}, nil
+	return &mutationBody{ReadCloser: out.Body, cancel: func() {}, remaining: *out.ContentLength}, nil
 }
 func (b *mutationBackend) Put(ctx context.Context, in objectmutation.Put) (objectmutation.Object, error) {
 	if in.MediaType == "" {
@@ -86,7 +114,7 @@ func (b *mutationBackend) Put(ctx context.Context, in objectmutation.Put) (objec
 	if err := validateMutationPut(in); err != nil {
 		return objectmutation.Object{}, err
 	}
-	ctx, cancel := context.WithTimeout(ctx, 60*time.Second)
+	ctx, cancel := mutationTransferBudget(ctx, in.Size)
 	defer cancel()
 	input := &s3.PutObjectInput{Bucket: aws.String(b.bucket), Key: aws.String(in.Key), Body: in.Body, ContentLength: aws.Int64(in.Size), ContentType: aws.String(in.MediaType), Metadata: cloneMutationMetadata(in.Metadata)}
 	if in.Absent {
@@ -105,7 +133,7 @@ func (b *mutationBackend) Delete(ctx context.Context, key, expectedETag string) 
 	if key == "" || strings.ContainsAny(expectedETag, "\r\n\x00") {
 		return objectmutation.Object{}, storage.NewError("invalid_request", storage.Path(key), nil)
 	}
-	ctx, cancel := context.WithTimeout(ctx, 60*time.Second)
+	ctx, cancel := mutationMetadata(ctx)
 	defer cancel()
 	input := &s3.DeleteObjectInput{Bucket: aws.String(b.bucket), Key: aws.String(key)}
 	if expectedETag != "" {

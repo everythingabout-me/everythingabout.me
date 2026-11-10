@@ -218,15 +218,25 @@ func TestFileAPIBudgetIsSeparateFromTheAPIBudget(t *testing.T) {
 	s := &Server{limiter: ratelimit.New()}
 	r := httptest.NewRequest(http.MethodGet, "/api/files/list", nil)
 	for i := 0; i < apiRatePerMinute; i++ {
-		if err := s.limitAPI(httptest.NewRecorder(), r, "api", apiRatePerMinute); err != nil {
+		if err := s.limitAPI(httptest.NewRecorder(), r, "api", "", apiRatePerMinute); err != nil {
 			t.Fatalf("request %d inside the API budget was refused: %v", i+1, err)
 		}
 	}
-	if err := s.limitAPI(httptest.NewRecorder(), r, "api", apiRatePerMinute); err == nil {
+	if err := s.limitAPI(httptest.NewRecorder(), r, "api", "", apiRatePerMinute); err == nil {
 		t.Fatal("the API budget admitted a request past its limit")
 	}
-	if err := s.limitAPI(httptest.NewRecorder(), r, "files", filesRatePerMinute); err != nil {
+	if err := s.limitAPI(httptest.NewRecorder(), r, "files", "u:owner-1", filesRatePerMinute); err != nil {
 		t.Fatalf("the file API inherited the spent API budget: %v", err)
+	}
+	// An address is not a user: two owners behind one NAT must not share a budget.
+	for i := 0; i < filesRatePerMinute; i++ {
+		s.limitAPI(httptest.NewRecorder(), r, "files", "u:owner-1", filesRatePerMinute)
+	}
+	if err := s.limitAPI(httptest.NewRecorder(), r, "files", "u:owner-1", filesRatePerMinute); err == nil {
+		t.Fatal("one owner's file budget was not closed")
+	}
+	if err := s.limitAPI(httptest.NewRecorder(), r, "files", "u:owner-2", filesRatePerMinute); err != nil {
+		t.Fatalf("a second owner inherited the first owner's budget: %v", err)
 	}
 }
 

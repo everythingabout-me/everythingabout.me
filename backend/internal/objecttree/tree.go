@@ -57,7 +57,12 @@ type Backend interface {
 
 // P1 bounds complete-directory collision checking. Oversized or nonterminating
 // native listings fail without returning a partial directory.
-const maxDirectoryEntries = 100000
+//
+// The bound is memory, not policy: one directory is materialized as a map of
+// path spellings plus entries, about 250 bytes each, so 250k children costs roughly
+// 60 MB for the length of the walk. It used to be 100k, which refused a flat folder
+// that any photo or health export can honestly produce.
+const maxDirectoryEntries = 250000
 const maxNativePages = 1000
 
 type Tree struct {

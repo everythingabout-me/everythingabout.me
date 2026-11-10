@@ -145,7 +145,9 @@ test("a transient failure checks receipts then retries the same part with bounde
   await harness.until(() => [...harness.timers.values()].some(({ delay }) => delay === 250));
   assert.equal(attempts.length, 1);
   assert.ok(server.calls.some(([kind]) => kind === "status"));
-  assert.equal(server.calls.filter(([kind]) => kind === "receipts").length, 2);
+  // The session was created empty in this attempt, so the only receipt read is the one
+  // after the failure that proves the part never landed.
+  assert.equal(server.calls.filter(([kind]) => kind === "receipts").length, 1);
   await harness.tick(250);
   await harness.until(complete);
   assert.equal(attempts.length, 2);
@@ -155,18 +157,20 @@ test("a transient failure checks receipts then retries the same part with bounde
   assert.equal(server.sessions.size, 1);
 });
 
-test("automatic part retries stop after three attempts and preserve the original session", async (t) => {
+test("automatic part retries stop after five attempts and preserve the original session", async (t) => {
   const server = uploadServer();
   let attempts = 0;
   server.api.uploadPart = async () => { attempts++; throw new TestApiError("server error", 500); };
   const harness = await mount(t, server.api);
   harness.render().enqueue([entry("ab")], "", () => false);
-  await harness.until(() => [...harness.timers.values()].some(({ delay }) => delay === 250));
-  await harness.tick(250);
-  await harness.until(() => [...harness.timers.values()].some(({ delay }) => delay === 500));
-  await harness.tick(500);
+  // Four waits for five attempts, each twice the last: a phone that lost its link for a
+  // quarter of a minute still finishes the part.
+  for (const delay of [250, 500, 1000, 2000]) {
+    await harness.until(() => [...harness.timers.values()].some(({ delay: pending }) => pending === delay));
+    await harness.tick(delay);
+  }
   const queue = await harness.until((queue) => queue.tasks[0]?.status === "failed");
-  assert.equal(attempts, 3);
+  assert.equal(attempts, 5);
   assert.equal(queue.tasks[0].uploadId, "session-1");
   assert.equal(server.sessions.size, 1);
   assert.equal(server.calls.filter(([kind]) => kind === "commit").length, 0);
@@ -188,7 +192,7 @@ test("receiver backpressure waits without spending a part attempt or failing the
   assert.equal(server.calls.filter(([kind]) => kind === "part").length, 0);
   // Backpressure is not an ambiguous ACK: no status or receipt query is needed.
   assert.equal(server.calls.filter(([kind]) => kind === "status").length, 0);
-  assert.equal(server.calls.filter(([kind]) => kind === "receipts").length, 1, "only the initial receipt read");
+  assert.equal(server.calls.filter(([kind]) => kind === "receipts").length, 0, "a fresh session has nothing to read");
   for (const delay of [500, 1000, 2000, 2000]) {
     await harness.until(() => [...harness.timers.values()].some(({ delay: pending }) => pending === delay));
     await harness.tick(delay);
@@ -249,10 +253,9 @@ test("a started file holds no part slot until the earlier file releases one", as
   const harness = await mount(t, server.api);
   harness.render().enqueue(["a", "b", "c"].map((path) => ({ path, file: new File(["abcdefgh"], path) })), "", () => false);
   // Three files of four parts each over one eight-slot pool: the first two take every
-  // slot, and the third holds none although it already has an open session and its
-  // receipts read. That file is queued for the user, whatever its task status says.
-  const queue = await harness.until((queue) => queue.tasks.length === 3 && active === 8
-    && server.calls.filter(([kind]) => kind === "receipts").length === 3);
+  // slot, and the third holds none although it already has an open session. That file is
+  // queued for the user, whatever its task status says.
+  const queue = await harness.until((queue) => queue.tasks.length === 3 && active === 8);
   assert.deepEqual(queue.tasks.map((task) => task.activeParts), [4, 4, 0]);
   assert.deepEqual(queue.tasks.map((task) => task.status), ["uploading", "uploading", "uploading"]);
   gate.resolve();

@@ -44,7 +44,7 @@ func TestDirectoryAndNativePageBudgetsFailWithoutPartialResult(t *testing.T) {
 		name     string
 		backend  *limitBackend
 		maxCalls int
-	}{{"directory_entries", &limitBackend{entries: maxDirectoryEntries + 1}, 101}, {"advancing_native_cursor", &limitBackend{infinite: true}, maxNativePages}} {
+	}{{"directory_entries", &limitBackend{entries: maxDirectoryEntries + 1}, maxDirectoryEntries/1000 + 1}, {"advancing_native_cursor", &limitBackend{infinite: true}, maxNativePages}} {
 		t.Run(test.name, func(t *testing.T) {
 			tree, err := Bind(test.backend, storage.Config{OwnerID: "alice", ConnectionID: "test", Generation: 1, ContentRoot: "drive/alice", SystemRoot: "system/alice"}, make([]byte, 32))
 			if err != nil {
