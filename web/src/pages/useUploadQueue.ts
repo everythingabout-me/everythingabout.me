@@ -45,11 +45,17 @@ const PROGRESS_INTERVAL_MS = 1000;
 const SPEED_WINDOW_MS = 10000;
 interface ProgressSample { at: number; loaded: number }
 export type UploadStatus = "queued" | "waiting" | "uploading" | "finalizing" | "failed" | "completed";
-export interface DeletionWait {
+export interface FileOperationWait {
   operationId: string;
   path: string;
   state: "queued" | "running" | "outcome_unknown" | "failed" | "cancelled";
   statusUnavailable?: boolean;
+  /**
+   * What is holding the path. A row may only claim a deletion when the blocker is one:
+   * a folder creation this import raced finishes in milliseconds, and a deletion is the
+   * user's own decision, so the two must not share a sentence.
+   */
+  kind: "delete" | "upload" | "operation";
   /**
    * Where this wait was discovered: a stored record the page keeps for an accepted
    * delete, or the server's own `operation_in_progress` answer.
@@ -99,7 +105,7 @@ export interface UploadTask {
   terminalState?: "failed" | "aborted" | "expired";
   retryRequested?: boolean;
   allocationRejected?: boolean;
-  waitingFor?: DeletionWait;
+  waitingFor?: FileOperationWait;
   waitMessage?: string;
   error?: string;
 }
@@ -178,10 +184,20 @@ function isOperation(value: Item | FileOperation): value is FileOperation { retu
  * outcome instead, and the queue offers Continue — the one decision left, because the
  * folder may still hold what the deletion did not remove.
  */
-function waitMessage(wait: DeletionWait): string {
-  if (wait.statusUnavailable) return t("drive.deletionStatusUnavailable");
-  if (wait.state === "failed" || wait.state === "cancelled") return t("drive.deletionDidNotFinish", { path: wait.path });
-  return t("drive.waitingForDeletion", { path: wait.path });
+function waitMessage(wait: FileOperationWait): string {
+  if (wait.statusUnavailable) return t("drive.operationStatusUnavailable");
+  const ended = wait.state === "failed" || wait.state === "cancelled";
+  if (wait.kind === "delete") {
+    return ended ? t("drive.deletionDidNotFinish", { path: wait.path }) : t("drive.waitingForDeletion", { path: wait.path });
+  }
+  if (wait.kind === "upload") return ended ? t("drive.uploadDidNotFinish") : t("drive.waitingForUpload");
+  return ended ? t("drive.operationDidNotFinish") : t("drive.waitingForOperation");
+}
+// Without a kind the honest sentence is "another file operation", never "a deletion".
+function waitKind(kind: string | undefined): FileOperationWait["kind"] {
+  if (kind === "delete") return "delete";
+  if (kind === "upload_commit") return "upload";
+  return "operation";
 }
 async function sha256(blob: Blob): Promise<string> {
   const bytes = await crypto.subtle.digest("SHA-256", await blob.arrayBuffer());
@@ -356,7 +372,7 @@ export function useUploadQueue(onUploaded: (task: UploadTask, item: Item) => voi
       const deletion = pendingFileOperation(task.path);
       if (deletion) {
         const known = task.waitingFor?.operationId === deletion.id ? task.waitingFor.state : "running";
-        const waitingFor: DeletionWait = { ...task.waitingFor, operationId: deletion.id, path: deletion.path, state: known, from: "record" };
+        const waitingFor: FileOperationWait = { ...task.waitingFor, operationId: deletion.id, path: deletion.path, state: known, kind: "delete", from: "record" };
         patch(id, { status: "waiting", waitingFor, waitMessage: waitMessage(waitingFor) });
         return;
       }
@@ -738,7 +754,7 @@ export function useUploadQueue(onUploaded: (task: UploadTask, item: Item) => voi
       if (runtime.controller.signal.aborted) return;
       if (error instanceof ApiError && error.code === "operation_in_progress" && error.operationId) {
         const task = tasks.current.get(id);
-        const waitingFor: DeletionWait = { operationId: error.operationId, path: task?.path ?? "", state: "running", from: "conflict" };
+        const waitingFor: FileOperationWait = { operationId: error.operationId, path: task?.path ?? "", state: "running", kind: waitKind(error.operationKind), from: "conflict" };
         patch(id, { status: "waiting", waitingFor, waitMessage: waitMessage(waitingFor), speed: 0 });
       } else { patch(id, { status: "failed", error: message(error), speed: 0 }); }
     } finally {
@@ -956,7 +972,7 @@ export function useUploadQueue(onUploaded: (task: UploadTask, item: Item) => voi
               } else if (result.state === "succeeded") {
                 settleFileOperation(id); patch(task.id, { status: "queued", waitingFor: undefined, waitMessage: undefined });
               } else {
-                const waitingFor: DeletionWait = { ...task.waitingFor, state: result.state, statusUnavailable: false };
+                const waitingFor: FileOperationWait = { ...task.waitingFor, state: result.state, statusUnavailable: false };
                 patch(task.id, { waitingFor, waitMessage: waitMessage(waitingFor) });
               }
             } else if (!(result instanceof Error)) { applyOperation(task, result); }

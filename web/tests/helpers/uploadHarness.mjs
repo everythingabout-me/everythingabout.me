@@ -73,7 +73,9 @@ export function memoryLocks() {
 export const digest = (bytes) => createHash("sha256").update(bytes).digest("hex");
 export const item = (path, kind = "file", size = 1) => ({ path: `/${path.replace(/^\/+/, "")}`, kind, size, contentRevision: "content-v1", revision: "entry-v1" });
 export const operation = (id, state = "running", result = null, kind = "delete") => ({ id, kind, state, progress: { completed: 0, total: null, unit: "entries" }, result, error: null, cancelRequested: false });
-export const conflict = (id = "delete-1") => new TestApiError("operation in progress", 409, { code: "operation_in_progress", operationId: id });
+// The default blocker is a deletion, because that is what the page's own records and the
+// docs describe; a test that simulates a folder-creation race overrides the kind.
+export const conflict = (id = "delete-1") => new TestApiError("operation in progress", 409, { code: "operation_in_progress", operationId: id, operationKind: "delete" });
 
 /** A durable fake server: ACK loss can change server state before throwing. */
 export function uploadServer(partSize = 2, options = {}) {

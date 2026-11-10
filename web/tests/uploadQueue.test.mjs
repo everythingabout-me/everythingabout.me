@@ -330,6 +330,20 @@ test("shared delete Operation polls once, retains Files, frees slots and resumes
   assert.equal(callsOf(server, "part").filter(([, id]) => id !== "session-1").length, 4);
 });
 
+// The row may only claim a deletion when the blocker is one. A move that is still running,
+// or any blocker whose kind the server did not send, is named as another file operation.
+test("a live non-deletion blocker is never described as a deletion", async (t) => {
+  const server = uploadServer();
+  server.api.createUpload = async () => { throw Object.assign(conflict("move-1"), { operationKind: "move" }); };
+  server.api.uploadStatus = async (id) => { server.calls.push(["status", id]); throw new TestApiError("not an upload", 404); };
+  server.api.getOperation = async (id) => operation(id, "running", null, "move");
+  const harness = await mount(t, server.api);
+  enqueue(harness, [entry("folder/file", "ab")]);
+  const queue = await harness.until((queue) => queue.tasks[0]?.status === "waiting");
+  assert.equal(queue.tasks[0].waitingFor.kind, "operation");
+  assert.equal(queue.tasks[0].waitMessage, "drive.waitingForOperation");
+});
+
 test("a deletion that did not finish, an unknown outcome, an unreadable status and a wrong identity never authorize bytes by themselves", async (t) => {
   const server = uploadServer();
   server.api.createUpload = async () => { server.calls.push(["create"]); throw conflict(); };
@@ -966,7 +980,7 @@ test("hung delete checks time out and allow other exact Operations to progress",
   // Rows are looked up by path, not position: the queue publishes in row order, which
   // this selection does not keep.
   const waiting = (path) => harness.render().tasks.find((task) => task.path === path).waitMessage;
-  assert.equal(waiting("stuck"), "drive.deletionStatusUnavailable");
+  assert.equal(waiting("stuck"), "drive.operationStatusUnavailable");
   assert.equal(waiting("other"), "drive.deletionDidNotFinish");
   assert.equal(callsOf(server, "part").length, 0);
 });
