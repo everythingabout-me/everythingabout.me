@@ -197,6 +197,13 @@ func (w *MutationDriver) Mkdir(ctx context.Context, in storage.Mutation, cp stor
 func (w *MutationDriver) Remove(ctx context.Context, in storage.Mutation, cp storage.Checkpoint) (storage.MutationResult, error) {
 	return w.runAction(ctx, storage.EffectIntent{ID: in.ID, Action: "remove", Target: in.Path, Conditions: in.Conditions}, cp)
 }
+
+// Purge delegates to the journalled removal: a local unlink is a syscall, so the ledger
+// costs microseconds here, and keeping one deletion path keeps one set of guarantees.
+func (w *MutationDriver) Purge(ctx context.Context, p storage.Path, _ storage.Kind, revision []byte) error {
+	_, err := w.Remove(ctx, storage.Mutation{ID: "purge:" + string(p), Path: p, Conditions: storage.Conditions{ExpectedRevision: revision}}, func(context.Context, []byte) error { return nil })
+	return err
+}
 func (w *MutationDriver) Move(ctx context.Context, in storage.MoveRequest, cp storage.Checkpoint) (storage.MutationResult, error) {
 	return w.runAction(ctx, storage.EffectIntent{ID: in.ID, Action: "move", Source: in.Source, Target: in.Target, SourceRevision: in.SourceRevision, Conditions: in.TargetConditions}, cp)
 }

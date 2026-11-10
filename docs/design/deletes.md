@@ -145,6 +145,12 @@ delete.
 - [x] Purge liveness: a path with a live index row or an observation after `AcceptedAt` is adopted, a delete
       that comes back `changed`/`precondition_failed` is adopted rather than fatal, and a folder that gained a
       child during a pass is retried (bounded).
+- [x] Purge cost: one conditional request per object and eight deletes in flight. A settled deletion does not
+      need the journalled removal — nothing has to be attributed later, `If-Match` carries the identity, and a
+      lost reply is answered by the same re-walk that resumes a crash — so the driver gets a `Purge` that skips
+      the receipt and the two re-observations `Remove` makes. Folders go after their children, and a folder is
+      kept when anything under it survived the pass, which the walk already knows without another request.
+      Measured on 80 objects: 94s → 2.5s.
 - [ ] Operation resource: expose `purged`/`adopted` while the purge runs. Today the result appears when the
       purge finishes; a client sees `running` in between.
 - [ ] Tombstone object (`__eam_system__/<owner>/tombstones/<operation>`) so a rebuild after index loss does not

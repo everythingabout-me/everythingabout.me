@@ -97,6 +97,24 @@ type FolderWriter interface {
 type Remover interface {
 	Remove(context.Context, Mutation, Checkpoint) (MutationResult, error)
 }
+
+// Purger deletes one native object whose removal the caller has already made final,
+// using an observation it already holds. It exists for a purge and for nothing else.
+//
+// Remove cannot serve that case: it re-observes the object twice, journals a receipt and
+// fsyncs a ledger before the one request that matters, because a mutation whose reply is
+// lost must be attributable later. A purge has no such question. The index already
+// recorded the deletion, the conditional request carries the identity, and a lost reply
+// is answered by the next walk finding the object gone or still there — which is the same
+// re-walk that resumes a crashed purge. So a purge may skip both, and one object costs
+// one request instead of five to seven.
+//
+// An implementation must still refuse to delete an object whose revision moved: the
+// caller adopts that as a newer intent, and a delete that fails loud and quiet is better
+// than one that fails destructive. `changed` is that refusal.
+type Purger interface {
+	Purge(context.Context, Path, Kind, []byte) error
+}
 type MoveRequest struct {
 	ID               string
 	Source, Target   Path

@@ -153,3 +153,33 @@ func TestListObservesEveryChildWithoutListingETagEvidence(t *testing.T) {
 		}
 	}
 }
+
+// The purge's deletion is one request: no ledger, no re-observation. What it may not skip
+// is the identity check, so a revision that moved is a refusal the caller adopts.
+func TestPurgeIsOneConditionalDeleteWithoutObservation(t *testing.T) {
+	d, b, cfg, _ := fixture(t)
+	ctx := context.Background()
+	key := cfg.ContentRoot + "gone.txt"
+	b.current[key] = Object{Key: key, ETag: `"etag"`, Size: 3}
+	heads, deletes := b.heads, b.deletes
+	if err := d.Purge(ctx, "gone.txt", storage.File, nativeRevision(`"etag"`)); err != nil {
+		t.Fatal(err)
+	}
+	if b.heads != heads {
+		t.Fatalf("purge observed the object %d times", b.heads-heads)
+	}
+	if b.deletes != deletes+1 {
+		t.Fatalf("purge issued %d deletes", b.deletes-deletes)
+	}
+	if _, ok := b.current[key]; ok {
+		t.Fatal("purge left the object")
+	}
+	// A revision that no longer matches is refused rather than deleted on trust.
+	b.current[key] = Object{Key: key, ETag: `"rewritten"`, Size: 3}
+	if err := d.Purge(ctx, "gone.txt", storage.File, nativeRevision(`"etag"`)); !storage.IsCode(err, "changed") {
+		t.Fatalf("stale purge=%v", err)
+	}
+	if _, ok := b.current[key]; !ok {
+		t.Fatal("stale purge deleted the object")
+	}
+}

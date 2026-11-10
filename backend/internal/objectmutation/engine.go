@@ -265,6 +265,36 @@ func (d *Driver) listedRevision(e storage.Entry) []byte {
 	return nativeRevision(string(e.NativeETag))
 }
 
+// Purge is the cheap deletion a settled purge uses: one conditional request, no ledger and
+// no re-observation. See storage.Purger for why those two are the only things it may skip.
+func (d *Driver) Purge(ctx context.Context, p storage.Path, kind storage.Kind, revision []byte) error {
+	if p == "" || storage.ValidatePath(p) != nil || (kind != storage.File && kind != storage.Folder) {
+		return fail("invalid_name", p)
+	}
+	ctx, done, err := d.operation(ctx)
+	if err != nil {
+		return err
+	}
+	defer done()
+	// The conditional request names the raw ETag, not the revision token that carries it.
+	expected := ""
+	if len(revision) > 0 {
+		if expected, err = parseRevision(revision); err != nil {
+			return err
+		}
+	}
+	// The marker of a folder is one object like any other; its children are separate keys
+	// and the walk already removed them, so there is no emptiness to check here.
+	_, err = d.backend.Delete(ctx, d.key(p, kind), expected)
+	if err == nil {
+		return nil
+	}
+	if storage.IsCode(err, "precondition_failed") {
+		return fail("changed", p)
+	}
+	return err
+}
+
 func (d *Driver) List(ctx context.Context, p storage.Path, req storage.PageRequest) (storage.Page, error) {
 	ctx, done, err := d.operation(ctx)
 	if err != nil {

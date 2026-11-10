@@ -5,7 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"log/slog"
-	"sort"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"everythingabout.me/backend/internal/storage"
@@ -80,67 +81,144 @@ func (a *Actions) purgePrefix(ctx context.Context, root Root, actor Actor, op Op
 				// The prefix is gone: an earlier attempt finished it, or an outside tool did.
 				return a.finishPurge(work, root, actor, op, Succeeded, nil)
 			}
-			return a.finishPurge(work, root, actor, op, Failed, err)
+			return a.retryPurge(work, op, err)
 		}
-		// Deepest first: a parent removed before its children would leave them unreachable.
-		order := append([]storage.Entry(nil), entries...)
-		sort.SliceStable(order, func(i, j int) bool {
-			return pathDepth(order[i].Path) > pathDepth(order[j].Path)
-		})
-		waited := 0
-		for start := 0; start < len(order); start += purgePageSize {
-			end := min(start+purgePageSize, len(order))
-			page := order[start:end]
-			live, err := a.options.LivePaths(work, root, pagePaths(page))
-			if err != nil {
-				return a.finishPurge(work, root, actor, op, Failed, err)
+		waited, err := a.purgeLevels(work, root, op, purge, native, entries, &deleted, &adopted)
+		if err != nil {
+			if saveErr := a.savePurgeProgress(work, op, deleted, adopted); saveErr != nil {
+				slog.Warn("file purge progress not saved", "operation", op.ID, "error", saveErr)
 			}
-			if len(live) != len(page) {
-				// The answer must cover the page it was asked about; a short answer would
-				// silently mean "nothing is live" and delete a re-created path.
-				return a.finishPurge(work, root, actor, op, Failed, E("invalid_backend_response", nil))
-			}
-			for i, entry := range page {
-				if live[i] {
-					// A user re-created this exact path after accepting the deletion. It is
-					// their new content, not a leftover, and deleting it would be the one
-					// failure a delete must never produce.
-					adopted++
-					continue
-				}
-				if !entry.ModifiedAt.IsZero() && entry.ModifiedAt.After(purge.AcceptedAt) {
-					// Written after the user's decision: an in-flight publish or an outside
-					// writer. Neither was ever visible under the deleted path.
-					adopted++
-					continue
-				}
-				done, countAdopted, err := a.purgeEntry(work, op, purge, native, entry)
-				if errors.Is(err, errFolderNotReady) {
-					waited++
-					continue
-				}
-				if err != nil {
-					if saveErr := a.savePurgeProgress(work, op, deleted, adopted); saveErr != nil {
-						slog.Warn("file purge progress not saved", "operation", op.ID, "error", saveErr)
-					}
-					return a.finishPurge(work, root, actor, op, Failed, err)
-				}
-				if done {
-					deleted++
-				}
-				if countAdopted {
-					adopted++
-				}
-			}
-			if err = a.savePurgeProgress(work, op, deleted, adopted); err != nil {
-				return a.finishPurge(work, root, actor, op, Failed, err)
-			}
+			return a.retryPurge(work, op, err)
+		}
+		if err = a.savePurgeProgress(work, op, deleted, adopted); err != nil {
+			return a.retryPurge(work, op, err)
 		}
 		if waited == 0 {
 			break
 		}
 	}
 	return a.finishPurge(work, root, actor, op, Succeeded, nil)
+}
+
+// purgeLevels deletes one walk's entries deepest-first, several at a time. Depth decides
+// the order and never the parallelism: a folder's marker may only be removed after its
+// children, and every entry at one depth is independent of the others — which is what
+// makes a purge of a thousand files a batch of requests instead of a queue of them.
+func (a *Actions) purgeLevels(ctx context.Context, root Root, op Operation, purge *PurgeState, native NativeActions, entries []storage.Entry, deleted, adopted *int64) (int, error) {
+	byDepth := map[int][]storage.Entry{}
+	deepest := 0
+	for _, entry := range entries {
+		depth := pathDepth(entry.Path)
+		byDepth[depth] = append(byDepth[depth], entry)
+		if depth > deepest {
+			deepest = depth
+		}
+	}
+	// A folder's marker may only go once nothing under it survived this pass: the walk saw
+	// every child, so "did any child stay" is bookkeeping, not another request. It is also
+	// what keeps an adopted child from being orphaned under a marker that disappeared.
+	survivors := map[storage.Path]int{}
+	waited := 0
+	for depth := deepest; depth >= 0; depth-- {
+		group := byDepth[depth]
+		for start := 0; start < len(group); start += purgePageSize {
+			page := group[start:min(start+purgePageSize, len(group))]
+			live, err := a.options.LivePaths(ctx, root, pagePaths(page))
+			if err != nil {
+				return waited, err
+			}
+			if len(live) != len(page) {
+				// The answer must cover the page it was asked about; a short answer would
+				// silently mean "nothing is live" and delete a re-created path.
+				return waited, E("invalid_backend_response", nil)
+			}
+			candidates := make([]storage.Entry, 0, len(page))
+			for i, entry := range page {
+				if live[i] {
+					// A user re-created this exact path after accepting the deletion. It is
+					// their new content, not a leftover, and deleting it would be the one
+					// failure a delete must never produce.
+					*adopted++
+					continue
+				}
+				if !entry.ModifiedAt.IsZero() && entry.ModifiedAt.After(purge.AcceptedAt) {
+					// Written after the user's decision: an in-flight publish or an outside
+					// writer. Neither was ever visible under the deleted path.
+					*adopted++
+					continue
+				}
+				candidates = append(candidates, entry)
+			}
+			results := a.purgeBatch(ctx, op, native, candidates)
+			for i, result := range results {
+				entry := candidates[i]
+				if result.err != nil {
+					return waited, result.err
+				}
+				if entry.Kind == storage.Folder && result.deleted && survivors[entry.Path] > 0 {
+					// Children of this folder were left behind, so the folder stays with them
+					// and the next pass tries again once they are gone.
+					survivors[parentPath(entry.Path)]++
+					waited++
+					*adopted++
+					continue
+				}
+				switch {
+				case result.notReady:
+					survivors[parentPath(entry.Path)]++
+					waited++
+				case result.deleted:
+					*deleted++
+				case result.adopted:
+					survivors[parentPath(entry.Path)]++
+					*adopted++
+				}
+			}
+		}
+	}
+	return waited, nil
+}
+
+// purgeBatch deletes these entries with a bounded number in flight. The first failure stops
+// new work and is returned: the pass re-runs from a walk, so finishing the batch would only
+// do work the retry repeats.
+func (a *Actions) purgeBatch(ctx context.Context, op Operation, native NativeActions, entries []storage.Entry) []purgeResult {
+	results := make([]purgeResult, len(entries))
+	if len(entries) == 0 {
+		return results
+	}
+	work, cancel := context.WithCancel(ctx)
+	defer cancel()
+	slots := make(chan struct{}, purgeConcurrency)
+	var wg sync.WaitGroup
+	var failed atomic.Bool
+	for i, entry := range entries {
+		if failed.Load() {
+			break
+		}
+		slots <- struct{}{}
+		wg.Add(1)
+		go func(i int, entry storage.Entry) {
+			defer wg.Done()
+			defer func() { <-slots }()
+			if work.Err() != nil {
+				return
+			}
+			results[i] = a.purgeEntry(work, op, entry, native)
+			if results[i].err != nil && work.Err() == nil {
+				failed.Store(true)
+			}
+		}(i, entry)
+	}
+	wg.Wait()
+	return results
+}
+
+// purgeResult is what one object's deletion decided: it went, it was adopted, it has to
+// wait for a child, or it failed and the pass retries.
+type purgeResult struct {
+	deleted, adopted, notReady bool
+	err                        error
 }
 
 // errFolderNotReady is not a failure: it means the folder acquired a child after this
@@ -150,47 +228,57 @@ var errFolderNotReady = errors.New("folder gained a child during the purge")
 // purgeEntry removes one native object. "Already gone" is success: the walk cannot
 // distinguish an object an earlier attempt deleted from one an outside tool removed,
 // and both mean the bytes the user wanted gone are gone.
-func (a *Actions) purgeEntry(ctx context.Context, op Operation, purge *PurgeState, native NativeActions, entry storage.Entry) (deleted, adopted bool, err error) {
+func (a *Actions) purgeEntry(ctx context.Context, op Operation, entry storage.Entry, native NativeActions) purgeResult {
 	revision := entry.Revision
 	if len(revision) == 0 {
 		// A folder that exists only as a common prefix has no revision of its own, and a
-		// provider that cannot name a child from a listing leaves us one observation
-		// short. Stat answers both without deciding anything.
+		// provider that cannot name a child from a listing leaves us one observation short.
+		// Stat answers both without deciding anything.
 		current, statErr := observe(ctx, native, entry.Path)
 		if storage.IsCode(statErr, "not_found") {
-			return true, false, nil
+			return purgeResult{deleted: true}
 		}
 		if statErr != nil {
-			return false, false, statErr
+			return purgeResult{err: statErr}
 		}
-		revision = current.Revision
 		if current.Kind != entry.Kind {
 			// The path changed kind under us: the object the user deleted is already gone.
-			return true, false, nil
+			return purgeResult{deleted: true}
 		}
+		revision = current.Revision
 	}
-	_, err = native.Remove(ctx, storage.Mutation{
+	// One conditional request where the driver can do it, the journalled removal otherwise:
+	// both refuse to delete an object whose revision moved, and both are safe to repeat.
+	if purger, ok := native.(storage.Purger); ok {
+		err := purger.Purge(ctx, entry.Path, entry.Kind, revision)
+		switch {
+		case err == nil:
+			return purgeResult{deleted: true}
+		case storage.IsCode(err, "not_found"):
+			return purgeResult{deleted: true}
+		case storage.IsCode(err, "changed"), storage.IsCode(err, "precondition_failed"):
+			// Somebody replaced the object between our observation and the delete. Treat it
+			// as their newer intent and leave it: a delete fails quiet, never destructive.
+			return purgeResult{adopted: true}
+		case storage.IsCode(err, "not_empty"), storage.IsCode(err, "directory_not_empty"):
+			return purgeResult{notReady: true}
+		}
+		return purgeResult{err: err}
+	}
+	_, err := native.Remove(ctx, storage.Mutation{
 		ID:         purgeEntryID(op.ID, entry.Path),
 		Path:       entry.Path,
 		Conditions: storage.Conditions{ExpectedRevision: revision},
 	}, func(context.Context, []byte) error { return nil })
 	switch {
-	case err == nil:
-		return true, false, nil
-	case storage.IsCode(err, "not_found"):
-		return true, false, nil
+	case err == nil, storage.IsCode(err, "not_found"):
+		return purgeResult{deleted: true}
 	case storage.IsCode(err, "changed"), storage.IsCode(err, "precondition_failed"):
-		// Somebody replaced the object between our observation and the delete. Treat it
-		// as their newer intent and leave it: a delete fails quiet, never destructive.
-		return false, true, nil
+		return purgeResult{adopted: true}
 	case storage.IsCode(err, "not_empty"), storage.IsCode(err, "directory_not_empty"):
-		return false, false, errFolderNotReady
+		return purgeResult{notReady: true}
 	}
-	var none *storage.NoFinalEffect
-	if errors.As(err, &none) {
-		return false, false, err
-	}
-	return false, false, err
+	return purgeResult{err: err}
 }
 
 func (a *Actions) savePurgeProgress(ctx context.Context, op Operation, deleted, adopted int64) error {
@@ -206,6 +294,16 @@ func (a *Actions) savePurgeProgress(ctx context.Context, op Operation, deleted, 
 	}
 	*op.Purge = *updated.Purge
 	return nil
+}
+
+// retryPurge leaves the operation running and lets the worker try again. A provider that
+// refuses a delete is a cleanup backlog, not a failed deletion: the index already told the
+// user the subtree is gone, and the retry costs nothing but the walk.
+func (a *Actions) retryPurge(ctx context.Context, op Operation, cause error) (Operation, error) {
+	persist, cancel := durableContext(ctx)
+	defer cancel()
+	releaseLease(persist, a.journal, op.Lease)
+	return op, cause
 }
 
 // finishPurge settles the operation. A purge that cannot finish stays non-terminal and
@@ -248,6 +346,12 @@ func pathDepth(p storage.Path) int {
 // the work unit, not a deadline: the purge of a large tree is many pages, each of which
 // can be retried on its own.
 const purgePageSize = 200
+
+// purgeConcurrency is how many independent deletions one pass keeps in flight. Deletes are
+// network-bound and per-object, so this is the whole difference between a purge measured in
+// minutes and one measured in seconds; it stays modest because a burst of deletes is also
+// what a provider throttles.
+const purgeConcurrency = 8
 
 // purgePasses bounds how often the walk restarts for folders that gained children while
 // a previous pass was deleting their siblings.

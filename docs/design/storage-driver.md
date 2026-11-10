@@ -330,6 +330,11 @@ and a folder of a thousand files costs a thousand per pass. Which is also why th
 assumed: on an endpoint where the two spellings disagree, the same shortcut turns every captured entry into
 `target_changed` — a wrong answer, not a slow one.
 
+A driver may also implement `storage.Purger`, which is the one deletion that is not a conditional effect: the
+caller has already settled the removal in the index, so it skips the receipt and the re-observation `Remove`
+performs and issues one conditional delete. It exists for purges only; a mutation whose reply may be lost still
+goes through `Remove`.
+
 The object mutation driver derives `Revision` from the current object's ETag and sends every conditional
 effect with native `If-Match` / `If-None-Match` where the provider enforces them (COS ignores `If-Match`
 on PUT, so replacement re-checks the ETag under the gateway lock just before publishing). It advertises

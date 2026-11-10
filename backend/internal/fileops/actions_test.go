@@ -37,6 +37,8 @@ type actionNative struct {
 	lostAt      int
 	pageSize    int
 	lists       int
+	purges      int
+	purgeMu     sync.Mutex
 }
 
 func newActionNative(root Root) *actionNative {
@@ -104,6 +106,32 @@ func (n *actionNative) List(_ context.Context, p storage.Path, req storage.PageR
 func (n *actionNative) Mkdir(ctx context.Context, m storage.Mutation, save storage.Checkpoint) (storage.MutationResult, error) {
 	return n.effect(ctx, storage.EffectIntent{ID: m.ID, Action: "mkdir", Target: m.Path, Conditions: m.Conditions}, save)
 }
+
+// Purge is the cheap settled deletion: no receipt, no observation, one map operation. It
+// exists so the purge's fast path is the one the tests exercise.
+func (n *actionNative) Purge(_ context.Context, p storage.Path, kind storage.Kind, revision []byte) error {
+	n.purgeMu.Lock()
+	defer n.purgeMu.Unlock()
+	n.purges++
+	entry, ok := n.entries[p]
+	if !ok {
+		return storage.NewError("not_found", p, nil)
+	}
+	if len(revision) > 0 && !bytes.Equal(entry.Revision, revision) {
+		return storage.NewError("changed", p, nil)
+	}
+	if kind == storage.Folder {
+		for other := range n.entries {
+			if other != p && strings.HasPrefix(string(other), string(p)+"/") {
+				return storage.NewError("not_empty", p, nil)
+			}
+		}
+	}
+	delete(n.entries, p)
+	delete(n.data, p)
+	return nil
+}
+
 func (n *actionNative) Remove(ctx context.Context, m storage.Mutation, save storage.Checkpoint) (storage.MutationResult, error) {
 	return n.effect(ctx, storage.EffectIntent{ID: m.ID, Action: "delete", Source: m.Path, SourceRevision: m.Conditions.ExpectedRevision}, save)
 }
@@ -232,7 +260,11 @@ func actionCoordinator(t *testing.T, p *Postgres, commit IndexCommit) *Actions {
 			return 0, json.RawMessage(`{"deleted":true}`), nil
 		},
 		LivePaths: func(_ context.Context, _ Root, paths []storage.Path) ([]bool, error) {
-			return make([]bool, len(paths)), nil
+			live := make([]bool, len(paths))
+			for i, path := range paths {
+				live[i] = liveOverride[path]
+			}
+			return live, nil
 		},
 	})
 	if err != nil {
@@ -245,6 +277,10 @@ func actionCoordinator(t *testing.T, p *Postgres, commit IndexCommit) *Actions {
 // index is not modelled in this package; "the rows leave the index" therefore only needs
 // the bytes, which the purge then deletes from the tree.
 var prefixHost *actionNative
+
+// liveOverride names paths an index would hold again after the deletion was accepted: the
+// tests use it to model a user re-creating something while the purge runs.
+var liveOverride = map[storage.Path]bool{}
 
 func prepareAction(t *testing.T, a *Actions, req ActionRequest, n NativeActions) Operation {
 	t.Helper()
@@ -759,6 +795,9 @@ func TestDeleteAcceptsWithoutWalkingThenPurges(t *testing.T) {
 	if out.State != Succeeded {
 		t.Fatalf("purge state=%s problem=%s", out.State, out.Problem)
 	}
+	if n.purges == 0 {
+		t.Fatal("purge used the journalled removal instead of the settled one")
+	}
 	if _, ok := n.data["victims/a"]; ok {
 		t.Fatal("purge left the object behind")
 	}
@@ -788,5 +827,34 @@ func TestDeleteAcceptanceStillResolvesTheTarget(t *testing.T) {
 	_, _, err := a.Prepare(context.Background(), ActionRequest{Root: r, Actor: actor, Kind: "delete", From: "absent", Recursive: true}, n)
 	if !storage.IsCode(err, "not_found") {
 		t.Fatalf("missing target accepted: %v", err)
+	}
+}
+
+// A path the index holds again was re-created after the deletion was accepted. The purge
+// must leave it, and it must leave the folder above it too: deleting the marker would
+// orphan the user's new content under a path that no longer exists.
+func TestPurgeKeepsAPathRecreatedDuringThePurge(t *testing.T) {
+	pool := isolatedPostgres(t)
+	p, r, actor := seedOwner(t, pool, provenBaseline(4, 4, 100, 100))
+	n := newActionNative(r)
+	n.put("victims", storage.Folder, "")
+	n.put("victims/a", storage.File, "abc")
+	n.put("victims/recreated", storage.File, "xyz")
+	a := actionCoordinator(t, p, nil)
+	op := prepareAction(t, a, ActionRequest{Root: r, Actor: actor, Kind: "delete", From: "victims", Recursive: true, IdempotencyKey: "delete-recreated"}, n)
+	liveOverride[storage.Path("victims/recreated")] = true
+	defer delete(liveOverride, storage.Path("victims/recreated"))
+	out := runAction(t, a, op, actor, n)
+	if out.State != Succeeded || out.Purge.Adopted == 0 {
+		t.Fatalf("state=%s adopted=%d", out.State, out.Purge.Adopted)
+	}
+	if n.data["victims/recreated"] != "xyz" {
+		t.Fatal("purge deleted a re-created path")
+	}
+	if _, ok := n.data["victims/a"]; ok {
+		t.Fatal("purge left a stale sibling")
+	}
+	if _, ok := n.entries["victims"]; !ok {
+		t.Fatal("purge removed the folder above a surviving path")
 	}
 }
