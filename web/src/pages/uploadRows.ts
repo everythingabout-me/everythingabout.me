@@ -70,6 +70,23 @@ function visibleStatus(task: UploadTask): UploadStatus {
   return task.activeParts > 0 || task.loaded > 0 ? "uploading" : "queued";
 }
 
+/**
+ * Whether the row is an upload still worth describing rather than a listing entry.
+ *
+ * A finished batch stays in the queue after its last file lands: its counts answer
+ * `isUploadDirectory` and the parent rows of a later batch, and a folder the upload
+ * created stays navigable until the index lists it. But once the listing itself carries
+ * the entry, that entry is the row — its own name, its own time, its own size rule — and
+ * the batch numbers describe history, not state. A completed folder used to keep the
+ * upload row for as long as the page stayed open, so a folder that had just received
+ * files sat in its parent reading "2 files · 2 uploaded" with the batch total where every
+ * sibling shows a timestamp, which reads as an upload that never finished.
+ */
+export function isUploadRowActive(entry: UploadRowEntry): boolean {
+  if (!entry.upload) return false;
+  return entry.upload.status !== "completed" || !entry.item;
+}
+
 /** Project every selected descendant onto its immediate child in the browsed directory. */
 export function buildUploadRows(items: Item[], tasks: UploadTask[], directory: string): UploadRowEntry[] {
   const dir = normalize(directory);

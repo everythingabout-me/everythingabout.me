@@ -36,7 +36,7 @@ import { formatRelativeTime } from "../i18n/format";
 import { useUploadQueue, type UploadStatus, type UploadTask } from "./useUploadQueue";
 import { resolveDeleteBlocker } from "./deleteBlocker";
 import { droppedUploadEntries, filesToUploadEntries } from "./uploadSelection";
-import { buildUploadRows, isUploadDirectory, type UploadRowEntry } from "./uploadRows";
+import { buildUploadRows, isUploadDirectory, isUploadRowActive, type UploadRowEntry } from "./uploadRows";
 import { pendingFileOperations, setUploadOwner, settleFileOperation, subscribeFileOperations, trackFileOperation } from "./uploadPersistence";
 import { formatBytes, formatPreciseBytes, formatSize, formatSpeed } from "./sizeFormat";
 import styles from "./FilesPage.module.css";
@@ -1592,7 +1592,7 @@ export function FilesPage() {
                   className={`${styles.list} ${styles.enter} ${navigating ? styles.dim : ""}`}
                 >
                   {entries.map((entry) =>
-                    entry.upload && (entry.isDir || entry.upload.status !== "completed" || !entry.item) ? (
+                    isUploadRowActive(entry) ? (
                       <UploadRow
                         key={entry.path}
                         entry={entry}

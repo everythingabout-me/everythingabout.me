@@ -5,7 +5,7 @@ import { transformWithOxc } from "vite";
 
 const source = await readFile(new URL("../src/pages/uploadRows.ts", import.meta.url), "utf8");
 const { code } = await transformWithOxc(source, "uploadRows.ts");
-const { buildUploadRows, isUploadDirectory } = await import(
+const { buildUploadRows, isUploadDirectory, isUploadRowActive } = await import(
   `data:text/javascript;base64,${Buffer.from(code).toString("base64")}`
 );
 
@@ -140,6 +140,28 @@ test("navigation remains available after the root directory task completes", () 
   assert.equal(row.upload.completedFiles, 1);
   assert.deepEqual(row.upload.cancelIds, []);
   assert.deepEqual(row.upload.retryIds, []);
+});
+
+test("a finished batch stops being an upload row once the listing carries the entry", () => {
+  const tasks = [
+    folder("health/root"),
+    task("health/root/a.txt", { status: "completed" }),
+    task("health/root/b.txt", { status: "completed" }),
+  ];
+  const listed = buildUploadRows([item("health/root", true)], tasks, "health")[0];
+  assert.equal(listed.upload.status, "completed");
+  assert.equal(isUploadRowActive(listed), false);
+  // The folder the upload created is not in the listing yet, so it still needs its row.
+  assert.equal(isUploadRowActive(buildUploadRows([], tasks, "health")[0]), true);
+  // A file follows the same rule, and keeps the row only while its entry is missing.
+  const doneFile = buildUploadRows([item("health/done.txt")], [task("health/done.txt", { status: "completed" })], "health")[0];
+  assert.equal(isUploadRowActive(doneFile), false);
+  assert.equal(isUploadRowActive(buildUploadRows([], [task("health/done.txt", { status: "completed" })], "health")[0]), true);
+  // Unfinished work keeps its row even when the entry is already listed.
+  const running = buildUploadRows([item("health/root", true)], [folder("health/root", "uploading")], "health")[0];
+  assert.equal(isUploadRowActive(running), true);
+  // A listing entry with no batch behind it is never an upload row.
+  assert.equal(isUploadRowActive({ path: "health/root", name: "root", isDir: true }), false);
 });
 
 test("empty folders retain correct identity and creation state without inventing files", () => {
