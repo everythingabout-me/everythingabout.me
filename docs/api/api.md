@@ -355,10 +355,12 @@ Uncertain effects retain guards. See [identity settlement](../design/file-identi
 
 Mutations fence only the native paths they observe or mutate, so an open upload session elsewhere in the
 drive never blocks an unrelated rename, copy or delete. A genuinely overlapping path returns
-`409 operation_in_progress` with the blocking `operationId`; wait for that exact Operation, or abort the
-identified open upload session when the conflict is a resumable upload of the same target. The Problem detail
-names the holding action (upload, delete, move, copy or folder creation) and the blocking operation id, so a
-refusal is actionable without a log lookup.
+`409 operation_in_progress` with the blocking `operationId` and its `operationKind`; wait for that exact
+Operation, adopt it when it is a resumable upload of the same target that is already publishing, or abort it
+only while it is still `open`. The Problem detail names the holding action (upload, delete, move, copy or
+folder creation) and the blocking operation id, so a refusal is actionable without a log lookup, and the kind
+is machine-readable because the two cases need opposite behaviour: a folder creation a sibling request raced
+is usually over by the time the client reads it, while a deletion is long and is the user's decision.
 
 A recursive delete may extend that resolution to an `open` upload session anywhere inside the deleted
 subtree: the delete would discard the same bytes anyway, and refusing a single Delete click merely because an

@@ -3,6 +3,8 @@
 export interface DeletionConflict {
   code?: string;
   operationId?: string;
+  /** What holds the path: delete, move, copy, mkdir or upload_commit. */
+  operationKind?: string;
   path?: string;
   deletionStatus?: "pending" | "running" | "failed";
 }
@@ -10,6 +12,7 @@ export interface DeletionConflict {
 export class ApiError extends Error implements DeletionConflict {
   readonly code?: string;
   readonly operationId?: string;
+  readonly operationKind?: string;
   readonly path?: string;
   readonly deletionStatus?: DeletionConflict["deletionStatus"];
 
@@ -22,6 +25,7 @@ export class ApiError extends Error implements DeletionConflict {
     this.name = "ApiError";
     this.code = metadata.code;
     this.operationId = metadata.operationId;
+    this.operationKind = metadata.operationKind;
     this.path = metadata.path;
     this.deletionStatus = metadata.deletionStatus;
   }
@@ -35,6 +39,8 @@ export interface FileProblem {
   detail: string;
   requestId: string;
   operationId?: string;
+  /** What holds the path when this is an operation_in_progress conflict. */
+  operationKind?: string;
 }
 
 export class FileApiError extends ApiError {

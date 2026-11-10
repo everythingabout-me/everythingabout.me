@@ -17,6 +17,10 @@ type Problem struct {
 	Detail      string `json:"detail"`
 	RequestID   string `json:"requestId"`
 	OperationID string `json:"operationId,omitempty"`
+	// OperationKind names what holds the path (delete, move, copy, mkdir, upload_commit).
+	// A client that must decide whether to wait has to tell a deletion it should respect
+	// from the folder creation this same upload just raced, and the id alone cannot say.
+	OperationKind string `json:"operationKind,omitempty"`
 }
 
 func (p *Problem) Error() string { return p.Code + ": " + p.Detail }

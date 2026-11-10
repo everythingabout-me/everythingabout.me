@@ -449,6 +449,35 @@ export function useUploadQueue(onUploaded: (task: UploadTask, item: Item) => voi
                   return;
                 }
               }
+              if (blocking.state === "committed" && blocking.result) {
+                complete(task, blocking.result);
+                return;
+              }
+              // The path's earlier attempt is already publishing, and a second session over it
+              // could only wait for this one. Adopt it instead: the poll finishes the row from
+              // the same Operation and its own result. No abort and no allocation — which is
+              // also what the contract forbids for committing/outcome_unknown work. Treated as
+              // an unrelated blocker, this was the state that showed "waiting for deletion of
+              // <a file>" and cost a poll interval per file.
+              if (blocking.state === "committing" || blocking.state === "outcome_unknown" || blocking.state === "committed") {
+                if (!signal.aborted) patch(id, { uploadId: blocking.id, operationId: blocking.operationId ?? error.operationId, status: "finalizing", uploaded: true, speed: 0, allocationRejected: false });
+                return;
+              }
+            }
+          }
+          // A non-delete blocker is almost always one of this import's own short-lived steps:
+          // the destination's missing ancestors are created inside another create, so a
+          // sibling's folder creation can refuse this one for milliseconds. Ask once whether
+          // it has already ended and retry; latching a poll for it cost a poll interval per
+          // file and showed the row "waiting for deletion of <a file>" for a deletion that
+          // never existed. A deletion is different: it is long, it is the user's decision,
+          // and it must keep the wait and its own report.
+          if (error instanceof ApiError && error.operationKind && error.operationKind !== "delete" && error.operationId) {
+            const blocker = await api.getOperation(error.operationId, signal).catch(() => undefined);
+            if (signal.aborted) return;
+            if (blocker && ["succeeded", "failed", "cancelled"].includes(blocker.state)) {
+              patch(id, { status: "queued", allocationRejected: false });
+              return;
             }
           }
           if (error instanceof ApiError && error.status === 409 && error.code === "name_conflict" && !task.overwrite) {

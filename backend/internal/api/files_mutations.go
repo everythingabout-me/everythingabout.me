@@ -81,6 +81,7 @@ func filesMutationProblem(err error) error {
 			// The blocking operation is part of the cause: the client can wait for that exact
 			// Operation or cancel it, while a bare code leaves nothing to act on.
 			problem.OperationID = e.OperationID
+			problem.OperationKind = e.OperationKind
 			held := "an unfinished operation"
 			switch e.OperationKind {
 			case "upload_commit":

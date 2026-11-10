@@ -239,6 +239,27 @@ test("a failed capability probe costs the modification time, not the files", asy
   assert.ok(queue.tasks.every((task) => task.intent && !("sourceModifiedAt" in task.intent)));
 });
 
+// The destination's ancestors are created inside the create request, so a sibling's folder
+// creation can refuse it for a few milliseconds. Waiting on that finished Operation turned a
+// healthy import into rows that said "waiting for deletion" and cost a poll interval each.
+test("a create blocked by a finished folder creation retries instead of waiting", async (t) => {
+  const server = uploadServer();
+  const create = server.api.createUpload;
+  let attempts = 0;
+  server.api.createUpload = async (...args) => {
+    if (++attempts === 1) throw Object.assign(conflict("mkdir-1"), { operationKind: "mkdir" });
+    return create(...args);
+  };
+  server.api.uploadStatus = async (id) => { server.calls.push(["status", id]); throw new TestApiError("not an upload", 404); };
+  server.api.getOperation = async (id) => operation(id, "succeeded");
+  const harness = await mount(t, server.api);
+  enqueue(harness, [entry("folder/file", "ab")]);
+  const queue = await harness.until(allComplete);
+  assert.equal(attempts, 2, "the refused create was retried once the blocker had ended");
+  assert.equal(queue.tasks[0].waitingFor, undefined);
+  assert.equal(queue.tasks[0].status, "completed");
+});
+
 test("zero-byte upload commits an empty session without a part request", async (t) => {
   const server = uploadServer();
   const harness = await mount(t, server.api);

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { conflict, deferred, digest, memoryLocks, memoryStorage, operation, setup, TestApiError, uploadServer } from "./helpers/uploadHarness.mjs";
+import { conflict, deferred, digest, item, memoryLocks, memoryStorage, operation, setup, TestApiError, uploadServer } from "./helpers/uploadHarness.mjs";
 
 const entry = () => ({ path: "file", file: new File(["ab"], "file", { type: "application/json" }) });
 const callsOf = (server, type) => server.calls.filter(([kind]) => kind === type);
@@ -46,6 +46,25 @@ function assertFreshPublication(server, attempts) {
   assert.deepEqual(callsOf(server, "part").map(([, id, number]) => [id, number]), [["session-2", 1]]);
   assert.deepEqual(callsOf(server, "commit"), [["commit", "session-2"]]);
 }
+
+// A page that was discarded mid-publish leaves the path's session committing. A new
+// selection must adopt that publication, not allocate a second session over it and then
+// describe the wait as a deletion of the file being uploaded.
+test("a path left committing is adopted and finished from its own Operation", async (t) => {
+  const { server } = await blockedUpload("committing");
+  server.api.getOperation = async (id) => operation(id, "succeeded", item("folder/file"));
+  const harness = await mount(t, server.api);
+  enqueue(harness);
+  const adopted = await harness.until((queue) => queue.tasks[0]?.status === "finalizing");
+  assert.equal(adopted.hasActiveUploads, true);
+  await harness.tick();
+  const queue = await harness.until(complete);
+  assert.equal(server.sessions.size, 1, "the committing session was adopted, not duplicated");
+  assert.equal(callsOf(server, "part").length, 0);
+  assert.equal(callsOf(server, "commit").length, 0, "the adopted session owns the publication");
+  assert.equal(queue.tasks[0].status, "completed");
+  assert.equal(harness.completed.length, 1);
+});
 
 test("fresh mount ignores an old open upload; explicit selection automatically aborts it before a fresh allocation", async (t) => {
   const { server, blocker, attempts } = await blockedUpload();
@@ -279,9 +298,6 @@ for (const [label, changes] of [
   ["a different session ID", { id: "unrelated-session" }],
   ["a different path", { path: "private/file" }],
   ["a descendant path", { path: "folder/file/child" }],
-  ["a committing upload", { state: "committing" }],
-  ["an upload with unknown publication outcome", { state: "outcome_unknown" }],
-  ["an already committed upload", { state: "committed" }],
 ]) {
   test(`a blocker reporting ${label} never authorizes abort or allocation`, async (t) => {
     const { server, blocker, attempts } = await blockedUpload();
@@ -296,6 +312,34 @@ for (const [label, changes] of [
     assert.deepEqual(callsOf(server, "status"), [["status", blocker.id]]);
     assert.equal(callsOf(server, "abort").length, 0);
     assertNoPublication(server);
+  });
+}
+
+// A blocker that is this path's own earlier session, already publishing, must be adopted:
+// the row follows its Operation to the result instead of allocating over it, aborting it,
+// or describing it as a deletion of the file being uploaded.
+for (const [label, changes] of [
+  ["a committing upload", { state: "committing" }],
+  ["an upload with unknown publication outcome", { state: "outcome_unknown" }],
+  ["an already committed upload", { state: "committed" }],
+]) {
+  test(`a blocker reporting ${label} is adopted, never aborted or reallocated`, async (t) => {
+    const { server, blocker, attempts } = await blockedUpload();
+    const status = server.api.uploadStatus;
+    server.api.uploadStatus = async (...args) => ({ ...await status(...args), ...changes });
+    server.api.getOperation = async (id) => operation(id, "succeeded", item("folder/file"));
+    const harness = await mount(t, server.api);
+    enqueue(harness);
+    const adopted = await harness.until((queue) => queue.tasks[0]?.status === "finalizing");
+    assert.equal(adopted.hasActiveUploads, true);
+    assert.equal(attempts.length, 1);
+    assert.equal(callsOf(server, "status").at(-1)[1], blocker.id);
+    assert.equal(callsOf(server, "abort").length, 0);
+    assertNoPublication(server);
+    await harness.tick();
+    const queue = await harness.until(complete);
+    assert.equal(queue.tasks[0].status, "completed");
+    assert.equal(server.sessions.size, 1, "the blocker's publication is the one that finished");
   });
 }
 
