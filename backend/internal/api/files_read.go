@@ -113,6 +113,19 @@ func filesHiddenRoots(f *fileRequest) []string {
 	return nil
 }
 
+// filesNativeDriver reports the admitted native tree behind the read-concealment
+// views. Concealment hides paths, not capability: the overlay is a read view built
+// per request from the deletions still in flight, so asserting the capability on it
+// would make one unfinished delete reject every write in the whole drive — the
+// owner cannot create a folder in an unrelated directory, and the capability
+// endpoint (which already unwraps) contradicts the mutation it advertises support
+// for. Mutations stay safe because every destination and selection is resolved
+// through the index with filesHiddenRoots, so a concealed path cannot be named.
+func filesNativeDriver(f *fileRequest) (fileops.NativeActions, bool) {
+	native, ok := filesUnderlyingDriver(f.Driver).(fileops.NativeActions)
+	return native, ok
+}
+
 // filesIndexedRecord returns the owner-scoped index row for one path, including the
 // native key that content reads address directly.
 func (s *Server) filesIndexedRecord(ctx context.Context, f *fileRequest, p fc.Path) (*nodes.FileBrowseRecord, error) {

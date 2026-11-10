@@ -123,7 +123,7 @@ func (s *Server) fileMutationContext(ctx context.Context, f *fileRequest) (fileo
 	if !s.cfg.Storage.CoordinatedWrites || s.filesJournal == nil {
 		return nil, fileops.Root{}, fileops.Actor{}, fc.NewProblem(501, "not_implemented", "Native file writes are not enabled.")
 	}
-	native, ok := f.Driver.(fileops.NativeActions)
+	native, ok := filesNativeDriver(f)
 	if !ok {
 		return nil, fileops.Root{}, fileops.Actor{}, fc.NewProblem(422, "unsupported_option", "This root does not support safe native file mutations.")
 	}

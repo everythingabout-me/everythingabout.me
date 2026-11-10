@@ -240,3 +240,26 @@ func TestPendingDeleteReferenceOverlayKeepsHiddenRootsVisibleToIndex(t *testing.
 		t.Fatal("hidden reference path reached the native tree")
 	}
 }
+
+// overlayNativeDriver satisfies the native action set without a real tree; this test
+// only asks whether the capability survives the concealment view.
+type overlayNativeDriver struct{ fileops.NativeActions }
+
+// A delete still in flight must hide its own path and nothing else. While the
+// overlay removed the native capability, every write in the whole drive answered
+// 422 unsupported_option — creating a folder in an unrelated directory failed
+// because an old delete somewhere else had not settled yet.
+func TestPendingDeleteOverlayKeepsNativeWriteCapability(t *testing.T) {
+	base := &overlayNativeDriver{}
+	driver := &pendingDeleteDriver{Driver: base, roots: []string{"gone"}}
+	if _, ok := filesNativeDriver(&fileRequest{Driver: driver}); !ok {
+		t.Fatal("the plain concealment view dropped the native write capability")
+	}
+	reference := &pendingDeleteReferenceDriver{pendingDeleteDriver: driver}
+	if _, ok := filesNativeDriver(&fileRequest{Driver: reference}); !ok {
+		t.Fatal("the reference concealment view dropped the native write capability")
+	}
+	if _, ok := filesNativeDriver(&fileRequest{Driver: base}); !ok {
+		t.Fatal("the unwrapped driver lost the native write capability")
+	}
+}

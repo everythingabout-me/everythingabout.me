@@ -10,7 +10,7 @@ func (s *Server) filesWriteReadiness(ctx context.Context, f *fileRequest) (bool,
 	if s.cfg == nil || !s.cfg.Storage.CoordinatedWrites || s.filesJournal == nil {
 		return false, nil, nil
 	}
-	native, ok := f.Driver.(fileops.NativeActions)
+	native, ok := filesNativeDriver(f)
 	if !ok {
 		return false, nil, nil
 	}
