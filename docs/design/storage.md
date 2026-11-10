@@ -224,15 +224,27 @@ another full-byte transfer.
 
 The browser starts every queued task, so a large batch opens its sessions immediately. Started tasks send
 numbered parts through one global pool of eight part requests with no per-file cap; the receiver admits
-part bodies process-wide, so no session publishes a parallelism for clients to respect. A freed slot
-immediately goes to the earliest-started file's next part, so files finish in order and one slow part never
-idles a connection. Because of that ordering, a started file may hold no slot at all for a long stretch; the
-queue therefore reports a file as uploading only while it holds at least one part slot, and shows a started
-file that is still claiming, allocating, reading receipts or waiting behind an earlier file as queued.
-"Uploading · 0 B/s" would describe a stall; a batch that is working but serialized behind one file must not
-look like one. After an uncertain part request the client asks the session what the provider or
-relay holds before resending; class C receipt hashes are verified against the retained File before reuse. The browser queue exists only in memory for the current Files page/document and survives folder
-navigation. Refresh/close discards it without restoring failed tasks or requesting File reselection. Register the
+part bodies process-wide, so no session publishes a parallelism for clients to respect. The file at the head of
+the queue takes every slot it has parts to fill — all eight while it does — and each freed slot goes to its next
+part, so files finish one after another and one slow part never idles a connection. A later file joins only on
+the slots the head leaves, when it has fewer parts left than slots; it never takes a slot away from the file
+ahead of it.
+
+Queue order is therefore what decides which file finishes first, and it has to be the one a person can see, so a
+selection is queued the way the list shows it — folders first, then name — never in the order the OS delivered a
+drop. The list is name-sorted, so serving the drop order lets a file further down the list stream while the one
+above it waits, which reads as the queue picking at random.
+
+A started file that is not at the head may hold no slot at all while the file ahead of it still has parts. The
+queue keeps reporting such a file as uploading and uses its held-slot count to name the wait beside the status,
+rather than moving it back to "queued": a file that already sent bytes keeps its bytes, its percentage and its
+open session, so a status that goes backwards reads as a restart, and "Uploading · 0 B/s" alone reads as a
+stall. Only a task that has not been started yet is queued.
+
+After an uncertain part request the client asks the session what the provider or relay holds before
+resending; class C receipt hashes are verified against
+the retained File before reuse. The browser queue exists only in memory for the current Files page/document
+and survives folder navigation. Refresh/close discards it without restoring failed tasks or requesting File reselection. Register the
 browser-native beforeunload warning while queued, waiting, uploading or finalizing tasks remain; do not rely on
 unload-time abort requests. Same-page retry, idempotency and cancellation retain their exact session/Operation
 identities. Remove the current owner's old `eam.uploads.v1:<owner>` localStorage record without executing it;

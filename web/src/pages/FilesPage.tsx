@@ -246,10 +246,10 @@ const UploadRow = memo(function UploadRow({
                 : upload.preparing ? t("drive.uploadCreatingFolders") : uploadStatusText(upload.status)}
             </span>
           )}
-          {upload.status === "uploading" && (!isDir || upload.speed > 0) && (
+          {upload.status === "uploading" && (upload.waitingForSlot || !isDir || upload.speed > 0) && (
             <span className={styles.uploadSpeed}>
               <span className={styles.uploadSep} aria-hidden="true">·</span>
-              {formatSpeed(upload.speed)}
+              {upload.waitingForSlot ? t("drive.uploadWaitingForSlot") : formatSpeed(upload.speed)}
             </span>
           )}
         </div>

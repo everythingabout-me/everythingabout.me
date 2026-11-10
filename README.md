@@ -25,9 +25,12 @@ File reselection. A browser-native beforeunload warning is registered while queu
 finalizing tasks remain.
 Durable server sessions and accepted Operations continue under their existing recovery/expiry rules. Clients
 that retain session identity and source bytes can use the resumable API independently of this browser behavior.
-Every queued file starts at once and their parts share one global pool of eight concurrent requests; one file may use all eight.
-A file is reported as uploading only while it holds a part slot: a started file that is still being allocated, or waiting behind an earlier
-file, shows as queued, because nothing is moving for it.
+Every queued file starts at once and their parts share one global pool of eight concurrent requests; the file the queue
+is on takes as many of the eight as it has parts to fill, and later files join on the slots it leaves.
+Serving order is the order the list shows — folders first, then name — and parts ascend inside a file, so the row at the
+top finishes first, then the next.
+A started file keeps its uploading status even while it holds no part slot: its row names that wait instead of
+returning to queued, because a status that moves backwards on a file that already sent bytes reads as a restart.
 See [transfer protocol](docs/design/transfer-protocol.md) for the exact boundaries.
 Object connections need no bucket versioning: revisions use current-object ETags and operation-specific
 conditions. COS ignores PUT If-Match, so admitted replacement rechecks ETag under gateway coordination;

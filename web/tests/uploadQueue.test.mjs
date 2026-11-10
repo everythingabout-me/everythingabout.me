@@ -896,7 +896,10 @@ test("hung delete checks time out and allow other exact Operations to progress",
   await harness.tick(15000);
   assert.equal(stuckSignal.aborted, true);
   assert.ok(callsOf(server, "operation").some(([, id]) => id === "delete-other"));
-  assert.equal(harness.render().tasks[0].waitMessage, "drive.deletionStatusUnavailable");
-  assert.equal(harness.render().tasks[1].waitMessage, "drive.deletionNeedsAttention");
+  // Rows are looked up by path, not position: the queue publishes in row order, which
+  // this selection does not keep.
+  const waiting = (path) => harness.render().tasks.find((task) => task.path === path).waitMessage;
+  assert.equal(waiting("stuck"), "drive.deletionStatusUnavailable");
+  assert.equal(waiting("other"), "drive.deletionNeedsAttention");
   assert.equal(callsOf(server, "part").length, 0);
 });

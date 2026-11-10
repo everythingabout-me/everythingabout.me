@@ -67,10 +67,11 @@ export interface UploadTask {
    * `status === "uploading"` only means the task was started: claiming the path,
    * allocating the session, reading receipts and waiting behind an earlier file all
    * happen before this file's first byte moves, and the global pool hands every free
-   * slot to the earliest-started file, so several started files can sit at 0 B/s for
-   * minutes. Counting held slots is the only local fact that says "bytes can move now";
-   * the row projection uses it to keep those files labelled as queued instead of
-   * reporting an upload that is not uploading.
+   * slot to the earliest-started file, so a started file can sit at 0 B/s for minutes
+   * while another one streams. Counting held slots is the only local fact that says
+   * "bytes can move now"; the row projection uses it to name that wait beside the
+   * status, which stays uploading — a file that already sent bytes must never fall
+   * back to the pre-start "queued" word, because that reads as a restart.
    */
   activeParts: number;
   uploaded: boolean;
@@ -97,6 +98,21 @@ export interface UploadQueue {
 interface Runtime { controller: AbortController; }
 interface PartWaiter { rank: number; number: number; resolve: () => void; }
 const relative = (path: string) => path.replace(/^\/+|\/+$/g, "");
+/**
+ * The order the file list shows: folders before files, then case-insensitive name.
+ *
+ * It mirrors the row projection's comparator because both answer the same question —
+ * what comes first — and the queue's answer has to be the visible one. Paths rather than
+ * basenames keep a selected tree depth-first and name-ordered, the order its folders
+ * appear in.
+ */
+function compareQueueOrder(a: UploadTask, b: UploadTask): number {
+  if (a.isDir !== b.isDir) return a.isDir ? -1 : 1;
+  const left = a.path.toLowerCase();
+  const right = b.path.toLowerCase();
+  if (left !== right) return left < right ? -1 : 1;
+  return a.path < b.path ? -1 : a.path > b.path ? 1 : 0;
+}
 let sequence = 0;
 // The only thing the queue asks capabilities for is whether this connection can
 // carry a source modification time — a service-wide flag, not a per-folder one.
@@ -174,8 +190,11 @@ export function useUploadQueue(onUploaded: (task: UploadTask, item: Item) => voi
   const verified = useRef(new Map<string, { file: File; parts: Map<number, string> }>());
   const pollBusy = useRef(false);
   const deadlines = useRef(new Set<ReturnType<typeof setTimeout>>());
-  // Global part pool: the earliest-started file (then lowest part number) gets the
-  // next free slot, so files finish in order instead of all advancing slowly.
+  // Global part pool: the file at the head of the queue takes every slot it has parts to
+  // fill, and the next part of that file is always the first waiter, so files finish one
+  // after another in queue order instead of all advancing slowly. A later file joins on
+  // the slots the head leaves — when it has fewer parts left than slots — never by taking
+  // one away from it.
   const partPool = useRef({ active: 0, waiters: [] as PartWaiter[] });
   const ranks = useRef(new Map<string, number>());
   const nextRank = useRef(0);
@@ -599,8 +618,8 @@ export function useUploadQueue(onUploaded: (task: UploadTask, item: Item) => voi
           };
           const rank = ranks.current.get(id) ?? Number.MAX_SAFE_INTEGER;
           // Slots this file holds right now, across its workers. A worker keeps its slot
-          // between its own parts, and yields it to a higher-priority part waiting for it,
-          // so this count is what the row reads to decide whether the file is moving.
+          // between its own parts, so this count is what the row reads to decide whether
+          // the file is moving.
           let held = 0;
           const holdSlot = () => { held++; patch(id, { activeParts: held }); };
           const yieldSlot = () => { held--; releasePart(); patch(id, { activeParts: held }); };
@@ -608,7 +627,8 @@ export function useUploadQueue(onUploaded: (task: UploadTask, item: Item) => voi
             let holding = false;
             try {
               for (let number = pending.shift(); number !== undefined && !batch.signal.aborted; number = pending.shift()) {
-                // Keep a held slot unless a higher-priority part is waiting for it.
+                // Keep a held slot unless a part queued by an earlier file, or this file's
+                // own earlier part, is waiting for it.
                 const head = partPool.current.waiters[0];
                 if (holding && head && (head.rank < rank || head.rank === rank && head.number < number)) { holding = false; yieldSlot(); }
                 if (!holding) {
@@ -772,6 +792,15 @@ export function useUploadQueue(onUploaded: (task: UploadTask, item: Item) => voi
       added.push(task);
       taken.set(path, task);
     }
+    // Queue order decides which file finishes first: inside one file parts ascend, and
+    // across files each freed slot goes to the earliest-queued file asking for one. That
+    // order must therefore be the one a person can see — the row order: folders first,
+    // then name. A drop hands the files over in whatever order the OS listed them, which
+    // the name-sorted list never shows, so keeping it lets a file further down the list
+    // stream while the one above it waits, which reads as the queue picking at random.
+    // This orders only the selection being added; a later selection still queues behind
+    // everything already running or waiting.
+    added.sort(compareQueueOrder);
     if (added.length) insert(added);
     // The user just picked the files; publish the rows before the first network hop.
     publish();

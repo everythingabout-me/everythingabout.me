@@ -258,3 +258,30 @@ test("a started file holds no part slot until the earlier file releases one", as
   gate.resolve();
   await harness.until((queue) => queue.tasks.every((task) => task.status === "completed"));
 });
+
+test("a selection queues in the order the list shows, not the order the drop delivered", async (t) => {
+  const server = uploadServer(2);
+  const gate = deferred();
+  const sent = [];
+  const pathOf = (id) => [...server.sessions.values()].find((session) => session.id === id).path;
+  const send = server.api.uploadPart;
+  server.api.uploadPart = async (id, number, blob, signal, progress) => {
+    sent.push(pathOf(id));
+    await gate.promise;
+    return send(id, number, blob, signal, progress);
+  };
+  const harness = await mount(t, server.api);
+  // Sixteen parts each, so one file can fill the whole eight-slot pool and the order the
+  // files are served in is visible without waiting for anything to finish.
+  harness.render().enqueue(["b", "a"].map((path) => ({ path, file: new File(["x".repeat(32)], path) })), "", () => false);
+  const queue = await harness.until((queue) => queue.tasks.some((task) => task.activeParts === 8));
+  // The drop delivered b first; the list shows a first, so a holds the pool and finishes
+  // first. The other order would make a row switch from uploading to waiting for a reason
+  // a person cannot see.
+  assert.deepEqual(queue.tasks.map((task) => task.path), ["a", "b"]);
+  assert.equal(queue.tasks[0].activeParts, 8);
+  assert.equal(queue.tasks[1].activeParts, 0);
+  assert.deepEqual([...new Set(sent)], ["a"]);
+  gate.resolve();
+  await harness.until((queue) => queue.tasks.every((task) => task.status === "completed"));
+});
