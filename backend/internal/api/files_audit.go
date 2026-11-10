@@ -15,9 +15,15 @@ import (
 	"everythingabout.me/backend/internal/auth"
 	"everythingabout.me/backend/internal/filechanges"
 	fc "everythingabout.me/backend/internal/filecontract"
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
-const filesAuditTimeout = 3 * time.Second
+// The audit write is one row, so its budget is not a statement about how much work it
+// may do; it only exists so a request cannot wait on the database forever. Three
+// seconds turned ordinary lock contention into a user-visible 503 audit_unavailable
+// for a row that would have committed in milliseconds a moment later, so the budget
+// matches the metadata read a protected request waits for anyway.
+const filesAuditTimeout = 30 * time.Second
 
 // filesAuditRecorder returns false when a fixture has no persistence backend.
 // Production records commit before a protected read enters its handler.
@@ -150,9 +156,21 @@ func filesAuditOperationID(path string) string {
 	return ""
 }
 
-func filesAuditIncomplete(audit *filechanges.Audit, phase string) {
-	// Persistence errors can contain SQL parameters. Log correlation only.
-	slog.Error("file audit incomplete", "request_id", audit.RequestID, "phase", phase)
+// filesAuditFailure explains an audit write without copying the database error, which
+// can carry SQL parameters. The SQLSTATE code is enough to tell a lock wait (55P03,
+// 40P01, 40001) from a timeout or a missing table.
+func filesAuditFailure(audit *filechanges.Audit, phase string, err error) {
+	code := "error"
+	var database *pgconn.PgError
+	switch {
+	case errors.As(err, &database):
+		code = database.Code
+	case errors.Is(err, context.DeadlineExceeded):
+		code = "deadline_exceeded"
+	case errors.Is(err, context.Canceled):
+		code = "cancelled"
+	}
+	slog.Error("file audit incomplete", "request_id", audit.RequestID, "phase", phase, "code", code)
 }
 
 func filesAuditCompletion(ctx context.Context, persist filesAuditRecorder, attempt *filechanges.Audit, response *filesResponseWriter, requestErr error) {
@@ -205,7 +223,7 @@ func filesAuditCompletion(ctx context.Context, persist filesAuditRecorder, attem
 	finishCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), filesAuditTimeout)
 	defer cancel()
 	if _, err := persist(finishCtx, &completion); err != nil {
-		filesAuditIncomplete(&completion, "completion")
+		filesAuditFailure(&completion, "completion", err)
 	}
 }
 

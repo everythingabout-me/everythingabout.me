@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -224,7 +225,25 @@ func filesSnapshotCheckGuards(ctx context.Context, tx pgx.Tx, f *fileRequest, p 
 	return problem
 }
 
+// The capture window is deliberate and documented (25 s here, 20 s of SQL statement
+// timeout, both in docs/api/api.md): the snapshot is synchronous and bounded instead of
+// becoming an Operation. A capture that does fail must still be traceable from the log,
+// which is why every path inside reports its code and cause chain — the client only ever
+// sees a generic temporarily_unavailable.
 func (s *Server) handleFilesCreateChangeSnapshot(w http.ResponseWriter, r *http.Request, f *fileRequest) error {
+	err := s.captureChangeSnapshot(w, r, f)
+	if err != nil {
+		code := "error"
+		var problem *fc.Problem
+		if errors.As(err, &problem) {
+			code = problem.Code
+		}
+		slog.Warn("change snapshot not created", "owner", f.Principal.User.ID, "code", code, "cause", errorCauseChain(err))
+	}
+	return err
+}
+
+func (s *Server) captureChangeSnapshot(w http.ResponseWriter, r *http.Request, f *fileRequest) error {
 	if err := f.requireChanges(false); err != nil {
 		return err
 	}

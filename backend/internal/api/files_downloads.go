@@ -58,7 +58,7 @@ func (s *Server) handleFilesDownloads(w http.ResponseWriter, r *http.Request, f 
 				items = append(items, problem)
 				continue
 			}
-			filesAuditIncomplete(audit, "grant")
+			filesAuditFailure(audit, "grant", auditErr)
 		}
 		items = append(items, item)
 	}

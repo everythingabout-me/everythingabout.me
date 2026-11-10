@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"log/slog"
 	"mime"
 	"net/http"
 	"path"
@@ -207,7 +208,13 @@ func (s *Server) filesEnsureParents(ctx context.Context, r *http.Request, f *fil
 		Root: root, Actor: actor, Kind: "mkdir", To: target,
 		Selection: "path:path:" + string(target), IdempotencyKey: randomFilesKey(),
 	}
-	for attempt := 0; ; attempt++ {
+	// A concurrent upload may be creating this same level. How long that takes is its
+	// business, not a number picked here, so the wait is bounded by the request's own
+	// context: the caller gives up when it gives up, and once the wait stops being
+	// momentary the log names the operation holding the path.
+	var waited time.Duration
+	warned := false
+	for {
 		op, _, e := actions.Prepare(ctx, request, native)
 		if e == nil && !op.Terminal() {
 			op, e = actions.Run(ctx, root, actor, op.ID, native)
@@ -223,14 +230,25 @@ func (s *Server) filesEnsureParents(ctx context.Context, r *http.Request, f *fil
 				return nil
 			}
 		}
-		if fileops.IsCode(e, "operation_in_progress") && attempt < 20 {
+		if fileops.IsCode(e, "operation_in_progress") {
 			if current, statErr := native.Stat(ctx, target); statErr == nil && current.Kind == storage.Folder {
 				return nil
 			}
+			var held *fileops.Error
+			holder := ""
+			if errors.As(e, &held) && held.OperationID != "" {
+				holder = held.OperationKind + " " + held.OperationID
+			}
 			select {
 			case <-ctx.Done():
+				slog.Info("stopped waiting for the destination folder", "target", target, "heldBy", holder, "waited", waited.Round(time.Millisecond))
 				return filesMutationProblem(ctx.Err())
 			case <-time.After(100 * time.Millisecond):
+			}
+			waited += 100 * time.Millisecond
+			if !warned && waited >= 5*time.Second {
+				warned = true
+				slog.Warn("waiting for another file operation to create the destination", "target", target, "heldBy", holder, "waited", waited.Round(time.Second))
 			}
 			request.IdempotencyKey = randomFilesKey()
 			continue

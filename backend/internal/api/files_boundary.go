@@ -335,7 +335,7 @@ func (s *Server) fileWrapWithAudit(fn fileHandler, persist filesAuditRecorder) h
 				req.CSRFToken = verifier.FileCSRFToken(r)
 			}
 			if _, err := persist(r.Context(), audit); err != nil {
-				filesAuditIncomplete(audit, "admission")
+				filesAuditFailure(audit, "admission", err)
 				if principal.Token != nil && (r.Method == http.MethodGet || r.Method == http.MethodHead) {
 					return fc.NewProblem(503, "audit_unavailable", "The access audit could not be recorded.")
 				}
