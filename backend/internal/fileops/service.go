@@ -6,7 +6,9 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
+	"strings"
 	"sync"
 	"time"
 
@@ -138,10 +140,10 @@ func (s *Service) Write(ctx context.Context, root Root, actor Actor, id string, 
 		if e != nil {
 			// Stage cannot publish authoritative bytes. Discard must also fence late
 			// temporary attempts; failed cleanup retains the operation and reservation.
-			return s.finishBeforeEffect(work, root, actor, op, writer, checkpoint, Failed, problem(writeFailureCode(e), e))
+			return s.finishBeforeEffect(work, root, actor, op, writer, checkpoint, Failed, problem(writeFailureCode(e), e, &op))
 		}
 		if err = validateStage(intent, received); err != nil {
-			return s.finishBeforeEffect(work, root, actor, op, writer, checkpoint, Failed, problem("invalid_stage", err))
+			return s.finishBeforeEffect(work, root, actor, op, writer, checkpoint, Failed, problem("invalid_stage", err, &op))
 		}
 		if err = s.journal.SaveStage(work, op.Lease, received); err != nil {
 			return op, err
@@ -162,7 +164,7 @@ func (s *Service) Write(ctx context.Context, root Root, actor Actor, id string, 
 		return s.finishBeforeEffect(work, root, actor, current, writer, checkpoint, Cancelled, nil)
 	}
 	if err = s.options.Authorize(work, current); err != nil {
-		return s.finishBeforeEffect(work, root, actor, current, writer, checkpoint, Failed, problem(publicationFailureCode(err), err))
+		return s.finishBeforeEffect(work, root, actor, current, writer, checkpoint, Failed, problem(publicationFailureCode(err), err, &current))
 	}
 	if err = s.journal.StartEffect(work, op.Lease); err != nil {
 		return op, err
@@ -271,9 +273,89 @@ func writeFailureCode(err error) string {
 	return "body_reception_failed"
 }
 
-func problem(code string, _ error) json.RawMessage {
-	value, _ := json.Marshal(map[string]any{"code": code, "detail": "The file operation did not complete."})
+// problem records what failed, not only which code failed. A canned sentence
+// leaves whoever reads the operation with a debugging session: which entry stopped,
+// how far the operation got, and what the storage layer reported are exactly the
+// facts that cannot be reconstructed from a log line after the fact. The cause is
+// rendered by type, never by Error(), because a storage error's cause is provider
+// response text and this detail is client-visible.
+func problem(code string, cause error, op *Operation) json.RawMessage {
+	value, _ := json.Marshal(map[string]any{"code": code, "detail": problemDetail(code, cause, op)})
 	return value
+}
+
+func problemDetail(code string, cause error, op *Operation) string {
+	detail := "The file operation did not complete."
+	if op != nil && len(op.Entries) > 0 {
+		applied, stopped := 0, (*EntryEffect)(nil)
+		for i := range op.Entries {
+			if op.Entries[i].State == "applied" {
+				applied++
+				continue
+			}
+			if stopped == nil {
+				stopped = &op.Entries[i]
+			}
+		}
+		verb := "Stopped at"
+		if code == "cancelled" {
+			verb = "Cancelled at"
+		}
+		switch {
+		case stopped != nil:
+			detail = fmt.Sprintf("%s entry %d of %d (%s %q); %d entries had been applied.", verb, stopped.Number+1, len(op.Entries), stopped.Action, entrySubject(*stopped), applied)
+		case applied > 0:
+			detail = fmt.Sprintf("All %d entries were applied but the operation did not settle.", len(op.Entries))
+		}
+	}
+	if described := strings.TrimPrefix(describeCause(cause), code+" <- "); described != "" {
+		detail += " Cause: " + described + "."
+	}
+	return detail
+}
+
+// entrySubject is the one path an entry is about: the source for a removal, the
+// destination for everything that creates one.
+func entrySubject(entry EntryEffect) string {
+	if entry.Source != "" {
+		return string(entry.Source)
+	}
+	return string(entry.Target)
+}
+
+// describeCause renders a cause chain from this application's own vocabulary.
+// A storage error contributes its code and path and stops: what it wraps is the
+// provider's response, and that never becomes client-visible text. Anything else
+// contributes its type, which names the package that failed without leaking bytes.
+func describeCause(err error) string {
+	var parts []string
+	for current := err; current != nil; {
+		switch typed := current.(type) {
+		case *Error:
+			parts = append(parts, typed.Code)
+			current = typed.Cause
+		case *storage.NoFinalEffect:
+			current = typed.Cause
+		case *storage.Error:
+			text := "storage " + typed.Code
+			if typed.Path != "" {
+				text += " at " + string(typed.Path)
+			}
+			parts = append(parts, text)
+			return strings.Join(parts, " <- ")
+		default:
+			switch {
+			case errors.Is(current, context.Canceled):
+				parts = append(parts, "cancelled")
+			case errors.Is(current, context.DeadlineExceeded):
+				parts = append(parts, "deadline exceeded")
+			default:
+				parts = append(parts, fmt.Sprintf("%T", current))
+			}
+			return strings.Join(parts, " <- ")
+		}
+	}
+	return strings.Join(parts, " <- ")
 }
 
 // durableContext detaches a durable write from the client's cancellation: once a
@@ -426,9 +508,9 @@ func (s *Service) recoverClaimed(ctx context.Context, root Root, actor Actor, op
 			state = Cancelled
 		}
 		if op.Phase == EffectStarted {
-			err = s.journal.ResolveNotApplied(ctx, op.Lease, state, inspection.Evidence, problem("native_not_applied", nil))
+			err = s.journal.ResolveNotApplied(ctx, op.Lease, state, inspection.Evidence, problem("native_not_applied", nil, &op))
 		} else {
-			err = s.journal.FinishWithoutEffect(ctx, op.Lease, state, problem("native_not_applied", nil))
+			err = s.journal.FinishWithoutEffect(ctx, op.Lease, state, problem("native_not_applied", nil, &op))
 		}
 		if err != nil {
 			return op, err

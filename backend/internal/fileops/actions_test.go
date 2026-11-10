@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"sort"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -31,6 +32,7 @@ type actionNative struct {
 	beforeStat  func(storage.Path)
 	afterEffect func(storage.EffectIntent)
 	failAt      int
+	failWith    error
 	unknownAt   int
 	lostAt      int
 	pageSize    int
@@ -128,6 +130,9 @@ func (n *actionNative) effect(ctx context.Context, i storage.EffectIntent, save 
 		return storage.MutationResult{}, errors.New("lost response")
 	}
 	if n.failAt == call {
+		if n.failWith != nil {
+			return fail(n.failWith)
+		}
 		return fail(errors.New("injected native failure"))
 	}
 	if i.Source != "" {
@@ -652,5 +657,36 @@ func TestActionGuardsFenceAffectedPaths(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// A failed operation must say which entry stopped it and why. The operation row is
+// the only place that survives: by the time anyone asks, the log line is gone, and a
+// code plus "did not complete" leaves them with a debugging session instead of an
+// answer. The cause is rendered by type, so a provider's response body never becomes
+// client-visible text.
+func TestActionFailureProblemNamesTheStoppingEntryAndItsCause(t *testing.T) {
+	pool := isolatedPostgres(t)
+	p, r, actor := seedOwner(t, pool, provenBaseline(3, 3, 100, 100))
+	n := newActionNative(r)
+	n.put("victims", storage.Folder, "")
+	n.put("victims/a", storage.File, "abc")
+	n.failAt = 1
+	n.failWith = storage.NewError("not_found", "victims/a", errors.New("provider response body"))
+	a := actionCoordinator(t, p, nil)
+	op := prepareAction(t, a, ActionRequest{Root: r, Actor: actor, Kind: "delete", From: "victims", Recursive: true}, n)
+	out := runAction(t, a, op, actor, n)
+	if out.State != Failed {
+		t.Fatalf("state=%s problem=%s", out.State, out.Problem)
+	}
+	problem := string(out.Problem)
+	t.Logf("problem=%s", problem)
+	for _, want := range []string{"entry 1 of 2", "storage not_found", "had been applied"} {
+		if !strings.Contains(problem, want) {
+			t.Fatalf("problem %s does not carry %q", problem, want)
+		}
+	}
+	if strings.Contains(problem, "provider response body") {
+		t.Fatalf("provider text reached the client-visible detail: %s", problem)
 	}
 }

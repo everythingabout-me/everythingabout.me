@@ -217,7 +217,7 @@ func (a *Actions) Prepare(ctx context.Context, req ActionRequest, native NativeA
 		persist, cancel := durableContext(ctx)
 		defer cancel()
 		code := actionErrorCode(cause)
-		if finishErr := a.journal.FinishWithoutEffect(persist, op.Lease, Failed, problem(code, cause)); finishErr != nil {
+		if finishErr := a.journal.FinishWithoutEffect(persist, op.Lease, Failed, problem(code, cause, &op)); finishErr != nil {
 			return op, false, errors.Join(cause, finishErr)
 		}
 		saved, readErr := a.journal.Get(persist, req.Root, req.Actor, op.ID)
@@ -822,7 +822,7 @@ func (a *Actions) finishInterruptedPrepare(ctx context.Context, root Root, actor
 	if op.CancelRequested {
 		state = Cancelled
 	}
-	if err = a.journal.FinishWithoutEffect(persist, op.Lease, state, problem("prepare_interrupted", nil)); err != nil {
+	if err = a.journal.FinishWithoutEffect(persist, op.Lease, state, problem("prepare_interrupted", nil, nil)); err != nil {
 		return op, err
 	}
 	return a.journal.Get(persist, root, actor, id)
@@ -1098,7 +1098,7 @@ func (a *Actions) settle(ctx context.Context, root Root, actor Actor, op Operati
 		if op.CancelRequested {
 			code = "cancelled"
 		}
-		p = problem(code, cause)
+		p = problem(code, cause, &op)
 	}
 	var observation *ActionObservation
 	if state == Succeeded && op.Kind != "delete" {
