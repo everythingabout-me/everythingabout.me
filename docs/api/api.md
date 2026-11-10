@@ -844,9 +844,10 @@ bucket, not a fixed window: it refills continuously, so a client that keeps work
 rate instead of stalling until the minute turns over. The file API's budget is keyed by owner — an address is
 not a user, and a NAT or office network must not let one person's import throttle another's — and it is
 separate from the account/legacy API's 600/min per token or address. An upload is a stream of ordinary
-requests (create, parts, commit: four for a one-part file), so the file budget is sized not to throttle a
-browser import — 12,000/min, advertised in capabilities — while a client that keeps looping against one
-endpoint still trips it. A refused request never reached a handler, so replaying it cannot repeat an effect. Resolve ambiguous mutations through their
+requests: three per small file on a relay connection (create, part, commit), two on a presigned-parts
+connection because the create response already carries the signed part window. The file budget is sized not
+to throttle a browser import — 12,000/min, advertised in capabilities — while a client that keeps looping
+against one endpoint still trips it. A refused request never reached a handler, so replaying it cannot repeat an effect. Resolve ambiguous mutations through their
 session/operation/idempotency identity rather than assuming a timeout means nothing happened. Every failed
 file request logs one line carrying the body's `requestId`, the problem code and the private driver cause,
 so a reported failure is traceable from the id alone; the cause is never copied into the response.

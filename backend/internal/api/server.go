@@ -240,9 +240,11 @@ const apiRatePerMinute = 600
 
 // filesRatePerMinute bounds the unified file API, which carries a different workload: an
 // upload is a stream of ordinary requests, not a loop. The browser client keeps eight files
-// in flight and each file costs a create, a part listing, its parts and a commit — four
-// requests for a one-part file, so a 23k-file import issues ~95k requests and, at a normal
-// round trip, tens to a couple of hundred requests per second.
+// in flight. A relay connection spends three application requests per small file (create,
+// part, commit); a presigned-parts connection spends two, because the create response
+// already carries the signed part window and the bytes go straight to the provider. A
+// 23k-file import therefore issues 50-70k requests, and at a normal round trip that is
+// tens to a couple of hundred requests per second.
 //
 // The 600/min of the shared budget refused that import: the window closed ~14 seconds in and
 // every control request afterwards failed, while the client's immediate retries kept the
