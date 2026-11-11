@@ -440,7 +440,7 @@ func (s *Server) handleFilesCreateUpload(w http.ResponseWriter, r *http.Request,
 		reservation.CreditVersion = intent.Conditions.ExpectedRevision
 	}
 	encoded, _ := json.Marshal(intent)
-	u, _, err := s.filesJournal.CreateUpload(r.Context(), fileops.BeginRequest{Root: root, Actor: actor, Kind: "upload_commit", IdempotencyKey: key, Intent: encoded, Guards: []fileops.Guard{{Path: intent.Target}}, Reservation: reservation}, fileops.UploadOptions{PartSize: filesUploadPartSize, ClientIntent: client})
+	u, err := s.filesCreateUpload(r.Context(), fileops.BeginRequest{Root: root, Actor: actor, Kind: "upload_commit", IdempotencyKey: key, Intent: encoded, Guards: []fileops.Guard{{Path: intent.Target}}, Reservation: reservation}, fileops.UploadOptions{PartSize: filesUploadPartSize, ClientIntent: client})
 	if err != nil {
 		return filesMutationProblem(err)
 	}
@@ -453,6 +453,48 @@ func (s *Server) handleFilesCreateUpload(w http.ResponseWriter, r *http.Request,
 	w.Header().Set("Location", "/api/files/uploads/"+u.ID)
 	return writeFilesJSON(w, 201, resource)
 }
+
+// filesCreateUpload admits a session, waiting out a folder creation that is still settling a
+// folder above the destination.
+//
+// By the time the request reaches this call its own Stat of the parent has succeeded, so the
+// folder's marker object exists; what still holds the guard is the index settlement that
+// follows that object. A sibling upload of the same import therefore refuses this one for
+// milliseconds — surfacing that as 409 cost the browser a round trip, a status probe and up to
+// a poll interval to learn what this loop already knows: the folder is about to exist.
+//
+// Only a folder creation is waited on. An upload, delete, move or copy holder is a decision
+// the client or the person has to make, and keeps its own 409 and Operation.
+func (s *Server) filesCreateUpload(ctx context.Context, req fileops.BeginRequest, opts fileops.UploadOptions) (fileops.Upload, error) {
+	var waited time.Duration
+	for {
+		u, _, err := s.filesJournal.CreateUpload(ctx, req, opts)
+		if err == nil {
+			return u, nil
+		}
+		var held *fileops.Error
+		if !errors.As(err, &held) || held.Code != "operation_in_progress" || held.OperationKind != "mkdir" {
+			return fileops.Upload{}, err
+		}
+		select {
+		case <-ctx.Done():
+			return fileops.Upload{}, ctx.Err()
+		case <-time.After(100 * time.Millisecond):
+		}
+		waited += 100 * time.Millisecond
+		if waited == 5*time.Second {
+			// The wait is the client's business, so it is bounded by the request context
+			// only. A folder creation that outlives a person's patience is worth naming,
+			// though: it means a sibling is stuck, not merely slow.
+			target := ""
+			if len(req.Guards) > 0 {
+				target = string(req.Guards[0].Path)
+			}
+			slog.Warn("waiting for a folder creation to settle before admitting an upload", "target", target, "heldBy", held.OperationID, "waited", waited)
+		}
+	}
+}
+
 func (s *Server) filesUploadContext(r *http.Request, f *fileRequest) (fileops.NativeActions, fileops.Root, fileops.Actor, fileops.Upload, error) {
 	native, root, actor, err := s.fileMutationContext(r.Context(), f)
 	if err != nil {
@@ -749,6 +791,40 @@ func (s *Server) handleFilesCommitUpload(w http.ResponseWriter, r *http.Request,
 	}
 	if u.Operation.Terminal() {
 		return filesOperationFailure(u.Operation)
+	}
+	// Settle in this request, the way every other mutation does. A small file is done in well
+	// under a second, and a 202 made the client spend a round trip and up to a poll interval
+	// to read a result the server already had. The settlement still runs under the server's
+	// context, so a client that gives up does not abort an accepted publication — it only
+	// stops waiting for the answer, and the Operation remains durable for the next read.
+	//
+	// A caller that asked for async work, or whose operation is already being settled
+	// elsewhere (this scanner, another tab, a request that lost its response), gets the
+	// Operation and polls it, exactly as before.
+	if !strings.Contains(strings.ToLower(r.Header.Get("Prefer")), "respond-async") {
+		started, done, e := s.startFileOperation(u.Operation)
+		if e != nil && !errors.Is(e, errFilesWorkerBusy) {
+			return e
+		}
+		if !started {
+			return writeFilesOperation(w, u.Operation, 202, f)
+		}
+		select {
+		case <-done:
+		case <-r.Context().Done():
+			return nil
+		}
+		settled, e := s.filesJournal.Get(r.Context(), root, actor, u.Operation.ID)
+		if e != nil {
+			return filesMutationProblem(e)
+		}
+		if !settled.Terminal() {
+			return writeFilesOperation(w, settled, 202, f)
+		}
+		if settled.State == fileops.Succeeded {
+			return writeFilesJSON(w, 200, filesScopedResult(settled.Result, f))
+		}
+		return filesOperationFailure(settled)
 	}
 	if err = s.queueFileOperation(u.Operation); err != nil && !errors.Is(err, errFilesWorkerBusy) {
 		return err

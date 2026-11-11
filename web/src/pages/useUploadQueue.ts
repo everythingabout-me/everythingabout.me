@@ -1,6 +1,6 @@
 /** Upload tasks and File references live only in the current page. */
 import { useCallback, useEffect, useRef, useState } from "react";
-import { ApiError, FileApiError, api, type FileProblem, type Item, type FileOperation, type FileUploadInput, type FileUploadPartGrant, type FileUploadSession } from "../api/client";
+import { ApiError, FileApiError, api, type FileProblem, type FileResource, type Item, type FileOperation, type FileUploadInput, type FileUploadPartGrant, type FileUploadSession } from "../api/client";
 import { t } from "../i18n";
 import { foldersWithoutFiles, type UploadEntry } from "./uploadSelection";
 import { claimUploadPath } from "./uploadOwnership";
@@ -43,6 +43,36 @@ const PROGRESS_INTERVAL_MS = 1000;
 // continuously, so this window only smooths: it damps each part's socket-buffer lead and
 // the gaps between receipts. A genuine stall still reaches 0 B/s, ten seconds later.
 const SPEED_WINDOW_MS = 10000;
+// Commit is idempotent: the same session may be committed again, and the second answer is
+// either the published file or the Operation that is publishing it. A lost response is
+// therefore a retry, not a failed upload — the same rule a part already follows, and the
+// shape every provider's finalize has: one synchronous request, retried on an uncertain
+// outcome. The server settles inside that request, so the happy path returns the file.
+const COMMIT_ATTEMPTS = 5;
+const COMMIT_RETRY_DELAY_MS = 250;
+const COMMIT_RETRY_MAX_DELAY_MS = 8000;
+function waitBeforeRetry(attempt: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) { reject(new DOMException("Upload canceled", "AbortError")); return; }
+    const abort = () => { clearTimeout(timer); reject(new DOMException("Upload canceled", "AbortError")); };
+    const timer = setTimeout(() => { signal?.removeEventListener("abort", abort); resolve(); },
+      Math.min(COMMIT_RETRY_MAX_DELAY_MS, COMMIT_RETRY_DELAY_MS * 2 ** attempt));
+    signal?.addEventListener("abort", abort, { once: true });
+  });
+}
+async function commitUpload(id: string, signal?: AbortSignal): Promise<FileResource | FileOperation> {
+  for (let attempt = 0; ; attempt++) {
+    try { return await api.commitUpload(id, signal); }
+    catch (error) {
+      if (signal?.aborted) throw error;
+      // A 4xx other than the transient set is the server's answer about the file itself
+      // (incomplete coverage, a moved parent), and retrying it would only repeat it.
+      const transient = !(error instanceof ApiError) || [0, 408, 425, 429, 500, 502, 503, 504].includes(error.status);
+      if (!transient || attempt + 1 >= COMMIT_ATTEMPTS) throw error;
+      await waitBeforeRetry(attempt, signal);
+    }
+  }
+}
 interface ProgressSample { at: number; loaded: number }
 export type UploadStatus = "queued" | "waiting" | "uploading" | "finalizing" | "failed" | "completed";
 export interface FileOperationWait {
@@ -762,7 +792,7 @@ export function useUploadQueue(onUploaded: (task: UploadTask, item: Item) => voi
         if (known.size !== session.partCount) { patch(id, { loaded: received, status: "queued", speed: 0 }); return; }
       }
       patch(id, { status: "finalizing", uploaded: true, loaded: session.size, speed: 0 });
-      const result = await api.commitUpload(session.id, signal);
+      const result = await commitUpload(session.id, signal);
       if (signal.aborted) return;
       if (isOperation(result)) { patch(id, { operationId: result.id }); }
       else { complete(task, result); }

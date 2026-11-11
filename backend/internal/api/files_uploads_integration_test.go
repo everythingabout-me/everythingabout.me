@@ -167,14 +167,19 @@ func (h *uploadsHTTPFixture) pollAs(t *testing.T, route, credential string) map[
 func (h *uploadsHTTPFixture) commit(t *testing.T, id string) map[string]any {
 	t.Helper()
 	response := h.request("POST", uploadRoute(id, "/commit"), h.bearer, nil, nil)
-	uploadsHTTPJSON(t, response, 202)
-	location := response.Header().Get("Location")
-	if !strings.HasPrefix(location, "/api/files/operations/") || response.Header().Get("Retry-After") == "" {
-		t.Fatalf("missing async operation headers: %v", response.Header())
-	}
-	op := h.poll(t, location)
-	if op["state"] != "succeeded" {
-		t.Fatalf("upload publication failed: %v", op)
+	// Commit settles inside the request when it can (200 + file); a 202 means another owner
+	// or a full pool took it, and the durable Operation is the answer.
+	if response.Code == http.StatusAccepted {
+		location := response.Header().Get("Location")
+		if !strings.HasPrefix(location, "/api/files/operations/") || response.Header().Get("Retry-After") == "" {
+			t.Fatalf("missing async operation headers: %v", response.Header())
+		}
+		op := h.poll(t, location)
+		if op["state"] != "succeeded" {
+			t.Fatalf("upload publication failed: %v", op)
+		}
+	} else if response.Code != http.StatusOK {
+		t.Fatalf("commit HTTP%d %s", response.Code, response.Body.String())
 	}
 	return uploadsHTTPJSON(t, h.request("POST", uploadRoute(id, "/commit"), h.bearer, nil, nil), 200)
 }
@@ -343,9 +348,12 @@ func TestFilesUploadsPostgresLocalConformance(t *testing.T) {
 		cookieUpload := uploadsHTTPJSON(t, h.create("/cookie", "cookie", 0, "cookie", csrfHeaders), 201)["id"].(string)
 		uploadsHTTPProblem(t, h.request("POST", uploadRoute(cookieUpload, "/commit"), "cookie", nil, nil), 403, "forbidden")
 		committed := h.request("POST", uploadRoute(cookieUpload, "/commit"), "cookie", nil, csrfHeaders)
-		uploadsHTTPJSON(t, committed, 202)
-		// Owner management can observe the owner-created session through another client.
-		h.pollAs(t, committed.Header().Get("Location"), "cookie")
+		if committed.Code == http.StatusAccepted {
+			// Owner management can observe the owner-created session through another client.
+			h.pollAs(t, committed.Header().Get("Location"), "cookie")
+		} else {
+			uploadsHTTPJSON(t, committed, 200)
+		}
 		zero := h.newUpload(t, "/zero", "zero", 0)
 		h.commit(t, zero)
 		data, err := os.ReadFile(filepath.Join(h.root.ContentRoot, "zero"))
@@ -465,8 +473,17 @@ func TestFilesUploadsPostgresLocalConformance(t *testing.T) {
 			t.Fatal(err)
 		}
 		response := h.request("POST", uploadRoute(id, "/commit"), h.bearer, nil, nil)
-		uploadsHTTPJSON(t, response, 202)
-		outcome := h.poll(t, response.Header().Get("Location"))
+		// A settlement that fits in the request reports its failure there; one that is still
+		// being settled elsewhere reports it through the Operation.
+		var outcome map[string]any
+		switch {
+		case response.Code == http.StatusAccepted:
+			outcome = h.poll(t, response.Header().Get("Location"))
+		case response.Code >= 400:
+			outcome = uploadsHTTPJSON(t, h.request("GET", "/api/files/operations/"+id, h.bearer, nil, nil), 200)
+		default:
+			t.Fatalf("changed parent accepted HTTP%d %s", response.Code, response.Body.String())
+		}
 		if outcome["state"] != "failed" && outcome["state"] != "cancelled" {
 			t.Fatalf("changed parent not rejected %v", outcome)
 		}

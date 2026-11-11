@@ -28,11 +28,15 @@ for (const lostAck of ["create", "part", "commit"]) {
     };
     const harness = await mount(t, server.api);
     enqueue(harness, [entry("file", "ab")], "Health");
-    let queue = await harness.until(lostAck === "part" ? allComplete : (queue) => queue.tasks[0]?.status === "failed");
+    // A part or a commit retries itself: both are idempotent against the session, and the
+    // server's commit answers with the publication or the Operation that is publishing it.
+    // Only an allocation the page cannot prove still needs the person's Retry.
+    if (lostAck === "commit") { await harness.settle(); await harness.tick(250); }
+    let queue = await harness.until(lostAck === "create" ? (queue) => queue.tasks[0]?.status === "failed" : allComplete);
     const id = queue.tasks[0].id;
-    if (lostAck !== "part") {
+    if (lostAck === "create") {
       const before = queue.tasks[0];
-      assert.ok(before.intent, "intent remains in memory after a lost allocation or commit ACK");
+      assert.ok(before.intent, "intent remains in memory after a lost allocation ACK");
       assert.ok(before.file instanceof File, "the original File remains available for same-page Retry");
       assert.equal(harness.storage.getItem("eam.uploads.v1:owner-a"), null, "upload drafts are never persisted");
       queue.retry(id);
@@ -42,14 +46,14 @@ for (const lostAck of ["create", "part", "commit"]) {
     assert.equal(queue.tasks[0].file, null);
     assert.equal(server.sessions.size, 1);
     assert.equal(callsOf(server, "part").length, 1, "a durable receipt suppresses resend after lost ACK");
-    assert.equal(callsOf(server, "commit").length, 1);
+    assert.equal(callsOf(server, "commit").length, lostAck === "commit" ? 2 : 1);
     assert.equal(harness.completed.length, 1);
     const creates = callsOf(server, "create");
     assert.equal(creates.length, lostAck === "create" ? 2 : 1);
     if (lostAck === "create") {
       assert.equal(creates[0][2], creates[1][2]);
       assert.deepEqual(creates[0][1], creates[1][1]);
-    } else assert.ok(callsOf(server, "status").some(([, id]) => id === "session-1"));
+    } else if (lostAck === "part") assert.ok(callsOf(server, "status").some(([, id]) => id === "session-1"));
     assert.equal(harness.storage.getItem("eam.uploads.v1:owner-a"), null);
   });
 }
@@ -557,31 +561,32 @@ test("unmount suppresses a late commit ACK and its completion callback", async (
   assert.equal(harness.completed.length, 0);
 });
 
-test("same-page retry of a committing session follows its original Operation without resending bytes", async (t) => {
+test("a lost commit ACK is retried and follows the session's Operation without resending bytes", async (t) => {
   const server = uploadServer();
+  let attempts = 0;
   server.api.commitUpload = async (id) => {
     server.calls.push(["commit", id]);
-    server.sessions.get(id).state = "committing";
-    throw new TestApiError("commit ACK lost");
+    // The first answer is lost after the server froze the session; the retry finds it already
+    // publishing and gets the durable Operation instead of a second publication.
+    if (++attempts === 1) { server.sessions.get(id).state = "committing"; throw new TestApiError("commit ACK lost"); }
+    return operation(id, "running", null, "upload_commit");
   };
   server.api.getOperation = async (id) => { server.calls.push(["operation", id]); return operation(id, "succeeded", item("file"), "upload_commit"); };
   const harness = await mount(t, server.api);
   enqueue(harness, [entry("file", "ab")]);
-  let queue = await harness.until((queue) => queue.tasks[0]?.status === "failed");
-  const id = queue.tasks[0].id;
-  assertGuard(harness, false);
-  queue.retry(id);
-  queue = await harness.until((queue) => queue.tasks[0]?.status === "finalizing");
+  let queue = await harness.until((queue) => queue.tasks[0]?.status === "finalizing");
+  // The lost answer is retried after the documented 250 ms backoff.
+  await harness.tick(250);
+  queue = await harness.until((queue) => Boolean(queue.tasks[0]?.operationId));
   assert.ok(queue.tasks[0].file instanceof File);
-  assert.equal(queue.tasks[0].operationId, "commit-session-1");
+  assert.equal(queue.tasks[0].operationId, "session-1");
   assertGuard(harness, true);
   await harness.tick();
   queue = await harness.until(allComplete);
-  assert.equal(queue.tasks[0].id, id);
   assert.equal(queue.tasks[0].file, null);
   assert.equal(callsOf(server, "part").length, 1);
-  assert.equal(callsOf(server, "commit").length, 1);
-  assert.deepEqual(callsOf(server, "operation"), [["operation", "commit-session-1"]]);
+  assert.equal(callsOf(server, "commit").length, 2);
+  assert.deepEqual(callsOf(server, "operation"), [["operation", "session-1"]]);
   assertGuard(harness, false);
 });
 
@@ -756,14 +761,22 @@ for (const terminal of ["expired", "aborted", "failed"]) {
 for (const boundary of ["upload abort", "Operation cancel"]) {
   test(`already_committed from ${boundary} reconciles the original published result`, async (t) => {
     const server = uploadServer();
-    const commit = server.api.commitUpload;
     let operationCommitted = false;
     server.api.commitUpload = async (id) => {
-      if (boundary === "upload abort") { await commit(id); throw new TestApiError("commit ACK lost"); }
+      // The commit is accepted and publishing; the client holds the Operation, not the file.
       server.sessions.get(id).state = "committing";
       return operation("commit-session-1", "running", null, "upload_commit");
     };
-    server.api.abortUpload = async (id) => { server.calls.push(["abort", id]); throw new TestApiError("publication active", 409, { code: boundary === "upload abort" ? "already_committed" : "commit_in_progress" }); };
+    server.api.abortUpload = async (id) => {
+      server.calls.push(["abort", id]);
+      const session = server.sessions.get(id);
+      if (boundary === "upload abort") {
+        // The publication won the race: by the time the abort arrives the file is published.
+        session.state = "committed"; session.result = item("file", "file", session.size);
+        throw new TestApiError("already committed", 409, { code: "already_committed" });
+      }
+      throw new TestApiError("publication active", 409, { code: "commit_in_progress" });
+    };
     server.api.cancelOperation = async (id) => { server.calls.push(["cancelOperation", id]); operationCommitted = true; throw new TestApiError("publication completed", 409, { code: "already_committed" }); };
     server.api.getOperation = async (id) => {
       server.calls.push(["operation", id]);
@@ -771,7 +784,7 @@ for (const boundary of ["upload abort", "Operation cancel"]) {
     };
     const harness = await mount(t, server.api);
     enqueue(harness, [entry("file", "ab")]);
-    const queue = await harness.until((queue) => queue.tasks[0]?.status === "failed" || Boolean(queue.tasks[0]?.operationId));
+    const queue = await harness.until((queue) => queue.tasks[0]?.status === "finalizing");
     queue.cancel(queue.tasks[0].id);
     await harness.until((queue) => queue.tasks.length === 0, "already committed cancellation must reconcile success");
     assert.equal(harness.completed.length, 1);

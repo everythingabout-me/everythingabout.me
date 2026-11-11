@@ -93,32 +93,45 @@ func (s *Server) workers() *fileWorkers {
 	return s.fileWorkers
 }
 func (s *Server) queueFileOperation(op fileops.Operation) error {
+	_, _, err := s.startFileOperation(op)
+	return err
+}
+
+// startFileOperation admits one operation into the pool. started reports that this call took
+// a slot and launched it; when it did, done closes once the operation has finished, so a
+// request that admitted the work can wait for the settlement it just started instead of
+// returning a token the client has to poll. A caller that gets started=false (already owned
+// by the scanner or another request, waiting out a retry, or no free slot) falls back to the
+// durable Operation.
+func (s *Server) startFileOperation(op fileops.Operation) (bool, <-chan struct{}, error) {
 	if s.filesJournal == nil || s.trees == nil || !s.cfg.Storage.CoordinatedWrites {
-		return fc.NewProblem(503, "temporarily_unavailable", "File mutation workers are not configured.")
+		return false, nil, fc.NewProblem(503, "temporarily_unavailable", "File mutation workers are not configured.")
 	}
 	worker := s.workers()
 	worker.mu.Lock()
 	defer worker.mu.Unlock()
 	if worker.active[op.ID] {
-		return nil
+		return false, nil, nil
 	}
 	if retry, ok := worker.retries[op.ID]; ok && time.Now().Before(retry.nextTry) {
 		// Deliberately quiet: the deferred attempt is reported where it is scheduled,
 		// with the cause chain, so the retry itself is not news.
 		slog.Debug("file operation retry deferred", "operation", op.ID, "attempt", retry.attempts, "code", retry.code, "retryIn", time.Until(retry.nextTry).Round(time.Second))
-		return nil
+		return false, nil, nil
 	}
 	if err := worker.ctx.Err(); err != nil {
-		return err
+		return false, nil, err
 	}
 	select {
 	case worker.slots <- struct{}{}:
 	default:
-		return errFilesWorkerBusy
+		return false, nil, errFilesWorkerBusy
 	}
 	worker.active[op.ID] = true
 	parentCtx := worker.ctx
+	done := make(chan struct{})
 	go func() {
+		defer close(done)
 		defer func() {
 			worker.mu.Lock()
 			delete(worker.active, op.ID)
@@ -147,7 +160,7 @@ func (s *Server) queueFileOperation(op fileops.Operation) error {
 			s.fileOperationRetained(op, err)
 		}
 	}()
-	return nil
+	return true, done, nil
 }
 
 // fileOperationProgressed clears the failure record: the next attempt starts from a

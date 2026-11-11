@@ -85,17 +85,20 @@ func TestFilesNativeUploadsPostgresIndependentReceiverAndCommit(t *testing.T) {
 		t.Fatalf("replay resent native bytes: %d", partsBefore)
 	}
 	response := f.request(t, "POST", "/uploads/"+id+"/commit", "", nil, nil)
-	uploadsHTTPJSON(t, response, 202)
-	deadline := time.Now().Add(12 * time.Second)
-	for {
-		state := uploadsHTTPJSON(t, f.request(t, "GET", "/operations/"+id, "", nil, nil), 200)
-		if state["state"] == "succeeded" {
-			break
+	if response.Code == http.StatusAccepted {
+		deadline := time.Now().Add(12 * time.Second)
+		for {
+			state := uploadsHTTPJSON(t, f.request(t, "GET", "/operations/"+id, "", nil, nil), 200)
+			if state["state"] == "succeeded" {
+				break
+			}
+			if state["state"] == "failed" || state["state"] == "outcome_unknown" || time.Now().After(deadline) {
+				t.Fatalf("native commit did not settle: %v", state)
+			}
+			time.Sleep(2 * time.Millisecond)
 		}
-		if state["state"] == "failed" || state["state"] == "outcome_unknown" || time.Now().After(deadline) {
-			t.Fatalf("native commit did not settle: %v", state)
-		}
-		time.Sleep(2 * time.Millisecond)
+	} else {
+		uploadsHTTPJSON(t, response, 200)
 	}
 	uploadsHTTPJSON(t, f.request(t, "POST", "/uploads/"+id+"/commit", "", nil, nil), 200)
 	key := "drive/" + f.owners[0] + "/native-large"
@@ -122,17 +125,20 @@ func TestFilesNativeUploadsPostgresIndependentReceiverAndCommit(t *testing.T) {
 	// Empty files still use a one-shot conditional zero-byte PUT at commit only.
 	empty := create("/native-empty", "empty-native", 0)
 	response = f.request(t, "POST", "/uploads/"+empty+"/commit", "", nil, nil)
-	uploadsHTTPJSON(t, response, 202)
-	deadline = time.Now().Add(8 * time.Second)
-	for {
-		status := uploadsHTTPJSON(t, f.request(t, "GET", "/uploads/"+empty, "", nil, nil), 200)
-		if status["state"] == "committed" {
-			break
+	if response.Code == http.StatusAccepted {
+		deadline := time.Now().Add(8 * time.Second)
+		for {
+			status := uploadsHTTPJSON(t, f.request(t, "GET", "/uploads/"+empty, "", nil, nil), 200)
+			if status["state"] == "committed" {
+				break
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("empty native upload did not commit: %v", status)
+			}
+			time.Sleep(time.Millisecond)
 		}
-		if time.Now().After(deadline) {
-			t.Fatalf("empty native upload did not commit: %v", status)
-		}
-		time.Sleep(time.Millisecond)
+	} else {
+		uploadsHTTPJSON(t, response, 200)
 	}
 }
 

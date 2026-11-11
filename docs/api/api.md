@@ -347,8 +347,9 @@ gets an ordinary create, not `409 operation_in_progress`. A purge that cannot fi
 does not fail the deletion — the index already recorded it — and it resumes from a re-walk. Provider backup/version retention is separate and secure erasure is
 not promised. Temporary transfer cleanup is background work, not deletion of authoritative user content.
 
-Completed rename/move returns `200` file/folder metadata; copy returns `201`; deletion returns `204`. Slow
-work returns `202 + Operation + Location`. The public action is the same even when backend work differs.
+Completed rename/move returns `200` file/folder metadata; copy returns `201`; deletion returns `204`; upload
+commit returns `200` with the published file. Work the server does not settle inside the request returns
+`202 + Operation + Location`. The public action is the same even when backend work differs.
 Cancellation/failure of multi-file work can leave native partial effects; the Operation records them.
 A non-atomic move must never expose one ID at both source and independent destination. Reserve source IDs
 under guards until coherent settlement. If terminal partial failure leaves both copies, source retains its ID
@@ -359,10 +360,15 @@ Mutations fence only the native paths they observe or mutate, so an open upload 
 drive never blocks an unrelated rename, copy or delete. A genuinely overlapping path returns
 `409 operation_in_progress` with the blocking `operationId` and its `operationKind`; wait for that exact
 Operation, adopt it when it is a resumable upload of the same target that is already publishing, or abort it
-only while it is still `open`. The Problem detail names the holding action (upload, delete, move, copy or
-folder creation) and the blocking operation id, so a refusal is actionable without a log lookup, and the kind
-is machine-readable because the two cases need opposite behaviour: a folder creation a sibling request raced
-is usually over by the time the client reads it, while a deletion is long and is the user's decision.
+only while it is still `open`. A **folder creation** holder is never reported to the client: creating an
+upload above missing ancestors settles a marker object and then its index entry, so a sibling's folder
+creation refuses this destination for milliseconds after the folder already exists natively. The create waits
+that holder out inside the same request, bounded by the request context, and logs the wait once it stops being
+momentary; the alternative — a 409 the browser could only answer by retrying — spent a round trip, a status
+probe and a poll interval to learn what the server already knew. Every other holder (upload, delete, move,
+copy) keeps its `409 operation_in_progress` with the blocking `operationId` and `operationKind`, so a refusal
+stays actionable without a log lookup, and the kind is machine-readable because those cases need opposite
+behaviour: an upload of the same target can be adopted, while a deletion is the user's decision.
 
 A recursive delete may extend that resolution to an `open` upload session anywhere inside the deleted
 subtree: the delete would discard the same bytes anyway, and refusing a single Delete click merely because an
@@ -681,6 +687,15 @@ visible and a replace has already overwritten the old content before the server 
 | A | Lists native parts, verifies every number with its exact bound length, performs `CompleteMultipartUpload` once at the final key, then settles index/quota |
 | B | Verifies the provider holds the full length, then completes the provider session itself (OneDrive deferred commit, Box session commit, Dropbox `upload_session/finish`; Google Drive completes on the final chunk), then settles |
 | C | Verifies coverage from durable receipts and publishes |
+
+Commit answers with the publication instead of a token whenever the settlement fits in the request: `200` with
+the file resource, exactly like the other mutations above. `202 + Operation` remains for the cases where the
+server does not own the settlement — a full worker pool, an operation the scanner or another request is
+already publishing, or a retrying attempt — and for a caller that asked for `Prefer: respond-async`. The
+settlement itself always runs under the server's context, so a client that gives up waiting does not abort an
+accepted publication; it only stops reading the answer. A commit is therefore idempotent in the way every
+provider's finalize is: after a lost response the client sends the same commit again and gets the file, or the
+Operation that is publishing it. Clients must not treat an uncertain commit as a failed upload.
 
 Class B sessions are created at the destination with the conflict rule set up front: create fails on an
 existing name, and replace targets the existing provider file with its native revision condition where one
