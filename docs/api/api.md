@@ -762,6 +762,13 @@ grant signs a PUT at the destination itself, carrying the create/replace conditi
 signed headers. `PUT` returning `2xx` means the object exists; the commit then verifies it
 (`HEAD`) and settles identity, quota, change facts and audit.
 
+A client sends a grant's headers verbatim and adds none of its own. The condition is part of
+the signature, so dropping a bound header sends no bytes at all (a client that refuses the
+grant fails the file before the request leaves), and a header the grant did not bind — an
+`Authorization`, a `Content-MD5` — is refused rather than attached: a grant is not a licence
+to widen what the browser sends to the provider. `Content-Length` is the one bound header a
+browser derives from the body itself, and the grant binds that same length.
+
 The trade is deliberate and narrow. A staged multipart upload costs five provider requests
 per file however small it is (`InitiateMultipartUpload`, two part listings, `Complete`); the
 direct path costs one PUT and one `HEAD`. In exchange, the object exists before the index

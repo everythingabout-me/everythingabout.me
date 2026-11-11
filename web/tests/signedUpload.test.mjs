@@ -71,6 +71,43 @@ test("presigned part sends exactly the signed URL and content type without confi
   await request;
 });
 
+test("a direct-publication part sends the conditional headers it was signed for", async (t) => {
+  // The one-conditional-PUT publication binds If-None-Match and X-Cos-Forbid-Overwrite
+  // into the signature. Dropping them fails every file at the provider, and refusing the
+  // grant outright fails it in the browser before a byte moves — which is what a page of
+  // 23,373 files did: sessions opened, no part ever sent.
+  const { api, xhr } = await setup(t);
+  const request = api.uploadPresignedPart(grant({
+    headers: {
+      "Content-Length": "3",
+      "Content-Type": "application/octet-stream",
+      "If-None-Match": "*",
+      "X-Cos-Forbid-Overwrite": "true",
+    },
+  }), new Blob(["abc"]));
+  const settled = request.then(() => "sent", (error) => error.message);
+  const data = await xhr();
+  assert.deepEqual(data.headers, {
+    "content-type": "application/octet-stream",
+    "if-none-match": "*",
+    "x-cos-forbid-overwrite": "true",
+  });
+  data.respond(200);
+  assert.equal(await settled, "sent");
+});
+
+test("a content-replacement part carries the If-Match it was signed for", async (t) => {
+  const { api, xhr } = await setup(t);
+  const request = api.uploadPresignedPart(grant({
+    headers: { "Content-Length": "3", "Content-Type": "text/plain", "If-Match": '"etag"' },
+  }), new Blob(["abc"]));
+  const settled = request.then(() => "sent", (error) => error.message);
+  const data = await xhr();
+  assert.deepEqual(data.headers, { "content-type": "text/plain", "if-match": '"etag"' });
+  data.respond(200);
+  assert.equal(await settled, "sent");
+});
+
 test("signing requests a part window and returns the grants", async (t) => {
   const { api, calls } = await setup(t);
   const parts = await api.signUploadParts("session +?", [1, 2]);

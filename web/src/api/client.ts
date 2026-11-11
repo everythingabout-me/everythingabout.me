@@ -824,6 +824,11 @@ function filePost<T>(resource: string, body?: unknown, headers?: HeadersInit, si
   });
 }
 
+// The only request headers a provider grant may set. Everything here is bound into the
+// signature, so it must travel; anything else (Authorization, Content-MD5, ...) is a grant
+// trying to widen what the browser sends to the provider and is refused.
+const signedRequestHeaders = new Set(["content-type", "if-none-match", "if-match", "x-cos-forbid-overwrite"]);
+
 function presignedPartTarget(grant: FileUploadPartGrant): { url: string; headers: Record<string, string> } {
   if (grant?.method !== "PUT" || typeof grant.url !== "string" || typeof grant.size !== "number"
     || !Number.isSafeInteger(grant.number) || grant.number < 1 || !Number.isSafeInteger(grant.size) || grant.size < 0) {
@@ -840,10 +845,18 @@ function presignedPartTarget(grant: FileUploadPartGrant): { url: string; headers
   const headers: Record<string, string> = {};
   for (const [name, value] of Object.entries(grant.headers ?? {})) {
     const lower = name.toLowerCase();
-    // The browser sets Content-Length from the Blob itself; setting it manually
-    // is forbidden. Only Content-Type is an application-set header.
+    // A grant is not a licence to set arbitrary request headers: the browser must never be
+    // made to attach a credential (Authorization) or a digest the part does not bind. It is
+    // limited to what a signed part actually binds — Content-Type, and the conditional
+    // headers of a direct publication, whose PUT is the publication itself: If-None-Match
+    // (create) or If-Match (replace) plus the provider's overwrite switch. Refusing those
+    // sent nothing at all, while the session had already been admitted.
+    // Content-Length is the one header the browser derives from the Blob (the length the
+    // grant bound) and refuses to have set.
     if (lower === "content-length") continue;
-    if (lower !== "content-type" || typeof value !== "string") throw new Error("Invalid presigned part headers.");
+    if (!signedRequestHeaders.has(lower) || typeof value !== "string" || /[\r\n\0]/.test(value)) {
+      throw new Error("Invalid presigned part headers.");
+    }
     headers[lower] = value;
   }
   return { url: parsed.toString(), headers };
