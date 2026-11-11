@@ -33,6 +33,13 @@ type ledger struct {
 	// Provider marks a copy performed inside the storage provider, which has no
 	// spool payload and resolves a lost reply from the target's intent marker.
 	Provider bool
+	// Unpublished records that the provider itself proved this publication never
+	// landed — the target was absent and the session this driver aborted is the one
+	// the provider still held, and a completed upload can no longer be aborted. A
+	// settled record must not be pushed back to "unknown" by a later call carrying
+	// the receipt from before that proof (cleanup does exactly that), because the
+	// fence it would restore can never be lifted again.
+	Unpublished bool
 }
 type receipt struct {
 	Format                            int
@@ -73,7 +80,7 @@ func (d *Driver) reconcileReceipt(r *ledger, evidence []byte) error {
 	// Every other mismatch with evidence of final I/O is a permanent unknown fence.
 	final := prior.Phase == "publishing" || prior.Phase == "unknown" || prior.Phase == "applied"
 	mismatch := prior.Attempt != r.Attempt
-	regressed := final && r.Phase != "applied" && r.Phase != "publishing" && r.Phase != "unknown"
+	regressed := final && r.Phase != "applied" && r.Phase != "publishing" && r.Phase != "unknown" && !r.Unpublished
 	if mismatch || regressed {
 		r.Phase = "unknown"
 		if err := d.save(r); err != nil {
@@ -291,6 +298,12 @@ func (d *Driver) inspect(ctx context.Context, kind, id string, in *storage.Write
 			if r.Phase == "not_applied" {
 				return storage.Inspection{State: storage.NotApplied, Evidence: d.receipt(r)}, nil
 			}
+		}
+		if err = d.resolveUnpublished(ctx, r); err != nil {
+			return storage.Inspection{}, err
+		}
+		if r.Phase == "not_applied" {
+			return storage.Inspection{State: storage.NotApplied, Evidence: d.receipt(r)}, nil
 		}
 		return storage.Inspection{State: storage.OutcomeUnknown, Evidence: d.receipt(r)}, nil
 	case "ready":
@@ -737,6 +750,51 @@ func (d *Driver) copyParts(ctx context.Context, r *ledger, request Copy, parts P
 		return Object{}, err
 	}
 	return obj, nil
+}
+
+// resolveUnpublished settles a multipart publication whose reply was lost by proving it
+// never landed, without ever attributing an existing object to this request.
+//
+// The provider itself answers the question: a completed multipart upload can no longer be
+// aborted, so an abort this call performs and the provider acknowledges proves the
+// completion never took effect. Two observations make that sound — the target must be
+// absent, and the abort must be the one that ends the session. If the object is there, or
+// the provider no longer knows the session, nothing is decided and the record keeps its
+// permanent fence, exactly as before; that half of the ambiguity really is unattributable
+// without an operator.
+//
+// It exists because the other half was not merely conservative but unanswerable: a lost
+// reply on a commit pinned its path (and every folder above it, which fences a recursive
+// delete) for good. One interrupted import left exactly that behind, and the folder holding
+// it could not be deleted until the record was resolved by hand.
+func (d *Driver) resolveUnpublished(ctx context.Context, r *ledger) error {
+	if r.Kind != "write" || r.Native == nil || r.Native.UploadID == "" {
+		return nil
+	}
+	multipart, ok := d.backend.(MultipartBackend)
+	if !ok {
+		return nil
+	}
+	key := d.key(r.Intent.Target, storage.File)
+	if _, err := d.backend.Head(ctx, key); err == nil {
+		// Something occupies the target. Attributing it to this request is what the
+		// publication fence forbids, so it stays unknown.
+		return nil
+	} else if !storage.IsCode(err, "not_found") {
+		return err
+	}
+	if err := multipart.AbortMultipart(context.WithoutCancel(ctx), key, r.Native.UploadID); err != nil {
+		// No session left to abort: either the completion did take effect or someone
+		// abandoned it, and the provider no longer distinguishes the two.
+		if storage.IsCode(err, "not_found") {
+			return nil
+		}
+		return err
+	}
+	r.Native = nil
+	r.Phase = "not_applied"
+	r.Unpublished = true
+	return d.save(r)
 }
 
 // resolveCopied attributes a provider-side copy whose reply was lost. The

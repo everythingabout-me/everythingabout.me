@@ -44,8 +44,11 @@ type nativeTestBackend struct {
 	parts                                            map[int][]byte
 	beginCalls, partCalls, completeCalls, abortCalls int
 	failPart, failComplete                           bool
-	abortErr                                         error
-	onPart                                           func()
+	// dropComplete is the other half of a lost reply: the completion failed before the
+	// provider acted, so the target is empty and the session is still open.
+	dropComplete bool
+	abortErr     error
+	onPart       func()
 }
 
 func (b *nativeTestBackend) BeginMultipart(context.Context, Put) (string, error) {
@@ -85,6 +88,9 @@ func (b *nativeTestBackend) CompleteMultipart(ctx context.Context, in Put, _ str
 	old, exists := b.current[in.Key]
 	if in.Absent && exists || in.ExpectedETag != "" && (!exists || old.ETag != in.ExpectedETag) {
 		return Object{}, fail("precondition_failed", "")
+	}
+	if b.dropComplete {
+		return Object{}, io.ErrUnexpectedEOF
 	}
 	out := Object{Key: in.Key, Size: int64(len(data)), VersionID: "complete-version", ETag: "complete-tag", MediaType: in.MediaType, Metadata: in.Metadata}
 	b.current[in.Key] = out
@@ -296,5 +302,74 @@ func TestNativeCompletionLostReplyNeverReplaysOrReleasesGuard(t *testing.T) {
 	requireCode(t, driver.Discard(context.Background(), in, checkpoint), "outcome_unknown")
 	if backend.completeCalls != 1 || backend.puts != 0 {
 		t.Fatal("native effect automatically replayed")
+	}
+	if backend.abortCalls != 0 {
+		t.Fatal("a publication that may have landed had its session aborted")
+	}
+}
+
+func TestNativePublishNeverLandedIsProvenUnapplied(t *testing.T) {
+	driver, backend, _, _ := nativeFixture(t)
+	metadata := &memoryUploadMetadata{}
+	in := nativeIntent(t, driver, "complete-dropped", 4)
+	part, e := driver.ReceivePart(context.Background(), in, storage.UploadPart{Number: 1, Size: 4}, bytes.NewReader([]byte("data")), metadata, keepPart)
+	if e != nil {
+		t.Fatal(e)
+	}
+	stage, e := driver.SealStage(context.Background(), in, []storage.UploadPart{part}, metadata, cpOK)
+	if e != nil {
+		t.Fatal(e)
+	}
+	// The completion never reached the provider: the target is empty and the session is
+	// still open. Aborting that session is the provider's own proof that nothing landed.
+	backend.dropComplete = true
+	var checkpoint []byte
+	if _, e = driver.Publish(context.Background(), stage, func(_ context.Context, b []byte) error { checkpoint = bytes.Clone(b); return nil }); e == nil {
+		t.Fatal("lost Complete reply implied success")
+	}
+	inspection, e := driver.Inspect(context.Background(), in, checkpoint)
+	if e != nil || inspection.State != storage.NotApplied {
+		t.Fatalf("an unpublished multipart was not settled %+v %v", inspection, e)
+	}
+	if backend.abortCalls != 1 {
+		t.Fatalf("upload session aborted %d times", backend.abortCalls)
+	}
+	// Cleanup re-enters with the receipt saved before the proof. It must seal the settled
+	// record; pushing it back to "unknown" would restore a fence nothing can ever lift.
+	if e = driver.Discard(context.Background(), in, checkpoint); e != nil {
+		t.Fatalf("cleanup of a proven-unpublished record: %v", e)
+	}
+	if settled, e := driver.Inspect(context.Background(), in, checkpoint); e != nil || settled.State != storage.NotApplied {
+		t.Fatalf("settled record regressed after cleanup: %+v %v", settled, e)
+	}
+	// The settled record cannot be turned into a fresh native effect afterwards.
+	if _, e = driver.Publish(context.Background(), stage, cpOK); e == nil || backend.completeCalls != 1 {
+		t.Fatalf("settled publication replayed: %v calls=%d", e, backend.completeCalls)
+	}
+}
+
+func TestNativePublishAmbiguityWithoutProviderProofStaysFenced(t *testing.T) {
+	driver, backend, _, _ := nativeFixture(t)
+	metadata := &memoryUploadMetadata{}
+	in := nativeIntent(t, driver, "complete-unprovable", 4)
+	part, e := driver.ReceivePart(context.Background(), in, storage.UploadPart{Number: 1, Size: 4}, bytes.NewReader([]byte("data")), metadata, keepPart)
+	if e != nil {
+		t.Fatal(e)
+	}
+	stage, e := driver.SealStage(context.Background(), in, []storage.UploadPart{part}, metadata, cpOK)
+	if e != nil {
+		t.Fatal(e)
+	}
+	backend.dropComplete = true
+	// No session left to abort: a completion that landed and one that was abandoned out
+	// of band look the same, so nothing is decided.
+	backend.abortErr = fail("not_found", "")
+	var checkpoint []byte
+	if _, e = driver.Publish(context.Background(), stage, func(_ context.Context, b []byte) error { checkpoint = bytes.Clone(b); return nil }); e == nil {
+		t.Fatal("lost Complete reply implied success")
+	}
+	inspection, e := driver.Inspect(context.Background(), in, checkpoint)
+	if e != nil || inspection.State != storage.OutcomeUnknown {
+		t.Fatalf("unprovable publication escaped its fence: %+v %v", inspection, e)
 	}
 }
