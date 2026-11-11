@@ -6,13 +6,14 @@ import { foldersWithoutFiles, type UploadEntry } from "./uploadSelection";
 import { claimUploadPath } from "./uploadOwnership";
 import { pendingFileOperation, setUploadOwner, settleFileOperation } from "./uploadPersistence";
 
-// Part requests in flight across every file. The byte path is a single HTTP/1.1 origin
-// — the Network panel's Protocol column shows http/1.1 for the bucket — so six sockets
-// per origin is all that can move at once, and a deeper pool only parks the extra
-// requests in the browser's socket queue while its own progress bar stays at zero.
-// Payload is bounded by the part size times this count (16 MiB × 6), which is the other
-// reason to keep it at the socket number rather than above it.
-const PART_POOL_SIZE = 6;
+// Part requests in flight across every file. The bucket is an HTTP/1.1 origin — measured
+// against this bucket, not inferred from the dev server: it answers 1.1 even when the
+// client offers h2 in ALPN, so six sockets per origin is all that can move at once. The
+// pool sits above that number on purpose: a part that waits behind a CORS preflight for a
+// new object key would otherwise leave a socket idle until JavaScript schedules the next
+// part, and a pool of 16 keeps the browser's own socket queue non-empty instead. Payload
+// is bounded by part size times this count (16 MiB × 16).
+const PART_POOL_SIZE = 16;
 // Sessions admitted per request, and settlements per request. A page of creates is cheap
 // (one conditional URL each, signed locally), so one request may carry a whole page of the
 // look-ahead; commits are bounded by the worker pool that settles them, so eight per
@@ -22,22 +23,25 @@ const PART_POOL_SIZE = 6;
 const CREATE_BATCH_SIZE = 32;
 const COMMIT_BATCH_SIZE = 8;
 const COMMIT_LINGER_MS = 2000;
-// Sessions kept in hand ahead of the transfer window. A page of creates costs about 1.7 s
-// (measured in 741f910 against this bucket), so the look-ahead has to cover several
-// seconds of the window's rotation: 24 is two windows, i.e. the window can be refilled
-// twice before a create page has to answer, and it still leaves as one request per page
-// (the server admits 32). It is also the bound on sessions this tab holds open: 24 in
-// hand plus 12 transferring, against an idle window of two hours.
-const ADMIT_AHEAD = 24;
+// Sessions kept in hand ahead of the transfer window: four part pools, so the window can be
+// refilled four times over before a create page (~1.7 s for 32, measured in 741f910 against
+// this bucket) has to answer. The page the server admits is 32, so 64 in hand is two
+// requests, which is the only cost this depth adds. Together with the window, this is the
+// most sessions one tab holds open: 96, against an idle window of two hours.
+const ADMIT_AHEAD = 64;
+// A prepared session reserves its bytes against the owner's quota the moment it is admitted,
+// so depth is bounded by bytes as well as by count: 64 small files are nothing, 64 videos
+// would reserve gigabytes for a minute before their turn. One gigabyte is four waves of the
+// part pool at 16 MiB, i.e. the point where the look-ahead would reserve more than the link
+// can consume while the window rotates.
+const ADMIT_AHEAD_BYTES = 1_000_000_000;
 // Files that may be transferring at once. A slot is held from the moment a file starts
 // moving until its bytes are placed; admission and settlement keep their own bounds and
-// never take one, so this window no longer mixes stages that wait on the network with
-// stages that move bytes. Six sockets are the byte bound, so the window only has to keep
-// those six busy while files rotate: six more absorb the gap between a file's last part
-// and the moment its successor takes the freed socket. The old 32 held every stage at
-// once, so most of the window was always waiting and throughput followed the slowest
-// stage rather than the link.
-const TRANSFER_WINDOW = 12;
+// never take one, so this window does not mix stages that wait on the network with stages
+// that move bytes. Two part pools: a file with one part left holds one slot, so filling
+// sixteen slots can take more than sixteen files, and a second pool's worth of files absorbs
+// the gap between a file's last part and the moment its successor takes the freed socket.
+const TRANSFER_WINDOW = 32;
 // The page is published at most this often. A file changes state several times, and
 // every publication re-derives the row projection over the whole selection, so a
 // 20k-file folder would publish ~100k times and never leave the main thread. Task
@@ -1011,6 +1015,11 @@ export function useUploadQueue(onUploaded: (task: UploadTask, item: Item) => voi
       }
       return false;
     };
+    // The look-ahead is bounded by the bytes it holds, not only by the files: a prepared
+    // session reserves its size against the owner's quota at admission, so depth has to
+    // account for what is already reserved on this tab's behalf.
+    let aheadBytes = 0;
+    for (const id of admissions.current.keys()) aheadBytes += tasks.current.get(id)?.size ?? 0;
     for (const id of pending.current) {
       if (admissions.current.size >= ADMIT_AHEAD) break;
       if (admissions.current.has(id) || admissionFailed.current.has(id)) continue;
@@ -1024,6 +1033,10 @@ export function useUploadQueue(onUploaded: (task: UploadTask, item: Item) => voi
       // so, and a session allocated ahead of that decision would be one nobody can use.
       if (pendingFileOperation(task.path)) continue;
       if (blockedBy(task.path)) continue;
+      // A single file larger than the byte bound is admitted by the window itself, which
+      // is the behaviour every file had before the look-ahead existed.
+      if (aheadBytes + task.size > ADMIT_AHEAD_BYTES) break;
+      aheadBytes += task.size;
       ensureAdmission(task);
     }
     const starts: UploadTask[] = [];

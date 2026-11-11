@@ -274,10 +274,10 @@ test("zero-byte upload commits an empty session without a part request", async (
   assert.equal(callsOf(server, "commit").length, 1);
 });
 
-// Six is the socket count of one HTTP/1.1 origin (the bucket the browser PUTs parts to),
-// which is the real byte concurrency; the pool is the client's only bound on requests in
-// flight, so it has to say six rather than a number the browser would silently queue.
-test("a global six-part pool has no per-file cap and refills in file order", async (t) => {
+// The pool is the client's only bound on part requests in flight. It sits above the six
+// sockets one HTTP/1.1 origin gives the browser, so a part waiting behind a CORS preflight
+// never leaves a socket idle, and it stays the single number every file shares.
+test("a global sixteen-part pool has no per-file cap and refills in file order", async (t) => {
   const server = uploadServer();
   const send = server.api.uploadPart;
   const gates = new Map();
@@ -294,23 +294,25 @@ test("a global six-part pool has no per-file cap and refills in file order", asy
     finally { active--; perFile.set(id, perFile.get(id) - 1); }
   };
   const harness = await mount(t, server.api);
-  enqueue(harness, [...Array.from({ length: 4 }, (_, i) => entry(`large-${i}`, "abcdefghijklmnopqrstuvwxyzabcdef")), entry("small", "x")]);
-  await harness.until(() => active === 6);
+  // 64 bytes in 2-byte parts is more parts than the pool holds, so the first file can fill
+  // it and still have parts left when one finishes.
+  enqueue(harness, [...Array.from({ length: 4 }, (_, i) => entry(`large-${i}`, "x".repeat(64))), entry("small", "x")]);
+  await harness.until(() => active === 16);
   await harness.tick();
-  assert.equal(peak, 6, "the pool caps part requests across files");
-  assert.deepEqual([...peaks.entries()], [["session-1", 6]], "one file may use the whole pool");
+  assert.equal(peak, 16, "the pool caps part requests across files");
+  assert.deepEqual([...peaks.entries()], [["session-1", 16]], "one file may use the whole pool");
   // Finishing one part immediately starts exactly one more, without waiting for its batch.
   const first = [...gates.keys()][0];
   gates.get(first).resolve();
-  await harness.until(() => gates.size === 7);
-  assert.equal(active, 6);
+  await harness.until(() => gates.size === 17);
+  assert.equal(active, 16);
   const started = [...gates.keys()].at(-1);
-  assert.equal(started, "session-1:7", "the earliest-started file keeps the pool until it runs out of parts");
+  assert.equal(started, "session-1:17", "the earliest-started file keeps the pool until it runs out of parts");
   const release = () => { for (const gate of gates.values()) gate.resolve(); };
   const timer = setInterval(release, 1);
   t.after(() => clearInterval(timer));
   await harness.until(allComplete);
-  assert.equal(peak, 6);
+  assert.equal(peak, 16);
 });
 
 test("shared delete Operation polls once, retains Files, frees slots and resumes only exact succeeded identity", async (t) => {
