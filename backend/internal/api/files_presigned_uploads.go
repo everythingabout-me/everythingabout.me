@@ -89,7 +89,7 @@ func (s *Server) handleFilesSignUploadParts(w http.ResponseWriter, r *http.Reque
 		return err
 	}
 	if err = filesUploadStateError(u.State); err != nil {
-		return filesMutationProblem(err)
+		return filesUploadEnded(u, err)
 	}
 	if err = filesUploadExpired(u); err != nil {
 		return filesMutationProblem(err)

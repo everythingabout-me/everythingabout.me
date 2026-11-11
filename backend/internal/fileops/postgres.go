@@ -241,14 +241,76 @@ func (p *Postgres) Begin(ctx context.Context, input BeginRequest) (Operation, bo
 	var replayed bool
 	err = p.transaction(ctx, req.Root.OwnerID, func(tx pgx.Tx) error {
 		var err error
-		op, replayed, err = p.beginTx(ctx, tx, req, fingerprint, reserve)
+		op, replayed, err = p.beginTx(ctx, tx, req, fingerprint, reserve, true)
 		return err
 	})
 	return op, replayed, err
 }
 
+// guardHolder returns the operation whose durable guard conflicts with one of want, or
+// nil when the paths are free. self names the asking operation, whose own rows never
+// conflict with it.
+//
+// A guard row held by an `open` upload session is skipped. Sessions take their guard when
+// they freeze (see freezeUpload), so such a row can only belong to a session opened before
+// that rule: it has no native effect behind it and fences nothing, exactly like every open
+// session since. The row disappears when its session freezes, ends or lapses, which the
+// seven-day session lifetime bounds; after that this exclusion matches nothing.
+func guardHolder(ctx context.Context, tx pgx.Tx, root Root, kind string, want []Guard, self string) (*Error, error) {
+	var own any
+	if self != "" {
+		own = self
+	}
+	rows, err := tx.Query(ctx, `select g.native_path,g.subtree,o.action,o.id::text from file_operation_guards g
+		join file_operations o on o.id=g.operation_id and o.owner_id=g.owner_id
+		where g.owner_id=$1 and ($2::uuid is null or g.operation_id<>$2::uuid)
+		  and not exists(select 1 from file_uploads u where u.operation_id=g.operation_id and u.owner_id=g.owner_id and u.state='open')
+		order by o.id,g.ordinal`, root.OwnerID, own)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var holder *Error
+	for rows.Next() {
+		var g Guard
+		var held, operationID string
+		if err = rows.Scan(&g.Path, &g.Subtree, &held, &operationID); err != nil {
+			return nil, err
+		}
+		if held == "move" {
+			g.Subtree = true
+		}
+		for _, w := range want {
+			if kind == "move" {
+				w.Subtree = true
+			}
+			if holder == nil && guardConflict(root, g, w) {
+				holder = &Error{Code: "operation_in_progress", OperationID: operationID, OperationKind: held}
+			}
+		}
+	}
+	return holder, rows.Err()
+}
+
+// insertGuards makes an operation's declared guards durable. A row that already exists is
+// kept: it is this operation's own, written by an earlier attempt of the same transition.
+func insertGuards(ctx context.Context, tx pgx.Tx, op Operation) error {
+	for i, g := range op.Guards {
+		if _, err := tx.Exec(ctx, `insert into file_operation_guards(operation_id,owner_id,ordinal,native_path,comparison_path,subtree) values($1,$2,$3,$4,$5,$6)
+			on conflict(operation_id,ordinal) do nothing`, op.ID, op.Root.OwnerID, i, string(g.Path), comparePath(op.Root, g.Path), g.Subtree); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // beginTx shares admission with upload sessions under the same owner lock and transaction.
-func (p *Postgres) beginTx(ctx context.Context, tx pgx.Tx, req BeginRequest, fingerprint string, reserve int64) (Operation, bool, error) {
+//
+// fence decides whether the guards become durable now. Every action and the simple PUT
+// fence at admission, because their native effect follows in the same request. An upload
+// session does not: it can publish only at commit, hours later, so it is admitted against
+// the current guards and takes its own when it freezes.
+func (p *Postgres) beginTx(ctx context.Context, tx pgx.Tx, req BeginRequest, fingerprint string, reserve int64, fence bool) (Operation, bool, error) {
 	var op Operation
 	replayed := false
 	err := func() error {
@@ -278,37 +340,12 @@ func (p *Postgres) beginTx(ctx context.Context, tx pgx.Tx, req BeginRequest, fin
 		if err != nil {
 			return err
 		}
-		rows, err := tx.Query(ctx, `select g.native_path,g.subtree,o.action,o.id::text from file_operation_guards g join file_operations o on o.id=g.operation_id and o.owner_id=g.owner_id where g.owner_id=$1 order by o.id,g.ordinal`, req.Root.OwnerID)
+		holder, err := guardHolder(ctx, tx, req.Root, req.Kind, req.Guards, "")
 		if err != nil {
 			return err
 		}
-		conflictID, conflictKind := "", ""
-		for rows.Next() {
-			var g Guard
-			var kind, operationID string
-			if err = rows.Scan(&g.Path, &g.Subtree, &kind, &operationID); err != nil {
-				rows.Close()
-				return err
-			}
-			if kind == "move" {
-				g.Subtree = true
-			}
-			for _, want := range req.Guards {
-				if req.Kind == "move" {
-					want.Subtree = true
-				}
-				if conflictID == "" && guardConflict(req.Root, g, want) {
-					conflictID, conflictKind = operationID, kind
-				}
-			}
-		}
-		err = rows.Err()
-		rows.Close()
-		if err != nil {
-			return err
-		}
-		if conflictID != "" {
-			return &Error{Code: "operation_in_progress", OperationID: conflictID, OperationKind: conflictKind}
+		if holder != nil {
+			return holder
 		}
 		if !budgetFits(u.LogicalBytes, u.LogicalReserved, reserve, u.LogicalLimit) {
 			return E("quota_exceeded", nil)
@@ -337,9 +374,8 @@ func (p *Postgres) beginTx(ctx context.Context, tx pgx.Tx, req BeginRequest, fin
 		if err != nil {
 			return err
 		}
-		for i, g := range req.Guards {
-			_, err = tx.Exec(ctx, `insert into file_operation_guards(operation_id,owner_id,ordinal,native_path,comparison_path,subtree) values($1,$2,$3,$4,$5,$6)`, op.ID, req.Root.OwnerID, i, string(g.Path), comparePath(req.Root, g.Path), g.Subtree)
-			if err != nil {
+		if fence {
+			if err = insertGuards(ctx, tx, op); err != nil {
 				return err
 			}
 		}

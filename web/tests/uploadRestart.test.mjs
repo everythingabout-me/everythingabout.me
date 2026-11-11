@@ -12,7 +12,9 @@ async function mount(t, api, options) {
 }
 function enqueue(harness) { harness.render().enqueue([entry()], "folder", () => false); }
 
-async function blockedUpload(state = "open") {
+// A creation is refused by an upload only while that upload is committing; an open session
+// for the same path is ended by the server when the new one is admitted (supersedingServer).
+async function blockedUpload(state = "committing") {
   const server = uploadServer();
   const create = server.api.createUpload;
   const session = await create({ path: "folder/file", size: 2, mediaType: "application/json", condition: { mode: "create" } }, "old-page-key");
@@ -28,6 +30,20 @@ async function blockedUpload(state = "open") {
     return create(...args);
   };
   return { server, blocker, attempts };
+}
+
+// The server's side of "a new session for a path replaces the open one": the older session
+// is ended inside the creation, with no request from the client.
+function supersedingServer(...args) {
+  const server = uploadServer(...args);
+  const create = server.api.createUpload;
+  server.api.createUpload = async (input, key, ...rest) => {
+    if (!server.keys.has(key)) {
+      for (const session of server.sessions.values()) if (session.path === input.path && session.state === "open") session.state = "aborted";
+    }
+    return { ...await create(input, key, ...rest) };
+  };
+  return server;
 }
 
 function assertNoPublication(server) {
@@ -66,10 +82,12 @@ test("a path left committing is adopted and finished from its own Operation", as
   assert.equal(harness.completed.length, 1);
 });
 
-test("fresh mount ignores an old open upload; explicit selection automatically aborts it before a fresh allocation", async (t) => {
-  const { server, blocker, attempts } = await blockedUpload();
-  blocker.path = "/folder/file";
+test("fresh mount ignores an old open upload; explicit selection allocates over it without asking about it", async (t) => {
+  const server = supersedingServer();
+  const old = await server.api.createUpload({ path: "folder/file", size: 2, mediaType: "application/json", condition: { mode: "create" } }, "old-page-key");
+  const blocker = server.sessions.get(old.id);
   server.receipts.get(blocker.id).set(1, { number: 1, size: 2, sha256: digest("xx") });
+  server.calls.length = 0;
   const storage = memoryStorage();
   storage.setItem("eam.uploads.v1:owner-a", JSON.stringify([{ id: "old-task", path: "folder/file", status: "uploading", uploadId: blocker.id, cancelRequested: true }]));
   const harness = await mount(t, server.api, { storage });
@@ -78,11 +96,15 @@ test("fresh mount ignores an old open upload; explicit selection automatically a
   assert.deepEqual(server.calls, [], "mount does not query, cancel or replay discarded uploads");
   enqueue(harness);
   const queue = await harness.until(complete);
-  assert.equal(blocker.state, "aborted");
-  assert.deepEqual(server.calls.slice(0, 4).map(([kind, id]) => [kind, typeof id === "string" ? id : id.path]), [
-    ["blocked-create", "session-1"], ["status", "session-1"], ["abort", "session-1"], ["create", "folder/file"],
-  ]);
-  assertFreshPublication(server, attempts);
+  assert.equal(blocker.state, "aborted", "the server ended the abandoned session when it admitted the new one");
+  assert.equal(server.calls[0][0], "create", "the first request is the allocation itself");
+  assert.equal(callsOf(server, "status").filter(([, id]) => id === blocker.id).length, 0, "the abandoned session is never asked about");
+  assert.equal(callsOf(server, "abort").length, 0, "and never aborted by the client");
+  assert.equal(callsOf(server, "create").length, 1);
+  assert.notEqual(callsOf(server, "create")[0][2], "old-page-key", "never reuse the discarded page's allocation identity");
+  assert.equal(server.sessions.size, 2);
+  assert.deepEqual(callsOf(server, "part").map(([, id, number]) => [id, number]), [["session-2", 1]]);
+  assert.deepEqual(callsOf(server, "commit"), [["commit", "session-2"]]);
   assert.equal(await callsOf(server, "part")[0][3].text(), "ab", "the fresh session sends the newly selected bytes");
   assert.equal(queue.tasks[0].file, null);
   assert.equal(harness.completed.length, 1);
@@ -91,18 +113,13 @@ test("fresh mount ignores an old open upload; explicit selection automatically a
 
 for (const release of ["unmount", "cancel", "complete"]) {
   test(`another page cannot touch an owned path until ${release}; explicit Retry then claims it automatically`, async (t) => {
-    const server = uploadServer(1);
+    const server = supersedingServer(1);
     const locks = memoryLocks(), gate = deferred();
-    const create = server.api.createUpload, send = server.api.uploadPart;
+    const send = server.api.uploadPart;
     let firstSignal;
     server.api.uploadStatus = async (id) => {
       server.calls.push(["status", id]);
       return { ...server.sessions.get(id) };
-    };
-    server.api.createUpload = async (...args) => {
-      const active = [...server.sessions.values()].find((session) => session.path === args[0].path && session.state === "open");
-      if (active && !server.keys.has(args[1])) { server.calls.push(["blocked-create", active.id]); throw conflict(active.id, "upload_commit"); }
-      return { ...await create(...args) };
     };
     server.api.uploadPart = async (...args) => {
       if (args[0] === "session-1" && args[1] === 2) { firstSignal = args[3]; await gate.promise; }
@@ -148,9 +165,14 @@ for (const release of ["unmount", "cancel", "complete"]) {
     assert.equal(queue.tasks[0].id, id);
     assert.equal(server.sessions.size, 2);
     assert.equal(second.completed.length, 1);
-    assert.deepEqual(callsOf(server, "abort"), release === "complete" ? [] : [["abort", "session-1"]]);
+    // Only a page's own cancel aborts a session. A session its page merely left behind is
+    // ended by the server when the retry is admitted, so the claiming page asks nothing
+    // about it and aborts nothing.
+    assert.deepEqual(callsOf(server, "abort"), release === "cancel" ? [["abort", "session-1"]] : []);
+    assert.ok(!secondCalls.includes("abortUpload"), "the claiming page never aborts another page's session");
     if (release === "unmount") {
-      assert.deepEqual(secondCalls.slice(0, 5), ["capabilities", "createUpload", "uploadStatus", "abortUpload", "createUpload"]);
+      assert.deepEqual(secondCalls.slice(0, 2), ["capabilities", "createUpload"]);
+      assert.equal(server.sessions.get("session-1").state, "aborted");
     }
     gate.resolve();
     await first.settle();
@@ -356,7 +378,7 @@ test("definitive non-upload blocker status retains exact Operation waiting witho
 });
 
 for (const error of [new TestApiError("status unavailable", 503), new Error("offline")]) {
-  test(`transient blocker status failure (${error.message}) remains retryable and explicit Retry automatically restarts`, async (t) => {
+  test(`transient blocker status failure (${error.message}) remains retryable and explicit Retry adopts the publication`, async (t) => {
     const { server, blocker, attempts } = await blockedUpload();
     const status = server.api.uploadStatus;
     let failure = error;
@@ -364,6 +386,7 @@ for (const error of [new TestApiError("status unavailable", 503), new Error("off
       if (failure) { server.calls.push(["status", args[0]]); throw failure; }
       return status(...args);
     };
+    server.api.getOperation = async (id) => operation(id, "succeeded", item("folder/file"));
     const harness = await mount(t, server.api);
     enqueue(harness);
     const failed = await harness.until((queue) => queue.tasks[0]?.status === "failed");
@@ -377,67 +400,19 @@ for (const error of [new TestApiError("status unavailable", 503), new Error("off
     assertNoPublication(server);
     await harness.tick();
     assert.equal(attempts.length, 1, "idle polling never silently retries a failed lookup");
-    assert.equal(callsOf(server, "operation").length, 0);
     failure = undefined;
     failed.retry(id);
+    await harness.until((queue) => queue.tasks[0]?.status === "finalizing");
+    await harness.tick();
     const queue = await harness.until(complete);
     assert.equal(queue.tasks[0].id, id);
-    assert.deepEqual(callsOf(server, "status"), [["status", blocker.id], ["status", blocker.id]]);
-    assert.deepEqual(callsOf(server, "abort"), [["abort", blocker.id]]);
-    assert.equal(blocker.state, "aborted");
-    assert.equal(attempts.length, 3, "Retry inspects the same retained blocker before a fresh allocation");
+    assert.equal(attempts.length, 2, "Retry asks for the allocation again and learns who holds the path");
     assert.ok(attempts.every(([, key]) => key === attempts[0][1]), "Retry retains the original allocation key");
     for (const [intent] of attempts) assert.deepEqual(intent, attempts[0][0]);
-    assert.equal(server.sessions.size, 2);
-    assert.deepEqual(callsOf(server, "part").map(([, id]) => id), ["session-2"]);
-    assert.deepEqual(callsOf(server, "commit"), [["commit", "session-2"]]);
-    assert.equal(harness.completed[0].task.file, originalFile);
-    assert.equal(queue.hasActiveUploads, false);
-  });
-}
-
-for (const terminal of ["aborted", "expired", "failed"]) {
-  test(`lost abort ACK with exact ${terminal} session and cancelled Operation safely allocates a fresh session`, async (t) => {
-    const { server, blocker, attempts } = await blockedUpload();
-    server.api.abortUpload = async (id) => { server.calls.push(["abort", id]); blocker.state = terminal; throw new TestApiError("abort ACK lost"); };
-    server.api.getOperation = async (id) => { server.calls.push(["operation", id]); return operation(id, "cancelled", null, "upload_commit"); };
-    const harness = await mount(t, server.api);
-    enqueue(harness);
-    await harness.until(complete);
-    assert.deepEqual(callsOf(server, "status"), [["status", blocker.id], ["status", blocker.id]]);
-    assert.deepEqual(callsOf(server, "abort"), [["abort", blocker.id]]);
-    assert.deepEqual(callsOf(server, "operation"), [["operation", blocker.id]]);
-    assertFreshPublication(server, attempts);
-  });
-}
-
-for (const [label, settled, opState, opId] of [
-  ["an open session", { state: "open" }, "cancelled"],
-  ["a committing session", { state: "committing" }, "cancelled"],
-  ["an unknown publication outcome", { state: "outcome_unknown" }, "cancelled"],
-  ["a different session ID", { state: "aborted", id: "unrelated-session" }, "cancelled"],
-  ["a different path", { state: "aborted", path: "private/file" }, "cancelled"],
-  ["a running Operation", { state: "aborted" }, "running"],
-  ["a failed Operation", { state: "aborted" }, "failed"],
-  ["an unknown Operation outcome", { state: "aborted" }, "outcome_unknown"],
-  ["a different Operation ID", { state: "aborted" }, "cancelled", "unrelated-operation"],
-]) {
-  test(`lost abort ACK followed by ${label} cannot authorize another allocation`, async (t) => {
-    const { server, blocker, attempts } = await blockedUpload();
-    const status = server.api.uploadStatus;
-    let aborted = false;
-    server.api.abortUpload = async (id) => { server.calls.push(["abort", id]); aborted = true; throw new TestApiError("abort ACK lost"); };
-    server.api.uploadStatus = async (...args) => ({ ...await status(...args), ...(aborted ? settled : {}) });
-    server.api.getOperation = async (id) => { server.calls.push(["operation", id]); return operation(opId ?? id, opState, null, "upload_commit"); };
-    const harness = await mount(t, server.api);
-    enqueue(harness);
-    const queue = await harness.until((queue) => queue.tasks[0]?.status === "failed");
-    assert.equal(queue.tasks[0].error, "abort ACK lost");
-    assert.equal(queue.hasActiveUploads, false);
-    await harness.tick();
-    assert.equal(attempts.length, 1);
-    assert.deepEqual(callsOf(server, "abort"), [["abort", blocker.id]]);
+    assert.equal(callsOf(server, "status").at(-1)[1], blocker.id);
+    assert.equal(callsOf(server, "abort").length, 0, "a publication under way is adopted, never aborted");
     assertNoPublication(server);
+    assert.equal(queue.hasActiveUploads, false);
   });
 }
 

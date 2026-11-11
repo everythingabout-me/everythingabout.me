@@ -16,6 +16,7 @@ import (
 
 	fc "everythingabout.me/backend/internal/filecontract"
 	"everythingabout.me/backend/internal/fileops"
+	"everythingabout.me/backend/internal/nodes"
 	"everythingabout.me/backend/internal/storage"
 	"everythingabout.me/backend/internal/uploadspool"
 )
@@ -51,6 +52,25 @@ func filesUploadStateError(state fileops.UploadState) error {
 		return fileops.E("upload_failed", nil)
 	}
 	return nil
+}
+
+// filesUploadEnded answers a request against a session that can no longer accept bytes or
+// commit, and says why when the journal recorded it. Without the reason a client whose
+// session was replaced by a newer one for the same path, or failed because its destination
+// changed, sees only "upload_aborted" for something it never asked to abort.
+func filesUploadEnded(u fileops.Upload, err error) error {
+	problem := filesMutationProblem(err)
+	p := filesProblem(problem)
+	if p == nil || p.Status != 410 {
+		return problem
+	}
+	var saved struct {
+		Detail string `json:"detail"`
+	}
+	if json.Unmarshal(u.Operation.Problem, &saved) == nil && saved.Detail != "" {
+		p.Detail = saved.Detail
+	}
+	return p
 }
 func (s *Server) filesUploadResource(u fileops.Upload, scopes ...*fileRequest) map[string]any {
 	if len(scopes) > 0 {
@@ -580,7 +600,7 @@ func (s *Server) handleFilesUploadPart(w http.ResponseWriter, r *http.Request, f
 		return err
 	}
 	if err = filesUploadStateError(u.State); err != nil {
-		return filesMutationProblem(err)
+		return filesUploadEnded(u, err)
 	}
 	if err = filesUploadExpired(u); err != nil {
 		return filesMutationProblem(err)
@@ -776,20 +796,29 @@ func (s *Server) handleFilesCommitUpload(w http.ResponseWriter, r *http.Request,
 			return filesMutationProblem(coverageErr)
 		}
 	}
+	// The freeze is where the session takes its guard and proves its destination is still
+	// the one it was opened against. A destination that changed ends the session there, and
+	// the terminal operation it returns carries the reason (rendered below).
+	opened := u
 	if s.filesTransferClass() == storage.TransferPresignedParts {
 		// Class A parts never pass through this application, so coverage is the
 		// provider listing verified above rather than application receipts.
-		u, err = s.filesJournal.FreezeProviderListed(r.Context(), root, actor, u.ID)
+		u, err = s.filesJournal.FreezeProviderListed(r.Context(), root, actor, u.ID, nodes.CheckUploadBinding)
 	} else {
-		u, err = s.filesJournal.FreezeUpload(r.Context(), root, actor, u.ID)
+		u, err = s.filesJournal.FreezeUpload(r.Context(), root, actor, u.ID, nodes.CheckUploadBinding)
 	}
 	if err != nil {
-		return filesMutationProblem(err)
+		return filesUploadEnded(opened, err)
 	}
 	if u.Operation.State == fileops.Succeeded {
 		return writeFilesJSON(w, 200, filesScopedResult(u.Operation.Result, f))
 	}
 	if u.Operation.Terminal() {
+		if opened.State == "open" {
+			// This request ended the session at the freeze. Its staged parts are of no use
+			// to anyone now, so discard them without waiting for the next sweep.
+			_ = s.queueFileOperation(u.Operation)
+		}
 		return filesOperationFailure(u.Operation)
 	}
 	// Settle in this request, the way every other mutation does. A small file is done in well

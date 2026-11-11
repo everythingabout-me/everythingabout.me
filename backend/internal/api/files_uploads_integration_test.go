@@ -304,7 +304,25 @@ func TestFilesUploadsPostgresLocalConformance(t *testing.T) {
 			t.Fatalf("concurrent identical slot ACKs %v", codes)
 		}
 		uploadsHTTPProblem(t, h.part(id, 1, []byte("else"), nil), 409, "part_conflict")
-		uploadsHTTPProblem(t, h.create("/concurrent", "independent-same-path", 4, h.bearer, nil), 409, "operation_in_progress")
+		// A second session for the same path does not wait for the first: it replaces it,
+		// and the first one's next request says which session did.
+		older := h.newUpload(t, "/same-path", "same-path-older", 4)
+		newer := h.newUpload(t, "/same-path", "same-path-newer", 4)
+		late := h.part(older, 1, []byte("same"), nil)
+		uploadsHTTPProblem(t, late, 410, "upload_aborted")
+		if !strings.Contains(late.Body.String(), newer) {
+			t.Fatalf("superseded session does not name its successor: %s", late.Body.String())
+		}
+		gone := h.request("POST", uploadRoute(older, "/commit"), h.bearer, nil, nil)
+		uploadsHTTPProblem(t, gone, 410, "upload_gone")
+		if !strings.Contains(gone.Body.String(), newer) {
+			t.Fatalf("commit of a superseded session does not name its successor: %s", gone.Body.String())
+		}
+		uploadsHTTPJSON(t, h.part(newer, 1, []byte("kept"), nil), 201)
+		h.commit(t, newer)
+		if data, err := os.ReadFile(filepath.Join(h.root.ContentRoot, "same-path")); err != nil || string(data) != "kept" {
+			t.Fatalf("the newer session did not publish: %q %v", data, err)
+		}
 		other := h.newUpload(t, "/other-target", "independent-other", 3)
 		wrong := sha256.Sum256([]byte("wrong"))
 		uploadsHTTPProblem(t, h.part(other, 1, []byte("abc"), http.Header{"Content-Digest": {"sha-256=:" + base64.StdEncoding.EncodeToString(wrong[:]) + ":"}}), 422, "checksum_mismatch")
@@ -460,10 +478,11 @@ func TestFilesUploadsPostgresLocalConformance(t *testing.T) {
 		if _, err := f.db.Pool().Exec(f.ctx, `update file_budgets set logical_limit=100 where owner_id=$1`, h.root.OwnerID); err != nil {
 			t.Fatal(err)
 		}
+		// The folder is created through the service, so the index holds it and the session
+		// binds its identity. What follows changes the native folder behind the index's
+		// back, which only the native revision captured at admission can notice.
 		parent := filepath.Join(h.root.ContentRoot, "Parent")
-		if err := os.Mkdir(parent, 0700); err != nil {
-			t.Fatal(err)
-		}
+		uploadsHTTPJSON(t, h.request("POST", "/api/files", h.bearer, []byte(`{"kind":"folder","path":"/Parent"}`), http.Header{"Content-Type": {"application/json"}}), 201)
 		id := h.newUpload(t, "/Parent/file", "parent-aba", 4)
 		uploadsHTTPJSON(t, h.part(id, 1, []byte("safe"), nil), 201)
 		if err := os.Rename(parent, parent+"-moved"); err != nil {
@@ -495,6 +514,110 @@ func TestFilesUploadsPostgresLocalConformance(t *testing.T) {
 		h.waitCleaned(t, id)
 		f.checkNoLiability(t, h.root)
 	})
+}
+
+// An open session fences nothing, so everything below is admitted while one is pending;
+// what the session bound is checked when it commits.
+func TestFilesUploadsPostgresLocalCommitTimeFence(t *testing.T) {
+	f := newFileWorkerFixture(t)
+	f.cfg.FileCookieOrigins = []string{"https://files.example"}
+	h := newUploadsHTTPFixture(t, f)
+	jsonHeader := http.Header{"Content-Type": {"application/json"}}
+	mkdir := func(path string) map[string]any {
+		t.Helper()
+		body, _ := json.Marshal(map[string]any{"kind": "folder", "path": path})
+		return uploadsHTTPJSON(t, h.request("POST", "/api/files", h.bearer, body, jsonHeader), 201)
+	}
+	pending := func(path, key string) string {
+		t.Helper()
+		id := h.newUpload(t, path, key, 4)
+		uploadsHTTPJSON(t, h.part(id, 1, []byte("data"), nil), 201)
+		return id
+	}
+	remove := func(path string) {
+		t.Helper()
+		w := h.request("DELETE", "/api/files?"+url.Values{"path": {path}, "recursive": {"true"}}.Encode(), h.bearer, nil, nil)
+		switch w.Code {
+		case http.StatusNoContent:
+		case http.StatusAccepted:
+			if op := h.poll(t, w.Header().Get("Location")); op["state"] != "succeeded" {
+				t.Fatalf("delete of %s: %v", path, op)
+			}
+		default:
+			t.Fatalf("delete of %s above an open upload: HTTP %d %s", path, w.Code, w.Body.String())
+		}
+	}
+	// refused commits the session and requires the commit to end it with this answer,
+	// before anything was published.
+	refused := func(id string, status int, code, reason string) {
+		t.Helper()
+		w := h.request("POST", uploadRoute(id, "/commit"), h.bearer, nil, nil)
+		uploadsHTTPProblem(t, w, status, code)
+		if !strings.Contains(w.Body.String(), reason) {
+			t.Fatalf("refusal does not say why (%q): %s", reason, w.Body.String())
+		}
+		if session := uploadsHTTPJSON(t, h.request("GET", uploadRoute(id, ""), h.bearer, nil, nil), 200); session["state"] != "failed" {
+			t.Fatalf("a session that can never commit is %v", session["state"])
+		}
+		if op := uploadsHTTPJSON(t, h.request("GET", "/api/files/operations/"+id, h.bearer, nil, nil), 200); op["state"] != "failed" {
+			t.Fatalf("operation after a refused commit: %v", op)
+		}
+		// The answer is the session's, not this request's: asking again explains it again.
+		again := h.request("POST", uploadRoute(id, "/commit"), h.bearer, nil, nil)
+		uploadsHTTPProblem(t, again, 410, "upload_gone")
+		if !strings.Contains(again.Body.String(), reason) {
+			t.Fatalf("repeated commit lost the reason (%q): %s", reason, again.Body.String())
+		}
+		h.waitCleaned(t, id)
+	}
+	absent := func(relative string) {
+		t.Helper()
+		if _, err := os.Stat(filepath.Join(h.root.ContentRoot, relative)); !os.IsNotExist(err) {
+			t.Fatalf("%s exists natively: %v", relative, err)
+		}
+	}
+
+	t.Run("a deleted folder is not resurrected by a session opened inside it", func(t *testing.T) {
+		mkdir("/Gone")
+		id := pending("/Gone/file", "fence-gone")
+		remove("/Gone")
+		refused(id, 409, "parent_missing", `no folder is indexed at \"/Gone\"`)
+		absent("Gone")
+	})
+	t.Run("a folder created again is not the folder the session was opened for", func(t *testing.T) {
+		mkdir("/Again")
+		id := pending("/Again/file", "fence-again")
+		remove("/Again")
+		mkdir("/Again")
+		refused(id, 412, "target_changed", "deleted and created again")
+		absent("Again/file")
+	})
+	t.Run("a folder may be renamed while a session is open inside it", func(t *testing.T) {
+		folder := mkdir("/Before")
+		id := pending("/Before/file", "fence-moved")
+		body, _ := json.Marshal(map[string]any{"from": "/Before", "to": "/After", "ifRevision": folder["revision"]})
+		uploadsHTTPJSON(t, h.request("POST", "/api/files/move", h.bearer, body, jsonHeader), 200)
+		refused(id, 409, "parent_missing", `no folder is indexed at \"/Before\"`)
+		absent("Before")
+		absent("After/file")
+	})
+	t.Run("a file with a pending replacement stays readable by ID", func(t *testing.T) {
+		created := uploadsHTTPJSON(t, h.request("PUT", "/api/files/content?"+url.Values{"path": {"/doc.txt"}}.Encode(), h.bearer, []byte("old"), http.Header{"If-None-Match": {"*"}}), 201)
+		body, _ := json.Marshal(map[string]any{"target": map[string]any{"id": created["id"]}, "size": 3, "mediaType": "text/plain",
+			"condition": map[string]any{"mode": "replace", "contentRevision": created["contentRevision"]}})
+		headers := jsonHeader.Clone()
+		headers.Set("Idempotency-Key", "fence-replace")
+		id := uploadsHTTPJSON(t, h.request("POST", "/api/files/uploads", h.bearer, body, headers), 201)["id"].(string)
+		read := h.request("GET", "/api/files/content?"+url.Values{"id": {created["id"].(string)}}.Encode(), h.bearer, nil, nil)
+		if read.Code != 200 || read.Body.String() != "old" {
+			t.Fatalf("read by ID under an open replacement: HTTP %d %s", read.Code, read.Body.String())
+		}
+		if w := h.request("DELETE", uploadRoute(id, ""), h.bearer, nil, nil); w.Code != 204 {
+			t.Fatalf("abort: HTTP %d %s", w.Code, w.Body.String())
+		}
+		h.waitCleaned(t, id)
+	})
+	f.checkNoLiability(t, h.root)
 }
 
 type uploadsBlockedReader struct {

@@ -67,7 +67,7 @@ func uploadFailureFixture(t *testing.T, f *fileWorkerFixture) (*Server, fileops.
 	if err != nil {
 		t.Fatal(err)
 	}
-	upload, err = f.journal.FreezeUpload(f.ctx, root, actor, upload.ID)
+	upload, err = f.journal.FreezeUpload(f.ctx, root, actor, upload.ID, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

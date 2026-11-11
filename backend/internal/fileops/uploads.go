@@ -57,18 +57,19 @@ type PartReceipt struct {
 }
 
 // uploadIdleWindow is how long an open session may sit without server-visible activity
-// before it expires and releases its path, its quota and its native allocation.
+// before it expires and releases its quota and its native allocation.
 //
 // The bound comes from the protocol, not from taste: a class A part URL lives one hour
 // (filesReadGrantWindow), so a transfer that is still moving must ask for a fresh
 // signature at least that often. Two hours of neither a signature nor a received part
-// therefore means nothing can still be arriving — and that is exactly the "the page is
-// gone, so the upload is gone" case: a session abandoned mid-flight stops holding its
-// target instead of fencing it until tomorrow.
+// therefore means nothing can still be arriving — "the page is gone, so the upload is
+// gone". An open session fences no path (it takes its guard at commit), so this window
+// decides only how long an abandoned session keeps its reservation and staged parts; it is
+// not what makes the destination usable again.
 const uploadIdleWindow = 2 * time.Hour
 
 // uploadSessionLifetime caps a session that keeps trickling activity forever, so a client
-// cannot hold a path indefinitely by signing one part a day.
+// cannot hold a reservation indefinitely by signing one part a day.
 const uploadSessionLifetime = 7 * 24 * time.Hour
 
 type UploadJournal interface {
@@ -82,7 +83,7 @@ type UploadJournal interface {
 	ListUploads(context.Context, Root, Actor, int, string) ([]Upload, error)
 	AcceptUploadPart(context.Context, Root, Actor, string, PartReceipt) (PartReceipt, bool, error)
 	ListUploadParts(context.Context, Root, Actor, string, int, int64, int64) ([]PartReceipt, int64, error)
-	FreezeUpload(context.Context, Root, Actor, string) (Upload, error)
+	FreezeUpload(context.Context, Root, Actor, string, UploadBinding) (Upload, error)
 	AbortUpload(context.Context, Root, Actor, string) (Upload, error)
 	ExpireUploads(context.Context, int) ([]Upload, error)
 	MarkUploadChunksCleaned(context.Context, Root, Actor, string) error

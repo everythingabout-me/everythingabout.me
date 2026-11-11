@@ -75,6 +75,8 @@ using a path performs resolution server-side in the same call. Clients do not ha
 An ID request resolves the current authorized location, including after earlier completed rename/move; a path
 request selects what exists at that location at admission. Once admitted, mutations bind the selected identity
 and location under guards; a concurrent move/recreation cannot silently retarget a queued mutation or upload.
+An upload session is the one mutation that is admitted long before it acts: it binds at creation, fences
+nothing while it is open, and has the binding proved again when it commits (see [§7](#7-upload-sessions-and-transfer-classes)).
 
 Existing-resource query endpoints accept exactly one nonempty `id` or `path` parameter, never both, even if
 both happen to identify the same resource. Reject duplicates, empty selectors, both or required-but-missing
@@ -535,8 +537,27 @@ uniform part size with a short final part; class B uses the provider's rules (no
 multiples on Google Drive and 320 KiB multiples on OneDrive, Box's own part size). See
 [transfer protocol §7](../design/transfer-protocol.md#7-geometry).
 
-Session lists use opaque UUID keysets. Same-path sessions are rejected while an older guard is active; the
-server does not cancel it on create. Commit returns a stable Operation until index/result settlement.
+Session lists use opaque UUID keysets. Commit returns a stable Operation until index/result settlement.
+
+**An open session fences nothing; the commit does.** A class A or C session can change the native tree in
+exactly one place, the publication its commit performs, so that is when it takes its path guard. While it is
+`open` it is staged parts and a quota reservation: it does not refuse a delete, move, copy or folder creation
+over its destination, and it does not make a file it is going to replace unreadable. The reason is the
+distance between the two windows — a publication lasts seconds, a session may stay open for hours and may
+have been abandoned — and what a create-time guard cost for it: a folder above 188 abandoned sessions could
+not be deleted, and a folder holding one could not be renamed, until the sessions lapsed. What the open
+session gives up is settled at commit, below.
+
+**A new session for a path replaces the open one.** Creating a session where another `open` session of the
+same root already targets the path ends the older one in the same transaction (state `aborted`, its
+reservation and replacement credit released), whichever principal opened it: the right to write the path is
+the right to displace an unpublished attempt at it. The older session's next signature, part or commit
+returns `410` and names the session that replaced it. The server cannot tell a live transfer from an
+abandoned tab for up to the idle window (class A parts bypass it), so the creation in hand is the only
+evidence that anyone is still there; refusing it made every retry after a closed page wait out a session
+nobody was driving. The cost is the rare case of two live clients sending the same path, where the older
+loses the bytes it sent. A session that is already `committing` is never replaced: creation over it returns
+`409 operation_in_progress` with its `operationId`, and the client adopts or waits for that publication.
 
 Create with an Idempotency-Key:
 
@@ -559,8 +580,9 @@ as part of this request. Each created folder gets a fresh ID, its native marker 
 change facts and audit an explicit `mkdir` would produce. The reason: importing a selected tree
 otherwise costs one mkdir round trip per directory before the first file may start, and a client that
 cannot start for minutes looks stuck. Only *who* sends that mkdir moves — the ordering rule does not:
-the parent row and marker exist before the upload binds the parent revision it observed, so a
-concurrent move/recreate of that parent still returns `412 target_changed`. Without `parents` a missing
+the parent row and marker exist before the upload binds the parent identity and revision it observed, so a
+concurrent move/recreate of that parent still fails the commit (`412 target_changed`, or `409 parent_missing`
+when no folder is left at that path). Without `parents` a missing
 parent is still `409 parent_missing`, and a destination whose parent is a file is still `409 not_a_folder`.
 
 Create mode (default) accepts `destination:Destination` and forbids `target`. For example,
@@ -714,8 +736,22 @@ open ──commit──> committing ──confirmed native effect + index settle
   └──timeout──> expired
 ```
 
-Commit atomically verifies exact coverage, freezes the manifest, and transitions to committing; incomplete
-coverage returns `409 upload_incomplete` and stays open. From then on the server signs no new parts and rejects
+Commit atomically verifies exact coverage, takes the session's path guard, proves the destination is still
+the one the session was opened for, freezes the manifest, and transitions to committing; incomplete
+coverage returns `409 upload_incomplete` and stays open. The guard and the proof happen in one transaction
+with every index settlement, so a commit and a delete or move of an ancestor are strictly ordered:
+
+- another operation still holds the path (`409 operation_in_progress` with its `operationId`): the session
+  stays `open` and the commit may be repeated, because that operation may yet fail and change nothing;
+- the destination is no longer what the session bound — the parent folder was deleted or moved
+  (`409 parent_missing`), or was created again or replaced by another folder, or the file being replaced is
+  gone (`412 target_changed`): the session ends as `failed` in that same transaction, nothing is published,
+  its quota is released, and every later commit returns `410` with the same reason. It is terminal because it
+  can never pass later; the alternative is a commit that publishes under a prefix a delete already removed,
+  which a rebuild from the native tree would resurrect.
+
+A deletion therefore never aborts an upload, and an upload never blocks a deletion; an upload into a folder
+that was deleted meanwhile is refused when it commits. From then on the server signs no new parts and rejects
 relayed ones. It returns file metadata with `200` if settled, or `202 + Operation + Location + Retry-After`
 otherwise. Repeated commit returns the same settled result or operation identity. Only the server's own commit
 call can have an ambiguous effect; it enters outcome_unknown and blocks conflicting mutations until reconcile
@@ -731,9 +767,11 @@ are never reused; their writes, signing and commits return `410`.
 
 ### Expiry
 
-Open sessions expire after 24 hours without activity (sign requests, status queries and relayed parts count),
-with a hard seven-day maximum, capped by the provider session's own lifetime; capabilities advertise the
-effective values. Expiry discards provider state exactly as abort does. Committing work has worker
+Open sessions expire after two hours without activity, with a hard seven-day maximum, capped by the provider
+session's own lifetime; capabilities advertise the effective values. Activity is what can still produce
+bytes — a sign request or a relayed part; a status query does not count, or polling would keep an abandoned
+session alive. Expiry discards provider state exactly as abort does and releases the session's quota; it is
+not what frees the destination, because an open session never held it. Committing work has worker
 leases/recovery rather than expiring because a request or token timed out. An expired provider credential is
 renewed internally; an unrecoverably lost provider session fails explicitly rather than pretending bytes
 survived. Keep terminal results and idempotency records at least 24 hours after termination, and advertise

@@ -109,8 +109,9 @@ func (p *Postgres) CreateUpload(ctx context.Context, input BeginRequest, options
 	if err != nil {
 		return u, false, err
 	}
-	// Sessions serialize only the exact destination. Ancestor mutations retain their
-	// own subtree guards and therefore still conflict with this exact path.
+	// The session declares its exact destination but does not fence it yet: beginTx admits it
+	// against the guards that exist now, and the row is written when the session freezes.
+	// See freezeUpload for why the fence belongs to the commit and not to the session.
 	input.Guards = []Guard{{Path: w.Target}}
 	key := input.IdempotencyKey
 	if len(key) > 1024 || strings.ContainsRune(key, 0) {
@@ -131,7 +132,14 @@ func (p *Postgres) CreateUpload(ctx context.Context, input BeginRequest, options
 		if err != nil || replay {
 			return err
 		}
-		op, _, err := p.beginTx(ctx, tx, req, opFingerprint, reserve)
+		// Before admission, so the quota and the replacement credit the older session held
+		// are free for this one. If admission then fails, the whole transaction rolls back
+		// and the older session is untouched.
+		superseded, err := supersedeOpenUploads(ctx, tx, req.Root, comparePath(req.Root, w.Target))
+		if err != nil {
+			return err
+		}
+		op, _, err := p.beginTx(ctx, tx, req, opFingerprint, reserve, false)
 		if err != nil {
 			return err
 		}
@@ -140,17 +148,112 @@ func (p *Postgres) CreateUpload(ctx context.Context, input BeginRequest, options
 		if key != "" {
 			dbKey = key
 		}
-		_, err = tx.Exec(ctx, `insert into file_uploads(operation_id,owner_id,principal_id,idempotency_key,client_fingerprint,comparison_path,part_size,part_count,state,created_at,expires_at) values($1,$2,$3,$4,$5,$6,$7,$8,'open',$9,$10)`, u.ID, req.Root.OwnerID, req.Actor.ID, dbKey, fingerprint, comparePath(req.Root, w.Target), u.PartSize, u.PartCount, u.CreatedAt, u.ExpiresAt)
-		return err
+		if _, err = tx.Exec(ctx, `insert into file_uploads(operation_id,owner_id,principal_id,idempotency_key,client_fingerprint,comparison_path,part_size,part_count,state,created_at,expires_at) values($1,$2,$3,$4,$5,$6,$7,$8,'open',$9,$10)`, u.ID, req.Root.OwnerID, req.Actor.ID, dbKey, fingerprint, comparePath(req.Root, w.Target), u.PartSize, u.PartCount, u.CreatedAt, u.ExpiresAt); err != nil {
+			return err
+		}
+		// The older session's own client learns this on its next request, so the record has
+		// to say which session replaced it rather than only that it ended.
+		for i := range superseded {
+			old := &superseded[i].Operation
+			old.Problem = uploadProblem("upload_superseded", "A newer upload session for the same path (upload "+u.ID+") replaced this one before it committed.")
+			if err = saveOperation(ctx, tx, *old); err != nil {
+				return err
+			}
+		}
+		return nil
 	})
 	return u, replay, err
+}
+
+// supersedeOpenUploads ends the `open` sessions of this root that target path, and returns
+// them. It runs inside the creation of a new session for that path.
+//
+// Two sessions for one path cannot both publish, so one of them has to lose; the only
+// question is which, and when. The server cannot tell whether the older one is alive: class A
+// parts go straight to the provider, so a healthy transfer and an abandoned tab look the
+// same for up to uploadIdleWindow. The request that is creating a session now is the one
+// piece of evidence that somebody is still there, so the newer session wins. Refusing it
+// instead (what a create-time guard did) made the common case — a retry after the page or
+// the import died — wait hours for a session nobody was driving, unless the client knew to
+// find that session and abort it first; allowing both made the loser discover it only after
+// sending every byte, and reserved the quota twice meanwhile.
+//
+// The cost is the rare case of two live clients sending the same path: the older one gets
+// upload_gone, naming the session that replaced it, on its next signature, part or commit.
+//
+// Only `open` sessions are ended: nothing of theirs is published, their staged parts are
+// private and the ordinary cleanup discards them. A session that is already committing holds
+// a guard, so the creation that reaches this point never sees one — beginTx refuses it with
+// operation_in_progress and names it.
+//
+// The authority is the creator's write access to the path: whoever may replace the file
+// there may displace an unpublished attempt at it, whichever principal opened that attempt.
+func supersedeOpenUploads(ctx context.Context, tx pgx.Tx, root Root, path string) ([]Upload, error) {
+	rows, err := tx.Query(ctx, `select operation_id::text,principal_id from file_uploads where owner_id=$1 and comparison_path=$2 and state='open' order by created_at,operation_id`, root.OwnerID, path)
+	if err != nil {
+		return nil, err
+	}
+	type candidate struct{ id, principal string }
+	var candidates []candidate
+	for rows.Next() {
+		var c candidate
+		if err = rows.Scan(&c.id, &c.principal); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		candidates = append(candidates, c)
+	}
+	err = rows.Err()
+	rows.Close()
+	if err != nil {
+		return nil, err
+	}
+	var out []Upload
+	for _, c := range candidates {
+		// Settled as its own principal would settle it, the way expiry does.
+		older, err := readUpload(ctx, tx, root, Actor{ID: c.principal, CanWrite: true}, c.id, true)
+		if IsCode(err, "not_found") {
+			// Another root generation's session targets another namespace.
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		if older.State != UploadOpen {
+			continue
+		}
+		now, err := dbNow(ctx, tx)
+		if err != nil {
+			return nil, err
+		}
+		state := UploadAborted
+		if !older.ExpiresAt.After(now) {
+			state = UploadExpired
+		}
+		if err = terminateOpenUpload(ctx, tx, &older, state, now, nil); err != nil {
+			if IsCode(err, "recovery_required") {
+				// Not provably free of a native attempt, so it is not ours to end: it keeps
+				// the path and the creation is refused with its name.
+				return nil, &Error{Code: "operation_in_progress", OperationID: c.id, OperationKind: "upload_commit"}
+			}
+			return nil, err
+		}
+		out = append(out, older)
+	}
+	return out, nil
+}
+
+// uploadProblem is the stored reason a session ended without publishing.
+func uploadProblem(code, detail string) json.RawMessage {
+	value, _ := json.Marshal(map[string]string{"code": code, "detail": detail})
+	return value
 }
 
 // TouchUpload records server-visible progress on an open session and slides its idle
 // expiry. Only activity that can still produce bytes counts: a signature request (class A
 // parts go straight to the provider, so this is the only request a live transfer must keep
 // making) or a received part (class C). A status read does not, because polling must not
-// keep an abandoned session — and the path it holds — alive.
+// keep an abandoned session — and the quota it reserves — alive.
 func (p *Postgres) TouchUpload(ctx context.Context, root Root, actor Actor, id string) (Upload, error) {
 	var u Upload
 	if err := validateRoot(root); err != nil {

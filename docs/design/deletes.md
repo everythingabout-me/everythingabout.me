@@ -74,8 +74,10 @@ Consequences:
   them: both have live rows, both are skipped. The old children of `/X` have no rows and are removed, so the
   re-created folder ends up containing exactly what the user put there.
 - **A publish that has not settled yet is never deleted.** An upload writes the object before its index row,
-  so "no live row" alone would race it. The purge skips a path that has a non-terminal upload targeting it
-  (the journal knows), and the conditional delete's `If-Match` is a second fence.
+  so "no live row" alone would race it. A commit holds its guard from the freeze to its settlement, so a
+  delete over it is not accepted until the row exists; a commit that starts after the acceptance can only
+  target a folder the index holds again, and its object is newer than the acceptance, which the purge adopts.
+  The conditional delete's `If-Match` is a further fence.
 - **A failed conditional delete is not an operation failure.** `412` means the object changed after we
   observed it — the user got there first. The entry is reported as `adopted` and the purge moves on. Today the
   same event fails the whole operation.
@@ -96,24 +98,30 @@ user could not see from a deletion they had already confirmed. The one case that
 user re-creating the path through this service — is protected by the live-row rule, not by refusing the
 delete.
 
-## An abandoned upload inside the subtree does not fence the delete
+## An open upload inside the subtree does not fence the delete
 
-An upload session that never committed still holds a guard on its target path — it reserves that path until
-the client commits, aborts, or the session expires 24 hours later. A recursive delete's guard covers the whole
-subtree, so it collides with every such session inside it.
+An upload session takes its path guard when it commits, not when it is created
+([api.md §7](../api/api.md#7-upload-sessions-and-transfer-classes)). A session that is still `open` is staged
+parts and a reservation, with no native effect behind it, so a delete over it is an ordinary delete: nothing
+to wait for, nothing to cancel, and the delete does not know the session exists.
 
-Those sessions are not a reason to refuse. The confirmation that accepted the delete already covered every
-path in the subtree, so a session inside it can never publish anything the user keeps; an `open` session has
-no native effect behind it, only private staging. So the delete's acceptance settles them — the same
-cancellation an abort performs, whose later cleanup discards the staged parts — and retries its own admission
-once. A session whose commit already started is not touched: it may have a native effect behind it, and the
-refusal names it.
+What happens to the session is decided when it commits. Its commit runs in one transaction with the guard it
+takes and a check of the index: the folder it was opened for must still be indexed at the same path under the
+same identity. After this delete's acceptance the rows are gone, so the commit is refused (`parent_missing`,
+or `target_changed` when the folder was created again) and the session ends without publishing. Both
+transactions take the owner lock, so there is no interleaving in which the commit sees the folder and the
+publication lands after the acceptance.
 
-Without this, the work is one `409` per session on the client: a browser cancels the named session and retries
-(bounded at 32 attempts to keep a live war from spinning). A folder above more sessions than that can never be
-deleted through the UI at all. Measured case: a 3,200-file import left 188 sessions behind when it stopped
-between allocating and committing, and the folder holding them answered `operation_in_progress` for every
-delete attempt until the sessions expired the next day.
+A session whose commit already started holds a guard, so the delete is refused with its `operationId` until
+that publication settles — seconds, not a session lifetime.
+
+This replaced two compensations for a guard held from creation. First the browser cancelled the session a
+`409` named and retried, bounded at 32 attempts; then the acceptance cancelled every open session inside the
+subtree itself. Both treated the symptom: the same guard still refused a rename of the folder, a delete of a
+single file with a pending replacement, any client that did not know to cancel first, and it made the delete
+abort uploads as a side effect. Measured case that started it: a 3,200-file import left 188 sessions behind
+when it stopped between allocating and committing, and the folder holding them answered
+`operation_in_progress` for every delete attempt until the sessions expired the next day.
 
 ## Races
 
@@ -122,6 +130,7 @@ delete attempt until the sessions expired the next day.
 | after `202`, folder re-created | ordinary `mkdir`; the purge skips it (`X/` has a live row); old children are still purged |
 | after `202`, file re-uploaded at an old path | ordinary create; the purge skips it; the old object is overwritten or deleted-then-rewritten by the upload itself |
 | during the purge, same path | first writer wins natively; the loser gets `412`/`409` and is retried by its own client; the purge treats `412` as `adopted`, never as an error |
+| upload session opened inside the folder before the delete, committed after `202` | the commit is refused before any native effect (`409 parent_missing`; `412 target_changed` if the folder was created again) and the session ends `failed`; nothing is published under the deleted prefix |
 | second delete of the same prefix | both walks proceed, both skip live rows; no double refund, because the rows left the index once |
 | DB lost during the purge | the folder resurrects with whatever bytes were not yet purged. Closed by the tombstone below; without it this is the accepted cost of a disposable index |
 

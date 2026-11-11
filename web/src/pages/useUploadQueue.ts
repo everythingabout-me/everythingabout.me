@@ -466,12 +466,15 @@ export function useUploadQueue(onUploaded: (task: UploadTask, item: Item) => voi
         try { session = await api.createUpload(intent, task.createKey, signal); }
         catch (error) {
           if (error instanceof ApiError && [400, 401, 403, 409, 413, 422, 507].includes(error.status)) patch(id, { allocationRejected: true });
-          // Only an earlier upload session of the same target can be adopted or aborted from
-          // here, and only that kind needs the session resource. Every other holder (mkdir,
-          // delete, move, copy) is answered by its own Operation, so asking /uploads/{id} about
-          // it was a request that could only ever 404 — one red line and one round trip per
-          // conflict that could not change the outcome. A server that does not name the kind
-          // still gets the probe, because then it is the only way to tell the two apart.
+          // An upload that holds the path is one that is committing: an open session fences
+          // nothing, and the server ends an older open session for this path itself when it
+          // admits a new one. So the only upload this refusal can name is a publication
+          // already under way, and only that kind needs the session resource. Every other
+          // holder (mkdir, delete, move, copy) is answered by its own Operation, so asking
+          // /uploads/{id} about it was a request that could only ever 404 — one red line and
+          // one round trip per conflict that could not change the outcome. A server that does
+          // not name the kind still gets the probe, because then it is the only way to tell
+          // the two apart.
           //
           // An Operation this branch reads is kept for the generic wait below: both ask the
           // same resource what it is doing, and a second round trip learns nothing.
@@ -486,18 +489,6 @@ export function useUploadQueue(onUploaded: (task: UploadTask, item: Item) => voi
             }
             if (signal.aborted) return;
             if (blocking?.id === error.operationId && relative(blocking.path) === task.path) {
-              if (blocking.state === "open") {
-                try { await api.abortUpload(blocking.id, signal); }
-                catch (abortError) {
-                  // A lost abort ACK must be reconciled before a fresh allocation.
-                  const settled = await api.uploadStatus(blocking.id, signal);
-                  if (settled.id !== blocking.id || relative(settled.path) !== task.path || !["aborted", "expired", "failed"].includes(settled.state)) throw abortError;
-                  const op = await api.getOperation(blocking.id, signal);
-                  if (op.id !== blocking.id || op.state !== "cancelled") throw abortError;
-                }
-                if (!signal.aborted) patch(id, { status: "queued", allocationRejected: false });
-                return;
-              }
               if (["aborted", "expired", "failed"].includes(blocking.state)) {
                 const op = await api.getOperation(blocking.id, signal);
                 blockerOperation = op;

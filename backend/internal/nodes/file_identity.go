@@ -11,12 +11,20 @@ import (
 // FileResolveID resolves an opaque public UUID within the authenticated owner.
 // Roots have an empty relative path. Invalid, deleted and foreign IDs are absent.
 func (s *Service) FileResolveID(ctx context.Context, owner, id string) (string, bool, error) {
+	return resolveFileID(ctx, s.db.Pool(), owner, id)
+}
+
+// resolveFileID is FileResolveID on a caller-chosen connection, so a transaction can ask
+// the same question about the state it is about to act on.
+func resolveFileID(ctx context.Context, q interface {
+	QueryRow(context.Context, string, ...any) pgx.Row
+}, owner, id string) (string, bool, error) {
 	var parsed pgtype.UUID
 	if err := parsed.Scan(id); err != nil || !parsed.Valid {
 		return "", false, nil
 	}
 	var path string
-	err := s.db.Pool().QueryRow(ctx, `select path from file_entries where owner_id=$1::uuid and id=$2::uuid
+	err := q.QueryRow(ctx, `select path from file_entries where owner_id=$1::uuid and id=$2::uuid
  union all select '' from file_identity_roots where owner_id=$1::uuid and id=$2::uuid`, owner, parsed).Scan(&path)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return "", false, nil
@@ -42,6 +50,11 @@ func (s *Service) FileIdentity(ctx context.Context, owner, path string) (id, par
 // FileIdentityBusy reports a durable path guard covering the selected location.
 // Guards remain authoritative through worker expiry and native outcome recovery;
 // their existence, rather than a worker lease, determines whether reads can race.
+//
+// An upload session takes its guard when it commits, so a pending replacement does not
+// make the file it will replace unreadable. A guard row under a still-open session is
+// the leftover of one opened before that rule and is ignored here exactly as the
+// mutation conflict scan ignores it (fileops guardHolder).
 func (s *Service) FileIdentityBusy(ctx context.Context, owner, path string) (string, error) {
 	var operationID string
 	err := s.db.Pool().QueryRow(ctx, `select guard.operation_id::text from file_operation_guards guard
@@ -52,6 +65,8 @@ func (s *Service) FileIdentityBusy(ctx context.Context, owner, path string) (str
  case when coalesce((operation.snapshot->'Root'->>'CaseSensitive')::boolean,true) then 'nfc-sensitive-v1' else 'nfc-fold-v1' end) as selected) comparison
  where guard.owner_id=$1::uuid and (comparison.guarded=comparison.selected
  or (guard.subtree and (comparison.guarded='' or starts_with(comparison.selected,comparison.guarded||'/'))))
+ and not exists(select 1 from file_uploads upload where upload.operation_id=guard.operation_id
+ and upload.owner_id=guard.owner_id and upload.state='open')
  order by guard.operation_id,guard.ordinal limit 1`, owner, path).Scan(&operationID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return "", nil

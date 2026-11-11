@@ -75,6 +75,27 @@ envelope is the same for every class:
 executor. Part numbers start at 1, offset is `(number-1)*partSize`, all parts but the last are exactly
 `partSize`, and a zero-byte session has no parts and commits immediately.
 
+### When a session fences its destination
+
+A session takes its path guard at the first moment it can produce a native effect, and not before. In
+classes A and C that is the commit: only the server publishes (§2), so an open session is unpublished parts
+and a reservation, and a guard held from creation would fence the path for the hours a session may stay open
+— or stay abandoned — to protect a publication that lasts seconds. The commit takes the guard and, in the
+same transaction, proves that the index still holds the folder (and, for a replacement, the file) the session
+bound at creation; a destination that changed ends the session there, before anything is published. The API
+consequences are in [api.md §7](../api/api.md#7-upload-sessions-and-transfer-classes).
+
+Two things follow, and both replace what the create-time guard used to do implicitly:
+
+- **One open session per path.** A new session for a path ends the open one it finds there. Two of them
+  cannot both publish, and the server cannot tell which is alive, so the one being created now wins.
+- **Nothing an open session needs is protected by a fence.** Its destination may be deleted, moved or
+  re-created under it; it learns that at commit, before anything is published.
+
+Class B is not uniform here, and its driver decides when it is built (§5): a provider that publishes only on
+the server's commit follows the rule above, while one whose client-side final write completes the file has its
+first native effect before commit and needs its fence earlier.
+
 ## 4. Class A — presigned parts
 
 ### Opening and signing
@@ -150,6 +171,14 @@ exactly as if someone had put the file into the drive directly: ordinary reconci
 
 Abandoned sessions leave nothing on OneDrive, Box and Dropbox. On Google Drive a client that sent the final
 chunk but never committed leaves a complete file, which is handled the same way.
+
+That difference decides where a class B session takes its path guard (§3). OneDrive (`deferCommit`), Box and
+Dropbox publish only on the server's commit (under the client contract above), so they fence at commit like
+classes A and C. A Google Drive
+session does not: its final chunk creates the file, or overwrites the replaced one, before any commit, so
+"only the commit changes the tree" is false for it and a commit-time guard would go up after the effect. Its
+driver must fence from the point the client can send that chunk, and must say what that costs (the path
+is held for the session's life again) when it is written; until then no class B session exists to decide for.
 
 Duplicate sibling names are never allowed on any connection, Google Drive included: they would break exit to an
 ordinary filesystem. Drive itself permits them and has no atomic create, so its driver reports
@@ -274,12 +303,12 @@ reconcile path.
 
 Open sessions expire after two hours without activity, with a hard limit of seven days, capped by the provider
 session's own lifetime. Activity is something that can still produce bytes: a class A signature request or a
-relayed part. A status read does not count — polling must not keep an abandoned session, and the path it holds,
-alive. Class A parts never reach this application, so a live transfer must re-sign at least once per URL
-lifetime (one hour); two hours of silence therefore means nothing can still be arriving. Expiry aborts the
-native upload or provider session and releases the path, so a page that was closed mid-upload stops holding its
-target instead of fencing it until the next day. Committing sessions do not expire; they follow worker leases
-and recovery.
+relayed part. A status read does not count — polling must not keep an abandoned session, and the quota it
+reserves, alive. Class A parts never reach this application, so a live transfer must re-sign at least once per
+URL lifetime (one hour); two hours of silence therefore means nothing can still be arriving. Expiry aborts the
+native upload or provider session and releases the reservation. It is not what frees the destination: an open
+session fences nothing (§3), so a page that was closed mid-upload never held its target in the first place.
+Committing sessions do not expire; they follow worker leases and recovery.
 
 Abort deletes the provider state: `AbortMultipartUpload` (A), `DELETE` on the provider session (B), the
 staged bytes (C). Dropbox has no abort call; an unfinished Dropbox session lapses and never becomes a file.

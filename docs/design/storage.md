@@ -280,8 +280,10 @@ whose status cannot be read keeps the automatic wait.
 
 Before allocation, browser tasks acquire an ephemeral Web Lock per owner and normalized target path, retained
 through retryable failures until completion, cancellation or page unmount. Browser destruction releases it.
-A new selection can automatically replace an abandoned `open` session without another confirmation once it
-owns the lock; an actual tab conflict fails inline. Missing/failed ownership never permits an unlocked abort.
+A new selection needs no step of its own to clear an abandoned `open` session for the same path: the server
+ends that session when it admits the new one, so the browser neither asks about it nor aborts it. The lock
+decides only which tab may start; an actual tab conflict fails inline, and missing/failed ownership never
+permits an allocation.
 This coordinates cooperating same-origin tabs in one browser, not external clients, origins or devices, and
 supplies no server authority. Exact session/Operation checks and publication guards remain authoritative;
 see [transfer protocol](transfer-protocol.md#3-upload-lifecycle) for the full lifecycle.

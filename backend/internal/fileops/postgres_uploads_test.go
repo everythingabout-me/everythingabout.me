@@ -110,9 +110,6 @@ func TestPostgresUploads(t *testing.T) {
 		req, opt = uploadRequest(r, a, "folder/other", 1, "same-key")
 		_, _, err = p.CreateUpload(ctx, req, opt)
 		requireCode(t, err, "idempotency_conflict")
-		req, opt = uploadRequest(r, a, "folder/one", 8, "new-key")
-		_, _, err = p.CreateUpload(ctx, req, opt)
-		requireCode(t, err, "operation_in_progress")
 		other := mustUpload(t, p, r, a, "folder/two", 8, "other")
 		req, _ = uploadRequest(r, a, "folder/simple", 1, "same-key")
 		req.Guards = []Guard{{Path: "folder/simple"}}
@@ -155,7 +152,7 @@ func TestPostgresUploads(t *testing.T) {
 	t.Run("immutable receipts watermark and freeze", func(t *testing.T) {
 		p, r, a := seedOwner(t, pool, provenBaseline(0, 0, 100, 1000))
 		u := mustUpload(t, p, r, a, "folder/receipts", 10, "")
-		_, err := p.FreezeUpload(ctx, r, a, u.ID)
+		_, err := p.FreezeUpload(ctx, r, a, u.ID, nil)
 		requireCode(t, err, "upload_incomplete")
 		one := mustReceipt(t, p, r, a, u, 2, 4)
 		two := mustReceipt(t, p, r, a, u, 1, 4)
@@ -189,11 +186,11 @@ func TestPostgresUploads(t *testing.T) {
 		if err != nil || status.ReceivedParts != 3 || status.ReceivedBytes != 10 {
 			t.Fatalf("unique counters %+v %v", status, err)
 		}
-		frozen, err := p.FreezeUpload(ctx, r, a, u.ID)
+		frozen, err := p.FreezeUpload(ctx, r, a, u.ID, nil)
 		if err != nil || frozen.State != UploadCommitting {
 			t.Fatalf("freeze %+v %v", frozen, err)
 		}
-		twice, err := p.FreezeUpload(ctx, r, a, u.ID)
+		twice, err := p.FreezeUpload(ctx, r, a, u.ID, nil)
 		if err != nil || twice.ID != frozen.ID {
 			t.Fatalf("freeze replay %+v %v", twice, err)
 		}
@@ -257,13 +254,13 @@ func TestPostgresUploads(t *testing.T) {
 		}
 		_, _, err = p.AcceptUploadPart(ctx, r, a, u.ID, receipt(2, 4))
 		requireCode(t, err, "upload_gone")
-		_, err = p.FreezeUpload(ctx, r, a, u.ID)
+		_, err = p.FreezeUpload(ctx, r, a, u.ID, nil)
 		requireCode(t, err, "upload_gone")
 		usage := mustUsage(t, p, r, a)
 		if usage.LogicalReserved != 0 || usage.PhysicalReserved != 32 {
 			t.Fatal(usage)
 		}
-		// The released target guard admits a fresh independent session.
+		// The same path admits a fresh independent session.
 		fresh := mustUpload(t, p, r, a, "folder/abort", 1, "")
 		candidates, err := p.CleanupCandidates(ctx, 1000)
 		if err != nil {
@@ -412,8 +409,8 @@ func TestPostgresUploads(t *testing.T) {
 		if capped.ExpiresAt.After(capped.CreatedAt.Add(uploadSessionLifetime)) {
 			t.Fatalf("lifetime cap exceeded: %+v", capped)
 		}
-		// Silence lapses it: the sweep expires the session, releasing the path and the
-		// logical quota without waiting out the old 24-hour window.
+		// Silence lapses it: the sweep expires the session and releases the logical quota
+		// without waiting out the old 24-hour window.
 		if _, err = pool.Exec(ctx, `update file_uploads set expires_at=clock_timestamp()-interval '1 second' where operation_id=$1`, u.ID); err != nil {
 			t.Fatal(err)
 		}
@@ -423,7 +420,7 @@ func TestPostgresUploads(t *testing.T) {
 		}
 		var guards int
 		if err = pool.QueryRow(ctx, `select count(*) from file_operation_guards where operation_id=$1`, u.ID).Scan(&guards); err != nil || guards != 0 {
-			t.Fatalf("expired session kept its path: %d %v", guards, err)
+			t.Fatalf("expired session holds a guard: %d %v", guards, err)
 		}
 	})
 	t.Run("root principal scope and bounded session pagination", func(t *testing.T) {
@@ -466,7 +463,7 @@ func TestPostgresUploads(t *testing.T) {
 		_, err = p.ListUploads(ctx, r, token, 1002, "")
 		requireCode(t, err, "invalid_request")
 		// Zero-byte sessions need no synthetic receipt before freeze.
-		frozen, err := p.FreezeUpload(ctx, r, token, u.ID)
+		frozen, err := p.FreezeUpload(ctx, r, token, u.ID, nil)
 		if err != nil || frozen.PartCount != 0 || frozen.State != UploadCommitting {
 			t.Fatalf("zero-byte freeze %+v %v", frozen, err)
 		}
@@ -507,7 +504,7 @@ func TestPostgresUploads(t *testing.T) {
 		wg.Add(2)
 		var partErr, freezeErr error
 		go func() { defer wg.Done(); <-start; _, _, partErr = p.AcceptUploadPart(ctx, r, a, u.ID, receipt(1, 4)) }()
-		go func() { defer wg.Done(); <-start; _, freezeErr = p.FreezeUpload(ctx, r, a, u.ID) }()
+		go func() { defer wg.Done(); <-start; _, freezeErr = p.FreezeUpload(ctx, r, a, u.ID, nil) }()
 		close(start)
 		wg.Wait()
 		if partErr != nil {
@@ -516,7 +513,7 @@ func TestPostgresUploads(t *testing.T) {
 		if freezeErr != nil && !IsCode(freezeErr, "upload_incomplete") {
 			t.Fatal(freezeErr)
 		}
-		if _, err := p.FreezeUpload(ctx, r, a, u.ID); err != nil {
+		if _, err := p.FreezeUpload(ctx, r, a, u.ID, nil); err != nil {
 			t.Fatal(err)
 		}
 	})

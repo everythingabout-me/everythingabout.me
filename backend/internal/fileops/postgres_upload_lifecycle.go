@@ -2,11 +2,11 @@ package fileops
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"time"
 
 	"github.com/jackc/pgx/v5"
-
-	"everythingabout.me/backend/internal/storage"
 )
 
 // expireLoadedUpload is called only after authorization under the owner lock.
@@ -23,24 +23,61 @@ func expireLoadedUpload(ctx context.Context, tx pgx.Tx, u *Upload) error {
 	if u.ExpiresAt.After(now) {
 		return nil
 	}
-	return terminateOpenUpload(ctx, tx, u, UploadExpired, now)
+	return terminateOpenUpload(ctx, tx, u, UploadExpired, now, nil)
 }
+
+// UploadBinding verifies, inside the freeze transaction, that the index still holds what a
+// session bound when it was opened: the destination folder under the same identity at the
+// same path, and for a replacement the same file at the target. It reports a session that
+// can never commit as parent_missing or target_changed, with the disagreement as its cause.
+// It lives outside this package because the index does; nil skips the check for callers
+// that have no index.
+type UploadBinding func(context.Context, pgx.Tx, Operation) error
 
 // FreezeUpload freezes a session whose part coverage is proven by durable application
 // receipts. It is the class C transition: every part passed through this application.
-func (p *Postgres) FreezeUpload(ctx context.Context, root Root, actor Actor, id string) (Upload, error) {
-	return p.freezeUpload(ctx, root, actor, id, false)
+func (p *Postgres) FreezeUpload(ctx context.Context, root Root, actor Actor, id string, bind UploadBinding) (Upload, error) {
+	return p.freezeUpload(ctx, root, actor, id, false, bind)
 }
 
 // FreezeProviderListed freezes a class A session, whose parts never pass through this
 // application and therefore have no receipts. Coverage was read from the provider's own
 // part listing by the caller; sealing re-lists that state before the single publication,
 // so this transition is never the only evidence a part exists.
-func (p *Postgres) FreezeProviderListed(ctx context.Context, root Root, actor Actor, id string) (Upload, error) {
-	return p.freezeUpload(ctx, root, actor, id, true)
+func (p *Postgres) FreezeProviderListed(ctx context.Context, root Root, actor Actor, id string, bind UploadBinding) (Upload, error) {
+	return p.freezeUpload(ctx, root, actor, id, true, bind)
 }
 
-func (p *Postgres) freezeUpload(ctx context.Context, root Root, actor Actor, id string, providerListed bool) (Upload, error) {
+// freezeUpload turns an open session into a commit, and is where the session takes its
+// guard.
+//
+// A class A or C session can change the native tree in exactly one place: the publication
+// its commit performs. Before that it is staged parts and a reservation, so a guard held
+// from creation fenced a path for the hours a session may stay open in order to protect a
+// window of seconds — and an abandoned session kept fencing it: a folder above 188 of them
+// could not be deleted, a folder holding one could not be renamed, and a file with a pending
+// replacement could not be read by ID. Taking the guard here makes the fence cover the
+// window in which something can actually go wrong, and nothing else.
+//
+// What the create-time guard also did was keep the destination from changing under the
+// session. That now has to be re-established at the moment the fence goes up, in the same
+// transaction and under the owner lock that every index settlement takes:
+//
+//   - a conflicting guard (a move, copy, delete or folder creation still in flight over the
+//     path) refuses the commit with operation_in_progress and leaves the session open: the
+//     holder may yet fail and leave everything where it was, so this answer is retryable;
+//   - a binding the index no longer honours (the folder was deleted, moved or re-created;
+//     the file being replaced is gone) fails the session for good, in this transaction. It
+//     can never pass later, so leaving it open would hold its quota until the idle expiry
+//     and hand the client the same refusal on every retry. Without this check a commit
+//     racing a recursive delete publishes under a prefix the index already removed: the
+//     purge adopts an object written after the acceptance, and the next rebuild from the
+//     tree resurrects a folder the user deleted.
+//
+// A class whose client can produce a native effect before commit (a cloud-drive session
+// that completes on its last chunk) needs its fence earlier than this; see
+// docs/design/transfer-protocol.md §5.
+func (p *Postgres) freezeUpload(ctx context.Context, root Root, actor Actor, id string, providerListed bool, bind UploadBinding) (Upload, error) {
 	var u Upload
 	if err := validateRoot(root); err != nil {
 		return u, err
@@ -79,6 +116,31 @@ func (p *Postgres) freezeUpload(ctx context.Context, root Root, actor Actor, id 
 				return E("upload_incomplete", nil)
 			}
 		}
+		holder, err := guardHolder(ctx, tx, root, u.Operation.Kind, u.Operation.Guards, id)
+		if err != nil {
+			return err
+		}
+		if holder != nil {
+			return holder
+		}
+		if bind != nil {
+			if err = bind(ctx, tx, u.Operation); err != nil {
+				var broken *Error
+				if !errors.As(err, &broken) || broken.Code != "parent_missing" && broken.Code != "target_changed" {
+					return err
+				}
+				detail := "The upload cannot be committed to the destination it was opened for"
+				if broken.Cause != nil {
+					detail += ": " + broken.Cause.Error()
+				}
+				// Returning nil commits the termination; the caller reads the failure from
+				// the terminal operation, the same answer every later status read gives.
+				return terminateOpenUpload(ctx, tx, &u, UploadFailed, now, uploadProblem(broken.Code, detail+". Start a new upload."))
+			}
+		}
+		if err = insertGuards(ctx, tx, u.Operation); err != nil {
+			return err
+		}
 		// Claim is fenced until this state change commits. No receipt can be inserted
 		// concurrently because receipt, abort, expiry and freeze share the owner lock.
 		_, err = tx.Exec(ctx, `update file_uploads set state='committing' where operation_id=$1 and owner_id=$2`, id, root.OwnerID)
@@ -94,7 +156,11 @@ func (p *Postgres) freezeUpload(ctx context.Context, root Root, actor Actor, id 
 // terminateOpenUpload proves there has never been a native attempt: Claim cannot
 // lease an open session. Logical quota/guards can be released immediately, while
 // all physical reservation survives until actual private spool/native cleanup.
-func terminateOpenUpload(ctx context.Context, tx pgx.Tx, u *Upload, state UploadState, now time.Time) error {
+//
+// UploadFailed is the commit that was refused before any native effect: the session row
+// becomes `committing` over a failed operation, which is how every failed commit is
+// stored. The other states cancel the operation. problem, when given, is the stored reason.
+func terminateOpenUpload(ctx context.Context, tx pgx.Tx, u *Upload, state UploadState, now time.Time, problem json.RawMessage) error {
 	op := &u.Operation
 	if u.State != UploadOpen || op.Terminal() || op.Lease.Token != "" || op.Stage != nil || op.Phase != Admitted || op.NativeResult != nil {
 		return E("recovery_required", nil)
@@ -112,15 +178,25 @@ func terminateOpenUpload(ctx context.Context, tx pgx.Tx, u *Upload, state Upload
 	if _, err := tx.Exec(ctx, `delete from file_credit_claims where operation_id=$1 and owner_id=$2`, op.ID, op.Root.OwnerID); err != nil {
 		return err
 	}
+	// An open session holds no guard; this only removes the row of a session opened while
+	// guards were still taken at creation.
 	if err := releaseGuards(ctx, tx, op); err != nil {
 		return err
 	}
-	op.CancelRequested = true
-	finish(op, Cancelled, now)
+	stored, finished := string(state), Cancelled
+	if state == UploadFailed {
+		stored, finished = string(UploadCommitting), Failed
+	} else {
+		op.CancelRequested = true
+	}
+	if len(problem) > 0 {
+		op.Problem = problem
+	}
+	finish(op, finished, now)
 	if err := saveOperation(ctx, tx, *op); err != nil {
 		return err
 	}
-	if _, err := tx.Exec(ctx, `update file_uploads set state=$3 where operation_id=$1 and owner_id=$2`, op.ID, op.Root.OwnerID, string(state)); err != nil {
+	if _, err := tx.Exec(ctx, `update file_uploads set state=$3 where operation_id=$1 and owner_id=$2`, op.ID, op.Root.OwnerID, stored); err != nil {
 		return err
 	}
 	u.State = state
@@ -151,7 +227,7 @@ func (p *Postgres) AbortUpload(ctx context.Context, root Root, actor Actor, id s
 		if !u.ExpiresAt.After(now) {
 			return E("upload_expired", nil)
 		}
-		return terminateOpenUpload(ctx, tx, &u, UploadAborted, now)
+		return terminateOpenUpload(ctx, tx, &u, UploadAborted, now, nil)
 	})
 	return u, err
 }
@@ -201,7 +277,7 @@ func (p *Postgres) ExpireUploads(ctx context.Context, limit int) ([]Upload, erro
 			if u.State != UploadOpen || u.ExpiresAt.After(now) {
 				return nil
 			}
-			if err = terminateOpenUpload(ctx, tx, &u, UploadExpired, now); err != nil {
+			if err = terminateOpenUpload(ctx, tx, &u, UploadExpired, now, nil); err != nil {
 				return err
 			}
 			out = append(out, u)
@@ -212,91 +288,6 @@ func (p *Postgres) ExpireUploads(ctx context.Context, limit int) ([]Upload, erro
 		}
 	}
 	return out, nil
-}
-
-// CancelOpenUploadsWithin aborts the upload sessions that never committed and still hold a
-// target at or inside target, and returns how many it settled.
-//
-// It exists for the recursive delete. That confirmation already covers every path in the
-// subtree, so a session inside it can never publish anything the user keeps; until it is
-// settled it fences the deletion with operation_in_progress for the rest of a session
-// lifetime that can be 24 hours, and holds quota for bytes nobody sent. The alternative is
-// a client cancelling them one 409 at a time, which a folder above more than a few dozen
-// abandoned sessions can never finish — 188 of them from one interrupted import made a
-// folder undeletable for the day.
-//
-// Only `open` sessions are settled. A commit that already started may have a native effect
-// behind it, so it is left to finish or fail on its own and the caller reports it by name.
-// An open session has published nothing at its target — staged parts, if any, are private
-// staging — and the ordinary cleanup scan discards them once the operation is terminal.
-func (p *Postgres) CancelOpenUploadsWithin(ctx context.Context, root Root, target storage.Path) (int, error) {
-	if err := validateRoot(root); err != nil {
-		return 0, err
-	}
-	base := comparePath(root, target)
-	rows, err := p.pool.Query(ctx, `select u.operation_id::text from file_uploads u
-		join file_operation_guards g on g.operation_id=u.operation_id and g.owner_id=u.owner_id
-		where u.owner_id=$1::uuid and u.state='open'
-		  and (g.comparison_path=$2 or left(g.comparison_path,length($2)+1)=$2||'/')
-		order by u.created_at`, root.OwnerID, base)
-	if err != nil {
-		return 0, err
-	}
-	var ids []string
-	for rows.Next() {
-		var id string
-		if err = rows.Scan(&id); err != nil {
-			rows.Close()
-			return 0, err
-		}
-		ids = append(ids, id)
-	}
-	err = rows.Err()
-	rows.Close()
-	if err != nil {
-		return 0, err
-	}
-	cancelled := 0
-	for _, id := range ids {
-		var settled bool
-		err = p.transaction(ctx, root.OwnerID, func(tx pgx.Tx) error {
-			op, err := readOperation(ctx, tx, id)
-			if err != nil {
-				return err
-			}
-			// The delete's authority over the subtree is the authority over these targets,
-			// so the session is settled as its own principal would settle it.
-			actor := Actor{ID: op.PrincipalID, CanWrite: true}
-			u, err := readUpload(ctx, tx, op.Root, actor, id, true)
-			if err != nil {
-				return err
-			}
-			if u.State != UploadOpen {
-				return nil
-			}
-			now, err := dbNow(ctx, tx)
-			if err != nil {
-				return err
-			}
-			if err = terminateOpenUpload(ctx, tx, &u, UploadAborted, now); err != nil {
-				// A leased session is not provably native-free; leave it to recovery and let
-				// the delete answer with its name instead of guessing.
-				if IsCode(err, "recovery_required") {
-					return nil
-				}
-				return err
-			}
-			settled = true
-			return nil
-		})
-		if err != nil {
-			return cancelled, err
-		}
-		if settled {
-			cancelled++
-		}
-	}
-	return cancelled, nil
 }
 
 // MarkUploadChunksCleaned records a successful spool discard. It releases no

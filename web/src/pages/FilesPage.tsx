@@ -64,28 +64,13 @@ function compareItems(a: Item, b: Item): number {
   return compareNames(a.name, b.name);
 }
 
-/** A delete stops retrying after many conflicting operations, so a live war cannot spin forever. */
-const DELETE_BLOCKER_ATTEMPTS = 32;
-
 /**
- * Aborts the session named in a 409, then reports whether the delete should try again.
- * `cancelled` means the guard is gone; `retry` means a concurrent commit already settled it.
+ * How often a delete re-sends itself after the operation that refused it has already ended.
+ * Each retry answers one short-lived holder — a commit or a folder creation that finished
+ * between the refusal and the read — so the bound only stops a delete that keeps losing to
+ * a stream of them (an import still publishing into the folder) from spinning forever.
  */
-async function cancelDeleteBlocker(blocker: { id: string; name: string }): Promise<"cancelled" | "retry"> {
-  try {
-    await api.abortUpload(blocker.id);
-    return "cancelled";
-  } catch (error) {
-    if (!(error instanceof ApiError)) throw error;
-    if (error.status === 401) throw error;
-    if (error.status === 403) throw new Error(t("drive.deleteBlockedByUpload", { name: blocker.name }));
-    // A concurrent commit may have settled the session first; only a session that is
-    // still open continues to hold the path guard.
-    const current = await api.uploadStatus(blocker.id).catch(() => null);
-    if (!current || current.state !== "open") return "retry";
-    throw new Error(t("drive.deleteBlockedByUpload", { name: blocker.name }));
-  }
-}
+const DELETE_BLOCKER_ATTEMPTS = 32;
 
 async function waitForOperation(
   operation: FileOperation,
@@ -1021,7 +1006,6 @@ export function FilesPage() {
     setDeletingPaths((paths) => [...paths, target.path]);
     try {
       let operation: FileOperation | void;
-      let cancelledUploads = 0;
       for (let attempt = 0; ; attempt++) {
         try {
           operation = await api.deletePath(target.path, target.kind === "folder", target.revision);
@@ -1029,22 +1013,18 @@ export function FilesPage() {
         } catch (error) {
           if (!(error instanceof ApiError) || error.code !== "operation_in_progress"
             || !error.operationId || attempt >= DELETE_BLOCKER_ATTEMPTS) throw error;
-          const blocker = await resolveDeleteBlocker(api, error.operationId, filePath(target.path));
+          const blocker = await resolveDeleteBlocker(api, error.operationId);
           if (blocker.resolution === "retry") continue;
-          if (blocker.resolution === "blocked") {
-            throw new Error(blocker.reason === "upload"
-              ? t("drive.deleteBlockedByUpload", { name: blocker.name })
-              : t("drive.deleteBlockedByOther"));
-          }
-          if (await cancelDeleteBlocker(blocker) === "retry") continue;
-          cancelledUploads += 1;
+          throw new Error(blocker.reason === "upload"
+            ? t("drive.deleteBlockedByUpload", { name: blocker.name })
+            : t("drive.deleteBlockedByOther"));
         }
       }
       deletionRequest.current += 1;
       // The accepted delete is already the user's final answer; only the native purge
       // is still running, and it is tracked only so a failure can be reported.
       if (operation && operation.state !== "succeeded") trackFileOperation(operation, target.path);
-      showToast(t(cancelledUploads > 0 ? "drive.deletedWithCancelledUploads" : "drive.deleted", { name: target.name }));
+      showToast(t("drive.deleted", { name: target.name }));
       setDeletionStatusError(false);
       // Drop the row before the listing round trip; the reload then confirms it.
       setItems((current) => current.filter((item) => target.kind === "folder"

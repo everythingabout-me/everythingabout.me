@@ -1,0 +1,17 @@
+-- Creating an upload session ends the `open` sessions that already target the same
+-- path (the newer one wins; see supersedeOpenUploads). That lookup runs once per
+-- created session, inside the owner lock, so it has to be an index probe: file_uploads
+-- keeps every terminal row for replay, and scanning an owner's rows for each file would
+-- make a 23k-file import quadratic.
+--
+-- Deliberately not unique. "One open session per path" is enforced by that lookup under
+-- the owner lock, not by this index: comparison_path does not carry the root generation,
+-- so sessions of two generations of the same owner may share a value, and a unique index
+-- would turn a root rebind into a failed upload.
+--
+-- No rows are changed. A session opened before guards moved from creation to commit keeps
+-- its create-time guard row until it freezes, ends or lapses; the conflict scan ignores a
+-- guard held by an `open` session, so that row fences nothing in the meantime. Deleting
+-- those rows here would run while the previous binary, which never takes a guard at
+-- commit, may still be serving.
+create index if not exists file_uploads_open_path on file_uploads(owner_id, comparison_path) where state='open';
