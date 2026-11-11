@@ -5,6 +5,8 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+
+	"everythingabout.me/backend/internal/storage"
 )
 
 // expireLoadedUpload is called only after authorization under the owner lock.
@@ -210,6 +212,91 @@ func (p *Postgres) ExpireUploads(ctx context.Context, limit int) ([]Upload, erro
 		}
 	}
 	return out, nil
+}
+
+// CancelOpenUploadsWithin aborts the upload sessions that never committed and still hold a
+// target at or inside target, and returns how many it settled.
+//
+// It exists for the recursive delete. That confirmation already covers every path in the
+// subtree, so a session inside it can never publish anything the user keeps; until it is
+// settled it fences the deletion with operation_in_progress for the rest of a session
+// lifetime that can be 24 hours, and holds quota for bytes nobody sent. The alternative is
+// a client cancelling them one 409 at a time, which a folder above more than a few dozen
+// abandoned sessions can never finish — 188 of them from one interrupted import made a
+// folder undeletable for the day.
+//
+// Only `open` sessions are settled. A commit that already started may have a native effect
+// behind it, so it is left to finish or fail on its own and the caller reports it by name.
+// An open session has published nothing at its target — staged parts, if any, are private
+// staging — and the ordinary cleanup scan discards them once the operation is terminal.
+func (p *Postgres) CancelOpenUploadsWithin(ctx context.Context, root Root, target storage.Path) (int, error) {
+	if err := validateRoot(root); err != nil {
+		return 0, err
+	}
+	base := comparePath(root, target)
+	rows, err := p.pool.Query(ctx, `select u.operation_id::text from file_uploads u
+		join file_operation_guards g on g.operation_id=u.operation_id and g.owner_id=u.owner_id
+		where u.owner_id=$1::uuid and u.state='open'
+		  and (g.comparison_path=$2 or left(g.comparison_path,length($2)+1)=$2||'/')
+		order by u.created_at`, root.OwnerID, base)
+	if err != nil {
+		return 0, err
+	}
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err = rows.Scan(&id); err != nil {
+			rows.Close()
+			return 0, err
+		}
+		ids = append(ids, id)
+	}
+	err = rows.Err()
+	rows.Close()
+	if err != nil {
+		return 0, err
+	}
+	cancelled := 0
+	for _, id := range ids {
+		var settled bool
+		err = p.transaction(ctx, root.OwnerID, func(tx pgx.Tx) error {
+			op, err := readOperation(ctx, tx, id)
+			if err != nil {
+				return err
+			}
+			// The delete's authority over the subtree is the authority over these targets,
+			// so the session is settled as its own principal would settle it.
+			actor := Actor{ID: op.PrincipalID, CanWrite: true}
+			u, err := readUpload(ctx, tx, op.Root, actor, id, true)
+			if err != nil {
+				return err
+			}
+			if u.State != UploadOpen {
+				return nil
+			}
+			now, err := dbNow(ctx, tx)
+			if err != nil {
+				return err
+			}
+			if err = terminateOpenUpload(ctx, tx, &u, UploadAborted, now); err != nil {
+				// A leased session is not provably native-free; leave it to recovery and let
+				// the delete answer with its name instead of guessing.
+				if IsCode(err, "recovery_required") {
+					return nil
+				}
+				return err
+			}
+			settled = true
+			return nil
+		})
+		if err != nil {
+			return cancelled, err
+		}
+		if settled {
+			cancelled++
+		}
+	}
+	return cancelled, nil
 }
 
 // MarkUploadChunksCleaned records a successful spool discard. It releases no

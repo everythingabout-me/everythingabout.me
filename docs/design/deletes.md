@@ -96,6 +96,25 @@ user could not see from a deletion they had already confirmed. The one case that
 user re-creating the path through this service — is protected by the live-row rule, not by refusing the
 delete.
 
+## An abandoned upload inside the subtree does not fence the delete
+
+An upload session that never committed still holds a guard on its target path — it reserves that path until
+the client commits, aborts, or the session expires 24 hours later. A recursive delete's guard covers the whole
+subtree, so it collides with every such session inside it.
+
+Those sessions are not a reason to refuse. The confirmation that accepted the delete already covered every
+path in the subtree, so a session inside it can never publish anything the user keeps; an `open` session has
+no native effect behind it, only private staging. So the delete's acceptance settles them — the same
+cancellation an abort performs, whose later cleanup discards the staged parts — and retries its own admission
+once. A session whose commit already started is not touched: it may have a native effect behind it, and the
+refusal names it.
+
+Without this, the work is one `409` per session on the client: a browser cancels the named session and retries
+(bounded at 32 attempts to keep a live war from spinning). A folder above more sessions than that can never be
+deleted through the UI at all. Measured case: a 3,200-file import left 188 sessions behind when it stopped
+between allocating and committing, and the folder holding them answered `operation_in_progress` for every
+delete attempt until the sessions expired the next day.
+
 ## Races
 
 | moment of a create | result |

@@ -358,6 +358,58 @@ func TestActionsPostgres(t *testing.T) {
 			t.Fatalf("conflict lost the blocking operation: %v", err)
 		}
 	})
+	t.Run("a recursive delete settles uploads abandoned inside it", func(t *testing.T) {
+		p, r, actor := seedOwner(t, pool, provenBaseline(0, 0, 100, 100))
+		n := newActionNative(r)
+		n.put("import", storage.Folder, "")
+		n.put("import/day.json", storage.File, "{}")
+		a := actionCoordinator(t, p, nil)
+		// Sessions an import allocated and then abandoned before committing. Each holds its
+		// target path until the session expires 24 hours later, which is what made the folder
+		// above them undeletable: the browser cancels one blocker per retry.
+		abandoned := []Upload{
+			mustUpload(t, p, r, actor, "import/a.json", 4, "import-a"),
+			mustUpload(t, p, r, actor, "import/b.json", 4, "import-b"),
+		}
+		op := prepareAction(t, a, ActionRequest{Root: r, Actor: actor, Kind: "delete", From: "import", Recursive: true, IdempotencyKey: "purge"}, n)
+		if out := runAction(t, a, op, actor, n); out.State != Succeeded {
+			t.Fatalf("delete of a folder holding abandoned uploads: %s", out.State)
+		}
+		for _, upload := range abandoned {
+			settled, err := p.GetUpload(ctx, r, actor, upload.ID)
+			if err != nil || settled.State != UploadAborted || settled.Operation.State != Cancelled {
+				t.Fatalf("session %s not settled: %v %+v", upload.ID, err, settled)
+			}
+			var guards int
+			if err = pool.QueryRow(ctx, `select count(*) from file_operation_guards where owner_id=$1::uuid and operation_id=$2::uuid`, r.OwnerID, upload.ID).Scan(&guards); err != nil || guards != 0 {
+				t.Fatalf("guards left on %s: %d %v", upload.ID, guards, err)
+			}
+		}
+	})
+	t.Run("a committing upload keeps the folder fenced", func(t *testing.T) {
+		p, r, actor := seedOwner(t, pool, provenBaseline(0, 0, 100, 100))
+		n := newActionNative(r)
+		n.put("import", storage.Folder, "")
+		n.put("import/day.json", storage.File, "{}")
+		a := actionCoordinator(t, p, nil)
+		// A session whose parts are all received is committing: its publication may already
+		// be native, so the delete must name it instead of cancelling it out from under itself.
+		committing := mustUpload(t, p, r, actor, "import/a.json", 4, "import-a")
+		mustReceipt(t, p, r, actor, committing, 1, 4)
+		if _, err := p.FreezeUpload(ctx, r, actor, committing.ID); err != nil {
+			t.Fatal(err)
+		}
+		_, _, err := a.Prepare(ctx, ActionRequest{Root: r, Actor: actor, Kind: "delete", From: "import", Recursive: true, IdempotencyKey: "purge"}, n)
+		requireCode(t, err, "operation_in_progress")
+		var conflict *Error
+		if !errors.As(err, &conflict) || conflict.OperationID != committing.ID {
+			t.Fatalf("conflict lost the committing upload: %v", err)
+		}
+		still, err := p.GetUpload(ctx, r, actor, committing.ID)
+		if err != nil || still.State != UploadCommitting {
+			t.Fatalf("committing session was altered: %v %+v", err, still)
+		}
+	})
 	t.Run("recursive copy finite paginated independent and charged", func(t *testing.T) {
 		p, r, actor := seedOwner(t, pool, provenBaseline(7, 7, 100, 100))
 		n := newActionNative(r)

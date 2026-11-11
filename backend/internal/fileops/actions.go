@@ -207,6 +207,22 @@ func (a *Actions) Prepare(ctx context.Context, req ActionRequest, native NativeA
 		return Operation{}, false, err
 	}
 	op, replay, err := a.journal.Begin(ctx, BeginRequest{Root: req.Root, Actor: req.Actor, Kind: req.Kind, IdempotencyKey: req.IdempotencyKey, Intent: intent, Guards: actionGuards(req)})
+	if err != nil && req.Kind == "delete" && req.Recursive && IsCode(err, "operation_in_progress") {
+		// A recursive delete's confirmation is already final for the whole subtree, so an
+		// upload session that never committed inside it can never publish anything the user
+		// is keeping — yet it keeps its target guard, and would answer this delete with
+		// operation_in_progress for the rest of its session (up to 24 hours). Settling those
+		// sessions here is what makes one request enough; leaving it to the client costs one
+		// 409 and one abort per session, so the folder above a few dozen of them could never
+		// be deleted at all. A commit that already started is not ours to undo and still
+		// names itself in the refusal.
+		if settled, cancelErr := a.journal.CancelOpenUploadsWithin(ctx, req.Root, req.From); cancelErr != nil {
+			slog.Warn("could not settle abandoned uploads inside the deleted folder", "path", req.From, "error", cancelErr)
+		} else if settled > 0 {
+			slog.Info("settled abandoned uploads inside the deleted folder", "path", req.From, "uploads", settled)
+			op, replay, err = a.journal.Begin(ctx, BeginRequest{Root: req.Root, Actor: req.Actor, Kind: req.Kind, IdempotencyKey: req.IdempotencyKey, Intent: intent, Guards: actionGuards(req)})
+		}
+	}
 	if err != nil {
 		return op, replay, err
 	}
