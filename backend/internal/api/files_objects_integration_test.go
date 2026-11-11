@@ -818,3 +818,105 @@ func TestFilesObjectsLostPublicationReplyRemainsGuarded(t *testing.T) {
 		t.Fatalf("recovery provenance lost %+v %v", op, err)
 	}
 }
+
+// A deletion settles what the index holds even when the bytes are already gone — removed by
+// another tool, or a folder that only ever existed as its children's prefix. Refusing with
+// 404 left a row nothing could remove: the listing showed an entry, and every attempt to
+// delete it failed on the native observation. What must not change: a path with no rows is
+// still 404, and a non-recursive deletion still never removes a subtree.
+func TestFilesObjectsDeleteSettlesAnEntryTheTreeAlreadyLost(t *testing.T) {
+	f := newObjectsAPIFixture(t)
+	if _, err := f.db.Pool().Exec(f.ctx, `update file_budgets set logical_limit=$1,physical_limit=$2`, int64(1<<30), int64(2<<30)); err != nil {
+		t.Fatal(err)
+	}
+	key := func(path string) string { return "drive/" + f.owners[0] + "/" + path }
+	rows := func(path string) int {
+		t.Helper()
+		var count int
+		if err := f.db.Pool().QueryRow(f.ctx, `select count(*) from file_entries where owner_id=$1::uuid and path=$2`, f.owners[0], path).Scan(&count); err != nil {
+			t.Fatal(err)
+		}
+		return count
+	}
+	// drop removes the bytes exactly as an outside tool would: the object (and a folder's
+	// marker) is gone, while the index still holds the entry.
+	drop := func(path string) {
+		t.Helper()
+		f.provider.mu.Lock()
+		defer f.provider.mu.Unlock()
+		for _, k := range []string{key(path), key(path) + "/"} {
+			if _, exists := f.provider.current(k); exists {
+				f.provider.record(k, nil, "", nil, true)
+			}
+		}
+	}
+	settle := func(id string) {
+		t.Helper()
+		deadline := time.Now().Add(10 * time.Second)
+		for {
+			status := objectsAPIJSON(t, f.request(t, "GET", "/uploads/"+id, "", nil, nil), 200)
+			if status["state"] == "committed" {
+				return
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("upload did not settle: %v", status)
+			}
+			time.Sleep(2 * time.Millisecond)
+		}
+	}
+	upload := func(path string) {
+		t.Helper()
+		body, _ := json.Marshal(map[string]any{"path": path, "size": 4, "parents": true})
+		created := objectsAPIJSON(t, f.request(t, "POST", "/uploads", "", body, http.Header{"Idempotency-Key": {"ghost-" + path}, "Content-Type": {"application/json"}}), 201)
+		id := created["id"].(string)
+		objectsAPIJSON(t, f.request(t, "PUT", "/uploads/"+id+"/parts/1", "", []byte("data"), nil), 201)
+		response := f.request(t, "POST", "/uploads/"+id+"/commit", "", nil, nil)
+		if response.Code != 200 && response.Code != 202 {
+			t.Fatalf("commit %q HTTP%d body=%s", path, response.Code, response.Body.String())
+		}
+		settle(id)
+	}
+	remove := func(path string, recursive bool) *httptest.ResponseRecorder {
+		target := "/api/files?" + url.Values{"path": {path}, "recursive": {strconv.FormatBool(recursive)}}.Encode()
+		r := httptest.NewRequest("DELETE", "https://files.example"+target, nil).WithContext(f.ctx)
+		r.Header.Set("Authorization", "Bearer "+f.tokens[0])
+		w := httptest.NewRecorder()
+		f.server.Handler().ServeHTTP(w, r)
+		return w
+	}
+
+	// A file whose object vanished still deletes: the row is the only thing left.
+	upload("/Gone.txt")
+	drop("Gone.txt")
+	expectStatus(t, remove("/Gone.txt", false), 204)
+	if count := rows("Gone.txt"); count != 0 {
+		t.Fatalf("row for a lost object survived the delete: %d", count)
+	}
+	// A folder whose marker vanished does too.
+	objectsAPIJSON(t, f.request(t, "POST", "", "", []byte(`{"kind":"folder","path":"/Empty"}`), http.Header{"Content-Type": {"application/json"}}), 201)
+	drop("Empty")
+	expectStatus(t, remove("/Empty", false), 204)
+	if count := rows("Empty"); count != 0 {
+		t.Fatalf("folder row survived the delete: %d", count)
+	}
+	// Nothing is invented: a path the index never had is still not found.
+	uploadsHTTPProblem(t, remove("/Never-Existed.txt", false), 404, "not_found")
+	// A folder whose bytes are all gone is settled with the rows it still holds: the tree
+	// is what decides "empty" here, exactly as it does for a folder that exists natively
+	// with a stale child. The non-recursive delete still refuses while the bytes are there.
+	upload("/Ghosted/a.txt")
+	uploadsHTTPProblem(t, remove("/Ghosted", false), 409, "directory_not_empty")
+	drop("Ghosted/a.txt")
+	drop("Ghosted")
+	expectStatus(t, remove("/Ghosted", false), 204)
+	if count := rows("Ghosted"); count != 0 {
+		t.Fatalf("subtree survived the delete: %d", count)
+	}
+}
+
+func expectStatus(t *testing.T, w *httptest.ResponseRecorder, status int) {
+	t.Helper()
+	if w.Code != status {
+		t.Fatalf("HTTP%d want%d headers=%v body=%s", w.Code, status, w.Header(), w.Body.String())
+	}
+}

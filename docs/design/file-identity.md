@@ -114,13 +114,16 @@ implies, in the same transaction as the file, parent first. Every row in the ind
 the tree — the prefix exists exactly because the file that carries it landed — so the invariant does
 not grow a "promised" state, a flag, an expiry sweep or a reconcile special case.
 
-**A row the tree lost converges through the sync scan, not through a special delete.** Deleting
-the last file of a folder leaves its row until a scan that makes the index equal the tree removes it:
-`ScanApplyOptions.Sync` already drops every row the tree does not carry, so a folder nobody asked for
-does not need a per-delete provider call, a flag or an expiry sweep to disappear. Making the delete
-itself settle a target that is already gone natively is the honest follow-up, and needs its own
-change because it alters what a delete means when the bytes vanished first; until then an emptied
-implicit folder is an index row without bytes, which the next sync scan removes.
+**A row the tree lost is settled away, not left standing.** A deletion whose target is already
+absent natively — removed by another tool, or a folder that only ever existed as its children's
+prefix — settles the index rows instead of answering `404`: the bytes are gone, so the row the caller
+can still see is the only thing left to remove. Two limits make that safe. It reads `not_found` as
+"absent" and nothing else: a transient error, a refusal or a wrong bucket fails the delete rather than
+settling anything. And a non-recursive deletion still refuses a path the index holds children under,
+so the absence of bytes never turns one click into a subtree. A path with no rows at all is still
+`404`. The cost of the trust is worth naming: a provider that answered `404` for everything would let
+a delete strip rows for files whose bytes still exist — index loss, not data loss, because the tree is
+authoritative and the next reconcile re-adopts them.
 
 **A filesystem is not an object store.** A provider that makes a folder when its first child is
 written (COS/S3) needs no marker here; one that does not (Local) keeps creating the chain at

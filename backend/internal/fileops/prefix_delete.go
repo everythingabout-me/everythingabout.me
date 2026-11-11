@@ -24,7 +24,28 @@ func (a *Actions) acceptDelete(ctx context.Context, req ActionRequest, op Operat
 	}
 	target, err := observe(ctx, native, req.From)
 	if err != nil {
-		return op, err
+		if !storage.IsCode(err, "not_found") {
+			return op, err
+		}
+		// The bytes are already gone: removed outside the service, or a folder that only
+		// ever existed as the prefix of its children. The index is a cache of the tree, so
+		// the deletion settles the rows the caller can still see instead of answering 404
+		// for an entry nothing can remove any other way. The index still decides whether
+		// there is anything to delete — a path it never held is not_found, exactly as
+		// before — and the tree still decided the recursion question above, when the
+		// target existed.
+		live, liveErr := a.options.LivePaths(ctx, req.Root, []storage.Path{req.From})
+		if liveErr != nil {
+			return op, liveErr
+		}
+		if len(live) != 1 || !live[0] {
+			return op, storage.NewError("not_found", req.From, nil)
+		}
+		accepted, acceptErr := a.journal.AcceptPrefixDelete(ctx, op.Lease, req.From, a.options.PrefixCommit)
+		if acceptErr != nil {
+			return op, acceptErr
+		}
+		return accepted, nil
 	}
 	if target.Kind == storage.Folder && !req.Recursive {
 		// A non-recursive folder deletion is an empty-folder deletion. The purge walks a
