@@ -25,12 +25,16 @@ type MutationResult struct {
 type Checkpoint func(context.Context, []byte) error
 
 type WriteIntent struct {
-	EntryID          string `json:",omitempty"`
-	ParentID         string `json:",omitempty"`
-	Selection        string `json:",omitempty"`
-	ID               string
-	Target           Path
-	Conditions       Conditions
+	EntryID    string `json:",omitempty"`
+	ParentID   string `json:",omitempty"`
+	Selection  string `json:",omitempty"`
+	ID         string
+	Target     Path
+	Conditions Conditions
+	// Parents records that the destination's missing ancestors were accepted at admission
+	// and are materialized when the file lands, rather than existing before it. Only a
+	// connection whose provider makes a folder with its first child sets it.
+	Parents          bool `json:",omitempty"`
 	Size             int64
 	MediaType        string
 	SourceModifiedAt *time.Time

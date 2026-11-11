@@ -304,6 +304,11 @@ func (s *Server) runFileOperation(ctx context.Context, op fileops.Operation) err
 				return fileops.E("invalid_intent", nil)
 			}
 			parent, err := native.Stat(ctx, intent.ParentPath)
+			// A promised parent has no native representation until its first child lands;
+			// absence is the state the session was admitted in, not a change.
+			if storage.IsCode(err, "not_found") && intent.Parents {
+				return nil
+			}
 			if err != nil || parent.Kind != storage.Folder || !bytes.Equal(parent.Revision, intent.ParentRevision) {
 				return fileops.E("target_changed", err)
 			}

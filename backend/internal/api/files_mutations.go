@@ -202,10 +202,14 @@ func (s *Server) filesMutationAuthorize(r *http.Request, f *fileRequest, native 
 				return fileops.E("invalid_intent", nil)
 			}
 			parent, err := native.Stat(ctx, intent.ParentPath)
+			// A promised parent (Intent.Parents) has no native representation until its
+			// first child lands, so its absence is the state the session was admitted in,
+			// not a change. The index-side fence already ran when the session froze.
 			if err != nil {
-				return filesMutationProblem(err)
-			}
-			if parent.Kind != storage.Folder || !bytes.Equal(parent.Revision, intent.ParentRevision) {
+				if !intent.Parents || !storage.IsCode(err, "not_found") {
+					return filesMutationProblem(err)
+				}
+			} else if parent.Kind != storage.Folder || !bytes.Equal(parent.Revision, intent.ParentRevision) {
 				return fc.NewProblem(412, "target_changed", "The destination parent changed.")
 			}
 		}

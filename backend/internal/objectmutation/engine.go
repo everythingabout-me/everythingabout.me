@@ -652,6 +652,25 @@ func cloneDigest(v *storage.Digest) *storage.Digest {
 	}
 	return &storage.Digest{Algorithm: v.Algorithm, Value: bytes.Clone(v.Value)}
 }
+
+// parentMoved answers whether the destination's parent still matches what this mutation
+// bound. A promised parent (Intent.Parents) has no native representation until its first
+// child lands, so being absent is the state it was admitted in, not a change: an object
+// store creates the folder with the very write this check is guarding.
+func (d *Driver) parentMoved(ctx context.Context, r *ledger) error {
+	parent, err := d.Stat(ctx, parentPath(r.Intent.Target))
+	if err != nil {
+		if storage.IsCode(err, "not_found") && r.Intent.Parents {
+			return nil
+		}
+		return err
+	}
+	if parent.Kind != storage.Folder || !bytes.Equal(parent.Revision, r.ParentRevision) {
+		return fail("changed", r.Intent.Target)
+	}
+	return nil
+}
+
 func (d *Driver) checkTarget(ctx context.Context, r *ledger) error {
 	current, err := d.tree.Stat(ctx, r.Intent.Target)
 	if err == nil {
@@ -736,10 +755,7 @@ func (d *Driver) publishLocked(ctx context.Context, r *ledger, cp storage.Checkp
 	if err := d.validateIntent(r.Intent); err != nil {
 		return storage.MutationResult{}, err
 	}
-	parent, err := d.Stat(ctx, parentPath(r.Intent.Target))
-	if err == nil && (parent.Kind != storage.Folder || !bytes.Equal(parent.Revision, r.ParentRevision)) {
-		err = fail("changed", r.Intent.Target)
-	}
+	err := d.parentMoved(ctx, r)
 	if err == nil {
 		err = d.checkTarget(ctx, r)
 	}
@@ -767,10 +783,7 @@ func (d *Driver) publishLocked(ctx context.Context, r *ledger, cp storage.Checkp
 	}
 	// A delayed checkpoint can allow coordinated parents/targets to change. Native
 	// conditional create plus revalidation avoids a Stat/unconditional-write shim.
-	parent, err = d.Stat(ctx, parentPath(r.Intent.Target))
-	if err == nil && !bytes.Equal(parent.Revision, r.ParentRevision) {
-		err = fail("changed", r.Intent.Target)
-	}
+	err = d.parentMoved(ctx, r)
 	if err == nil {
 		err = d.checkTarget(ctx, r)
 	}

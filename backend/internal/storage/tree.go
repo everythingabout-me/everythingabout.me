@@ -130,6 +130,11 @@ type Descriptor struct {
 	AtomicReplace             bool
 	NativeConditionalMutation bool
 	NativeTreeMove            bool
+	// ImplicitParents: the provider makes a folder when its first child is written, so the
+	// index may hold an ancestor row the provider has no marker object for. A filesystem
+	// needs the directory before the file exists, so it reports false and an upload still
+	// materializes its ancestors before admission binds them.
+	ImplicitParents bool
 	// TransferClasses is the subset of presigned-parts, resumable-session and
 	// relay this driver can serve. The connection selects exactly one of them.
 	TransferClasses []string

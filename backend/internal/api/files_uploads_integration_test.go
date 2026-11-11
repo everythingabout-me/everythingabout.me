@@ -724,3 +724,89 @@ func TestFilesUploadBatchPageAsSent(t *testing.T) {
 		t.Fatalf("the upload page published entries before their bytes arrived: %v", list)
 	}
 }
+
+// A destination whose folders do not exist yet is admitted without creating them; the
+// ancestors enter the index when the file lands, because only then does the tree carry the
+// prefix they name. Materializing them at admission cost one provider-heavy mkdir per folder
+// — six provider round trips at 240 ms — and paid it again on every import of the same tree,
+// which is where an 11-year health export spent two hours before the first file appeared.
+func TestFilesUploadsMaterializeParentsAtSettlement(t *testing.T) {
+	f := newObjectsAPIFixture(t)
+	if _, err := f.db.Pool().Exec(f.ctx, `update file_budgets set logical_limit=$1,physical_limit=$2`, int64(1<<30), int64(2<<30)); err != nil {
+		t.Fatal(err)
+	}
+	create := func(path, key string, size int64, parents bool) *httptest.ResponseRecorder {
+		body, _ := json.Marshal(map[string]any{"path": path, "size": size, "mediaType": "application/json", "parents": parents})
+		return f.request(t, "POST", "/uploads", "", body, http.Header{"Idempotency-Key": {key}, "Content-Type": {"application/json"}})
+	}
+	rows := func(prefix string) int {
+		t.Helper()
+		var count int
+		if err := f.db.Pool().QueryRow(f.ctx, `select count(*) from file_entries where owner_id=$1::uuid and path like $2`, f.owners[0], prefix).Scan(&count); err != nil {
+			t.Fatal(err)
+		}
+		return count
+	}
+	// Without parents the missing ancestor is still refused: the opt-in is what changed.
+	uploadsHTTPProblem(t, create("/Health/2015/09/26/step-count.json", "plain", 4, false), 409, "parent_missing")
+	// With parents the session is admitted and nothing has been created yet.
+	id := uploadsHTTPJSON(t, create("/Health/2015/09/26/step-count.json", "promised", 4, true), 201)["id"].(string)
+	if count := rows("Health%"); count != 0 {
+		t.Fatalf("admission created %d ancestor rows for a destination the tree does not have", count)
+	}
+	uploadsHTTPJSON(t, f.request(t, "PUT", "/uploads/"+id+"/parts/1", "", []byte("data"), nil), 201)
+	response := f.request(t, "POST", "/uploads/"+id+"/commit", "", nil, nil)
+	if response.Code != 200 && response.Code != 202 {
+		op := uploadsHTTPJSON(t, f.request(t, "GET", "/operations/"+id, "", nil, nil), 200)
+		status := uploadsHTTPJSON(t, f.request(t, "GET", "/uploads/"+id, "", nil, nil), 200)
+		key := "drive/" + f.owners[0] + "/Health/2015/09/26/step-count.json"
+		f.provider.mu.Lock()
+		native, exists := f.provider.current(key)
+		puts, completes := f.provider.puts[key], f.provider.completeRequests[key]
+		f.provider.mu.Unlock()
+		t.Fatalf("commit HTTP%d body=%s operation=%v status=%v native=%v exists=%v puts=%d completes=%d",
+			response.Code, response.Body.String(), op, status, native, exists, puts, completes)
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		status := uploadsHTTPJSON(t, f.request(t, "GET", "/uploads/"+id, "", nil, nil), 200)
+		if status["state"] == "committed" {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("upload did not settle: %v", status)
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	// The settlement wrote the ancestors parent first, so the chain is addressable.
+	for _, folder := range []string{"Health", "Health/2015", "Health/2015/09", "Health/2015/09/26"} {
+		if count := rows(folder); count != 1 {
+			t.Fatalf("folder %q has %d rows after settlement", folder, count)
+		}
+	}
+	listing := objectsAPIJSON(t, f.request(t, "GET", "/list", "/Health/2015/09/26", nil, nil), 200)
+	entries, _ := listing["items"].([]any)
+	if len(entries) != 1 || entries[0].(map[string]any)["path"] != "/Health/2015/09/26/step-count.json" {
+		t.Fatalf("listing %v", listing)
+	}
+	// A second file in the same, now-existing folder takes the ordinary path.
+	second := uploadsHTTPJSON(t, create("/Health/2015/09/26/flights-climbed.json", "existing", 4, true), 201)["id"].(string)
+	uploadsHTTPJSON(t, f.request(t, "PUT", "/uploads/"+second+"/parts/1", "", []byte("data"), nil), 201)
+	if response := f.request(t, "POST", "/uploads/"+second+"/commit", "", nil, nil); response.Code != 200 && response.Code != 202 {
+		t.Fatalf("second commit HTTP%d body=%s", response.Code, response.Body.String())
+	}
+	deadline = time.Now().Add(10 * time.Second)
+	for {
+		status := uploadsHTTPJSON(t, f.request(t, "GET", "/uploads/"+second, "", nil, nil), 200)
+		if status["state"] == "committed" {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("second upload did not settle: %v", status)
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	if count := rows("Health/2015/09/26/%"); count != 2 {
+		t.Fatalf("folder rows after two files = %d", count)
+	}
+}

@@ -30,9 +30,16 @@ func commitStagedFile(ctx context.Context, tx pgx.Tx, op fileops.Operation, resu
 		return nil, fmt.Errorf("configure root name comparison: %w", err)
 	}
 	p := string(entry.Path)
-	// Parents must have been admitted/captured; index settlement never invents a
-	// native folder or runs the old EnsureParents side effect.
+	// The bytes are in place, so the folders their path names are real: materialize the
+	// ancestors a parents:true upload promised, then require them as usual. Doing this at
+	// settlement rather than at admission is what keeps every row backed by the tree — a
+	// commit that never publishes leaves no folder behind.
 	parent := paths.ParentOf(p)
+	if intent.Parents && parent != "" {
+		if _, err := ensureUploadParents(ctx, tx, op.Root.OwnerID, p); err != nil {
+			return nil, fmt.Errorf("materialize upload parents: %w", err)
+		}
+	}
 	if parent != "" {
 		var folder bool
 		err := tx.QueryRow(ctx, `select is_dir from file_entries where owner_id=$1::uuid and path=$2`, op.Root.OwnerID, parent).Scan(&folder)
@@ -112,7 +119,10 @@ func CheckUploadBinding(ctx context.Context, tx pgx.Tx, op fileops.Operation) er
 		}
 		occupied = err == nil && isFolder
 	}
-	if !occupied {
+	if !occupied && !intent.Parents {
+		// A promised parent is materialized by the settlement that publishes the file, so a
+		// session admitted against a destination that does not exist yet is still fenced by
+		// its captured parent identity (below) rather than by a folder row it cannot have.
 		return fileops.E("parent_missing", fmt.Errorf("no folder is indexed at %q (it was deleted or moved, or it exists only outside this service and has not been reconciled)", folder))
 	}
 	if intent.ParentID != "" {

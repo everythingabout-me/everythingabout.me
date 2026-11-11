@@ -395,19 +395,27 @@ func (s *Server) handleFilesCreateUpload(w http.ResponseWriter, r *http.Request,
 	}
 	parentPath := storage.Path(parentName)
 	parent, err := native.Stat(r.Context(), parentPath)
-	if storage.IsCode(err, "not_found") && req.Parents && condition.Mode == fc.PutCreate {
+	// On a provider that makes a folder with its first child, parents:true only needs the
+	// ancestor to be *acceptable* now; settlement materializes it when the file lands. Doing
+	// it here was one provider-heavy mkdir per folder, paid again on every import, and it
+	// bought nothing: the marker is the same object the first child's key already implies.
+	// A filesystem cannot do this — it needs the directory before the file — so it keeps the
+	// explicit mkdir, which is what ImplicitParents reports.
+	implicitParents := req.Parents && condition.Mode == fc.PutCreate && native.Describe().ImplicitParents
+	if storage.IsCode(err, "not_found") && req.Parents && condition.Mode == fc.PutCreate && !implicitParents {
 		if err = s.filesEnsureParents(r.Context(), r, f, native, root, actor, parentPath); err != nil {
 			return err
 		}
 		parent, err = native.Stat(r.Context(), parentPath)
 	}
-	if storage.IsCode(err, "not_found") {
-		return fc.NewProblem(409, "parent_missing", "The destination parent does not exist.")
-	}
-	if err != nil {
+	if err != nil && !storage.IsCode(err, "not_found") {
 		return filesMutationProblem(err)
 	}
-	if parent.Kind != storage.Folder {
+	if storage.IsCode(err, "not_found") {
+		if !implicitParents {
+			return fc.NewProblem(409, "parent_missing", "The destination parent does not exist.")
+		}
+	} else if parent.Kind != storage.Folder {
 		return fc.NewProblem(409, "not_a_folder", "The destination parent is not a folder.")
 	}
 	entryID, parentID, err := s.filesBindMutationSelection(r.Context(), f, p, selection, selectedID)
@@ -418,6 +426,7 @@ func (s *Server) handleFilesCreateUpload(w http.ResponseWriter, r *http.Request,
 		entryID = ""
 	}
 	client.Target, client.EntryID, client.ParentID = storage.Path(p.Relative()), entryID, parentID
+	client.Parents = implicitParents
 	intent := client
 	intent.ParentPath = parentPath
 	intent.ParentRevision = parent.Revision

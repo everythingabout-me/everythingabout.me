@@ -93,6 +93,43 @@ configuration. Moving/recreating a target or ancestor after admission fails `412
 or queued mutation never silently follows a later move. A new ID request admitted after a completed move
 may use its new current location. Idempotency and cursors bind selector mode and intent as well as scope.
 
+## Folders without a marker
+
+An empty folder is a state only a person can ask for. An import passes through "this folder has no
+children yet" on its way to writing thousands of them, and today both states are made with the same
+native marker object: `parents:true` runs the mkdir action for every missing ancestor of every
+destination. On a connection where one provider round trip costs 240 ms and a marker costs six of
+them, an 11-year health export pays roughly two hours for directories that exist only because a file
+is about to land in them.
+
+Keep the index equal to the tree instead of inventing a second kind of folder:
+
+**Admission creates nothing.** `parents:true` stops materializing ancestors; it only says that a
+missing ancestor is acceptable. An upload into a folder that does not exist yet binds a parent path
+and no parent ID, so the fence does not apply to that ancestor (`CheckUploadBinding` already binds a
+parent that exists by row, ID and current path).
+
+**Settlement materializes.** When the file lands, its settlement creates the ancestor rows its path
+implies, in the same transaction as the file, parent first. Every row in the index is still backed by
+the tree — the prefix exists exactly because the file that carries it landed — so the invariant does
+not grow a "promised" state, a flag, an expiry sweep or a reconcile special case.
+
+**A row the tree lost converges through the sync scan, not through a special delete.** Deleting
+the last file of a folder leaves its row until a scan that makes the index equal the tree removes it:
+`ScanApplyOptions.Sync` already drops every row the tree does not carry, so a folder nobody asked for
+does not need a per-delete provider call, a flag or an expiry sweep to disappear. Making the delete
+itself settle a target that is already gone natively is the honest follow-up, and needs its own
+change because it alters what a delete means when the bytes vanished first; until then an emptied
+implicit folder is an index row without bytes, which the next sync scan removes.
+
+**A filesystem is not an object store.** A provider that makes a folder when its first child is
+written (COS/S3) needs no marker here; one that does not (Local) keeps creating the chain at
+admission, before the session binds it. That is one driver capability, not a state machine.
+
+What this gives up: an upload into a not-yet-existing folder binds no parent ID, so a folder created
+and deleted again at that path during the upload's window is not a `412 target_changed`. The file
+lands at the path the client asked for, which is what it promised. Everything else keeps its fence.
+
 ## Native effects and identity settlement
 
 Native files remain ordinary readable files at their accepted paths. Adding service IDs never permits

@@ -15,12 +15,8 @@ func (d *Driver) publishNativeLocked(ctx context.Context, r *ledger, cp storage.
 		return storage.MutationResult{}, err
 	}
 	verify := func() error {
-		parent, err := d.Stat(ctx, parentPath(r.Intent.Target))
-		if err != nil {
+		if err := d.parentMoved(ctx, r); err != nil {
 			return err
-		}
-		if parent.Kind != storage.Folder || !bytes.Equal(parent.Revision, r.ParentRevision) {
-			return fail("changed", r.Intent.Target)
 		}
 		return d.checkTarget(ctx, r)
 	}
