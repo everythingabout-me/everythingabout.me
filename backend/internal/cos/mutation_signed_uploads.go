@@ -7,6 +7,7 @@ import (
 	"net/url"
 	"path"
 	"strconv"
+	"strings"
 	"time"
 
 	"everythingabout.me/backend/internal/objectmutation"
@@ -43,6 +44,50 @@ func (b *mutationBackend) SignPart(ctx context.Context, key, id string, number i
 		Headers:   map[string]string{"Content-Length": strconv.FormatInt(size, 10), "Content-Type": "application/octet-stream"},
 		ExpiresAt: expires.UTC(),
 	}, nil
+}
+
+// SignPut signs one conditional PUT at the destination itself. The condition is part of
+// the signed headers, so a client cannot publish past it, and the length is bound the same
+// way a part length is.
+func (b *mutationBackend) SignPut(ctx context.Context, key string, size int64, mediaType string, cond storage.Conditions, expires time.Time) (storage.SignedPartGrant, error) {
+	var out storage.SignedPartGrant
+	if b.client == nil || size <= 0 || key == "" {
+		return out, storage.NewError("unsupported", storage.Path(key), nil)
+	}
+	headers := http.Header{"Content-Length": {strconv.FormatInt(size, 10)}}
+	if mediaType != "" {
+		headers.Set("Content-Type", mediaType)
+	} else {
+		headers.Set("Content-Type", "application/octet-stream")
+	}
+	if cond.Absent {
+		// Both the standard conditional header and the provider's own switch: one of them
+		// is honoured by every admitted COS generation, and neither lets an existing object
+		// be replaced.
+		headers.Set("If-None-Match", "*")
+		headers.Set("x-cos-forbid-overwrite", "true")
+	} else {
+		etag := strings.TrimPrefix(string(cond.ExpectedRevision), "native-etag:")
+		if etag == "" || strings.ContainsAny(etag, "\r\n\x00\"") {
+			return out, storage.NewError("unsupported", storage.Path(key), nil)
+		}
+		headers.Set("If-Match", `"`+etag+`"`)
+	}
+	duration := time.Until(expires)
+	if duration <= 0 || duration > time.Hour {
+		return out, storage.NewError("invalid_request", storage.Path(key), nil)
+	}
+	signed, err := b.client.Object.GetPresignedURL2(ctx, http.MethodPut, key, duration, &sdk.PresignedURLOptions{Header: &headers}, true)
+	if err != nil {
+		return out, err
+	}
+	bound := make(map[string]string, len(headers))
+	for name, values := range headers {
+		if len(values) > 0 {
+			bound[name] = values[0]
+		}
+	}
+	return storage.SignedPartGrant{Number: 1, Size: size, Method: http.MethodPut, URL: signed.String(), Headers: bound, ExpiresAt: expires.UTC()}, nil
 }
 
 func (b *mutationBackend) ListParts(ctx context.Context, key, id string, after, limit int) ([]storage.NativeUploadPart, bool, error) {

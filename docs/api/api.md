@@ -698,6 +698,22 @@ aborted only if it is still `open`. This flow never
 automatically aborts `committing`, `outcome_unknown` or `committed` work, and it neither supplies server
 authority nor proves inactivity of other clients, origins or devices.
 
+### Direct publication for one-part uploads
+
+A file that fits in a single part, uploaded over a class A connection whose provider is
+admitted for conditional writes, is published by the client: the create response's single
+grant signs a PUT at the destination itself, carrying the create/replace condition in the
+signed headers. `PUT` returning `2xx` means the object exists; the commit then verifies it
+(`HEAD`) and settles identity, quota, change facts and audit.
+
+The trade is deliberate and narrow. A staged multipart upload costs five provider requests
+per file however small it is (`InitiateMultipartUpload`, two part listings, `Complete`); the
+direct path costs one PUT and one `HEAD`. In exchange, the object exists before the index
+does — reconcile adopts such a file if the process dies between the PUT and the commit, and
+a purge must not treat a just-published object as an orphan. A provider without conditional
+writes keeps the multipart path; nothing falls back at runtime, the session's mode is fixed
+at creation.
+
 ### Commit
 
 Only the server publishes. Until commit, uploaded bytes are unpublished provider state and nothing is visible
@@ -706,7 +722,8 @@ visible and a replace has already overwritten the old content before the server 
 
 | Class | Commit behaviour |
 |---|---|
-| A | Lists native parts, verifies every number with its exact bound length, performs `CompleteMultipartUpload` once at the final key, then settles index/quota |
+| A (multipart) | Lists native parts, verifies every number with its exact bound length, performs `CompleteMultipartUpload` once at the final key, then settles index/quota |
+| A (direct) | The client PUT a single conditional object at the destination, so the commit only observes it: it takes the path guard, proves the destination binding, verifies length and revision, then settles index/quota. A create signed this way is refused as `name_conflict` (`412` from the provider) when the name exists |
 | B | Verifies the provider holds the full length, then completes the provider session itself (OneDrive deferred commit, Box session commit, Dropbox `upload_session/finish`; Google Drive completes on the final chunk), then settles |
 | C | Verifies coverage from durable receipts and publishes |
 

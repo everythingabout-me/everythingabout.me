@@ -81,6 +81,38 @@ func (d *Driver) BeginPlannedUpload(ctx context.Context, in storage.WriteIntent,
 	return storage.PlannedUpload{Handle: []byte(session.UploadID), PartSize: nativePartSize, Parts: parts, ExpiresAt: expires.UTC()}, nil
 }
 
+// SupportsDirectPut reports whether the backend can sign a conditional PUT at the
+// destination. A backend without that capability keeps the multipart path.
+func (d *Driver) SupportsDirectPut() bool {
+	_, ok := d.backend.(DirectPutBackend)
+	return ok && d.SignedUploadSupported()
+}
+
+// BeginDirectPut signs one conditional PUT at the destination itself. Nothing is staged
+// and no provider request is made here: the client's PUT creates the object, and the
+// session's commit verifies it. The size bound is the part size, because a file that needs
+// more than one request cannot be published by a single conditional PUT.
+func (d *Driver) BeginDirectPut(ctx context.Context, in storage.WriteIntent, metadata storage.UploadMetadata, expires time.Time) (storage.SignedPartGrant, error) {
+	var grant storage.SignedPartGrant
+	if err := d.validateUploadIntent(in); err != nil {
+		return grant, err
+	}
+	backend, ok := d.backend.(DirectPutBackend)
+	if !ok || !d.SupportsDirectPut() {
+		return grant, fail("unsupported", in.Target)
+	}
+	if in.Size <= 0 || in.Size > nativePartSize {
+		return grant, fail("unsupported", in.Target)
+	}
+	if !in.Conditions.Absent && len(in.Conditions.ExpectedRevision) == 0 {
+		return grant, fail("precondition_required", in.Target)
+	}
+	if !expires.After(time.Now()) {
+		return grant, fail("invalid_request", in.Target)
+	}
+	return backend.SignPut(ctx, d.key(in.Target, storage.File), in.Size, in.MediaType, in.Conditions, expires)
+}
+
 func (d *Driver) SignUploadParts(ctx context.Context, in storage.WriteIntent, numbers []int, metadata storage.UploadMetadata, expires time.Time) ([]storage.SignedPartGrant, error) {
 	if err := d.validateUploadIntent(in); err != nil {
 		return nil, err

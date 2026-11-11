@@ -408,9 +408,16 @@ Variants: `Committed locally main@abc1234, not pushed` / `Not committed (tests f
   driver exists. Class A signs part and read URLs with the configured `COS_SECRET_*` credential, which
   remains server-side; `FILE_TRANSFER_CLASS` selects `presigned-parts` or `relay`. Grants are scoped to one upload
   session or one file, time-limited,
-  renewable and recorded before they are issued. Class A part URLs bind exact length and no digest. Clients
-  never publish: class A/C by construction, class B (cloud drives) by client contract; the server commit publishes. A provider credential is never
-  issued to a principal whose scope is narrower than its reach. See `docs/design/transfer-protocol.md`.
+  renewable and recorded before they are issued. Class A part URLs bind exact length and no digest.
+  **A staged transfer is never published by its client**: multipart parts stay unpublished until the server
+  completes them, class C bytes stay in the spool until the server publishes, and class B is a client contract.
+  The exception is a **direct** class A session (one file that fits in a single part, on a connection admitted
+  for conditional writes): its URL signs a conditional PUT at the destination itself, so the client's PUT is
+  the publication and the commit only verifies the object and settles the index. That swap costs one window in
+  which the native tree holds a file the index has not recorded (reconcile adopts it, and a purge must not
+  treat it as an orphan), in exchange for one provider write instead of five per small file. A provider
+  credential is never issued to a principal whose scope is narrower than its reach. See
+  `docs/design/transfer-protocol.md`.
 - Delete or rewrite an existing migration; only append.
 - Change the 5173 port or the `/api` proxy in `web/vite.config.ts` — COS CORS and the development flow depend
   on it.

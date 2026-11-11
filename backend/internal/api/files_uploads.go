@@ -1,6 +1,7 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -460,11 +461,25 @@ func (s *Server) handleFilesCreateUpload(w http.ResponseWriter, r *http.Request,
 		reservation.CreditVersion = intent.Conditions.ExpectedRevision
 	}
 	encoded, _ := json.Marshal(intent)
-	u, err := s.filesCreateUpload(r.Context(), fileops.BeginRequest{Root: root, Actor: actor, Kind: "upload_commit", IdempotencyKey: key, Intent: encoded, Guards: []fileops.Guard{{Path: intent.Target}}, Reservation: reservation}, fileops.UploadOptions{PartSize: filesUploadPartSize, ClientIntent: client})
+	// One conditional PUT publishes a file that fits in a single part: the client writes the
+	// destination itself, so nothing is staged and the commit only verifies the object. A
+	// driver that cannot sign that condition keeps the multipart path.
+	mode := fileops.UploadModeMultipart
+	if *req.Size > 0 && *req.Size <= filesUploadPartSize && s.filesTransferClass() == storage.TransferPresignedParts {
+		if writer, ok := native.(storage.DirectPutWriter); ok && writer.SupportsDirectPut() {
+			mode = fileops.UploadModeDirect
+		}
+	}
+	u, err := s.filesCreateUpload(r.Context(), fileops.BeginRequest{Root: root, Actor: actor, Kind: "upload_commit", IdempotencyKey: key, Intent: encoded, Guards: []fileops.Guard{{Path: intent.Target}}, Reservation: reservation}, fileops.UploadOptions{PartSize: filesUploadPartSize, ClientIntent: client, Mode: mode})
 	if err != nil {
 		return filesMutationProblem(err)
 	}
-	transport, err := s.filesUploadTransport(r.Context(), native, u)
+	var transport any
+	if u.Mode == fileops.UploadModeDirect {
+		transport, err = s.filesDirectPutTransport(r.Context(), native, u)
+	} else {
+		transport, err = s.filesUploadTransport(r.Context(), native, u)
+	}
 	if err != nil {
 		return err
 	}
@@ -513,6 +528,51 @@ func (s *Server) filesCreateUpload(ctx context.Context, req fileops.BeginRequest
 			slog.Warn("waiting for a folder creation to settle before admitting an upload", "target", target, "heldBy", held.OperationID, "waited", waited)
 		}
 	}
+}
+
+// filesDirectPutTransport signs the one conditional PUT a direct session uploads. It is
+// shaped like a one-part presigned upload so the browser needs no second transport.
+func (s *Server) filesDirectPutTransport(ctx context.Context, native fileops.NativeActions, u fileops.Upload) (any, error) {
+	writer, ok := native.(storage.DirectPutWriter)
+	if !ok {
+		return nil, fc.NewProblem(503, "temporarily_unavailable", "This connection cannot sign a conditional destination PUT.")
+	}
+	intent, err := filesUploadIntent(u)
+	if err != nil {
+		return nil, filesMutationProblem(err)
+	}
+	grant, err := writer.BeginDirectPut(ctx, intent, nil, s.filesPartGrantExpiry(u))
+	if err != nil {
+		return nil, filesMutationProblem(err)
+	}
+	payload, err := s.filesPartGrantPayload(grant)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"kind": storage.TransferPresignedParts, "parts": []any{payload}, "expiresAt": grant.ExpiresAt.UTC()}, nil
+}
+
+// runDirectUploadOperation settles a session whose bytes the client already PUT at the
+// destination. The write pipeline is the ordinary one; only its native effect is missing,
+// because the client's conditional PUT was the publication.
+func (s *Server) runDirectUploadOperation(ctx context.Context, op fileops.Operation, actor fileops.Actor, native fileops.NativeActions, service *fileops.Service) (fileops.Operation, error) {
+	writer := fileops.NewDirectUploadWriter(native)
+	var err error
+	if !op.Terminal() {
+		switch {
+		case op.Phase == fileops.Admitted && !op.CancelRequested:
+			// The writer never reads the body; the object is already at the destination.
+			op, err = service.Write(ctx, op.Root, actor, op.ID, writer, bytes.NewReader(nil))
+		case op.Phase == fileops.StagedReady && op.State != fileops.Unknown:
+			op, err = service.Write(ctx, op.Root, actor, op.ID, writer, nil)
+		default:
+			op, err = service.Recover(ctx, op.Root, actor, op.ID, writer)
+		}
+	}
+	if err == nil && op.Terminal() {
+		err = service.Cleanup(ctx, op.Root, actor, op.ID, writer)
+	}
+	return op, err
 }
 
 func (s *Server) filesUploadContext(r *http.Request, f *fileRequest) (fileops.NativeActions, fileops.Root, fileops.Actor, fileops.Upload, error) {
@@ -783,7 +843,8 @@ func (s *Server) handleFilesCommitUpload(w http.ResponseWriter, r *http.Request,
 	if err = filesUploadExpired(u); err != nil {
 		return filesMutationProblem(err)
 	}
-	if s.filesTransferClass() == storage.TransferPresignedParts && u.State == "open" {
+	direct := u.Mode == fileops.UploadModeDirect
+	if !direct && s.filesTransferClass() == storage.TransferPresignedParts && u.State == "open" {
 		parts, listErr := s.filesPlannedParts(r.Context(), native, u)
 		if listErr != nil {
 			return listErr
@@ -800,7 +861,12 @@ func (s *Server) handleFilesCommitUpload(w http.ResponseWriter, r *http.Request,
 	// the one it was opened against. A destination that changed ends the session there, and
 	// the terminal operation it returns carries the reason (rendered below).
 	opened := u
-	if s.filesTransferClass() == storage.TransferPresignedParts {
+	if direct {
+		// The client's conditional PUT already published the object; there is no part
+		// coverage to prove and the commit's own observation of the destination is the
+		// evidence. The freeze still takes the guard and proves the destination binding.
+		u, err = s.filesJournal.FreezeDirect(r.Context(), root, actor, u.ID, nodes.CheckUploadBinding)
+	} else if s.filesTransferClass() == storage.TransferPresignedParts {
 		// Class A parts never pass through this application, so coverage is the
 		// provider listing verified above rather than application receipts.
 		u, err = s.filesJournal.FreezeProviderListed(r.Context(), root, actor, u.ID, nodes.CheckUploadBinding)
@@ -902,6 +968,9 @@ func (s *Server) runUploadOperation(ctx context.Context, op fileops.Operation, a
 	}
 	if u.State == "open" {
 		return op, fileops.E("commit_not_started", nil)
+	}
+	if u.Mode == fileops.UploadModeDirect {
+		return s.runDirectUploadOperation(ctx, op, actor, native, service)
 	}
 	if s.filesTransferClass() == storage.TransferPresignedParts {
 		planned, ok := native.(storage.PlannedUploadWriter)

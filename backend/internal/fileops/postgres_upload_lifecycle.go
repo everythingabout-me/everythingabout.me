@@ -37,7 +37,15 @@ type UploadBinding func(context.Context, pgx.Tx, Operation) error
 // FreezeUpload freezes a session whose part coverage is proven by durable application
 // receipts. It is the class C transition: every part passed through this application.
 func (p *Postgres) FreezeUpload(ctx context.Context, root Root, actor Actor, id string, bind UploadBinding) (Upload, error) {
-	return p.freezeUpload(ctx, root, actor, id, false, bind)
+	return p.freezeUpload(ctx, root, actor, id, false, false, bind)
+}
+
+// FreezeDirect freezes a session whose bytes the client already PUT at the destination.
+// Nothing was staged as parts and no provider listing can prove coverage, so the freeze
+// takes the guard and checks the destination binding only; the commit's own observation
+// of the object is what proves the bytes.
+func (p *Postgres) FreezeDirect(ctx context.Context, root Root, actor Actor, id string, bind UploadBinding) (Upload, error) {
+	return p.freezeUpload(ctx, root, actor, id, false, true, bind)
 }
 
 // FreezeProviderListed freezes a class A session, whose parts never pass through this
@@ -45,7 +53,7 @@ func (p *Postgres) FreezeUpload(ctx context.Context, root Root, actor Actor, id 
 // part listing by the caller; sealing re-lists that state before the single publication,
 // so this transition is never the only evidence a part exists.
 func (p *Postgres) FreezeProviderListed(ctx context.Context, root Root, actor Actor, id string, bind UploadBinding) (Upload, error) {
-	return p.freezeUpload(ctx, root, actor, id, true, bind)
+	return p.freezeUpload(ctx, root, actor, id, true, false, bind)
 }
 
 // freezeUpload turns an open session into a commit, and is where the session takes its
@@ -77,7 +85,7 @@ func (p *Postgres) FreezeProviderListed(ctx context.Context, root Root, actor Ac
 // A class whose client can produce a native effect before commit (a cloud-drive session
 // that completes on its last chunk) needs its fence earlier than this; see
 // docs/design/transfer-protocol.md §5.
-func (p *Postgres) freezeUpload(ctx context.Context, root Root, actor Actor, id string, providerListed bool, bind UploadBinding) (Upload, error) {
+func (p *Postgres) freezeUpload(ctx context.Context, root Root, actor Actor, id string, providerListed, direct bool, bind UploadBinding) (Upload, error) {
 	var u Upload
 	if err := validateRoot(root); err != nil {
 		return u, err
@@ -105,7 +113,7 @@ func (p *Postgres) freezeUpload(ctx context.Context, root Root, actor Actor, id 
 		if err != nil {
 			return err
 		}
-		if !providerListed {
+		if !providerListed && !direct {
 			var count, bad int64
 			var size int64
 			err = tx.QueryRow(ctx, `select count(*),coalesce(sum(size),0),count(*) filter(where number<1 or number>$3 or size<>case when number=$3 then $4::bigint-($3::bigint-1)*$5::bigint else $5::bigint end) from file_upload_parts where operation_id=$1 and owner_id=$2`, id, root.OwnerID, u.PartCount, w.Size, u.PartSize).Scan(&count, &size, &bad)

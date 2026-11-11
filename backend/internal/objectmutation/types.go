@@ -127,6 +127,13 @@ type SignedPartBackend interface {
 	ListParts(context.Context, string, string, int, int) ([]storage.NativeUploadPart, bool, error)
 }
 
+// DirectPutBackend signs one conditional PUT at a destination key, for a driver whose
+// provider can create or replace an object in a single request. The condition travels in
+// the signed headers, so the client cannot drop it.
+type DirectPutBackend interface {
+	SignPut(context.Context, string, int64, string, storage.Conditions, time.Time) (storage.SignedPartGrant, error)
+}
+
 // ReadSignerBackend issues direct read grants with a dedicated GetObject-only
 // identity. A driver without it cannot serve class A reads.
 type ReadSignerBackend interface {

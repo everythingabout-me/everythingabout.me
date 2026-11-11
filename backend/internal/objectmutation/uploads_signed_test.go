@@ -24,6 +24,20 @@ func (b *signedTestBackend) SignPart(_ context.Context, key, id string, n int, s
 	return storage.SignedPartGrant{Number: n, Size: size, Method: "PUT", URL: "https://bucket.example/" + key, Headers: map[string]string{"Content-Length": "4", "Content-Type": "application/octet-stream"}, ExpiresAt: expires}, nil
 }
 
+func (b *signedTestBackend) SignPut(_ context.Context, key string, size int64, mediaType string, cond storage.Conditions, expires time.Time) (storage.SignedPartGrant, error) {
+	b.signCalls++
+	if b.signFail {
+		return storage.SignedPartGrant{}, storage.NewError("storage_failure", storage.Path(key), nil)
+	}
+	headers := map[string]string{"Content-Length": itoa(int(size)), "Content-Type": mediaType}
+	if cond.Absent {
+		headers["If-None-Match"] = "*"
+	} else {
+		headers["If-Match"] = string(cond.ExpectedRevision)
+	}
+	return storage.SignedPartGrant{Number: 1, Size: size, Method: "PUT", URL: "https://bucket.example/" + key, Headers: headers, ExpiresAt: expires}, nil
+}
+
 func (b *signedTestBackend) ListParts(_ context.Context, key, _ string, after, limit int) ([]storage.NativeUploadPart, bool, error) {
 	b.listCalls++
 	parts := make([]storage.NativeUploadPart, 0, len(b.parts))
@@ -135,4 +149,40 @@ func TestPlannedUploadRequiresProviderEvidence(t *testing.T) {
 	}
 	_, err := d.BeginPlannedUpload(context.Background(), nativeIntent(t, d, "unproved", 4), &memoryUploadMetadata{}, time.Now().Add(time.Minute))
 	requireCode(t, err, "unsupported")
+}
+
+// A direct session signs the destination itself: one conditional PUT, no multipart
+// allocation, and the condition travels in the signed headers so a client cannot drop it.
+func TestBeginDirectPutSignsOneConditionalDestinationPut(t *testing.T) {
+	driver, backend, metadata := signedFixture(t)
+	defer driver.Close()
+	intent := storage.WriteIntent{ID: "own-1", Target: "folder/file.txt", Size: 4, MediaType: "text/plain", Conditions: storage.Conditions{Absent: true}}
+	grant, err := driver.BeginDirectPut(context.Background(), intent, metadata, time.Now().Add(time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if grant.Number != 1 || grant.Size != 4 || grant.URL == "" {
+		t.Fatalf("unexpected grant: %+v", grant)
+	}
+	if grant.Headers["If-None-Match"] != "*" {
+		t.Fatalf("create condition missing from the signed headers: %v", grant.Headers)
+	}
+	if backend.signCalls != 1 || backend.beginCalls != 0 {
+		t.Fatalf("direct put touched the provider: signed=%d begins=%d", backend.signCalls, backend.beginCalls)
+	}
+}
+
+func TestBeginDirectPutRefusesWhatOnePutCannotPublish(t *testing.T) {
+	driver, _, metadata := signedFixture(t)
+	defer driver.Close()
+	expires := time.Now().Add(time.Minute)
+	for name, intent := range map[string]storage.WriteIntent{
+		"multi part":                 {ID: "own-1", Target: "big", Size: 2*nativePartSize + 1, Conditions: storage.Conditions{Absent: true}},
+		"no condition":               {ID: "own-1", Target: "file", Size: 4},
+		"replace without a revision": {ID: "own-1", Target: "file", Size: 4, Conditions: storage.Conditions{}},
+	} {
+		if _, err := driver.BeginDirectPut(context.Background(), intent, metadata, expires); err == nil {
+			t.Fatalf("%s: expected the direct path to refuse", name)
+		}
+	}
 }

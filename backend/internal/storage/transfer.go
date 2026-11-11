@@ -66,6 +66,26 @@ type PlannedUploadWriter interface {
 	DiscardPlannedUpload(context.Context, WriteIntent, UploadMetadata) error
 }
 
+// DirectPutWriter is the class A writer for a destination whose provider can create or
+// replace the object with one conditional PUT at that destination. The client sends the
+// single PUT itself; nothing is staged, so the session's commit verifies the object the
+// client's PUT created instead of publishing one.
+//
+// It is separate from PlannedUploadWriter because the two differ in who publishes: a
+// planned upload stages parts and the service completes them, while a direct put has
+// already happened before the commit runs. A driver that cannot sign a conditional PUT at
+// the destination simply does not implement this interface, and the service keeps the
+// multipart path for it.
+type DirectPutWriter interface {
+	// SupportsDirectPut reports whether this driver's provider can honour the condition on
+	// a single PUT. The interface is implemented by every object driver, but only an
+	// admitted conditional-write backend answers true.
+	SupportsDirectPut() bool
+	// BeginDirectPut signs one exact-length conditional PUT at the destination and returns
+	// it as a one-part grant. No provider request is made here.
+	BeginDirectPut(context.Context, WriteIntent, UploadMetadata, time.Time) (SignedPartGrant, error)
+}
+
 // ReadGrantOptions selects one provider representation. Disposition is
 // "attachment" or the safe inline allowlist.
 type ReadGrantOptions struct {

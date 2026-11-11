@@ -296,7 +296,7 @@ Every route can be asked what it holds:
 | B — Box | `GET .../upload_sessions/{id}/parts` |
 | C | The application's own receipts |
 
-Because clients never publish (§2), an interrupted client write leaves only unpublished bytes: the client asks
+Because a staged client write never publishes (§2), an interrupted multipart write leaves only unpublished bytes: the client asks
 for the session status and resumes. A client request never makes the destination path ambiguous. The only
 ambiguous effects are the server's own commit calls, handled by the ordinary `outcome_unknown` guard and
 reconcile path.

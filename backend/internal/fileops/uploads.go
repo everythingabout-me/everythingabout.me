@@ -31,13 +31,25 @@ const (
 type UploadOptions struct {
 	PartSize     int64
 	ClientIntent storage.WriteIntent
+	// Mode is UploadModeMultipart unless the connection admitted a conditional single PUT
+	// and the file fits in one: then the client publishes at the final key and the commit
+	// only verifies it. See sql/039_upload_mode.sql.
+	Mode string
 }
+
+// Upload modes. Multipart stages parts under the final key and the server publishes by
+// completing them; direct lets the client PUT one conditional object at the final key.
+const (
+	UploadModeMultipart = "multipart"
+	UploadModeDirect    = "direct"
+)
 
 type Upload struct {
 	ID              string
 	Operation       Operation
 	PartSize        int64
 	PartCount       int
+	Mode            string
 	State           UploadState
 	ReceivedParts   int
 	ReceivedBytes   int64
