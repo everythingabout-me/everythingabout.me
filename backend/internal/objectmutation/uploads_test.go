@@ -275,7 +275,7 @@ func TestNativePartReservationBindsSlotAndConfirmationBindsContent(t *testing.T)
 	}
 }
 
-func TestNativeCompletionLostReplyNeverReplaysOrReleasesGuard(t *testing.T) {
+func TestNativeCompletionLostReplySettlesAppliedWithoutReplay(t *testing.T) {
 	driver, backend, _, _ := nativeFixture(t)
 	metadata := &memoryUploadMetadata{}
 	in := nativeIntent(t, driver, "complete-lost", 4)
@@ -287,24 +287,56 @@ func TestNativeCompletionLostReplyNeverReplaysOrReleasesGuard(t *testing.T) {
 	if e != nil {
 		t.Fatal(e)
 	}
+	// The provider completed the upload and stored the object with this request's own
+	// intent marker; only the reply was lost.
 	backend.failComplete = true
 	var checkpoint []byte
-	_, e = driver.Publish(context.Background(), stage, func(_ context.Context, b []byte) error { checkpoint = bytes.Clone(b); return nil })
-	if e == nil {
+	if _, e = driver.Publish(context.Background(), stage, func(_ context.Context, b []byte) error { checkpoint = bytes.Clone(b); return nil }); e == nil {
 		t.Fatal("lost Complete reply implied success")
 	}
 	inspection, e := driver.Inspect(context.Background(), in, checkpoint)
+	if e != nil || inspection.State != storage.Applied || inspection.Result == nil {
+		t.Fatalf("a publication that landed was not settled %+v %v", inspection, e)
+	}
+	if inspection.Result.Entry == nil || inspection.Result.Entry.Path != in.Target || inspection.Result.Entry.Size != in.Size {
+		t.Fatalf("settled entry does not describe the target: %+v", inspection.Result.Entry)
+	}
+	if backend.completeCalls != 1 || backend.abortCalls != 0 {
+		t.Fatalf("settling re-sent or aborted: complete=%d abort=%d", backend.completeCalls, backend.abortCalls)
+	}
+	// A retry reads the settled result instead of issuing a second final request.
+	if result, e := driver.Publish(context.Background(), stage, cpOK); e != nil || backend.completeCalls != 1 || result.Entry == nil {
+		t.Fatalf("settled publication replayed: %v complete=%d", e, backend.completeCalls)
+	}
+}
+
+func TestNativePublishWithoutItsOwnMarkerStaysFenced(t *testing.T) {
+	driver, backend, _, _ := nativeFixture(t)
+	metadata := &memoryUploadMetadata{}
+	in := nativeIntent(t, driver, "complete-foreign", 4)
+	part, e := driver.ReceivePart(context.Background(), in, storage.UploadPart{Number: 1, Size: 4}, bytes.NewReader([]byte("data")), metadata, keepPart)
+	if e != nil {
+		t.Fatal(e)
+	}
+	stage, e := driver.SealStage(context.Background(), in, []storage.UploadPart{part}, metadata, cpOK)
+	if e != nil {
+		t.Fatal(e)
+	}
+	backend.failComplete = true
+	var checkpoint []byte
+	if _, e = driver.Publish(context.Background(), stage, func(_ context.Context, b []byte) error { checkpoint = bytes.Clone(b); return nil }); e == nil {
+		t.Fatal("lost Complete reply implied success")
+	}
+	// After the lost reply someone else wrote the same path, so the object there no longer
+	// carries this request's marker. A HEAD cannot say what became of our publication, and
+	// claiming either outcome would be a guess.
+	key := driver.key(in.Target, storage.File)
+	backend.mu.Lock()
+	backend.current[key] = Object{Key: key, Size: in.Size, ETag: "foreign", Metadata: map[string]string{"eam-intent": "another-operation"}}
+	backend.mu.Unlock()
+	inspection, e := driver.Inspect(context.Background(), in, checkpoint)
 	if e != nil || inspection.State != storage.OutcomeUnknown {
-		t.Fatalf("unknown result not guarded %+v %v", inspection, e)
-	}
-	_, e = driver.Publish(context.Background(), stage, cpOK)
-	requireCode(t, e, "outcome_unknown")
-	requireCode(t, driver.Discard(context.Background(), in, checkpoint), "outcome_unknown")
-	if backend.completeCalls != 1 || backend.puts != 0 {
-		t.Fatal("native effect automatically replayed")
-	}
-	if backend.abortCalls != 0 {
-		t.Fatal("a publication that may have landed had its session aborted")
+		t.Fatalf("an unattributable object was resolved anyway: %+v %v", inspection, e)
 	}
 }
 

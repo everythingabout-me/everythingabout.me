@@ -272,10 +272,14 @@ for the session status and resumes. A client request never makes the destination
 ambiguous effects are the server's own commit calls, handled by the ordinary `outcome_unknown` guard and
 reconcile path.
 
-Open sessions expire after 24 hours of inactivity (sign requests, status queries and relayed parts count as
-activity), with a hard limit of seven days, capped by the provider session's own lifetime. Expiry aborts the
-native upload or provider session. Committing sessions do not expire; they follow
-worker leases and recovery.
+Open sessions expire after two hours without activity, with a hard limit of seven days, capped by the provider
+session's own lifetime. Activity is something that can still produce bytes: a class A signature request or a
+relayed part. A status read does not count — polling must not keep an abandoned session, and the path it holds,
+alive. Class A parts never reach this application, so a live transfer must re-sign at least once per URL
+lifetime (one hour); two hours of silence therefore means nothing can still be arriving. Expiry aborts the
+native upload or provider session and releases the path, so a page that was closed mid-upload stops holding its
+target instead of fencing it until the next day. Committing sessions do not expire; they follow worker leases
+and recovery.
 
 Abort deletes the provider state: `AbortMultipartUpload` (A), `DELETE` on the provider session (B), the
 staged bytes (C). Dropbox has no abort call; an unfinished Dropbox session lapses and never becomes a file.

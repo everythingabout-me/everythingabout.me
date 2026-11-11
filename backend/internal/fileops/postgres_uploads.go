@@ -135,7 +135,7 @@ func (p *Postgres) CreateUpload(ctx context.Context, input BeginRequest, options
 		if err != nil {
 			return err
 		}
-		u = Upload{ID: op.ID, Operation: op, PartSize: options.PartSize, PartCount: count, State: UploadOpen, CreatedAt: op.CreatedAt, ExpiresAt: op.CreatedAt.Add(24 * time.Hour)}
+		u = Upload{ID: op.ID, Operation: op, PartSize: options.PartSize, PartCount: count, State: UploadOpen, CreatedAt: op.CreatedAt, ExpiresAt: op.CreatedAt.Add(uploadIdleWindow)}
 		var dbKey any
 		if key != "" {
 			dbKey = key
@@ -144,6 +144,39 @@ func (p *Postgres) CreateUpload(ctx context.Context, input BeginRequest, options
 		return err
 	})
 	return u, replay, err
+}
+
+// TouchUpload records server-visible progress on an open session and slides its idle
+// expiry. Only activity that can still produce bytes counts: a signature request (class A
+// parts go straight to the provider, so this is the only request a live transfer must keep
+// making) or a received part (class C). A status read does not, because polling must not
+// keep an abandoned session — and the path it holds — alive.
+func (p *Postgres) TouchUpload(ctx context.Context, root Root, actor Actor, id string) (Upload, error) {
+	var u Upload
+	if err := validateRoot(root); err != nil {
+		return u, err
+	}
+	err := p.transaction(ctx, root.OwnerID, func(tx pgx.Tx) error {
+		var err error
+		u, err = readUpload(ctx, tx, root, actor, id, true)
+		if err != nil || u.State != UploadOpen {
+			return err
+		}
+		now, err := dbNow(ctx, tx)
+		if err != nil {
+			return err
+		}
+		until := now.Add(uploadIdleWindow)
+		if cap := u.CreatedAt.Add(uploadSessionLifetime); cap.Before(until) {
+			until = cap
+		}
+		if _, err = tx.Exec(ctx, `update file_uploads set expires_at=$3 where operation_id=$1 and owner_id=$2 and state='open'`, id, root.OwnerID, until); err != nil {
+			return err
+		}
+		u.ExpiresAt = until
+		return nil
+	})
+	return u, err
 }
 
 func (p *Postgres) GetUpload(ctx context.Context, root Root, actor Actor, id string) (Upload, error) {
@@ -284,7 +317,8 @@ func (p *Postgres) AcceptUploadPart(ctx context.Context, root Root, actor Actor,
 		if !errors.Is(err, pgx.ErrNoRows) {
 			return err
 		}
-		err = tx.QueryRow(ctx, `update file_uploads set received_parts=received_parts+1,received_bytes=received_bytes+$3,ack_sequence=ack_sequence+1,expires_at=least(created_at+interval '168 hours',$4::timestamptz+interval '24 hours') where operation_id=$1 and owner_id=$2 returning ack_sequence`, id, root.OwnerID, part.Size, now).Scan(&part.Sequence)
+		err = tx.QueryRow(ctx, `update file_uploads set received_parts=received_parts+1,received_bytes=received_bytes+$3,ack_sequence=ack_sequence+1,
+			expires_at=least(created_at+make_interval(secs => $4),$5::timestamptz+make_interval(secs => $6)) where operation_id=$1 and owner_id=$2 returning ack_sequence`, id, root.OwnerID, part.Size, uploadSessionLifetime.Seconds(), now, uploadIdleWindow.Seconds()).Scan(&part.Sequence)
 		if err != nil {
 			return err
 		}

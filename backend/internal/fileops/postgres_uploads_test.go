@@ -83,7 +83,7 @@ func TestPostgresUploads(t *testing.T) {
 	t.Run("atomic admission and independent client replay keys", func(t *testing.T) {
 		p, r, a := seedOwner(t, pool, provenBaseline(0, 0, 20, 200))
 		u := mustUpload(t, p, r, a, "folder/one", 8, "same-key")
-		if u.ID != u.Operation.ID || u.PartCount != 2 || u.State != UploadOpen || u.ExpiresAt.Sub(u.CreatedAt) != 24*time.Hour {
+		if u.ID != u.Operation.ID || u.PartCount != 2 || u.State != UploadOpen || u.ExpiresAt.Sub(u.CreatedAt) != uploadIdleWindow {
 			t.Fatal(u)
 		}
 		_, err := p.Claim(ctx, r, a, u.ID, time.Minute)
@@ -384,6 +384,46 @@ func TestPostgresUploads(t *testing.T) {
 		expired, err = p.ExpireUploads(ctx, 1)
 		if err != nil || len(expired) != 0 {
 			t.Fatalf("expiry repeated %+v %v", expired, err)
+		}
+	})
+	t.Run("signing keeps a slow upload alive and an abandoned one lapses", func(t *testing.T) {
+		p, r, a := seedOwner(t, pool, provenBaseline(0, 0, 100, 1000))
+		u := mustUpload(t, p, r, a, "folder/slow", 8, "")
+		// A transfer that started two hours ago but is still asking for signatures is alive;
+		// without the touch it would lapse mid-upload and lose the parts already sent.
+		if _, err := p.TouchUpload(ctx, r, a, u.ID); err != nil {
+			t.Fatal(err)
+		}
+		touched, err := p.GetUpload(ctx, r, a, u.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if touched.ExpiresAt.Sub(touched.CreatedAt) <= uploadIdleWindow {
+			t.Fatalf("signing did not slide the idle expiry: %+v", touched)
+		}
+		// The seven-day cap still bounds a session that keeps trickling activity.
+		if _, err = pool.Exec(ctx, `update file_uploads set created_at=clock_timestamp()-interval '7 days 1 minute' where operation_id=$1`, u.ID); err != nil {
+			t.Fatal(err)
+		}
+		capped, err := p.TouchUpload(ctx, r, a, u.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if capped.ExpiresAt.After(capped.CreatedAt.Add(uploadSessionLifetime)) {
+			t.Fatalf("lifetime cap exceeded: %+v", capped)
+		}
+		// Silence lapses it: the sweep expires the session, releasing the path and the
+		// logical quota without waiting out the old 24-hour window.
+		if _, err = pool.Exec(ctx, `update file_uploads set expires_at=clock_timestamp()-interval '1 second' where operation_id=$1`, u.ID); err != nil {
+			t.Fatal(err)
+		}
+		expired, err := p.ExpireUploads(ctx, 10)
+		if err != nil || len(expired) != 1 || expired[0].State != UploadExpired {
+			t.Fatalf("idle session not expired: %+v %v", expired, err)
+		}
+		var guards int
+		if err = pool.QueryRow(ctx, `select count(*) from file_operation_guards where operation_id=$1`, u.ID).Scan(&guards); err != nil || guards != 0 {
+			t.Fatalf("expired session kept its path: %d %v", guards, err)
 		}
 	})
 	t.Run("root principal scope and bounded session pagination", func(t *testing.T) {

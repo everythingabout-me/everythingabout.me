@@ -56,10 +56,29 @@ type PartReceipt struct {
 	Sequence int64
 }
 
+// uploadIdleWindow is how long an open session may sit without server-visible activity
+// before it expires and releases its path, its quota and its native allocation.
+//
+// The bound comes from the protocol, not from taste: a class A part URL lives one hour
+// (filesReadGrantWindow), so a transfer that is still moving must ask for a fresh
+// signature at least that often. Two hours of neither a signature nor a received part
+// therefore means nothing can still be arriving — and that is exactly the "the page is
+// gone, so the upload is gone" case: a session abandoned mid-flight stops holding its
+// target instead of fencing it until tomorrow.
+const uploadIdleWindow = 2 * time.Hour
+
+// uploadSessionLifetime caps a session that keeps trickling activity forever, so a client
+// cannot hold a path indefinitely by signing one part a day.
+const uploadSessionLifetime = 7 * 24 * time.Hour
+
 type UploadJournal interface {
 	CreateUpload(context.Context, BeginRequest, UploadOptions) (Upload, bool, error)
 	ReplayUpload(context.Context, Root, Actor, string, storage.WriteIntent) (Upload, bool, error)
 	GetUpload(context.Context, Root, Actor, string) (Upload, error)
+	// TouchUpload records server-visible progress and slides the idle expiry. Class A parts
+	// never pass through this application, so a signature request is the only evidence that
+	// such a transfer is still moving.
+	TouchUpload(context.Context, Root, Actor, string) (Upload, error)
 	ListUploads(context.Context, Root, Actor, int, string) ([]Upload, error)
 	AcceptUploadPart(context.Context, Root, Actor, string, PartReceipt) (PartReceipt, bool, error)
 	ListUploadParts(context.Context, Root, Actor, string, int, int64, int64) ([]PartReceipt, int64, error)

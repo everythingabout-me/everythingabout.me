@@ -193,15 +193,17 @@ Persist `outcome_unknown`, block
 conflicting mutations, and reconcile; if the provider cannot establish safe quiescence, require explicit
 operator recovery rather than risk overwrite. The full driver contract defines these limits.
 
-One ambiguity the provider can settle by itself is a multipart publication whose reply was lost. If the target
-is absent and the multipart session the driver then aborts is the one the provider still held, the publication
-never took effect — a completed upload can no longer be aborted — so the record settles as `not_applied` and
-the path is released. The other half, an object at the target, stays fenced: a HEAD cannot attribute it to
-this request, and that is still operator territory. The settled state is recorded on the ledger
-(`Unpublished`) so a later cleanup call carrying the receipt from before the proof cannot push it back to
-`unknown`, which would restore a fence nothing can lift again. Leaving the first half unresolved is not merely
-cautious: a lost commit reply fenced its path, and every folder above it, permanently — one interrupted import
-made a whole folder undeletable that way.
+One ambiguity the provider settles by itself is a multipart publication whose reply was lost, and it settles
+both ways from facts the provider holds. Nothing at the target and the session the driver then aborts is the
+one the provider still held: a completed upload can no longer be aborted, so the publication never took effect
+and the record is `not_applied`. An object at the target carrying this request's own intent marker and size:
+this exact request wrote it, since nothing else writes that marker, so the record is `applied` without
+re-sending the publication. An object without the marker, or no session left to abort, decides nothing and
+stays fenced for an operator — a bare HEAD never attributes an object. Both settled states are recorded on the
+ledger (`Unpublished` for the negative one) so a later cleanup call carrying the receipt from before the proof
+cannot push the record back to `unknown`, which would restore a fence nothing can lift again. Resolving neither
+was not merely cautious: a lost commit reply fenced its path, and every folder above it, permanently — one
+interrupted import made a whole folder undeletable that way.
 
 One-file overwrite should preserve old complete bytes until an atomic native switch. Drivers unable to meet
 a required create/replace condition must reject that write capability instead of silently falling back to

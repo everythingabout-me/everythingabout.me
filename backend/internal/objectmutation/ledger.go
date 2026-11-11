@@ -299,10 +299,14 @@ func (d *Driver) inspect(ctx context.Context, kind, id string, in *storage.Write
 				return storage.Inspection{State: storage.NotApplied, Evidence: d.receipt(r)}, nil
 			}
 		}
-		if err = d.resolveUnpublished(ctx, r); err != nil {
+		if err = d.resolvePublication(ctx, r); err != nil {
 			return storage.Inspection{}, err
 		}
-		if r.Phase == "not_applied" {
+		switch {
+		case r.Phase == "applied" && r.Result != nil:
+			result := cloneResult(*r.Result)
+			return storage.Inspection{State: storage.Applied, Result: &result, Evidence: d.receipt(r)}, nil
+		case r.Phase == "not_applied":
 			return storage.Inspection{State: storage.NotApplied, Evidence: d.receipt(r)}, nil
 		}
 		return storage.Inspection{State: storage.OutcomeUnknown, Evidence: d.receipt(r)}, nil
@@ -752,38 +756,52 @@ func (d *Driver) copyParts(ctx context.Context, r *ledger, request Copy, parts P
 	return obj, nil
 }
 
-// resolveUnpublished settles a multipart publication whose reply was lost by proving it
-// never landed, without ever attributing an existing object to this request.
+// resolvePublication settles a multipart publication whose reply was lost from the two
+// facts the provider itself holds, so "unknown" lasts one inspection instead of forever.
 //
-// The provider itself answers the question: a completed multipart upload can no longer be
-// aborted, so an abort this call performs and the provider acknowledges proves the
-// completion never took effect. Two observations make that sound — the target must be
-// absent, and the abort must be the one that ends the session. If the object is there, or
-// the provider no longer knows the session, nothing is decided and the record keeps its
-// permanent fence, exactly as before; that half of the ambiguity really is unattributable
-// without an operator.
+//   - Nothing at the target and the session is still there: aborting it proves the
+//     completion never took effect, because a completed upload can no longer be aborted.
+//     The record settles as not_applied.
+//   - An object at the target carrying this request's own intent marker and size: this
+//     exact request wrote it, since nothing else writes that marker. The record settles as
+//     applied, without re-sending the publication.
+//   - Anything else — an object that is not ours, or no session left to abort — decides
+//     nothing. A bare HEAD cannot attribute an object, so that half stays fenced for an
+//     operator.
 //
-// It exists because the other half was not merely conservative but unanswerable: a lost
-// reply on a commit pinned its path (and every folder above it, which fences a recursive
-// delete) for good. One interrupted import left exactly that behind, and the folder holding
-// it could not be deleted until the record was resolved by hand.
-func (d *Driver) resolveUnpublished(ctx context.Context, r *ledger) error {
-	if r.Kind != "write" || r.Native == nil || r.Native.UploadID == "" {
+// It exists because leaving both halves unresolved was not merely cautious: a lost reply
+// pinned its path, and every folder above it, permanently. One interrupted import made a
+// whole folder undeletable that way until the record was resolved by hand.
+func (d *Driver) resolvePublication(ctx context.Context, r *ledger) error {
+	// A provider copy resolves through resolveCopied, which owns the same question with the
+	// copy's own intent marker; this path is only for a publication from this writer.
+	if r.Provider || r.Kind != "write" || r.Native == nil || r.Native.UploadID == "" {
 		return nil
+	}
+	key := d.key(r.Intent.Target, storage.File)
+	obj, err := d.backend.Head(ctx, key)
+	switch {
+	case err == nil:
+		if obj.Metadata["eam-intent"] != r.ID || obj.Size != r.Intent.Size {
+			return nil
+		}
+		entry, err := d.objectEntry(r.Intent.Target, storage.File, obj)
+		if err != nil {
+			return err
+		}
+		r.Native = nil
+		r.Phase = "applied"
+		result := storage.MutationResult{Entry: &entry, Evidence: d.receipt(r)}
+		r.Result = &result
+		return d.save(r)
+	case !storage.IsCode(err, "not_found"):
+		return err
 	}
 	multipart, ok := d.backend.(MultipartBackend)
 	if !ok {
 		return nil
 	}
-	key := d.key(r.Intent.Target, storage.File)
-	if _, err := d.backend.Head(ctx, key); err == nil {
-		// Something occupies the target. Attributing it to this request is what the
-		// publication fence forbids, so it stays unknown.
-		return nil
-	} else if !storage.IsCode(err, "not_found") {
-		return err
-	}
-	if err := multipart.AbortMultipart(context.WithoutCancel(ctx), key, r.Native.UploadID); err != nil {
+	if err = multipart.AbortMultipart(context.WithoutCancel(ctx), key, r.Native.UploadID); err != nil {
 		// No session left to abort: either the completion did take effect or someone
 		// abandoned it, and the provider no longer distinguishes the two.
 		if storage.IsCode(err, "not_found") {

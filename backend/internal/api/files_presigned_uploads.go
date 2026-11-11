@@ -84,7 +84,7 @@ func (s *Server) handleFilesSignUploadParts(w http.ResponseWriter, r *http.Reque
 	if s.filesTransferClass() != storage.TransferPresignedParts {
 		return fc.NewProblem(422, "unsupported_option", "This connection does not use class A presigned parts.")
 	}
-	native, _, _, u, err := s.filesUploadContext(r, f)
+	native, root, actor, u, err := s.filesUploadContext(r, f)
 	if err != nil {
 		return err
 	}
@@ -96,6 +96,12 @@ func (s *Server) handleFilesSignUploadParts(w http.ResponseWriter, r *http.Reque
 	}
 	if u.State != "open" {
 		return fc.NewProblem(409, "commit_in_progress", "The part manifest is frozen.")
+	}
+	// Class A parts never reach this application, so asking for a signature is the only
+	// evidence that this transfer is still moving. It is also what keeps the session's idle
+	// expiry (and the path it holds) from lapsing under a long upload.
+	if u, err = s.filesJournal.TouchUpload(r.Context(), root, actor, u.ID); err != nil {
+		return filesMutationProblem(err)
 	}
 	var req struct {
 		Numbers []int `json:"numbers"`
