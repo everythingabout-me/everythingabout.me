@@ -682,3 +682,45 @@ func TestFilesUploadsPostgresObjectPublicationLimitAndUnknown(t *testing.T) {
 		t.Fatalf("unknown effect released liability %+v", usage)
 	}
 }
+
+// A page of uploads hands each item to the single create handler as the bytes the client
+// sent, never as a re-encoding of the decoded request. Re-encoding wrote the absent
+// destination and target aliases as null, and the single handler refuses a path that also
+// carries a null alias: every item answered invalid_selector while the page still answered
+// 200, which is how a 23,373-file import showed "0 / 23,373" with no session row, no
+// failed request of its own, and nothing in the log but a wall of 200s.
+func TestFilesUploadBatchPageAsSent(t *testing.T) {
+	f := newFileWorkerFixture(t)
+	h := newUploadsHTTPFixture(t, f)
+	body := []byte(`{"items":[` +
+		`{"path":"/Pictures/trip/one.jpg","size":3,"mediaType":"image/jpeg","parents":true,"idempotencyKey":"page-one"},` +
+		`{"path":"/Pictures/trip/two.jpg","size":4,"mediaType":"image/jpeg","parents":true,"idempotencyKey":"page-two"},` +
+		`{"path":"/Pictures/trip/bad.jpg","target":{"id":"6f1c0d0e-0000-4000-8000-000000000000"},"size":5}]}`)
+	value := uploadsHTTPJSON(t, h.request("POST", "/api/files/uploads/batch", h.bearer, body, http.Header{"Content-Type": {"application/json"}}), 200)
+	items, _ := value["items"].([]any)
+	if len(items) != 3 {
+		t.Fatalf("page items %v", value)
+	}
+	ids := map[string]bool{}
+	for index := 0; index < 2; index++ {
+		upload, _ := items[index].(map[string]any)["upload"].(map[string]any)
+		id, _ := upload["id"].(string)
+		if id == "" || upload["state"] != "open" || ids[id] {
+			t.Fatalf("item %d was not admitted: %v", index, items[index])
+		}
+		if !strings.HasPrefix(upload["path"].(string), "/Pictures/trip/") {
+			t.Fatalf("item %d bound the wrong target: %v", index, upload)
+		}
+		ids[id] = true
+	}
+	// One refused item leaves its neighbours admitted instead of failing the page, and the
+	// refusal is the single handler's own Problem, not a batch-shaped substitute.
+	if problem, _ := items[2].(map[string]any)["error"].(map[string]any); problem["code"] != "invalid_selector" {
+		t.Fatalf("neighbour isolation %v", items[2])
+	}
+	// parents:true created the destination tree once; both sessions share the one folder.
+	parent := uploadsHTTPJSON(t, h.request("GET", "/api/files/list?path=%2FPictures%2Ftrip", h.bearer, nil, nil), 200)
+	if list, _ := parent["items"].([]any); len(list) != 0 {
+		t.Fatalf("the upload page published entries before their bytes arrived: %v", list)
+	}
+}

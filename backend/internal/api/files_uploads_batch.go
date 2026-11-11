@@ -42,9 +42,15 @@ func (b *batchRecorder) WriteHeader(code int) {
 // handleFilesCreateUploadBatch admits up to 32 sessions in one request. Each item is the
 // same body the single create endpoint takes, plus its own idempotency key, and each item
 // answers independently: one name conflict does not fail the page.
+//
+// An item is forwarded to the single handler as the bytes the client sent, never
+// re-encoded from the decoded request: re-encoding writes every absent field as null, and
+// the single handler refuses a path carrying a null destination alias. That made every
+// item answer invalid_selector while the page still answered 200, so a 23k-file import
+// read as "0 / 23,373" with no session and no failed request to point at.
 func (s *Server) handleFilesCreateUploadBatch(w http.ResponseWriter, r *http.Request, f *fileRequest) error {
 	var req struct {
-		Items []filesCreateUploadRequest `json:"items"`
+		Items []json.RawMessage `json:"items"`
 	}
 	if err := strictFilesJSON(r, &req); err != nil {
 		return err
@@ -53,16 +59,17 @@ func (s *Server) handleFilesCreateUploadBatch(w http.ResponseWriter, r *http.Req
 		return fc.NewProblem(400, "invalid_request", fmt.Sprintf("Between one and %d items are required.", filesUploadCreateBatchLimit))
 	}
 	items := make([]any, len(req.Items))
-	for i := range req.Items {
-		item := req.Items[i]
+	for i, body := range req.Items {
+		// The idempotency key moves into the header the single handler reads. Everything
+		// else in the item is the inner handler's business.
+		var item filesCreateUploadRequest
+		if err := json.Unmarshal(body, &item); err != nil {
+			items[i] = map[string]any{"error": fc.NewProblem(400, "invalid_request", "The item is not a JSON upload request.")}
+			continue
+		}
 		key := item.IdempotencyKey
 		if key == "" {
 			key = randomFilesKey()
-		}
-		body, err := json.Marshal(item)
-		if err != nil {
-			items[i] = map[string]any{"error": fc.NewProblem(400, "invalid_request", "The item could not be encoded.")}
-			continue
 		}
 		inner := r.Clone(r.Context())
 		inner.Method = http.MethodPost
