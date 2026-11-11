@@ -161,8 +161,18 @@ export function buildUploadRows(items: Item[], tasks: UploadTask[], directory: s
     const fileStarted = files.some((task) =>
       task.status === "uploading" || task.status === "finalizing" || task.status === "completed");
     const preparing = folders.length > 1 && completedFolders < folders.length && !fileStarted && failed.length === 0;
+    // A batch row speaks for its whole selection, so one started file keeps it uploading.
+    // `visibleStatus` names one file's own wait for a part slot, which is right for a file
+    // row; a folder that adopted it fell back to "queued" for the few hundred milliseconds
+    // between a wave of files being settled and the next wave's sessions being admitted.
+    // No wave boundary holds a slot, so a 23k-file import flickered to "queued" and back on
+    // every one of them, and the word a person reads there is "it has not started" — the
+    // one reading an import that is merely between waves must not produce.
+    const running = (task: UploadTask) => row.isDir
+      ? task.status === "uploading"
+      : visibleStatus(task) === "uploading";
     const status: UploadStatus = failed.length ? "failed"
-      : pending.some((task) => visibleStatus(task) === "uploading") ? "uploading"
+      : pending.some(running) ? "uploading"
         : pending.some((task) => visibleStatus(task) === "finalizing")
           ? row.isDir && pending.some((task) => visibleStatus(task) === "queued") ? "uploading" : "finalizing"
           : waiting.length ? "waiting" : pending.length ? "queued" : "completed";

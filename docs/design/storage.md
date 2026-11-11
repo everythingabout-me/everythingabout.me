@@ -253,6 +253,13 @@ The one exception is a file that already sent bytes and then gave its slot up to
 keeps its uploading status, keeps its percentage, and names the wait from the slots it holds, because a status
 that goes backwards reads as a restart and "Uploading · 0 B/s" alone reads as a stall.
 
+That word belongs to a file's own row, never to the folder row that aggregates a selection. A batch between waves
+holds no slot for the few hundred milliseconds in which one wave is settled and the next wave's sessions are still
+being admitted, and a folder row that read that instant as queued said "queued" on every wave boundary — on a
+23k-file import, an import that appeared to keep returning to its start while it was working. A folder row is
+therefore uploading once any of its files has started, whatever its own files are waiting for, and it names a wait
+only through the slot sentence: another file holding the pool is the one pause a batch can point at.
+
 After an uncertain part request the client asks the session what the provider or relay holds before
 resending; class C receipt hashes are verified against
 the retained File before reuse. The browser queue exists only in memory for the current Files page/document

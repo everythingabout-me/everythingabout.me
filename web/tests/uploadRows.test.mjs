@@ -296,16 +296,24 @@ test("a file waiting its turn is queued, and a file that already sent bytes keep
     ...entry, dir: "health/batch", path: `health/batch/${entry.name.slice("health/".length)}`,
     loaded: typeof loaded === "function" ? loaded(entry) : loaded, activeParts: 0,
   }));
-  // A whole folder waiting its turn is queued; once one of its files has bytes it reports
-  // the transfer with the wait named, not the pre-start word.
+  // A folder row speaks for the whole batch, so a started file keeps it uploading even
+  // while nothing holds the pool: the next wave's sessions are being admitted, and this is
+  // where a 23k-file import used to flicker to "queued" on every wave boundary.
   const outside = task("health/zzz-pool.mov", { status: "uploading", activeParts: 8, speed: 40 });
   const waitingBatch = buildUploadRows([], [folder("health/batch"), ...batch(0), outside], "health")[0];
-  assert.equal(waitingBatch.upload.status, "queued");
-  assert.equal(waitingBatch.upload.waitingForSlot, false);
+  assert.equal(waitingBatch.upload.status, "uploading");
+  assert.equal(waitingBatch.upload.waitingForSlot, true);
   const partialBatch = buildUploadRows([], [folder("health/batch"),
     ...batch((entry) => (entry.name === "health/a.mov" ? 40 : 0)), outside], "health")[0];
   assert.equal(partialBatch.upload.status, "uploading");
   assert.equal(partialBatch.upload.waitingForSlot, true);
+  // Between waves nobody holds a slot at all, so nothing can name a wait behind another
+  // file; the row still says uploading, and the files inside it still name their own wait.
+  const betweenWaves = buildUploadRows([], [folder("health/batch"), ...batch(0)], "health")[0];
+  assert.equal(betweenWaves.upload.status, "uploading");
+  assert.equal(betweenWaves.upload.waitingForSlot, false);
+  assert.deepEqual(buildUploadRows([], batch(0), "health/batch").map((row) => row.upload.status),
+    ["queued", "queued", "queued"]);
   // A folder task is not a byte transfer: creating it is its own work, never a slot wait.
   const making = buildUploadRows([], [folder("health/empty", "uploading")], "health")[0];
   assert.equal(making.upload.status, "uploading");
