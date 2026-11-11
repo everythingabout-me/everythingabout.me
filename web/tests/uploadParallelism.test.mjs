@@ -80,7 +80,7 @@ for (const [ordering, expected] of [["any", 5], ["ascending", 1]]) {
   });
 }
 
-test("class A sessions share the global eight-part pool without application parts", async (t) => {
+test("class A sessions share the global six-part pool without application parts", async (t) => {
   const server = uploadServer(4, { class: "A" });
   const gate = deferred();
   let active = 0, peak = 0;
@@ -97,12 +97,12 @@ test("class A sessions share the global eight-part pool without application part
   };
   const harness = await mount(t, server.api);
   harness.render().enqueue(["a", "b", "c", "d"].map((path) => ({ path, file: new File(["abcdefgh"], path) })), "", () => false);
-  await harness.until(() => active === 8);
+  await harness.until(() => active === 6);
   await harness.tick();
-  assert.equal(peak, 8, "all class A parts across four files run together");
+  assert.equal(peak, 6, "all class A parts across four files run together");
   gate.resolve();
   await harness.until((queue) => queue.tasks.length === 4 && queue.tasks.every((task) => task.status === "completed"));
-  assert.equal(peak, 8);
+  assert.equal(peak, 6);
   assert.equal(sent.length, 8);
   assert.equal(server.calls.filter(([kind]) => kind === "part").length, 0, "class A never sends bytes to the application");
   assert.ok(server.calls.some(([kind]) => kind === "sign"), "missing grants are signed by the application");
@@ -252,11 +252,11 @@ test("a started file holds no part slot until the earlier file releases one", as
   };
   const harness = await mount(t, server.api);
   harness.render().enqueue(["a", "b", "c"].map((path) => ({ path, file: new File(["abcdefgh"], path) })), "", () => false);
-  // Three files of four parts each over one eight-slot pool: the first two take every
-  // slot, and the third holds none although it already has an open session. That file is
-  // queued for the user, whatever its task status says.
-  const queue = await harness.until((queue) => queue.tasks.length === 3 && active === 8);
-  assert.deepEqual(queue.tasks.map((task) => task.activeParts), [4, 4, 0]);
+  // Three files of four parts each over one six-slot pool: the first takes four slots,
+  // the second the two that are left, and the third holds none although it already has an
+  // open session. That file is queued for the user, whatever its task status says.
+  const queue = await harness.until((queue) => queue.tasks.length === 3 && active === 6);
+  assert.deepEqual(queue.tasks.map((task) => task.activeParts), [4, 2, 0]);
   assert.deepEqual(queue.tasks.map((task) => task.status), ["uploading", "uploading", "uploading"]);
   gate.resolve();
   await harness.until((queue) => queue.tasks.every((task) => task.status === "completed"));
@@ -274,17 +274,89 @@ test("a selection queues in the order the list shows, not the order the drop del
     return send(id, number, blob, signal, progress);
   };
   const harness = await mount(t, server.api);
-  // Sixteen parts each, so one file can fill the whole eight-slot pool and the order the
+  // Sixteen parts each, so one file can fill the whole six-slot pool and the order the
   // files are served in is visible without waiting for anything to finish.
   harness.render().enqueue(["b", "a"].map((path) => ({ path, file: new File(["x".repeat(32)], path) })), "", () => false);
-  const queue = await harness.until((queue) => queue.tasks.some((task) => task.activeParts === 8));
+  const queue = await harness.until((queue) => queue.tasks.some((task) => task.activeParts === 6));
   // The drop delivered b first; the list shows a first, so a holds the pool and finishes
   // first. The other order would make a row switch from uploading to waiting for a reason
   // a person cannot see.
   assert.deepEqual(queue.tasks.map((task) => task.path), ["a", "b"]);
-  assert.equal(queue.tasks[0].activeParts, 8);
+  assert.equal(queue.tasks[0].activeParts, 6);
   assert.equal(queue.tasks[1].activeParts, 0);
   assert.deepEqual([...new Set(sent)], ["a"]);
   gate.resolve();
   await harness.until((queue) => queue.tasks.every((task) => task.status === "completed"));
+});
+
+// Admission and settlement are stages with their own bounds: the transfer window must be
+// filled with files that already hold a session, and a file whose bytes are placed must
+// stop occupying a slot while it settles. These three assert the boundary itself, because
+// blurring it is what made the queue's throughput follow its slowest control request.
+const named = (path, bytes = "ab") => ({ path, file: new File([bytes], path) });
+
+test("admission runs a page ahead of the bytes, so a started file never asks for a session", async (t) => {
+  const server = uploadServer(2);
+  const gate = deferred();
+  const send = server.api.uploadPart;
+  server.api.uploadPart = async (...args) => { await gate.promise; return send(...args); };
+  const harness = await mount(t, server.api);
+  const files = Array.from({ length: 30 }, (_, i) => named(`f${String(i).padStart(2, "0")}`));
+  harness.render().enqueue(files, "", () => false);
+  // Twelve files hold the transfer window. The queue keeps a page of sessions in hand for
+  // the files behind them, and no started file spends a round trip learning its own id.
+  await harness.until((queue) => queue.tasks.filter((task) => task.status === "uploading").length === 12 && server.sessions.size === 24);
+  assert.equal(server.calls.filter(([kind]) => kind === "status").length, 0, "a started file already holds its session");
+  assert.equal(new Set(server.calls.filter(([kind]) => kind === "create").map(([, , key]) => key)).size, 24, "each prepared file is admitted exactly once");
+  gate.resolve();
+  await harness.until((queue) => queue.tasks.every((task) => task.status === "completed"));
+});
+
+test("a settling file holds no transfer slot, so the window keeps moving while it publishes", async (t) => {
+  const server = uploadServer(2);
+  const commitGate = deferred();
+  const partGate = deferred();
+  const sendCommit = server.api.commitUpload;
+  server.api.commitUpload = async (id) => { await commitGate.promise; return sendCommit(id); };
+  const pathOf = (id) => [...server.sessions.values()].find((session) => session.id === id).path;
+  // The two files behind the window keep their parts open, so the window's rotation is
+  // visible: the twelve ahead of them are waiting for publication, not for a slot.
+  const behind = new Set(["c12", "c13"]);
+  const sendPart = server.api.uploadPart;
+  server.api.uploadPart = async (id, number, blob, signal, progress) => {
+    if (behind.has(pathOf(id))) await partGate.promise;
+    return sendPart(id, number, blob, signal, progress);
+  };
+  const harness = await mount(t, server.api);
+  const files = Array.from({ length: 14 }, (_, i) => named(`c${String(i).padStart(2, "0")}`));
+  harness.render().enqueue(files, "", () => false);
+  const queue = await harness.until((queue) =>
+    queue.tasks.filter((task) => task.status === "finalizing").length === 12
+    && queue.tasks.filter((task) => task.status === "uploading").length === 2);
+  assert.deepEqual(queue.tasks.filter((task) => task.status === "finalizing").map((task) => task.path),
+    files.slice(0, 12).map((file) => file.path));
+  assert.deepEqual(queue.tasks.filter((task) => task.status === "uploading").map((task) => task.path),
+    files.slice(12).map((file) => file.path));
+  commitGate.resolve();
+  partGate.resolve();
+  await harness.until((queue) => queue.tasks.every((task) => task.status === "completed"));
+});
+
+test("cancelling a prepared row aborts its session instead of leaving it open", async (t) => {
+  const server = uploadServer(2);
+  const gate = deferred();
+  const send = server.api.uploadPart;
+  server.api.uploadPart = async (...args) => { await gate.promise; return send(...args); };
+  const harness = await mount(t, server.api);
+  const files = Array.from({ length: 30 }, (_, i) => named(`p${String(i).padStart(2, "0")}`));
+  harness.render().enqueue(files, "", () => false);
+  const queue = await harness.until((queue) => server.sessions.size === 24
+    && queue.tasks.some((task) => task.status === "queued" && task.uploadId));
+  const prepared = queue.tasks.find((task) => task.status === "queued" && task.uploadId);
+  assert.ok(prepared && prepared.uploadId, "a row behind the window holds a prepared session");
+  queue.cancel(prepared.id);
+  await harness.until((queue) => !queue.tasks.some((task) => task.id === prepared.id));
+  assert.deepEqual(server.calls.filter(([kind]) => kind === "abort"), [["abort", prepared.uploadId]], "the prepared session is aborted");
+  assert.equal(server.calls.filter(([kind, input]) => kind === "create" && input.path === prepared.path).length, 1, "the prepared session is never reallocated");
+  gate.resolve();
 });

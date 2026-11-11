@@ -6,29 +6,38 @@ import { foldersWithoutFiles, type UploadEntry } from "./uploadSelection";
 import { claimUploadPath } from "./uploadOwnership";
 import { pendingFileOperation, setUploadOwner, settleFileOperation } from "./uploadPersistence";
 
-// Part requests in flight across every file. A part is long enough that even a slow
-// stream keeps its connection busy, so eight 16 MiB parts already hold 128 MiB in
-// flight; more only costs payload memory. This pool is the only bound on byte
-// concurrency: the server admits part bodies with one process-wide pool and does
-// not tell clients how many to send, so tasks share this pool instead of each
-// respecting its own budget.
-const PART_POOL_SIZE = 8;
+// Part requests in flight across every file. The byte path is a single HTTP/1.1 origin
+// — the Network panel's Protocol column shows http/1.1 for the bucket — so six sockets
+// per origin is all that can move at once, and a deeper pool only parks the extra
+// requests in the browser's socket queue while its own progress bar stays at zero.
+// Payload is bounded by the part size times this count (16 MiB × 6), which is the other
+// reason to keep it at the socket number rather than above it.
+const PART_POOL_SIZE = 6;
 // Sessions admitted per request, and settlements per request. A page of creates is cheap
-// (one conditional URL each, signed locally), so the queue asks for 32 at a time; commits
-// are bounded by the worker pool that settles them, so eight per request and a two-second
-// linger for a partial page, which keeps a slow tail from waiting for a full batch.
+// (one conditional URL each, signed locally), so one request may carry a whole page of the
+// look-ahead; commits are bounded by the worker pool that settles them, so eight per
+// request and a two-second linger for a partial page, which keeps a slow tail from waiting
+// for a full batch. A settlement no longer holds a transfer slot, so that linger now costs
+// one row's latency instead of the pipeline's throughput.
 const CREATE_BATCH_SIZE = 32;
 const COMMIT_BATCH_SIZE = 8;
 const COMMIT_LINGER_MS = 2000;
-// Tasks allowed to be running at all: claiming a path, allocating the session, moving
-// parts and committing. One admission page, so the window holds exactly what the batch
-// transport asks for at once: 32 sessions arrive in one request, and the tasks that cannot
-// hold one of the eight byte slots wait for one. That wait is the point — an admitted task
-// takes a freed slot immediately, so a wave of small files no longer spends a fresh
-// handshake after the last byte of the wave it replaced, and the part pool never drains
-// between waves. This bounds handshakes and outstanding requests, not payload: a large
-// file still gets its parts from the same eight-slot pool.
-const START_POOL_SIZE = 32;
+// Sessions kept in hand ahead of the transfer window. A page of creates costs about 1.7 s
+// (measured in 741f910 against this bucket), so the look-ahead has to cover several
+// seconds of the window's rotation: 24 is two windows, i.e. the window can be refilled
+// twice before a create page has to answer, and it still leaves as one request per page
+// (the server admits 32). It is also the bound on sessions this tab holds open: 24 in
+// hand plus 12 transferring, against an idle window of two hours.
+const ADMIT_AHEAD = 24;
+// Files that may be transferring at once. A slot is held from the moment a file starts
+// moving until its bytes are placed; admission and settlement keep their own bounds and
+// never take one, so this window no longer mixes stages that wait on the network with
+// stages that move bytes. Six sockets are the byte bound, so the window only has to keep
+// those six busy while files rotate: six more absorb the gap between a file's last part
+// and the moment its successor takes the freed socket. The old 32 held every stage at
+// once, so most of the window was always waiting and throughput followed the slowest
+// stage rather than the link.
+const TRANSFER_WINDOW = 12;
 // The page is published at most this often. A file changes state several times, and
 // every publication re-derives the row projection over the whole selection, so a
 // 20k-file folder would publish ~100k times and never leave the main thread. Task
@@ -276,8 +285,21 @@ export function useUploadQueue(onUploaded: (task: UploadTask, item: Item) => voi
   // and re-renders the page, so a 20k-file folder would publish ~100k times. The map also
   // keeps one update O(1) instead of rebuilding the whole task array per change.
   const tasks = useRef(new Map<string, UploadTask>());
-  // Ids waiting for a start slot, in selection order.
+  // Ids still waiting for a transfer slot, in selection order. A queued file may already
+  // hold its session — admission is a stage of its own and does not remove it from here.
   const pending = useRef(new Set<string>());
+  // Ids currently holding a transfer slot, from the moment a file starts moving bytes to
+  // the moment its bytes are placed. Admission and settlement never take one, so this set
+  // — not "started tasks" — is the byte concurrency the part pool hands slots to.
+  const transferring = useRef(new Set<string>());
+  // Admission in flight or in hand, one per file. Its presence is the right to start that
+  // file without waiting for a create: whoever starts it awaits this promise instead of
+  // sending a second request, and the session it carries is used once.
+  const admissions = useRef(new Map<string, { controller: AbortController; promise: Promise<FileUploadSession> }>());
+  // Files a look-ahead admission already refused. The window is the authority for a
+  // refusal — it owns the row's error and its retry — so retrying the same refusal on
+  // every completion would only turn one bad destination into an endless request loop.
+  const admissionFailed = useRef(new Set<string>());
   // Directory tasks that have not completed. A task under one of them must wait, and
   // answering "is an ancestor still a pending directory" by scanning every task would
   // make each start O(tasks).
@@ -293,10 +315,11 @@ export function useUploadQueue(onUploaded: (task: UploadTask, item: Item) => voi
   const finishRef = useRef(onUploaded);
   const verified = useRef(new Map<string, { file: File; parts: Map<number, string> }>());
   const pollBusy = useRef(false);
-  // Admission and settlement pages. The queue still runs one task at a time; these only
-  // collapse the two control requests a task would otherwise send alone. A test double
-  // without the batch calls keeps the per-file path, so the queue's own behaviour stays
-  // covered by the existing suite.
+  // Admission and settlement pages. These collapse the two control requests a task would
+  // otherwise send alone; the look-ahead fills a page with the files that will start next,
+  // which is why a prepare costs one request for a whole window rather than one per file.
+  // A test double without the batch calls keeps the per-file path, so the queue's own
+  // behaviour stays covered by the existing suite.
   const createBatch = useRef<BatchState<PendingCreate>>({ items: [], flushing: false });
   const settleBatch = useRef<BatchState<PendingSettle>>({ items: [], flushing: false });
 
@@ -439,6 +462,18 @@ export function useUploadQueue(onUploaded: (task: UploadTask, item: Item) => voi
     pathClaims.current.delete(id);
     release();
   }, []);
+  // A prepared session outlives no row: dropping the row drops the session too, so a
+  // cancelled or re-selected file does not leave an open session behind for its whole
+  // two-hour idle window. The abort only discards the answer — the server may already
+  // have created the session — which is exactly the case the create key exists for.
+  const dropAdmission = useCallback((id: string) => {
+    const admission = admissions.current.get(id);
+    if (admission) {
+      admissions.current.delete(id);
+      admission.controller.abort();
+    }
+    admissionFailed.current.delete(id);
+  }, []);
   const patch = useCallback((id: string, changes: Partial<UploadTask>) => {
     const current = tasks.current.get(id);
     if (!current) return;
@@ -457,11 +492,13 @@ export function useUploadQueue(onUploaded: (task: UploadTask, item: Item) => voi
       if (!task) continue;
       tasks.current.delete(id);
       pending.current.delete(id);
+      transferring.current.delete(id);
       if (task.isDir) openDirs.current.delete(task.path);
+      dropAdmission(id);
       releaseClaim(id);
     }
     schedulePublish();
-  }, [releaseClaim, schedulePublish]);
+  }, [dropAdmission, releaseClaim, schedulePublish]);
   const complete = useCallback((task: UploadTask, item: Item) => {
     if (!mounted.current || !tasks.current.has(task.id)) return;
     if (task.uploadId) verified.current.delete(task.uploadId);
@@ -489,6 +526,81 @@ export function useUploadQueue(onUploaded: (task: UploadTask, item: Item) => voi
       } else patch(task.id, { status: "failed", speed: 0, terminalState: task.isDir ? undefined : op.state === "failed" ? "failed" : "aborted", error: op.error ? problemText(op.error) : t("drive.uploadFailed") });
     } else { patch(task.id, { status: "finalizing", speed: 0 }); }
   }, [complete, patch, remove]);
+
+  // Admission is a stage of its own: claim the path, freeze the intent, allocate the
+  // session. It runs ahead of the transfer window so a file that starts moving already
+  // holds its session. The order inside it — claim, then create — is the order the server's
+  // fences require: admitting a path is what ends an older open session for that path, so
+  // creating before the cross-tab claim would let a second tab kill this one's session.
+  const admitSession = useCallback(async (task: UploadTask, signal: AbortSignal): Promise<FileUploadSession> => {
+    if (!pathClaims.current.has(task.id)) {
+      let release: (() => void) | null;
+      const claimController = new AbortController();
+      const abortClaim = () => claimController.abort();
+      signal.addEventListener("abort", abortClaim, { once: true });
+      try { release = await claimUploadPath(owner.current, task.path, claimController.signal); }
+      catch (error) {
+        if (signal.aborted) throw error;
+        throw new Error(t("drive.uploadCoordinationUnavailable"), { cause: error });
+      } finally { signal.removeEventListener("abort", abortClaim); }
+      if (signal.aborted) { release?.(); throw new DOMException("Upload canceled", "AbortError"); }
+      if (!release) throw new Error(t("drive.uploadAlreadyInProgress"));
+      pathClaims.current.set(task.id, release);
+    }
+    let intent = task.intent;
+    if (!intent) {
+      if (!task.file) throw new Error(t("drive.uploadFileUnavailable"));
+      let condition: FileUploadInput["condition"] = { mode: "create" };
+      if (task.overwrite) {
+        const old = await api.metadata(task.path);
+        if (old.kind !== "file" || !old.contentRevision) throw new Error("The destination cannot be replaced safely.");
+        condition = { mode: "replace", contentRevision: old.contentRevision };
+      }
+      const sourceModifiedAt = await supportsSourceModifiedAt();
+      if (signal.aborted) throw new DOMException("Upload canceled", "AbortError");
+      intent = { path: task.path, size: task.size, mediaType: task.file?.type || "application/octet-stream", condition,
+        ...(task.parents && condition.mode === "create" ? { parents: true as const } : {}),
+        ...(sourceModifiedAt && task.modifiedAt !== undefined ? { sourceModifiedAt: new Date(task.modifiedAt).toISOString() } : {}) };
+      // Retain the exact intent/key in memory before allocation, including a lost create ACK.
+      patch(task.id, { intent });
+    }
+    const session = await admitUpload(intent, task.createKey, signal);
+    patch(task.id, { uploadId: session.id, allocationRejected: false });
+    return session;
+  }, [admitUpload, patch]);
+
+  // One admission per file, whoever asks first: the look-ahead that prepares a page and
+  // the window that starts the file await the same request, so a file can never be
+  // admitted twice — which for one path would end the other session.
+  const ensureAdmission = useCallback((task: UploadTask) => {
+    const existing = admissions.current.get(task.id);
+    if (existing) return existing;
+    const controller = new AbortController();
+    const promise = admitSession(task, controller.signal);
+    // An entry this tab prepares and then never starts (a cancellation) must not surface as
+    // an unhandled rejection; whoever drives the row handles the refusal.
+    promise.catch(() => {});
+    const entry = { controller, promise };
+    admissions.current.set(task.id, entry);
+    void promise.then(
+      () => { admissionFailed.current.delete(task.id); },
+      () => {
+        if (admissions.current.get(task.id) === entry) admissions.current.delete(task.id);
+        // The window owns a refusal — it decides between waiting on the blocker, retrying
+        // and failing the row — so the look-ahead steps back and lets the queue move on.
+        admissionFailed.current.add(task.id);
+        pumpRef.current();
+      },
+    );
+    return entry;
+  }, [admitSession]);
+  // A file stops holding a transfer slot the moment its bytes are placed. The settlement
+  // has its own page and its own bound, so waiting for it here would only make the next
+  // file's first byte wait for this row's answer.
+  const releaseWindow = useCallback((id: string) => {
+    if (!transferring.current.delete(id)) return;
+    pumpRef.current();
+  }, []);
 
   const run = useCallback(async (id: string, runtime: Runtime) => {
     const signal = runtime.controller.signal;
@@ -526,46 +638,22 @@ export function useUploadQueue(onUploaded: (task: UploadTask, item: Item) => voi
         else { if (result.kind !== "folder") throw new Error("A file occupies the destination folder."); complete(task, result); }
         return;
       }
-      if (!pathClaims.current.has(id)) {
-        let release: (() => void) | null;
-        const claimController = new AbortController();
-        const abortClaim = () => claimController.abort();
-        signal.addEventListener("abort", abortClaim, { once: true });
-        try { release = await claimUploadPath(owner.current, task.path, claimController.signal); }
-        catch (error) {
-          if (signal.aborted) return;
-          throw new Error(t("drive.uploadCoordinationUnavailable"), { cause: error });
-        } finally { signal.removeEventListener("abort", abortClaim); }
-        if (signal.aborted) { release?.(); return; }
-        if (!release) throw new Error(t("drive.uploadAlreadyInProgress"));
-        pathClaims.current.set(id, release);
-      }
       let session: FileUploadSession;
       // True only when this attempt allocated the session. A session that was just created
       // reports how much it holds; one this attempt resumed may already carry parts whose
       // receipts were never seen, so only the first case may trust that count.
       let allocated = false;
-      if (task.uploadId) {
-        session = await api.uploadStatus(task.uploadId, signal);
+      // A session the look-ahead prepared is already in hand: starting the file must not
+      // ask the server again. A file with no admission yet is admitted here, so a queue
+      // that has not caught up (or a resumed row) still works — that is the same request,
+      // only later. Clearing the refused mark here re-arms the look-ahead for a file the
+      // window is about to retry, which is the only place a refusal gets a second opinion.
+      admissionFailed.current.delete(id);
+      const admission = task.uploadId && !admissions.current.has(id) ? undefined : admissions.current.get(id) ?? ensureAdmission(task);
+      if (!admission) {
+        session = await api.uploadStatus(task.uploadId!, signal);
       } else {
-        let intent = task.intent;
-        if (!intent) {
-          if (!task.file) { patch(id, { status: "failed", error: t("drive.uploadFileUnavailable"), speed: 0 }); return; }
-          let condition: FileUploadInput["condition"] = { mode: "create" };
-          if (task.overwrite) {
-            const old = await api.metadata(task.path);
-            if (old.kind !== "file" || !old.contentRevision) throw new Error("The destination cannot be replaced safely.");
-            condition = { mode: "replace", contentRevision: old.contentRevision };
-          }
-          const sourceModifiedAt = await supportsSourceModifiedAt();
-          if (signal.aborted) return;
-          intent = { path: task.path, size: task.size, mediaType: task.file?.type || "application/octet-stream", condition,
-            ...(task.parents && condition.mode === "create" ? { parents: true as const } : {}),
-            ...(sourceModifiedAt && task.modifiedAt !== undefined ? { sourceModifiedAt: new Date(task.modifiedAt).toISOString() } : {}) };
-          // Retain the exact intent/key in memory before allocation, including a lost create ACK.
-          patch(id, { intent });
-        }
-        try { session = await admitUpload(intent, task.createKey, signal); }
+        try { session = await admission.promise; }
         catch (error) {
           if (error instanceof ApiError && [400, 401, 403, 409, 413, 422, 507].includes(error.status)) patch(id, { allocationRejected: true });
           // An upload that holds the path is one that is committing: an open session fences
@@ -644,8 +732,9 @@ export function useUploadQueue(onUploaded: (task: UploadTask, item: Item) => voi
           throw error;
         }
         allocated = true;
-        patch(id, { uploadId: session.id, allocationRejected: false });
+        admissions.current.delete(id);
       }
+      patch(id, { uploadId: session.id, allocationRejected: false });
       if (signal.aborted) return;
       task = tasks.current.get(id)!;
       if (session.state === "committed") { if (!session.result) throw new Error("The upload result is incomplete."); complete(task, session.result); return; }
@@ -885,6 +974,9 @@ export function useUploadQueue(onUploaded: (task: UploadTask, item: Item) => voi
         if (known.size !== session.partCount) { patch(id, { loaded: received, status: "queued", speed: 0 }); return; }
       }
       patch(id, { status: "finalizing", uploaded: true, loaded: session.size, speed: 0 });
+      // The bytes are placed. Give the slot back before waiting for the settlement: the
+      // next admitted file starts streaming now, and this row's answer arrives on its own.
+      releaseWindow(id);
       const result = await commitUpload(session.id, signal, settleUpload);
       if (signal.aborted) return;
       if (isOperation(result)) { patch(id, { operationId: result.id }); }
@@ -898,18 +990,18 @@ export function useUploadQueue(onUploaded: (task: UploadTask, item: Item) => voi
       } else { patch(id, { status: "failed", error: message(error), speed: 0 }); }
     } finally {
       running.current.delete(id);
+      transferring.current.delete(id);
       pumpRef.current();
     }
-  }, [acquirePart, admitUpload, applyOperation, complete, patch, releasePart, settleUpload]);
+  }, [acquirePart, applyOperation, complete, ensureAdmission, patch, releasePart, releaseWindow, settleUpload]);
   const pump = useCallback(() => {
     if (!ready.current || !mounted.current) return;
-    // Start at most START_POOL_SIZE tasks at once. The part pool still decides how many
-    // bytes are in flight and the server still does not publish a per-session number to
-    // respect; this window bounds the *handshakes* instead. Starting all 20k tasks of a
-    // folder selection at once opened 20k upload sessions and 20k pending requests for a
-    // queue that can only stream eight parts, and left the browser holding every one.
-    // A child waits only for its unfinished directory task, which starts this again when
-    // it settles.
+    // Two stages, two bounds. Admission runs ADMIT_AHEAD files ahead of the window, so a
+    // file that starts moving already holds its session and its first byte never waits for
+    // a create page; the window then only bounds files whose bytes are moving, which is
+    // what the part pool can actually keep busy. A child waits only for its unfinished
+    // directory task, which starts this again when it settles — and a directory is never
+    // prepared ahead of its own children.
     const blockedBy = (path: string): boolean => {
       let slash = path.lastIndexOf("/");
       while (slash > 0) {
@@ -919,9 +1011,24 @@ export function useUploadQueue(onUploaded: (task: UploadTask, item: Item) => voi
       }
       return false;
     };
+    for (const id of pending.current) {
+      if (admissions.current.size >= ADMIT_AHEAD) break;
+      if (admissions.current.has(id) || admissionFailed.current.has(id)) continue;
+      const task = tasks.current.get(id);
+      if (!task || task.isDir || task.status !== "queued" || task.cancelRequested) continue;
+      // A file that already holds a session is resumed, not admitted again: replaying its
+      // key only returns the session it already has, and what a repeated attempt needs to
+      // learn first is that session's state — which the window asks for itself.
+      if (task.uploadId || task.operationId || task.waitingFor) continue;
+      // A path held by a recorded deletion is a wait, not an admission: the row has to say
+      // so, and a session allocated ahead of that decision would be one nobody can use.
+      if (pendingFileOperation(task.path)) continue;
+      if (blockedBy(task.path)) continue;
+      ensureAdmission(task);
+    }
     const starts: UploadTask[] = [];
     for (const id of pending.current) {
-      if (running.current.size + starts.length >= START_POOL_SIZE) break;
+      if (transferring.current.size + starts.length >= TRANSFER_WINDOW) break;
       const task = tasks.current.get(id);
       if (!task || task.status !== "queued" || task.cancelRequested || running.current.has(id)) {
         pending.current.delete(id);
@@ -936,16 +1043,21 @@ export function useUploadQueue(onUploaded: (task: UploadTask, item: Item) => voi
       // Pool priority follows the order files first start, kept across retries/turns.
       if (!ranks.current.has(task.id)) ranks.current.set(task.id, nextRank.current++);
       running.current.set(task.id, { controller: new AbortController() });
+      transferring.current.add(task.id);
       patch(task.id, { status: "uploading", error: undefined });
     }
     for (const task of starts) void run(task.id, running.current.get(task.id)!);
-  }, [patch, run]);
+  }, [ensureAdmission, patch, run]);
   pumpRef.current = pump;
   const cancel = useCallback((id: string) => {
     const root = tasks.current.get(id);
     const targets = [...tasks.current.values()].filter((task) => task.id === id || root?.isDir && task.path.startsWith(`${root.path}/`));
     for (const task of targets) {
       running.current.get(task.id)?.controller.abort();
+      // A prepared session is this row's, so cancelling the row must discard it too: the
+      // intent and key stay on the task, which is what lets the abort below recover the
+      // allocation even when its acknowledgement never arrived.
+      dropAdmission(task.id);
       patch(task.id, { cancelRequested: true, status: "finalizing", speed: 0 });
       void (async () => {
         try {
@@ -991,15 +1103,18 @@ export function useUploadQueue(onUploaded: (task: UploadTask, item: Item) => voi
     }
     // Cancelling is a gesture: the rows must answer now, not on the next publish tick.
     publish();
-  }, [applyOperation, complete, patch, publish, remove]);
+  }, [applyOperation, complete, dropAdmission, patch, publish, remove]);
   const retry = useCallback((id: string) => {
     const task = tasks.current.get(id);
     if (task?.cancelRequested) { cancel(id); return; }
+    // A retry that starts a new session must not resume the old one, and a retry that keeps
+    // its key must still get a fresh look (the prepare may have been refused before).
+    if (task?.terminalState) dropAdmission(id);
     patch(id, { status: "queued", error: undefined, speed: 0, retryRequested: true,
       ...(task?.terminalState ? { uploadId: undefined, operationId: undefined, intent: undefined, createKey: taskId(), terminalState: undefined, uploaded: false, loaded: 0 } : {}) });
     publish();
     pumpRef.current();
-  }, [cancel, patch, publish]);
+  }, [cancel, dropAdmission, patch, publish]);
   // Resuming is a decision, so it is a gesture: the task goes back to the queue with its
   // record gone, and the next attempt asks the server instead of the browser what the
   // path may take. A deletion that is still queued, running or of unknown outcome is not
@@ -1030,6 +1145,10 @@ export function useUploadQueue(onUploaded: (task: UploadTask, item: Item) => voi
       if (old) {
         if (entry.file && !old.isDir && !old.cancelRequested && (!old.file || old.status === "failed")) {
           if (entry.file.size !== old.size) { patch(old.id, { error: t("drive.reselectedFileChanged") }); continue; }
+          // A new selection may reuse the path but not the session prepared for the old file;
+          // a session that starts again must come from a fresh admission, and the size check
+          // above is the only guarantee that its geometry would have matched.
+          dropAdmission(old.id);
           patch(old.id, { file: entry.file, status: "queued", error: undefined, retryRequested: true,
             ...(old.terminalState ? { uploadId: undefined, operationId: undefined, intent: undefined, createKey: taskId(), terminalState: undefined, uploaded: false, loaded: 0 } : {}) });
         }
@@ -1056,7 +1175,7 @@ export function useUploadQueue(onUploaded: (task: UploadTask, item: Item) => voi
     // The user just picked the files; publish the rows before the first network hop.
     publish();
     pumpRef.current();
-  }, [insert, patch, publish]);
+  }, [dropAdmission, insert, patch, publish]);
   useEffect(() => {
     mounted.current = true;
     const controller = new AbortController();
@@ -1128,6 +1247,12 @@ export function useUploadQueue(onUploaded: (task: UploadTask, item: Item) => voi
       deadlines.current.clear();
       for (const runtime of running.current.values()) runtime.controller.abort();
       running.current.clear();
+      transferring.current.clear();
+      // Prepared sessions have no row to outlive: leaving the page drops them the way it
+      // dropped every other in-memory promise, and their idle window expires them.
+      for (const admission of admissions.current.values()) admission.controller.abort();
+      admissions.current.clear();
+      admissionFailed.current.clear();
       for (const release of pathClaims.current.values()) release();
       pathClaims.current.clear();
     };
