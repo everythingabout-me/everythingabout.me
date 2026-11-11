@@ -398,6 +398,10 @@ func (s *Server) filesHandler() http.Handler {
 		case fc.Base + "/uploads":
 			routes["GET"] = s.handleFilesListUploads
 			routes["POST"] = s.handleFilesCreateUpload
+		case fc.Base + "/uploads/batch":
+			routes["POST"] = s.handleFilesCreateUploadBatch
+		case fc.Base + "/uploads/commit/batch":
+			routes["POST"] = s.handleFilesCommitUploadBatch
 		default:
 			if strings.HasPrefix(r.URL.Path, fc.Base+"/subscriptions/") {
 				suffix := strings.TrimPrefix(r.URL.Path, fc.Base+"/subscriptions/")

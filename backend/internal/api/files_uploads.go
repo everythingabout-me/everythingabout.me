@@ -106,7 +106,9 @@ func filesUploadMaxSize(native fileops.NativeActions) int64 {
 }
 
 type filesCreateUploadRequest struct {
-	Destination      *fc.Destination   `json:"destination"`
+	Destination *fc.Destination `json:"destination"`
+	// IdempotencyKey is used by the batch form only; the single create reads the header.
+	IdempotencyKey   string            `json:"idempotencyKey,omitempty"`
 	Target           *fc.EntrySelector `json:"target"`
 	Path             *string           `json:"path"`
 	Size             *int64            `json:"size"`

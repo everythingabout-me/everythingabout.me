@@ -1,0 +1,121 @@
+package api
+
+import (
+	"bytes"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+
+	fc "everythingabout.me/backend/internal/filecontract"
+)
+
+// Batch bounds. Create is the only call whose cost is paid per file before any bytes
+// move, so one request admits a page of a small-file import; commit is bounded by the
+// worker pool that settles it, eight being what one request can finish inside a couple of
+// seconds. Both are page sizes, not rates: the client sends the next page when it needs it.
+const (
+	filesUploadCreateBatchLimit = 32
+	filesUploadCommitBatchLimit = 8
+)
+
+// batchRecorder is a ResponseWriter for one inner handler: the batch reuses the single
+// resource's handler instead of a second implementation of admission, authorization and
+// error mapping, so the two cannot drift.
+type batchRecorder struct {
+	header http.Header
+	status int
+	body   bytes.Buffer
+}
+
+func newBatchRecorder() *batchRecorder {
+	return &batchRecorder{header: http.Header{}, status: http.StatusOK}
+}
+func (b *batchRecorder) Header() http.Header         { return b.header }
+func (b *batchRecorder) Write(p []byte) (int, error) { return b.body.Write(p) }
+func (b *batchRecorder) WriteHeader(code int) {
+	if b.status == http.StatusOK {
+		b.status = code
+	}
+}
+
+// handleFilesCreateUploadBatch admits up to 32 sessions in one request. Each item is the
+// same body the single create endpoint takes, plus its own idempotency key, and each item
+// answers independently: one name conflict does not fail the page.
+func (s *Server) handleFilesCreateUploadBatch(w http.ResponseWriter, r *http.Request, f *fileRequest) error {
+	var req struct {
+		Items []filesCreateUploadRequest `json:"items"`
+	}
+	if err := strictFilesJSON(r, &req); err != nil {
+		return err
+	}
+	if len(req.Items) == 0 || len(req.Items) > filesUploadCreateBatchLimit {
+		return fc.NewProblem(400, "invalid_request", fmt.Sprintf("Between one and %d items are required.", filesUploadCreateBatchLimit))
+	}
+	items := make([]any, len(req.Items))
+	for i := range req.Items {
+		item := req.Items[i]
+		key := item.IdempotencyKey
+		if key == "" {
+			key = randomFilesKey()
+		}
+		body, err := json.Marshal(item)
+		if err != nil {
+			items[i] = map[string]any{"error": fc.NewProblem(400, "invalid_request", "The item could not be encoded.")}
+			continue
+		}
+		inner := r.Clone(r.Context())
+		inner.Method = http.MethodPost
+		inner.URL.Path = fc.Base + "/uploads"
+		inner.URL.RawQuery = ""
+		inner.Body = io.NopCloser(bytes.NewReader(body))
+		inner.ContentLength = int64(len(body))
+		inner.Header = r.Header.Clone()
+		inner.Header.Set("Idempotency-Key", key)
+		rec := newBatchRecorder()
+		if err := s.handleFilesCreateUpload(rec, inner, f); err != nil {
+			items[i] = map[string]any{"error": filesProblem(err)}
+			continue
+		}
+		items[i] = map[string]any{"upload": json.RawMessage(rec.body.Bytes())}
+	}
+	return writeFilesJSON(w, http.StatusOK, map[string]any{"items": items})
+}
+
+// handleFilesCommitUploadBatch settles up to eight sessions in one request. The answer per
+// item is whatever the single commit answered: the published file, or the Operation that
+// is still publishing it.
+func (s *Server) handleFilesCommitUploadBatch(w http.ResponseWriter, r *http.Request, f *fileRequest) error {
+	var req struct {
+		Items []struct {
+			ID string `json:"id"`
+		} `json:"items"`
+	}
+	if err := strictFilesJSON(r, &req); err != nil {
+		return err
+	}
+	if len(req.Items) == 0 || len(req.Items) > filesUploadCommitBatchLimit {
+		return fc.NewProblem(400, "invalid_request", fmt.Sprintf("Between one and %d items are required.", filesUploadCommitBatchLimit))
+	}
+	items := make([]any, len(req.Items))
+	for i, item := range req.Items {
+		if item.ID == "" {
+			items[i] = map[string]any{"error": fc.NewProblem(400, "invalid_request", "Each item needs an upload id.")}
+			continue
+		}
+		inner := r.Clone(r.Context())
+		inner.Method = http.MethodPost
+		inner.URL.Path = fc.Base + "/uploads/" + item.ID + "/commit"
+		inner.URL.RawQuery = ""
+		inner.Body = http.NoBody
+		inner.ContentLength = 0
+		inner.Header = r.Header.Clone()
+		rec := newBatchRecorder()
+		if err := s.handleFilesCommitUpload(rec, inner, f); err != nil {
+			items[i] = map[string]any{"error": filesProblem(err)}
+			continue
+		}
+		items[i] = map[string]any{"result": json.RawMessage(rec.body.Bytes())}
+	}
+	return writeFilesJSON(w, http.StatusOK, map[string]any{"items": items})
+}
