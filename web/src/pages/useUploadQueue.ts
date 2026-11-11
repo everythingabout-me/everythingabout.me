@@ -21,10 +21,13 @@ const CREATE_BATCH_SIZE = 32;
 const COMMIT_BATCH_SIZE = 8;
 const COMMIT_LINGER_MS = 2000;
 // Tasks allowed to be running at all: claiming a path, allocating the session, moving
-// parts and committing. Eight matches the part pool, so a wave of small files cannot
-// open hundreds of upload sessions for bytes that can only stream eight at a time.
-// This bounds handshakes and outstanding requests, not payload: a large file still
-// gets its parts from the same eight-slot pool.
+// parts and committing. One admission page, so the window holds exactly what the batch
+// transport asks for at once: 32 sessions arrive in one request, and the tasks that cannot
+// hold one of the eight byte slots wait for one. That wait is the point — an admitted task
+// takes a freed slot immediately, so a wave of small files no longer spends a fresh
+// handshake after the last byte of the wave it replaced, and the part pool never drains
+// between waves. This bounds handshakes and outstanding requests, not payload: a large
+// file still gets its parts from the same eight-slot pool.
 const START_POOL_SIZE = 32;
 // The page is published at most this often. A file changes state several times, and
 // every publication re-derives the row projection over the whole selection, so a
