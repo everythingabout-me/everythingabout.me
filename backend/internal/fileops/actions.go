@@ -61,8 +61,17 @@ type actionBinding struct {
 
 const nativeTreeMoveStrategy = "native_tree_move"
 
+// maxActionEntries is the one bound on a captured subtree: it counts what the capture
+// admits, so it is also the bound on the round trips that admit it.
+//
+// There is deliberately no separate page budget. A listing page is transport, and a
+// legitimate tree needs one page per folder — the page budget used to be a flat 1000,
+// so a tree of 1017 year/month folders (4,096 entries, nothing unusual) could not be
+// captured at all: every recursive action on it failed as "request_too_large" and the
+// delete retried that deterministic failure forever. The invariant that replaces it is
+// per page, not per walk: a page must carry an entry unless it is the last page, so a
+// driver that pages without progress is refused where it happens (see listFolder).
 const maxActionEntries = 100000
-const maxActionPages = 1000
 
 // listConcurrency is how many folders one BFS level lists at once. It matches the
 // observation pool: enough to turn a wide folder's round trips into one wave, small
@@ -523,7 +532,7 @@ func captureAction(ctx context.Context, req ActionRequest, native NativeActions)
 // listConcurrency, instead of one sequential round trip per folder: a flat folder of 776
 // subfolders cost 776 sequential LISTs (about a minute against a bucket in another
 // region) and made every recursive action on it a dead request. The walk stays bounded by
-// maxActionPages and maxActionEntries, which is the bound that matters — not a clock.
+// maxActionEntries, which is the bound that matters — not a clock.
 func snapshotActionTree(ctx context.Context, native NativeActions, root storage.Path, recursive bool) ([]storage.Entry, error) {
 	first, err := observe(ctx, native, root)
 	if err != nil {
@@ -554,13 +563,12 @@ func snapshotActionTree(ctx context.Context, native NativeActions, root storage.
 }
 
 // treeWalk holds the bookkeeping shared by the concurrent listings of one snapshot.
-// Network calls happen outside the lock; discovery, deduplication and both limits are
-// decided under it, so concurrency cannot loosen them.
+// Network calls happen outside the lock; discovery, deduplication and the entry limit
+// are decided under it, so concurrency cannot loosen them.
 type treeWalk struct {
 	native  NativeActions
 	mu      sync.Mutex
 	seen    map[string]bool
-	pages   int
 	entries int
 }
 
@@ -595,13 +603,6 @@ func (w *treeWalk) listFolder(ctx context.Context, folder storage.Entry, recursi
 	cursors := map[string]bool{}
 	var children []storage.Entry
 	for {
-		w.mu.Lock()
-		w.pages++
-		overPages := w.pages > maxActionPages
-		w.mu.Unlock()
-		if overPages {
-			return nil, E("request_too_large", nil)
-		}
 		page, err := w.native.List(ctx, folder.Path, storage.PageRequest{Cursor: cursor, Limit: 1000})
 		if err != nil {
 			return nil, err
@@ -611,6 +612,11 @@ func (w *treeWalk) listFolder(ctx context.Context, folder storage.Entry, recursi
 		}
 		if !recursive && len(page.Entries) > 0 {
 			return nil, E("directory_not_empty", nil)
+		}
+		if len(page.Entries) == 0 && page.NextCursor != "" {
+			// A page that admits nothing and still asks for another is broken pagination,
+			// not a large folder: the only honest terminator is "no more children".
+			return nil, E("invalid_native_result", fmt.Errorf("listing %q paged without yielding an entry (cursor %q)", folder.Path, page.NextCursor))
 		}
 		w.mu.Lock()
 		for _, e := range page.Entries {
@@ -623,7 +629,7 @@ func (w *treeWalk) listFolder(ctx context.Context, folder storage.Entry, recursi
 			w.entries++
 			if w.entries > maxActionEntries {
 				w.mu.Unlock()
-				return nil, E("request_too_large", nil)
+				return nil, E("request_too_large", fmt.Errorf("capturing %q stopped at the %d-entry limit", folder.Path, maxActionEntries))
 			}
 			children = append(children, cloneActionEntry(e))
 		}
@@ -1250,16 +1256,17 @@ func observeActionResult(ctx context.Context, native NativeActions, op Operation
 		cursors := map[string]bool{}
 		seen := map[string]bool{}
 		cursor := ""
-		for pageNumber := 0; ; pageNumber++ {
-			if pageNumber >= maxActionPages {
-				return observation, E("request_too_large", nil)
-			}
+		for {
 			page, err := native.List(ctx, req.To, storage.PageRequest{Limit: 1000, Cursor: cursor})
 			if err != nil {
 				return observation, err
 			}
 			if len(page.Entries) > 1000 {
 				return observation, E("invalid_native_result", nil)
+			}
+			if len(page.Entries) == 0 && page.NextCursor != "" {
+				// Same rule as the capture walk: no entry, no next page.
+				return observation, E("invalid_native_result", fmt.Errorf("listing %q paged without yielding an entry (cursor %q)", req.To, page.NextCursor))
 			}
 			for _, child := range page.Entries {
 				key := comparePath(op.Root, child.Path)

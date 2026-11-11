@@ -2,6 +2,7 @@ package fileops
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -114,15 +115,85 @@ func TestSnapshotActionTreeRefusesNonRecursiveNonEmpty(t *testing.T) {
 	}
 }
 
-// The page limit is what bounds a recursive capture; it must still fire now that sibling
-// folders are listed concurrently.
-func TestSnapshotActionTreeBoundsPages(t *testing.T) {
+// A capture is bounded by entries, never by round trips: one year/month tree of 1,017
+// folders and 4,096 entries was refused by a flat 1,000-page budget, which made the
+// recursive delete of it fail, retry, and fail again forever. Two thousand sibling
+// folders are a legal tree and must capture in full.
+func TestSnapshotActionTreeCapturesManyFolders(t *testing.T) {
 	native := newWalkNative()
-	for i := 0; i < maxActionPages+2; i++ {
+	const folders = 2000
+	for i := 0; i < folders; i++ {
 		native.addFolder("", fmt.Sprintf("f%04d", i))
 	}
-	if _, err := snapshotActionTree(context.Background(), native, "", true); err == nil || !IsCode(err, "request_too_large") {
-		t.Fatalf("wide capture past the page limit: %v", err)
+	entries, err := snapshotActionTree(context.Background(), native, "", true)
+	if err != nil {
+		t.Fatalf("capture of %d sibling folders: %v", folders, err)
+	}
+	if want := folders + 1; len(entries) != want {
+		t.Fatalf("captured %d entries, want %d (the root and every folder)", len(entries), want)
+	}
+}
+
+// flatNative answers one folder with `total` generated children, 1,000 per page, so a
+// capture can be driven past the entry limit without holding the tree in memory.
+type flatNative struct {
+	walkNative
+	total int
+}
+
+func (f *flatNative) List(_ context.Context, p storage.Path, q storage.PageRequest) (storage.Page, error) {
+	if p != "" {
+		return storage.Page{}, nil
+	}
+	offset := 0
+	if q.Cursor != "" {
+		if _, err := fmt.Sscanf(q.Cursor, "%d", &offset); err != nil {
+			return storage.Page{}, fmt.Errorf("test cursor %q: %w", q.Cursor, err)
+		}
+	}
+	end := min(offset+1000, f.total)
+	page := storage.Page{}
+	for i := offset; i < end; i++ {
+		page.Entries = append(page.Entries, storage.Entry{Path: storage.Path(fmt.Sprintf("n%06d", i)), Kind: storage.File, Size: 1, Revision: []byte("rev")})
+	}
+	if end < f.total {
+		page.NextCursor = fmt.Sprint(end)
+	}
+	return page, nil
+}
+
+// The entry limit is the bound that remains, and it must still fire.
+func TestSnapshotActionTreeBoundsEntries(t *testing.T) {
+	native := &flatNative{walkNative: *newWalkNative(), total: maxActionEntries + 1}
+	_, err := snapshotActionTree(context.Background(), native, "", true)
+	if err == nil || !IsCode(err, "request_too_large") {
+		t.Fatalf("capture past the entry limit: %v", err)
+	}
+	// The refusal must say what it refused: the code alone sent the last person who hit
+	// it looking for an oversized request body. The code is what the client sees; the
+	// cause is what the log and the operation problem carry.
+	var cause error
+	if unwrapped := errors.Unwrap(err); unwrapped != nil {
+		cause = unwrapped
+	}
+	if cause == nil || !strings.Contains(cause.Error(), "100000") {
+		t.Fatalf("entry-limit refusal does not name the limit: %v", err)
+	}
+}
+
+// pagingNative hands back an empty page that still asks for the next one. No legitimate
+// driver does that, and treating it as "nothing more" would silently truncate a capture.
+type pagingNative struct{ walkNative }
+
+func (p *pagingNative) List(_ context.Context, _ storage.Path, q storage.PageRequest) (storage.Page, error) {
+	return storage.Page{NextCursor: q.Cursor + "x"}, nil
+}
+
+func TestSnapshotActionTreeRefusesPagingWithoutProgress(t *testing.T) {
+	native := &pagingNative{walkNative: *newWalkNative()}
+	_, err := snapshotActionTree(context.Background(), native, "", true)
+	if err == nil || !IsCode(err, "invalid_native_result") {
+		t.Fatalf("paging without progress: %v", err)
 	}
 }
 

@@ -361,7 +361,7 @@ func describeCause(err error) string {
 // durableContext detaches a durable write from the client's cancellation: once a
 // native effect exists, its index settlement must finish even if the browser hangs
 // up. It carries no wall clock, because the work is already bounded where it is
-// produced (maxActionEntries, maxActionPages, page limits) and a budget picked in
+// produced (maxActionEntries, page limits) and a budget picked in
 // advance can only fire on the operation large enough to matter. A 5 s budget here
 // is exactly what kept a 776-entry delete from ever settling: every retry hit the
 // deadline mid-commit, the deferred release then ran on the same expired context and
