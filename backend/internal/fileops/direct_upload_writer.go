@@ -55,7 +55,17 @@ func (w *DirectUploadWriter) Publish(ctx context.Context, staged storage.Staged,
 	if entry.Kind != storage.File || entry.Size != staged.Size {
 		return storage.MutationResult{}, E("invalid_native_result", nil)
 	}
-	return storage.MutationResult{Entry: &entry}, nil
+	return storage.MutationResult{Entry: &entry, Evidence: observation(entry)}, nil
+}
+
+// observation is the evidence a direct publication can offer: the target's own revision,
+// the value a later HEAD has to reproduce to prove those are this session's bytes. A staged
+// publication carries the mutation ledger's receipt instead. The distinction matters
+// because Service.Write refuses any applied result that carries no evidence — a direct
+// commit without one retries forever as outcome_unknown while the file sits at the
+// destination, unsettled and unindexed.
+func observation(entry storage.Entry) []byte {
+	return bytes.Clone(entry.Revision)
 }
 
 // Inspect answers what a lost attempt did, from the object itself: the same rules Stage
@@ -75,7 +85,8 @@ func (w *DirectUploadWriter) Inspect(ctx context.Context, in storage.WriteIntent
 		return storage.Inspection{State: storage.NotApplied}, nil
 	}
 	staged := storage.Staged{Intent: in, Size: entry.Size, Handle: entry.Revision}
-	return storage.Inspection{State: storage.Applied, Stage: &staged, Result: &storage.MutationResult{Entry: &entry}}, nil
+	return storage.Inspection{State: storage.Applied, Stage: &staged, Evidence: observation(entry),
+		Result: &storage.MutationResult{Entry: &entry, Evidence: observation(entry)}}, nil
 }
 
 // Discard does nothing. A direct publication has no temporary identity to discard: the
