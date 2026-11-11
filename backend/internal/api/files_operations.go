@@ -39,12 +39,24 @@ func writeFilesOperationWithRetry(w http.ResponseWriter, op fileops.Operation, s
 	}
 	var total any = len(op.Entries)
 	unit := "entries"
-	if op.Kind == "upload_commit" {
+	switch {
+	case op.Kind == "upload_commit":
 		unit = "bytes"
 		total = op.Reservation.NewBytes
 		if op.State == fileops.Succeeded {
 			completed = int(op.Reservation.NewBytes)
 		}
+	case op.Purge != nil:
+		// A recursive deletion has no manifest to count: the index settled at acceptance,
+		// and what remains is a byte purge that walks the prefix. Reporting the empty
+		// manifest showed 0/0 entries for the whole purge — next to state "running" and
+		// result "deleted: true" that is indistinguishable from an operation that never
+		// started, and it once took a live import down for 45 minutes of staring. The
+		// counters that move are the purge's own, and the total is unknown until the last
+		// walk, so it stays null rather than pretending zero.
+		completed = int(op.Purge.Deleted + op.Purge.Adopted)
+		total = nil
+		unit = "objects"
 	}
 	var result any
 	if len(op.Result) > 0 {

@@ -745,6 +745,12 @@ until their expiry and still cannot publish. Queued work rechecks authorization 
 Operation JSON has `{id,kind,state,progress,result,error,cancelRequested,retrying,createdAt,finishedAt}`. States are
 `queued/running/outcome_unknown/succeeded/failed/cancelled`; progress is `{completed,total,unit}` with nullable
 total. Also record per-entry effects, conflicts and remaining work for partial tree operations.
+`unit` names what is being counted: `entries` for a manifest operation, `bytes` for `upload_commit`, and
+`objects` for a recursive deletion. A recursive deletion is the one kind with no manifest — it is accepted
+immediately, so `result` already carries `{deleted:true}` while `state` stays `running` until the native byte
+purge settles. Its progress therefore counts the objects purged or adopted, with `total: null`, because the
+purge only learns its extent by walking the prefix; reading the empty manifest instead reported 0 of 0 for the
+whole purge and made a working deletion look like one that never started.
 `retrying` is null while the worker is making progress and otherwise `{attempts,code,lastAttemptAt,nextAttemptAt}`,
 so a nonterminal operation that keeps failing is distinguishable from one that is merely slow; the attempts back off
 from 30 seconds to 30 minutes instead of repeating once per lease. The cause chain itself stays in the server log.
