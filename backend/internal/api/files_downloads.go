@@ -175,8 +175,14 @@ func filesVerifyReadableContent(ctx context.Context, f *fileRequest, p fc.Path, 
 	case storage.IsCode(err, "stale_reference"):
 		return nil
 	case storage.IsCode(err, "not_found"):
-		return fc.NewProblem(404, "native_absent", "The index lists "+p.Relative()+" as a file, but storage has no object at this path. It was probably moved or deleted outside this application; sync the index from Account -> Storage to pick up its current location.")
+		return filesNativeAbsent(p)
 	default:
 		return err
 	}
+}
+
+// filesNativeAbsent names an index entry whose bytes are gone, so a client can offer
+// index synchronization instead of showing a read that can only fail.
+func filesNativeAbsent(p fc.Path) *fc.Problem {
+	return fc.NewProblem(404, "native_absent", "The index lists "+p.Relative()+" as a file, but storage has no object at this path. It was probably moved or deleted outside this application; sync the index from Account -> Storage to pick up its current location.")
 }

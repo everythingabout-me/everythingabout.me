@@ -131,6 +131,7 @@ Common commands:
 | `backend/internal/nodes/` | Canonical parent/name index, dynamic current paths and transactional identity/change settlement; never bytes |
 | `backend/internal/filechanges/` | Commit-safe owner change facts, recursive markers, projection and durable file audit |
 | `backend/internal/storage/` | Object storage interface; implementation in `internal/cos/` (Tencent Cloud) |
+| `backend/internal/mediameta/` | Capture facts (time, GPS, device, size) read from a photo or video by ranged reads, on demand; results are a disposable cache |
 | `backend/internal/timeline/` + `events/` | The stream: analyze → group → score → narrate, stored as `events` |
 | `backend/internal/auth/` `emailcode/` `mail/` | Verification codes, passwords, sessions, API tokens, SES |
 | `backend/internal/jobs/` | Async jobs for directory move / copy |

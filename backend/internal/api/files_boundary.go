@@ -380,6 +380,8 @@ func (s *Server) filesHandler() http.Handler {
 			routes["PUT"] = s.handleFilesPut
 		case fc.Base + "/downloads":
 			routes["POST"] = s.handleFilesDownloads
+		case fc.Base + "/media-metadata":
+			routes["GET"] = s.handleFilesMediaMetadata
 		case fc.Base + "/move":
 			routes["POST"] = s.handleFilesMove
 		case fc.Base + "/copy":

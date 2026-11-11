@@ -22,6 +22,7 @@ import (
 	"everythingabout.me/backend/internal/httpx"
 	"everythingabout.me/backend/internal/jobs"
 	"everythingabout.me/backend/internal/mail"
+	"everythingabout.me/backend/internal/mediameta"
 	"everythingabout.me/backend/internal/nodes"
 	"everythingabout.me/backend/internal/paths"
 	"everythingabout.me/backend/internal/ratelimit"
@@ -45,6 +46,7 @@ type Server struct {
 	backupJobs     map[string]bool
 	filesAuth      FilesAuthenticator
 	filesIndex     FileReadIndex
+	mediaCache     mediameta.Cache
 	filesJournal   *fileops.Postgres
 	uploadSpools   fileUploadSpoolFactory
 	fileWorkerMu   sync.Mutex
@@ -96,6 +98,7 @@ func New(cfg *config.Config, db *store.DB, objectStorage storage.Storage, web ht
 	}
 	if db != nil {
 		server.filesJournal = fileops.NewPostgres(db.Pool())
+		server.mediaCache = mediameta.NewPostgresCache(db.Pool())
 		server.conns = connections.NewPostgresStore(db)
 	}
 	if cfg.BackendName() == "cos" && !cfg.Storage.CoordinatedWrites {

@@ -8,9 +8,10 @@ import {
   useMemo,
   useRef,
   useState,
+  type ReactNode,
 } from "react";
 import { Link, useBlocker, useLoaderData, useLocation, useNavigate } from "react-router";
-import { ApiError, api, filePath, isFileOperation, isNativeAbsent, prefetchListing, type AuthUser, type Crumb, type Item, type FileOperation } from "../api/client";
+import { ApiError, api, filePath, isFileOperation, isNativeAbsent, prefetchListing, type AuthUser, type Crumb, type FileMediaMetadata, type Item, type FileOperation } from "../api/client";
 import { AppHeader } from "../components/AppHeader";
 import { StorageNotice } from "../components/StorageNotice";
 import {
@@ -31,7 +32,7 @@ import {
 import { canPreviewFile } from "../components/preview/supported";
 import { TransferDialog, type TransferMode } from "../components/TransferDialog";
 import { filesHref, filesRoutePath } from "../filesPath";
-import { resultsText, t } from "../i18n";
+import { formatNumber, intlLocale, resultsText, t } from "../i18n";
 import { formatRelativeTime } from "../i18n/format";
 import { useUploadQueue, type UploadStatus, type UploadTask } from "./useUploadQueue";
 import { resolveDeleteBlocker } from "./deleteBlocker";
@@ -39,6 +40,7 @@ import { droppedUploadEntries, filesToUploadEntries } from "./uploadSelection";
 import { buildUploadRows, isUploadDirectory, isUploadRowActive, type UploadRowEntry } from "./uploadRows";
 import { pendingFileOperations, setUploadOwner, settleFileOperation, subscribeFileOperations, trackFileOperation } from "./uploadPersistence";
 import { formatBytes, formatPreciseBytes, formatSize, formatSpeed } from "./sizeFormat";
+import { cameraText, capturedAtText, coordinatesText, dimensionsText, durationText, exposureText, mayHaveMediaMetadata } from "./mediaMetadataFormat";
 import styles from "./FilesPage.module.css";
 
 /**
@@ -409,6 +411,66 @@ function DeleteConfirmation({
   );
 }
 
+/**
+ * What the file says about its own capture, fetched when its page opens. The server parses
+ * on the first request and caches; nothing here is loaded for a listing.
+ *
+ * A failure renders nothing: these rows are an addition to the details above them, and the
+ * preview already reports a file whose bytes are gone.
+ */
+function useMediaMetadata(file: Item): FileMediaMetadata | null {
+  const [media, setMedia] = useState<FileMediaMetadata | null>(null);
+  const wanted = file.kind === "file" && mayHaveMediaMetadata(file.name, file.mediaType);
+  useEffect(() => {
+    setMedia(null);
+    if (!wanted) return;
+    const controller = new AbortController();
+    api.mediaMetadata(file.path, controller.signal).then(
+      (next) => { if (!controller.signal.aborted) setMedia(next); },
+      () => {},
+    );
+    return () => controller.abort();
+    // contentRevision: replaced bytes are a different capture.
+  }, [file.path, file.contentRevision, wanted]);
+  return media;
+}
+
+/** Rows appear only for facts the file states, so a screenshot adds nothing but its size. */
+function MediaMetadataRows({ media }: { media: FileMediaMetadata }) {
+  const camera = cameraText(media.make, media.model);
+  const exposure = exposureText(media);
+  const rows: [string, ReactNode][] = [];
+  if (media.capturedAt) rows.push([t("file.captured"), capturedAtText(media.capturedAt, intlLocale)]);
+  if (media.location) {
+    const altitude = media.location.altitude;
+    rows.push([t("file.location"), (
+      <>
+        {coordinatesText(media.location.latitude, media.location.longitude)}
+        {altitude !== null && (
+          <span className={styles.detailNote}>
+            {t("file.altitude", { meters: formatNumber(Math.round(altitude)) })}
+          </span>
+        )}
+      </>
+    )]);
+  }
+  if (camera) rows.push([t("file.camera"), camera]);
+  if (media.lens) rows.push([t("file.lens"), media.lens]);
+  if (exposure) rows.push([t("file.exposure"), exposure]);
+  if (media.width && media.height) rows.push([t("file.dimensions"), dimensionsText(media.width, media.height)]);
+  if (media.durationSeconds !== null) rows.push([t("file.duration"), durationText(media.durationSeconds)]);
+  return (
+    <>
+      {rows.map(([label, value]) => (
+        <div className={styles.detailRow} key={label}>
+          <dt>{label}</dt>
+          <dd>{value}</dd>
+        </div>
+      ))}
+    </>
+  );
+}
+
 /** A file's own page: the path bar above it already names the file, so this adds only facts. */
 function FileDetail({ file, onDelete, deleteDisabled, deleteHint }: {
   file: Item;
@@ -419,6 +481,7 @@ function FileDetail({ file, onDelete, deleteDisabled, deleteHint }: {
   const [downloadError, setDownloadError] = useState<string | null>(null);
   const [downloadMissing, setDownloadMissing] = useState(false);
   useEffect(() => { setDownloadError(null); setDownloadMissing(false); }, [file.path]);
+  const media = useMediaMetadata(file);
   const download = async () => {
     setDownloadError(null);
     setDownloadMissing(false);
@@ -491,6 +554,7 @@ function FileDetail({ file, onDelete, deleteDisabled, deleteHint }: {
             <dt>{t("file.created")}</dt>
             <dd>{file.createdAt ? formatRelativeTime(file.createdAt) : "—"}</dd>
           </div>
+          {media && <MediaMetadataRows media={media} />}
         </dl>
         <div className={styles.detailActions}>
           <button

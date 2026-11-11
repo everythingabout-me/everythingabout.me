@@ -153,21 +153,31 @@ func (s *Server) filesIndexedMetadata(ctx context.Context, f *fileRequest, p fc.
 // filesIndexedContent returns the indexed metadata together with the native key that a
 // reference read addresses, so a caller that must verify the object pays one index read.
 func (s *Server) filesIndexedContent(ctx context.Context, f *fileRequest, p fc.Path) (fc.Metadata, string, error) {
-	record, err := s.filesIndexedRecord(ctx, f, p)
+	metadata, record, err := s.filesIndexedEntry(ctx, f, p)
 	if err != nil {
 		return fc.Metadata{}, "", err
+	}
+	return metadata, record.Row.Key, nil
+}
+
+// filesIndexedEntry returns the public metadata together with the index record it was
+// built from, for callers that need a private field of the same observation.
+func (s *Server) filesIndexedEntry(ctx context.Context, f *fileRequest, p fc.Path) (fc.Metadata, *nodes.FileBrowseRecord, error) {
+	record, err := s.filesIndexedRecord(ctx, f, p)
+	if err != nil {
+		return fc.Metadata{}, nil, err
 	}
 	metadata, err := nodes.IndexedMetadata(f.ContentNamespace, *record)
 	if err != nil {
-		return fc.Metadata{}, "", err
+		return fc.Metadata{}, nil, err
 	}
 	if err := f.RequireRead(metadata.Path); err != nil {
-		return fc.Metadata{}, "", err
+		return fc.Metadata{}, nil, err
 	}
 	if !filesEqualPath(f, metadata.Path, p) {
-		return fc.Metadata{}, "", fc.NewProblem(404, "not_found", "The indexed path was not found.")
+		return fc.Metadata{}, nil, fc.NewProblem(404, "not_found", "The indexed path was not found.")
 	}
-	return filesRedactParent(f, metadata), record.Row.Key, nil
+	return filesRedactParent(f, metadata), record, nil
 }
 
 func (s *Server) handleFilesMetadata(w http.ResponseWriter, r *http.Request, f *fileRequest) error {

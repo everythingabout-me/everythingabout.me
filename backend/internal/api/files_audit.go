@@ -96,6 +96,8 @@ func filesAuditAction(r *http.Request) string {
 		}
 	case "/downloads":
 		return "download_grant"
+	case "/media-metadata":
+		return "media_metadata"
 	case "/list", "/search", "/move", "/copy", "/thumbnail", "/me", "/capabilities", "/changes", "/subscriptions":
 		return strings.TrimPrefix(route, "/")
 	}

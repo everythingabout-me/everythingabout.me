@@ -102,6 +102,36 @@ export interface FileResource {
   checksum: { algorithm: string; value: string } | null;
 }
 
+/**
+ * What a photo or video states about its own capture. Every field is null when the file
+ * does not state it; `state` tells a file that says nothing ("empty") from one the server
+ * does not parse ("unsupported").
+ */
+export interface FileMediaMetadata {
+  id: string;
+  state: "parsed" | "empty" | "unsupported";
+  /**
+   * ISO 8601 in three shapes: zoneless wall clock, wall clock with offset, or a "Z" instant.
+   * Format with capturedAtText (mediaMetadataFormat.ts); `new Date()` alone would move a
+   * photo's wall clock into the viewer's zone.
+   */
+  capturedAt: string | null;
+  /** WGS 84 decimal degrees; altitude in meters. */
+  location: { latitude: number; longitude: number; altitude: number | null } | null;
+  make: string | null;
+  model: string | null;
+  lens: string | null;
+  /** Displayed size: a stored rotation is already applied. */
+  width: number | null;
+  height: number | null;
+  durationSeconds: number | null;
+  fNumber: number | null;
+  exposureSeconds: number | null;
+  iso: number | null;
+  focalLength: number | null;
+  focalLength35mm: number | null;
+}
+
 export type FileChangeFilter =
   | { target: EntrySelector; kind: "file"; recursive: false }
   | { target: EntrySelector; kind: "folder"; recursive: boolean };
@@ -918,6 +948,10 @@ export const files = {
     const selected = Object.fromEntries(["id", "path"].filter((key) => hasOwn(options, key)).map((key) => [key, options[key as "id" | "path"]]));
     return fileRequest(fileURL("/search", { ...options, ...(Object.keys(selected).length ? entrySelector(selected as EntrySelector) : {}) }));
   },
+  /** Parsed on first request by a few ranged reads, served from the server's cache afterwards. */
+  mediaMetadata(selector: FileSelector, signal?: AbortSignal): Promise<FileMediaMetadata> {
+    return fileRequest(fileURL("/media-metadata", entrySelector(selector)), { signal });
+  },
   me(): Promise<FilePrincipal> {
     return fileRequest(fileURL("/me"));
   },
@@ -1257,6 +1291,7 @@ export const api = {
   subscriptionEventsURL: files.subscriptionEventsURL,
 
   metadata: files.metadata,
+  mediaMetadata: files.mediaMetadata,
   fileMe: files.me,
   capabilities: files.capabilities,
   getOperation: files.operation,

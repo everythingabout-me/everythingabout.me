@@ -234,6 +234,7 @@ All suffixes are below `B`:
 | DELETE | `?path=/Photos/a.jpg&recursive=true` or `id=f7ca1104-12f0-4bbf-8c77-41d341f7d120` in place of path | Native deletion; explicit recursion for nonempty folders |
 | GET | `/thumbnail?path=/Photos/a.jpg&width=&format=` or `id=f7ca1104-12f0-4bbf-8c77-41d341f7d120` in place of path | Authorized representation; current route remains 501 |
 | POST | `/downloads` | Batch of read grants: URL or bearer, expiry, representation facts |
+| GET | `/media-metadata?path=/Photos/a.jpg` or `?id=f7ca1104-12f0-4bbf-8c77-41d341f7d120` | Capture facts the file states in its own bytes; parsed on first request, cached afterwards |
 | POST, GET | `/uploads` | Create/list this principal's resumable sessions |
 | GET | `/uploads/{uploadId}` | Compact state/progress and target path |
 | POST | `/uploads/{uploadId}/parts/sign` | Class A: sign a batch of part URLs (next window or renewal) |
@@ -431,6 +432,49 @@ synchronization (`POST /sync`, described in §4) rather than a broken preview.
 through the service before resuming. `etag` is present only when the route proves the §2 version guarantee.
 Direct URLs are served from the provider's domain; class A forces `attachment` except for the safe inline media
 allowlist. See [transfer protocol §8](../design/transfer-protocol.md#8-reading) for each provider's source.
+
+### Embedded media metadata
+
+`GET B/media-metadata?path=` (or `?id=`) returns what a photo or video states about its own capture:
+
+```json
+{
+  "id":"f7ca1104-12f0-4bbf-8c77-41d341f7d120",
+  "state":"parsed",
+  "capturedAt":"2024-05-01T10:20:30+08:00",
+  "location":{"latitude":31.2304,"longitude":121.4737,"altitude":12.3},
+  "make":"Apple","model":"iPhone 15 Pro","lens":"iPhone 15 Pro back triple camera 6.765mm f/1.78",
+  "width":3024,"height":4032,"durationSeconds":null,
+  "fNumber":1.78,"exposureSeconds":0.008333,"iso":80,"focalLength":6.765,"focalLength35mm":24
+}
+```
+
+Every fact is read from the file (EXIF in JPEG, HEIC/HEIF/AVIF and TIFF-based raw files; the movie header and
+QuickTime/user-data metadata in MP4 and MOV). Nothing is inferred from the name, the index or the upload, so a
+field is `null` exactly when the file does not state it. `state` says how to read the nulls: `parsed` found at
+least one fact, `empty` read the file and found none, and `unsupported` means the file was not read (not one of
+those containers, or a connection without ranged reads). A folder is `409 not_a_file`.
+
+`capturedAt` is ISO 8601 in one of three shapes, because files record time in three ways and merging them would
+invent precision: `2024-05-01T10:20:30` is the wall clock where it was taken with no zone recorded (show it
+as written), `2024-05-01T10:20:30+08:00` adds the recorded offset, and `2024-05-01T02:20:30Z` is an instant
+whose local zone was not recorded (convert it to the viewer's zone). `location` is WGS 84 decimal degrees with
+`altitude` in meters. `width` and `height` are the displayed size, with a stored rotation applied.
+
+The metadata is parsed on demand, not at upload. With presigned parts the bytes never cross this service, and
+most files are never opened, so parsing at ingest would spend provider requests on files nobody looks at. The
+first request for a file reads only the regions that hold these facts: at most 16 ranged reads of 256 KiB,
+whatever the file size, because sample data is skipped by its box header. A JPEG or HEIC takes one read and a
+short clip two; a 21 GB, 50-minute recording measured one HEAD and six reads, 1.4 MB in total. The result is stored per entry and content revision; later requests
+are answered from the index and that stored result with no storage request. Replacing the content, or a parser
+change, makes the stored result a miss. Like every indexed read, a stored result can trail a change made
+outside the application until `POST /sync` updates the index. The store is a cache: it can be emptied at any
+time and each file is simply parsed again when next viewed.
+
+Read permission on the path is the whole authorization, for cookie and Bearer clients alike: every fact here is
+inside bytes the caller may already download. A file that is corrupt or truncated is `empty` or partially
+`parsed`, never an error; a storage failure is an ordinary Problem and is not stored. An index entry whose
+object is gone fails with `404 native_absent`, as a read grant does.
 
 ### Class C content delivery
 

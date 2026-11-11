@@ -853,6 +853,13 @@ a.crumb:hover {
   font-size: 13px;
 }
 
+/* A secondary fact on the same row, such as the altitude after coordinates. */
+.detailNote {
+  margin-left: 10px;
+  color: var(--text-3);
+  font-size: 13px;
+}
+
 /* ---------- Drag and drop ---------- */
 
 .dropOverlay {
