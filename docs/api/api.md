@@ -663,7 +663,10 @@ their normal expiry/cleanup, and accepted work continues under the existing reco
 Browser tasks acquire ephemeral ownership for the owner and normalized target path before the first upload
 allocation, using same-origin Web Locks. A conflicting tab produces a retryable inline error without aborting the
 holder's session. After ownership is acquired, a new selection whose creation returns `operation_in_progress`
-inspects only the identified blocking session and aborts it only if it is still `open`. This flow never
+inspects the blocking session only when the conflict names an upload holder (`operationKind` is
+`upload_commit`, or absent on an older server); a `mkdir`, `delete`, `move` or `copy` holder is read from its own
+Operation, because `GET /uploads/{id}` about it could only ever 404. An upload session of the same target is
+aborted only if it is still `open`. This flow never
 automatically aborts `committing`, `outcome_unknown` or `committed` work, and it neither supplies server
 authority nor proves inactivity of other clients, origins or devices.
 

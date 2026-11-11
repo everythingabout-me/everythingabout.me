@@ -21,8 +21,28 @@ type fileWorkers struct {
 	active  map[string]bool
 	retries map[string]*fileWorkerRetry
 	slots   chan struct{}
-	ctx     context.Context
+	// wake carries "a slot just freed" from a finishing operation to the scanner.
+	// Without it the only thing that admits deferred work is the periodic sweep, so
+	// every completed commit leaves its successor waiting up to one sweep interval
+	// even though the pool has room again.
+	wake chan struct{}
+	ctx  context.Context
 }
+
+// fileOperationSlots bounds how many operations settle at once.
+//
+// Settling one small upload is a few provider round trips plus one index
+// transaction, roughly two seconds, and it is I/O-bound — so this count, not the
+// provider or the browser, decides how many files a second the service can finish.
+// Four slots pinned a 23k-file import at ~1.6 files/s however small the files were,
+// while a single browser tab already keeps eight chains in flight and every refused
+// operation then waited for the next five-second sweep. Thirty-two admits four such
+// clients (a second tab, a phone, an API import) and matches the provider transports'
+// idle-connection budget (MaxIdleConnsPerHost 32), so a larger pool would only move
+// the queue into the socket layer. The bound is process-wide rather than per owner:
+// one import can still starve another owner's commit, which is a scheduling question
+// this constant does not answer.
+const fileOperationSlots = 32
 
 // fileWorkerRetry is the consecutive-failure record for one operation. The journal
 // already knows a retry happened (it is the expiry of the lease), but it cannot say
@@ -62,7 +82,13 @@ func (s *Server) workers() *fileWorkers {
 	s.fileWorkerMu.Lock()
 	defer s.fileWorkerMu.Unlock()
 	if s.fileWorkers == nil {
-		s.fileWorkers = &fileWorkers{active: make(map[string]bool), retries: make(map[string]*fileWorkerRetry), slots: make(chan struct{}, 4), ctx: context.Background()}
+		s.fileWorkers = &fileWorkers{
+			active:  make(map[string]bool),
+			retries: make(map[string]*fileWorkerRetry),
+			slots:   make(chan struct{}, fileOperationSlots),
+			wake:    make(chan struct{}, 1),
+			ctx:     context.Background(),
+		}
 	}
 	return s.fileWorkers
 }
@@ -93,7 +119,19 @@ func (s *Server) queueFileOperation(op fileops.Operation) error {
 	worker.active[op.ID] = true
 	parentCtx := worker.ctx
 	go func() {
-		defer func() { worker.mu.Lock(); delete(worker.active, op.ID); worker.mu.Unlock(); <-worker.slots }()
+		defer func() {
+			worker.mu.Lock()
+			delete(worker.active, op.ID)
+			worker.mu.Unlock()
+			<-worker.slots
+			// The scan that would have admitted the next operation already stopped at
+			// the busy pool, so a freed slot is the only moment that work can start.
+			// Tell the scanner instead of leaving it to the periodic sweep.
+			select {
+			case worker.wake <- struct{}{}:
+			default:
+			}
+		}()
 		// No wall clock here: the operation is resumable from its journal, every
 		// native request is bounded by the provider's own timeout, and a folder move
 		// of one terabyte legitimately outlives any deadline picked in advance. A
@@ -315,33 +353,51 @@ func (s *Server) StartFileOperations(ctx context.Context) {
 	go func() {
 		ticker := time.NewTicker(5 * time.Second)
 		defer ticker.Stop()
+		// A wake says only "a slot is free", so it drains the queue and returns to wait;
+		// expiry and cleanup stay on the ticker. Running all three on every completed
+		// commit would spend two queries per file to learn nothing new.
+		periodic := true
 		for {
-			if expired, e := s.filesJournal.ExpireUploads(ctx, 32); e == nil {
-				for _, u := range expired {
-					_ = s.queueFileOperation(u.Operation)
-				}
-			}
-			pending, err := s.filesJournal.Pending(ctx, 32)
-			if err != nil && ctx.Err() == nil {
-				slog.Warn("file operation scan unavailable", "error", err)
-			}
-			for _, op := range pending {
-				if err = s.queueFileOperation(op); errors.Is(err, errFilesWorkerBusy) {
-					break
-				}
-			}
-			if cleanup, e := s.filesJournal.CleanupCandidates(ctx, 16); e == nil {
-				for _, op := range cleanup {
-					if e = s.queueFileOperation(op); errors.Is(e, errFilesWorkerBusy) {
-						break
+			if periodic {
+				if expired, e := s.filesJournal.ExpireUploads(ctx, 32); e == nil {
+					for _, u := range expired {
+						_ = s.queueFileOperation(u.Operation)
 					}
 				}
 			}
+			s.drainPendingFileOperations(ctx)
+			if periodic {
+				if cleanup, e := s.filesJournal.CleanupCandidates(ctx, 16); e == nil {
+					for _, op := range cleanup {
+						if e = s.queueFileOperation(op); errors.Is(e, errFilesWorkerBusy) {
+							break
+						}
+					}
+				}
+			}
+			periodic = true
 			select {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
+			case <-worker.wake:
+				periodic = false
 			}
 		}
 	}()
+}
+
+// drainPendingFileOperations admits durable work that is waiting for a slot. A refused
+// admission means the pool is full, so the scan stops there and lets the next wake (or
+// sweep) retry; pushing the rest would only park them in the busy path again.
+func (s *Server) drainPendingFileOperations(ctx context.Context) {
+	pending, err := s.filesJournal.Pending(ctx, fileOperationSlots)
+	if err != nil && ctx.Err() == nil {
+		slog.Warn("file operation scan unavailable", "error", err)
+	}
+	for _, op := range pending {
+		if err := s.queueFileOperation(op); errors.Is(err, errFilesWorkerBusy) {
+			return
+		}
+	}
 }

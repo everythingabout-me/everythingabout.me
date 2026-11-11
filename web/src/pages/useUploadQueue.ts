@@ -436,7 +436,18 @@ export function useUploadQueue(onUploaded: (task: UploadTask, item: Item) => voi
         try { session = await api.createUpload(intent, task.createKey, signal); }
         catch (error) {
           if (error instanceof ApiError && [400, 401, 403, 409, 413, 422, 507].includes(error.status)) patch(id, { allocationRejected: true });
-          if (error instanceof ApiError && error.code === "operation_in_progress" && error.operationId) {
+          // Only an earlier upload session of the same target can be adopted or aborted from
+          // here, and only that kind needs the session resource. Every other holder (mkdir,
+          // delete, move, copy) is answered by its own Operation, so asking /uploads/{id} about
+          // it was a request that could only ever 404 — one red line and one round trip per
+          // conflict that could not change the outcome. A server that does not name the kind
+          // still gets the probe, because then it is the only way to tell the two apart.
+          //
+          // An Operation this branch reads is kept for the generic wait below: both ask the
+          // same resource what it is doing, and a second round trip learns nothing.
+          let blockerOperation: FileOperation | undefined;
+          if (error instanceof ApiError && error.code === "operation_in_progress" && error.operationId
+            && (error.operationKind === undefined || error.operationKind === "upload_commit")) {
             let blocking: FileUploadSession | undefined;
             try { blocking = await api.uploadStatus(error.operationId, signal); }
             catch (statusError) {
@@ -459,6 +470,7 @@ export function useUploadQueue(onUploaded: (task: UploadTask, item: Item) => voi
               }
               if (["aborted", "expired", "failed"].includes(blocking.state)) {
                 const op = await api.getOperation(blocking.id, signal);
+                blockerOperation = op;
                 if (signal.aborted) return;
                 if (op.id === blocking.id && op.state === "cancelled") {
                   patch(id, { status: "queued", allocationRejected: false });
@@ -489,9 +501,13 @@ export function useUploadQueue(onUploaded: (task: UploadTask, item: Item) => voi
           // never existed. A deletion is different: it is long, it is the user's decision,
           // and it must keep the wait and its own report.
           if (error instanceof ApiError && error.operationKind && error.operationKind !== "delete" && error.operationId) {
-            const blocker = await api.getOperation(error.operationId, signal).catch(() => undefined);
+            // The resource has to be the blocking Operation: another operation's terminal
+            // state, even one this attempt just read, says nothing about this path.
+            const blocker = blockerOperation?.id === error.operationId
+              ? blockerOperation
+              : await api.getOperation(error.operationId, signal).catch(() => undefined);
             if (signal.aborted) return;
-            if (blocker && ["succeeded", "failed", "cancelled"].includes(blocker.state)) {
+            if (blocker && blocker.id === error.operationId && ["succeeded", "failed", "cancelled"].includes(blocker.state)) {
               patch(id, { status: "queued", allocationRejected: false });
               return;
             }

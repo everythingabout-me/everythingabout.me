@@ -23,7 +23,7 @@ async function blockedUpload(state = "open") {
   server.api.createUpload = async (...args) => {
     attempts.push([structuredClone(args[0]), args[1]]);
     if (attempts.length === 1 || !["aborted", "expired", "failed"].includes(blocker.state)) {
-      server.calls.push(["blocked-create", session.id]); throw conflict(session.id);
+      server.calls.push(["blocked-create", session.id]); throw conflict(session.id, "upload_commit");
     }
     return create(...args);
   };
@@ -101,7 +101,7 @@ for (const release of ["unmount", "cancel", "complete"]) {
     };
     server.api.createUpload = async (...args) => {
       const active = [...server.sessions.values()].find((session) => session.path === args[0].path && session.state === "open");
-      if (active && !server.keys.has(args[1])) { server.calls.push(["blocked-create", active.id]); throw conflict(active.id); }
+      if (active && !server.keys.has(args[1])) { server.calls.push(["blocked-create", active.id]); throw conflict(active.id, "upload_commit"); }
       return { ...await create(...args) };
     };
     server.api.uploadPart = async (...args) => {
@@ -443,15 +443,18 @@ for (const [label, settled, opState, opId] of [
 
 for (const terminal of ["aborted", "expired", "failed"]) {
   for (const opState of ["cancelled", "failed", "running", "outcome_unknown"]) {
-    test(`an initially ${terminal} blocker with ${opState} Operation ${opState === "cancelled" ? "permits a fresh allocation" : "keeps exact Operation waiting"}`, async (t) => {
+    // A terminal Operation released its guards, so the path may be allocated again; only a
+    // still-running or unknown outcome keeps the wait, because it may still hold them.
+    const released = opState === "cancelled" || opState === "failed";
+    test(`an initially ${terminal} blocker with ${opState} Operation ${released ? "permits a fresh allocation" : "keeps exact Operation waiting"}`, async (t) => {
       const { server, blocker, attempts } = await blockedUpload(terminal);
       server.api.getOperation = async (id) => { server.calls.push(["operation", id]); return operation(id, opState, null, "upload_commit"); };
       const harness = await mount(t, server.api);
       enqueue(harness);
-      const queue = await harness.until(opState === "cancelled" ? complete : (queue) => queue.tasks[0]?.status === "waiting");
+      const queue = await harness.until(released ? complete : (queue) => queue.tasks[0]?.status === "waiting");
       assert.deepEqual(callsOf(server, "operation"), [["operation", blocker.id]]);
       assert.equal(callsOf(server, "abort").length, 0);
-      if (opState === "cancelled") assertFreshPublication(server, attempts);
+      if (released) assertFreshPublication(server, attempts);
       else {
         assert.equal(attempts.length, 1);
         assert.equal(queue.tasks[0].waitingFor.operationId, blocker.id);
