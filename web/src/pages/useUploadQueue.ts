@@ -13,12 +13,19 @@ import { pendingFileOperation, setUploadOwner, settleFileOperation } from "./upl
 // not tell clients how many to send, so tasks share this pool instead of each
 // respecting its own budget.
 const PART_POOL_SIZE = 8;
+// Sessions admitted per request, and settlements per request. A page of creates is cheap
+// (one conditional URL each, signed locally), so the queue asks for 32 at a time; commits
+// are bounded by the worker pool that settles them, so eight per request and a two-second
+// linger for a partial page, which keeps a slow tail from waiting for a full batch.
+const CREATE_BATCH_SIZE = 32;
+const COMMIT_BATCH_SIZE = 8;
+const COMMIT_LINGER_MS = 2000;
 // Tasks allowed to be running at all: claiming a path, allocating the session, moving
 // parts and committing. Eight matches the part pool, so a wave of small files cannot
 // open hundreds of upload sessions for bytes that can only stream eight at a time.
 // This bounds handshakes and outstanding requests, not payload: a large file still
 // gets its parts from the same eight-slot pool.
-const START_POOL_SIZE = 8;
+const START_POOL_SIZE = 32;
 // The page is published at most this often. A file changes state several times, and
 // every publication re-derives the row projection over the whole selection, so a
 // 20k-file folder would publish ~100k times and never leave the main thread. Task
@@ -60,9 +67,9 @@ function waitBeforeRetry(attempt: number, signal?: AbortSignal): Promise<void> {
     signal?.addEventListener("abort", abort, { once: true });
   });
 }
-async function commitUpload(id: string, signal?: AbortSignal): Promise<FileResource | FileOperation> {
+async function commitUpload(id: string, signal: AbortSignal | undefined, settle: (id: string, signal?: AbortSignal) => Promise<FileResource | FileOperation>): Promise<FileResource | FileOperation> {
   for (let attempt = 0; ; attempt++) {
-    try { return await api.commitUpload(id, signal); }
+    try { return await settle(id, signal); }
     catch (error) {
       if (signal?.aborted) throw error;
       // A 4xx other than the transient set is the server's answer about the file itself
@@ -249,6 +256,16 @@ async function withVerifySlot<T>(run: () => Promise<T>): Promise<T> {
     if (next) next(); else verifyPool.active--;
   }
 }
+/** One page of pending admission/settlement work. */
+interface BatchState<T> {
+  items: T[];
+  timer?: ReturnType<typeof setTimeout>;
+  flushing: boolean;
+}
+
+interface PendingCreate { input: FileUploadInput; key: string; resolve: (session: FileUploadSession) => void; reject: (error: unknown) => void; cancelled: boolean }
+interface PendingSettle { id: string; resolve: (result: FileResource | FileOperation) => void; reject: (error: unknown) => void; cancelled: boolean }
+
 export function useUploadQueue(onUploaded: (task: UploadTask, item: Item) => void): UploadQueue {
   // Task state is authoritative here, in a Map, and reaches React as a snapshot on a
   // cadence. One file performs several updates (queued, started, allocated, parts,
@@ -273,6 +290,88 @@ export function useUploadQueue(onUploaded: (task: UploadTask, item: Item) => voi
   const finishRef = useRef(onUploaded);
   const verified = useRef(new Map<string, { file: File; parts: Map<number, string> }>());
   const pollBusy = useRef(false);
+  // Admission and settlement pages. The queue still runs one task at a time; these only
+  // collapse the two control requests a task would otherwise send alone. A test double
+  // without the batch calls keeps the per-file path, so the queue's own behaviour stays
+  // covered by the existing suite.
+  const createBatch = useRef<BatchState<PendingCreate>>({ items: [], flushing: false });
+  const settleBatch = useRef<BatchState<PendingSettle>>({ items: [], flushing: false });
+
+  const flushCreates = useCallback(async () => {
+    const state = createBatch.current;
+    if (state.flushing) return;
+    state.flushing = true;
+    const batch = state.items.splice(0, CREATE_BATCH_SIZE);
+    try {
+      const results = await api.createUploadBatch(batch.map(({ input, key }) => ({ input, key })));
+      batch.forEach((item, index) => {
+        if (item.cancelled) return;
+        const result = results[index];
+        if (result?.upload) item.resolve(result.upload);
+        else if (result?.error) item.reject(new FileApiError(result.error));
+        else item.reject(new Error("The admission page was incomplete."));
+      });
+    } catch (error) {
+      batch.forEach((item) => { if (!item.cancelled) item.reject(error); });
+    } finally {
+      state.flushing = false;
+      if (state.items.length) state.timer = setTimeout(() => { state.timer = undefined; void flushCreates(); }, 0);
+    }
+  }, []);
+
+  // One admission call per file when the client has no batch transport (the test double),
+  // otherwise a page of them: the URL is signed locally, so a page costs what one costs.
+  const admitUpload = useCallback((input: FileUploadInput, key: string, signal?: AbortSignal) => new Promise<FileUploadSession>((resolve, reject) => {
+    if (typeof api.createUploadBatch !== "function") { api.createUpload(input, key, signal).then(resolve, reject); return; }
+    if (signal?.aborted) { reject(new DOMException("Upload canceled", "AbortError")); return; }
+    const state = createBatch.current;
+    const item: PendingCreate = { input, key, resolve, reject, cancelled: false };
+    signal?.addEventListener("abort", () => { item.cancelled = true; reject(new DOMException("Upload canceled", "AbortError")); }, { once: true });
+    state.items.push(item);
+    if (state.items.length >= CREATE_BATCH_SIZE) {
+      if (state.timer !== undefined) { clearTimeout(state.timer); state.timer = undefined; }
+      void flushCreates();
+    } else if (state.timer === undefined) {
+      state.timer = setTimeout(() => { state.timer = undefined; void flushCreates(); }, 0);
+    }
+  }), [flushCreates]);
+
+  const flushSettles = useCallback(async () => {
+    const state = settleBatch.current;
+    if (state.flushing) return;
+    state.flushing = true;
+    const batch = state.items.splice(0, COMMIT_BATCH_SIZE);
+    try {
+      const results = await api.commitUploadBatch(batch.map(({ id }) => id));
+      batch.forEach((item, index) => {
+        if (item.cancelled) return;
+        const result = results[index];
+        if (result?.result) item.resolve(result.result);
+        else if (result?.error) item.reject(new FileApiError(result.error));
+        else item.reject(new Error("The settlement page was incomplete."));
+      });
+    } catch (error) {
+      batch.forEach((item) => { if (!item.cancelled) item.reject(error); });
+    } finally {
+      state.flushing = false;
+      if (state.items.length) state.timer = setTimeout(() => { state.timer = undefined; void flushSettles(); }, 0);
+    }
+  }, []);
+
+  const settleUpload = useCallback((id: string, signal?: AbortSignal) => new Promise<FileResource | FileOperation>((resolve, reject) => {
+    if (typeof api.commitUploadBatch !== "function") { api.commitUpload(id, signal).then(resolve, reject); return; }
+    if (signal?.aborted) { reject(new DOMException("Upload canceled", "AbortError")); return; }
+    const state = settleBatch.current;
+    const item: PendingSettle = { id, resolve, reject, cancelled: false };
+    signal?.addEventListener("abort", () => { item.cancelled = true; reject(new DOMException("Upload canceled", "AbortError")); }, { once: true });
+    state.items.push(item);
+    if (state.items.length >= COMMIT_BATCH_SIZE) {
+      if (state.timer !== undefined) { clearTimeout(state.timer); state.timer = undefined; }
+      void flushSettles();
+    } else if (state.timer === undefined) {
+      state.timer = setTimeout(() => { state.timer = undefined; void flushSettles(); }, COMMIT_LINGER_MS);
+    }
+  }), [flushSettles]);
   const deadlines = useRef(new Set<ReturnType<typeof setTimeout>>());
   // Global part pool: the file at the head of the queue takes every slot it has parts to
   // fill, and the next part of that file is always the first waiter, so files finish one
@@ -463,7 +562,7 @@ export function useUploadQueue(onUploaded: (task: UploadTask, item: Item) => voi
           // Retain the exact intent/key in memory before allocation, including a lost create ACK.
           patch(id, { intent });
         }
-        try { session = await api.createUpload(intent, task.createKey, signal); }
+        try { session = await admitUpload(intent, task.createKey, signal); }
         catch (error) {
           if (error instanceof ApiError && [400, 401, 403, 409, 413, 422, 507].includes(error.status)) patch(id, { allocationRejected: true });
           // An upload that holds the path is one that is committing: an open session fences
@@ -783,7 +882,7 @@ export function useUploadQueue(onUploaded: (task: UploadTask, item: Item) => voi
         if (known.size !== session.partCount) { patch(id, { loaded: received, status: "queued", speed: 0 }); return; }
       }
       patch(id, { status: "finalizing", uploaded: true, loaded: session.size, speed: 0 });
-      const result = await commitUpload(session.id, signal);
+      const result = await commitUpload(session.id, signal, settleUpload);
       if (signal.aborted) return;
       if (isOperation(result)) { patch(id, { operationId: result.id }); }
       else { complete(task, result); }
@@ -798,7 +897,7 @@ export function useUploadQueue(onUploaded: (task: UploadTask, item: Item) => voi
       running.current.delete(id);
       pumpRef.current();
     }
-  }, [acquirePart, applyOperation, complete, patch, releasePart]);
+  }, [acquirePart, admitUpload, applyOperation, complete, patch, releasePart, settleUpload]);
   const pump = useCallback(() => {
     if (!ready.current || !mounted.current) return;
     // Start at most START_POOL_SIZE tasks at once. The part pool still decides how many

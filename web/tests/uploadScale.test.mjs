@@ -50,7 +50,7 @@ test("a running folder upload paints on the queue's cadence, not once per file",
     `${harness.updates() - enqueued} published states over ${harness.paints()} paints`);
 });
 
-test("a large selection holds a bounded number of upload sessions at once", async (t) => {
+test("a large selection holds a bounded page of upload sessions at once", async (t) => {
   const server = uploadServer();
   const create = server.api.createUpload;
   let active = 0;
@@ -71,7 +71,9 @@ test("a large selection holds a bounded number of upload sessions at once", asyn
   t.after(harness.unmount);
   harness.render().enqueue(directory(200), "", () => false);
   await harness.until(allComplete, "every queued file eventually starts");
-  assert.ok(peak <= 8, `${peak} upload sessions were open at once`);
+  // Admission runs a page at a time: 32 sessions may be open, while bytes stay bounded by
+  // the eight-slot part pool.
+  assert.ok(peak <= 32, `${peak} upload sessions were open at once`);
   assert.ok(peak > 1, "a queue that serializes everything would be useless");
   assert.equal(first.length, 1);
   assert.equal(server.calls.filter(([kind]) => kind === "create").length, 200, "each file allocates exactly once");

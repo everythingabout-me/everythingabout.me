@@ -698,6 +698,15 @@ aborted only if it is still `open`. This flow never
 automatically aborts `committing`, `outcome_unknown` or `committed` work, and it neither supplies server
 authority nor proves inactivity of other clients, origins or devices.
 
+### Batched admission and settlement
+
+`POST /api/files/uploads/batch` admits up to 32 sessions in one request and
+`POST /api/files/uploads/commit/batch` settles up to eight. Each item is the single-item body
+(each create item carries its own `idempotencyKey`) and each answers independently: a
+refused destination is one item's `error`, never the page's. The browser sends a create page
+when it needs URLs, and a settle page of eight or after a two-second linger for a partial
+page; bytes stay bounded by the eight-part pool either way.
+
 ### Direct publication for one-part uploads
 
 A file that fits in a single part, uploaded over a class A connection whose provider is

@@ -1303,6 +1303,21 @@ export const api = {
   createUpload(input: FileUploadInput, key: string, signal?: AbortSignal): Promise<FileUploadSession> {
     return filePost("/uploads", uploadInput(input), { "Idempotency-Key": key }, signal);
   },
+  /**
+   * Admit a page of sessions in one request. Each item answers on its own: one refused
+   * destination does not fail the page, and the caller maps its own error.
+   */
+  async createUploadBatch(items: { input: FileUploadInput; key: string }[], signal?: AbortSignal): Promise<{ upload?: FileUploadSession; error?: FileProblem }[]> {
+    const body = { items: items.map(({ input, key }) => ({ ...uploadInput(input), idempotencyKey: key })) };
+    const result = await filePost<{ items: { upload?: FileUploadSession; error?: FileProblem }[] }>("/uploads/batch", body, undefined, signal);
+    return Array.isArray(result.items) ? result.items : [];
+  },
+
+  /** Settle a page of sessions in one request; each item is a file or its Operation. */
+  async commitUploadBatch(ids: string[], signal?: AbortSignal): Promise<{ result?: FileResource | FileOperation; error?: FileProblem }[]> {
+    const result = await filePost<{ items: { result?: FileResource | FileOperation; error?: FileProblem }[] }>("/uploads/commit/batch", { items: ids.map((id) => ({ id })) }, undefined, signal);
+    return Array.isArray(result.items) ? result.items : [];
+  },
 
   /** Class C only: one immutable part through the application, with a durable receipt. */
   uploadPart(id: string, number: number, blob: Blob, signal?: AbortSignal, onProgress?: (progress: UploadProgress) => void): Promise<FileUploadReceipt> {
