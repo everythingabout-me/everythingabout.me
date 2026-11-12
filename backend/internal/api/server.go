@@ -51,18 +51,21 @@ type Server struct {
 	uploadSpools   fileUploadSpoolFactory
 	fileWorkerMu   sync.Mutex
 	fileWorkers    *fileWorkers
-	cfg            *config.Config
-	db             *store.DB
-	auth           *auth.Service
-	codes          *emailcode.Service
-	mail           *mail.Sender
-	storage        storage.Storage
-	nodes          *nodes.Service
-	jobs           *jobs.Service
-	eventsSvc      *events.Service
-	timeline       *timeline.Service
-	limiter        *ratelimit.Limiter
-	web            http.Handler
+	// background tracks the goroutines the Start* methods launch, so WaitBackground
+	// can prove they have stopped before the caller closes the pool they use.
+	background sync.WaitGroup
+	cfg        *config.Config
+	db         *store.DB
+	auth       *auth.Service
+	codes      *emailcode.Service
+	mail       *mail.Sender
+	storage    storage.Storage
+	nodes      *nodes.Service
+	jobs       *jobs.Service
+	eventsSvc  *events.Service
+	timeline   *timeline.Service
+	limiter    *ratelimit.Limiter
+	web        http.Handler
 }
 
 // New wires dependencies. web is the handler for the frontend build (SPA) and may be nil.
@@ -119,6 +122,61 @@ func (s *Server) StartTimeline(ctx context.Context) {
 		return
 	}
 	s.timeline.Start(ctx)
+}
+
+// WaitBackground blocks until the background work started by StartTimeline,
+// StartUploadIndex and StartFileOperations has stopped, or ctx ends first. Call it
+// after http.Server.Shutdown has returned and before closing the database pool,
+// storage backend or connection resolver.
+//
+// Shutdown waits for handlers, not for work a handler leaves running after it has
+// answered. The recovery scanners, the upload index, the timeline organizer and
+// every admitted file operation query the same pool; their contexts are cancelled
+// by the same signal, but cancellation only asks them to stop. Closing the pool on
+// cancellation alone is a race that looks clean most of the time and fails exactly
+// under load, so the close path waits here instead of assuming.
+func (s *Server) WaitBackground(ctx context.Context) error {
+	// File operations are the one kind that can still be writing after every
+	// cancellable goroutine has returned: once a native effect is published, fileops
+	// detaches its index settlement from the request context (durableContext) so the
+	// settlement finishes even if the client is gone. Close admission under the lock
+	// startFileOperation uses, so no new operation can be added while waiting.
+	s.fileWorkerMu.Lock()
+	workers := s.fileWorkers
+	s.fileWorkerMu.Unlock()
+	if workers != nil {
+		workers.mu.Lock()
+		workers.draining = true
+		workers.mu.Unlock()
+		if err := waitGroup(ctx, &workers.operations); err != nil {
+			return err
+		}
+	}
+	if err := waitGroup(ctx, &s.background); err != nil {
+		return err
+	}
+	// The organizer owns its own goroutines, so its completion is asked of it
+	// directly rather than through s.background.
+	if s.timeline != nil {
+		return s.timeline.Wait(ctx)
+	}
+	return nil
+}
+
+// waitGroup waits for wg while honouring ctx. A context that ends first means the
+// caller's drain budget is spent; the goroutine is left to die with the process.
+func waitGroup(ctx context.Context, wg *sync.WaitGroup) error {
+	done := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 type handlerFunc func(http.ResponseWriter, *http.Request) error

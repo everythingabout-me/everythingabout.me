@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"crypto/rand"
@@ -15,6 +16,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -202,17 +204,20 @@ func TestLocalStorageServerStartupPostgres(t *testing.T) {
 	}
 	exited := make(chan error, 1)
 	go func() { exited <- server.Wait() }()
+	serverExited := false
 	defer func() {
-		_ = server.Process.Signal(os.Interrupt)
-		select {
-		case err := <-exited:
-			if err != nil {
-				t.Errorf("server shutdown: %v", err)
+		if !serverExited {
+			_ = server.Process.Signal(os.Interrupt)
+			select {
+			case err := <-exited:
+				if err != nil {
+					t.Errorf("server shutdown: %v", err)
+				}
+			case <-time.After(12 * time.Second):
+				_ = server.Process.Kill()
+				<-exited
+				t.Error("server did not shut down gracefully")
 			}
-		case <-time.After(12 * time.Second):
-			_ = server.Process.Kill()
-			<-exited
-			t.Error("server did not shut down gracefully")
 		}
 		if data, err := os.ReadFile(logPath); err == nil {
 			t.Logf("actual server process log:\n%s", data)
@@ -298,4 +303,75 @@ func TestLocalStorageServerStartupPostgres(t *testing.T) {
 		t.Fatalf("native root changed: %v %v", entries, err)
 	}
 	t.Log("real local server: health 200; password session, account and imported listing 200; five retired legacy mutations 410; index unchanged; original native filename, binary bytes and empty folder preserved")
+
+	// A backup runs in a goroutine that shutdown deliberately does not wait for.
+	// The row is the only trace it leaves, so a stopped process must turn a
+	// 'running' row into an explicit interruption instead of leaving it running.
+	var backupConnection string
+	if err := db.QueryRow(ctx, `select id::text from storage_connections limit 1`).Scan(&backupConnection); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(ctx, `insert into backup_runs(owner_id, connection_id, snapshot, state) values($1::uuid,$2::uuid,'2020-01-01','running')`, ownerID, backupConnection); err != nil {
+		t.Fatal(err)
+	}
+
+	// A request that is still reading its body when SIGTERM arrives must be allowed
+	// to finish, and the pool must still be open when it does: /api/auth/code reads
+	// the JSON body first and only then writes the verification-code row. If shutdown
+	// closed the pool when ListenAndServe returned — the behaviour this test exists to
+	// prevent — the process would exit with the request in flight and never answer.
+	slow, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer slow.Close()
+	slowBody := `{"email":"startup@example.test"}`
+	half := len(slowBody) / 2
+	if _, err := fmt.Fprintf(slow, "POST /api/auth/code HTTP/1.1\r\nHost: %s\r\nOrigin: %s\r\nContent-Type: application/json\r\nContent-Length: %d\r\nConnection: close\r\n\r\n%s", addr, base, len(slowBody), slowBody[:half]); err != nil {
+		t.Fatal(err)
+	}
+	// Let the handler reach ReadJSON and block on the missing bytes before signalling.
+	time.Sleep(200 * time.Millisecond)
+	if err := server.Process.Signal(syscall.SIGTERM); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(300 * time.Millisecond)
+	select {
+	case err := <-exited:
+		serverExited = true
+		t.Fatalf("server exited with a request still in flight: %v", err)
+	default:
+	}
+	if _, err := io.WriteString(slow, slowBody[half:]); err != nil {
+		t.Fatalf("finish the in-flight request: %v", err)
+	}
+	if err := slow.SetReadDeadline(time.Now().Add(10 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	response, err := http.ReadResponse(bufio.NewReader(slow), nil)
+	if err != nil {
+		t.Fatalf("read the response for the request that was in flight during shutdown: %v", err)
+	}
+	data, _ = io.ReadAll(response.Body)
+	response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("in-flight request did not finish before the pool closed: status=%d body=%s", response.StatusCode, data)
+	}
+	select {
+	case err := <-exited:
+		serverExited = true
+		if err != nil {
+			t.Errorf("server shutdown: %v", err)
+		}
+	case <-time.After(12 * time.Second):
+		t.Fatal("server did not exit after the in-flight request finished")
+	}
+	var backupState, backupError string
+	if err := db.QueryRow(ctx, `select state, coalesce(error,'') from backup_runs where owner_id=$1::uuid and snapshot='2020-01-01'`, ownerID).Scan(&backupState, &backupError); err != nil {
+		t.Fatal(err)
+	}
+	if backupState != "failed" || !strings.Contains(backupError, "stopped before this backup finished") {
+		t.Fatalf("interrupted backup was not recorded: state=%s error=%q", backupState, backupError)
+	}
+	t.Log("SIGTERM: the request still reading its body finished with 200 against a live pool, the interrupted backup was recorded, then the process exited")
 }

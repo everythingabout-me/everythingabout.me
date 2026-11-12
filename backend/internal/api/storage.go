@@ -265,9 +265,63 @@ func (s *Server) handleBackupStart(w http.ResponseWriter, r *http.Request) error
 	if s.backupBusy(key) {
 		return httpx.Conflict("A backup is already running for this destination.")
 	}
+	// Record the attempt before answering 202. The copy itself runs off the request,
+	// so a shutdown or crash would otherwise destroy the only evidence that a backup
+	// was ever asked for. The completion upsert updates this same row through the
+	// (owner, connection, snapshot) unique index, and the settings page already knows
+	// how to render 'running'.
+	if err := s.recordBackupStart(r.Context(), user.ID, target.ID, date); err != nil {
+		s.releaseBackup(key)
+		return err
+	}
 	go s.runBackupJob(key, user.ID, *target, in.Action, date, in.Keep)
 	httpx.WriteOKStatus(w, http.StatusAccepted, map[string]any{"started": true})
 	return nil
+}
+
+// recordBackupStart writes the row a run owns before any bytes move. Without it a
+// run interrupted by a deploy left no trace at all, and the history could not tell
+// "never started" from "started and died"; a re-run resets the row because the
+// unique index keys a day's attempt, not an append-only log.
+func (s *Server) recordBackupStart(ctx context.Context, ownerID, connectionID, date string) error {
+	_, err := s.db.Pool().Exec(ctx, `
+		insert into backup_runs(owner_id, connection_id, snapshot, state)
+		values($1::uuid,$2::uuid,$3::date,'running')
+		on conflict (owner_id, connection_id, snapshot) do update
+		set state='running', error=null, files=0, folders=0, bytes=0, started_at=now(), finished_at=null`,
+		ownerID, connectionID, date)
+	return err
+}
+
+// MarkInterruptedBackups records that runs still at 'running' did not finish.
+// A backup started from the web runs on its own context and is deliberately not
+// waited for — copying a whole tree can legitimately outlive any drain budget — so
+// the row written at start would otherwise claim forever that a backup is in
+// progress. Call it while the pool is still open, after the HTTP drain.
+//
+// It is an UPDATE, not a second drain, and it is safe against a run finishing
+// concurrently: that run's completion upsert either lands first (the row is then
+// complete and this statement skips it) or last (the real result replaces the
+// failure). A deployment runs one instance, so a 'running' row at this point
+// belongs to this process.
+func (s *Server) MarkInterruptedBackups(ctx context.Context) error {
+	if s.db == nil {
+		return nil
+	}
+	tag, err := s.db.Pool().Exec(ctx, `update backup_runs set state='failed', error=$1, finished_at=now() where state='running'`, "the server stopped before this backup finished")
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() > 0 {
+		slog.Warn("marked interrupted backups as failed", "runs", tag.RowsAffected())
+	}
+	return nil
+}
+
+func (s *Server) releaseBackup(key string) {
+	s.backupMu.Lock()
+	delete(s.backupJobs, key)
+	s.backupMu.Unlock()
 }
 
 func (s *Server) backupBusy(key string) bool {
@@ -284,11 +338,7 @@ func (s *Server) backupBusy(key string) bool {
 }
 
 func (s *Server) runBackupJob(key, ownerID string, target connections.Connection, action, date string, keep int) {
-	defer func() {
-		s.backupMu.Lock()
-		delete(s.backupJobs, key)
-		s.backupMu.Unlock()
-	}()
+	defer s.releaseBackup(key)
 	ctx := context.Background()
 	fail := func(err error) {
 		s.recordBackupRun(ctx, ownerID, target.ID, date, snapshot.Result{}, err)

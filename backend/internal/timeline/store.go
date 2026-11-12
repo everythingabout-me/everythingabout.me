@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -28,6 +29,11 @@ type Service struct {
 	cfg     config.Timeline
 	events  *events.Service
 	started atomic.Bool
+	// done closes once the goroutines Start launched have all returned. Wait reads
+	// it so a shutdown can keep the pool open until the organizer has stopped;
+	// doneMu guards the handoff between Start and Wait.
+	doneMu sync.Mutex
+	done   chan struct{}
 }
 
 type job struct {

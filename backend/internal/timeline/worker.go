@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"sync"
 	"time"
 
 	"everythingabout.me/backend/internal/paths"
@@ -30,13 +31,57 @@ func (s *Service) Start(ctx context.Context) {
 		return
 	}
 
+	done := make(chan struct{})
+	s.doneMu.Lock()
+	s.done = done
+	s.doneMu.Unlock()
+
 	s.recoverJobs(ctx)
+	var running sync.WaitGroup
+	running.Add(s.cfg.Workers + 2)
 	for i := 0; i < s.cfg.Workers; i++ {
-		go s.worker(ctx)
+		go func() {
+			defer running.Done()
+			s.worker(ctx)
+		}()
 	}
-	go s.bootstrap(ctx)
-	go s.sweeper(ctx)
+	go func() {
+		defer running.Done()
+		s.bootstrap(ctx)
+	}()
+	go func() {
+		defer running.Done()
+		s.sweeper(ctx)
+	}()
+	go func() {
+		running.Wait()
+		close(done)
+	}()
 	slog.Info("timeline: started", "workers", s.cfg.Workers, "budget", s.engine.Budget)
+}
+
+// Wait blocks until every goroutine Start launched has returned, or ctx ends
+// first. It returns immediately when the organizer is disabled or never started
+// (a coordinated-writes deployment starts none at all).
+//
+// Waiting is not the same as draining a job. A worker that is asked to stop
+// abandons its job with status 'running', which recoverJobs resets at the next
+// start; that is deliberate resumption. Without this wait, though, the caller
+// closes the pool while the worker is still finishing the database call that
+// observes the cancellation, turning a clean restart into a spurious failure.
+func (s *Service) Wait(ctx context.Context) error {
+	s.doneMu.Lock()
+	done := s.done
+	s.doneMu.Unlock()
+	if done == nil {
+		return nil
+	}
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 func (s *Service) recoverJobs(ctx context.Context) {

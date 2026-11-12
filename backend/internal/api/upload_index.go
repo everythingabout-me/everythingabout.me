@@ -94,18 +94,32 @@ func (s *Server) settleUpload(ctx context.Context, ownerID, path string, isDir b
 	}
 }
 
-// StartUploadIndex runs independently of the optional timeline organizer.
+// StartUploadIndex runs independently of the optional timeline organizer. Each Run
+// drains its own in-flight calls before returning; the goroutines are tracked so
+// WaitBackground can keep the pool open until they have.
 func (s *Server) StartUploadIndex(ctx context.Context) {
 	if s.cfg.Storage.CoordinatedWrites {
 		return
 	}
 	if s.jobs != nil {
-		go s.jobs.RunDeletes(ctx)
+		s.background.Add(1)
+		go func() {
+			defer s.background.Done()
+			s.jobs.RunDeletes(ctx)
+		}()
 	}
 	if s.browserUploads != nil {
-		go s.browserUploads.Run(ctx)
+		s.background.Add(1)
+		go func() {
+			defer s.background.Done()
+			s.browserUploads.Run(ctx)
+		}()
 	}
 	if s.uploadIndex != nil {
-		go s.uploadIndex.Run(ctx)
+		s.background.Add(1)
+		go func() {
+			defer s.background.Done()
+			s.uploadIndex.Run(ctx)
+		}()
 	}
 }

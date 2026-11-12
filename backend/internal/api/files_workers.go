@@ -21,6 +21,11 @@ type fileWorkers struct {
 	active  map[string]bool
 	retries map[string]*fileWorkerRetry
 	slots   chan struct{}
+	// operations counts admitted operations, including the ones whose settlement
+	// deliberately outlives cancellation. draining closes admission so WaitBackground
+	// can wait for it without racing a new Add.
+	operations sync.WaitGroup
+	draining   bool
 	// wake carries "a slot just freed" from a finishing operation to the scanner.
 	// Without it the only thing that admits deferred work is the periodic sweep, so
 	// every completed commit leaves its successor waiting up to one sweep interval
@@ -137,6 +142,11 @@ func (s *Server) startFileOperation(op fileops.Operation) (bool, <-chan struct{}
 	if worker.active[op.ID] {
 		return false, nil, nil
 	}
+	if worker.draining {
+		// The process is past the point where new work may hold the pool open; a
+		// caller that races the drain gets the same answer a cancelled worker would.
+		return false, nil, context.Canceled
+	}
 	if retry, ok := worker.retries[op.ID]; ok && time.Now().Before(retry.nextTry) {
 		// Deliberately quiet: the deferred attempt is reported where it is scheduled,
 		// with the cause chain, so the retry itself is not news.
@@ -152,9 +162,11 @@ func (s *Server) startFileOperation(op fileops.Operation) (bool, <-chan struct{}
 		return false, nil, errFilesWorkerBusy
 	}
 	worker.active[op.ID] = true
+	worker.operations.Add(1)
 	parentCtx := worker.ctx
 	done := make(chan struct{})
 	go func() {
+		defer worker.operations.Done()
 		defer close(done)
 		defer func() {
 			worker.mu.Lock()
@@ -406,8 +418,11 @@ func (s *Server) StartFileOperations(ctx context.Context) {
 	worker := s.workers()
 	worker.mu.Lock()
 	worker.ctx = ctx
+	worker.draining = false
 	worker.mu.Unlock()
+	s.background.Add(1)
 	go func() {
+		defer s.background.Done()
 		ticker := time.NewTicker(5 * time.Second)
 		defer ticker.Stop()
 		// A wake says only "a slot is free", so it drains the queue and returns to wait;
