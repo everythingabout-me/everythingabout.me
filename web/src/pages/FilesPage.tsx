@@ -37,7 +37,7 @@ import { formatRelativeTime } from "../i18n/format";
 import { useUploadQueue, type UploadStatus, type UploadTask } from "./useUploadQueue";
 import { resolveDeleteBlocker } from "./deleteBlocker";
 import { droppedUploadEntries, filesToUploadEntries } from "./uploadSelection";
-import { buildUploadRows, isUploadDirectory, isUploadRowActive, type UploadRowEntry } from "./uploadRows";
+import { buildUploadRows, failedTasks, isUploadDirectory, isUploadRowActive, type UploadRowEntry } from "./uploadRows";
 import { pendingFileOperations, setUploadOwner, settleFileOperation, subscribeFileOperations, trackFileOperation } from "./uploadPersistence";
 import { formatBytes, formatPreciseBytes, formatSize, formatSpeed } from "./sizeFormat";
 import { cameraText, capturedAtText, coordinatesText, dimensionsText, durationText, exposureText, mayHaveMediaMetadata } from "./mediaMetadataFormat";
@@ -204,12 +204,10 @@ const ItemRow = memo(function ItemRow({
 const UploadRow = memo(function UploadRow({
   entry,
   onCancel,
-  onRetry,
   onResume,
 }: {
   entry: UploadRowEntry;
   onCancel: (id: string) => void;
-  onRetry: (id: string) => void;
   onResume: (id: string) => void;
 }) {
   const { upload, task, item, name, path, isDir } = entry;
@@ -331,15 +329,6 @@ const UploadRow = memo(function UploadRow({
               {t("drive.continueUpload")}
             </button>
           )}
-          {upload.retryIds.length > 0 && (
-            <button
-              className={styles.textBtn}
-              onClick={() => upload.retryIds.forEach(onRetry)}
-              title={t("drive.retryUpload")}
-            >
-              {t("common.retry")}
-            </button>
-          )}
           {upload.cancelIds.length > 0 && (
             <button
               className={`${styles.ghostBtn} ${styles.cancelUpload}`}
@@ -355,6 +344,73 @@ const UploadRow = memo(function UploadRow({
     </div>
   );
 });
+
+/**
+ * The failures of the current transfer, as their own short list.
+ *
+ * A folder row can say "3 failed" and nothing more useful: the files behind that number may
+ * be several levels down and the person has no reason to visit them, while the one action
+ * they need — send those bytes again — belongs to the transfer, not to the folder. So retry
+ * lives here and only here, per file or for all of them, and a row keeps the count as the
+ * place a failure is noticed.
+ *
+ * The list is a projection of the queue and owns no state: it disappears with the tab, the
+ * same rule the rest of the transfer list follows, so nothing here can outlive the bytes it
+ * describes and disagree with the folder.
+ */
+const UploadFailures = memo(function UploadFailures({
+  tasks,
+  onRetry,
+  onCancel,
+}: {
+  tasks: UploadTask[];
+  onRetry: (id: string) => void;
+  onCancel: (id: string) => void;
+}) {
+  if (tasks.length === 0) return null;
+  return (
+    <div className={styles.uploadFailures}>
+      <div className={styles.uploadFailuresHead}>
+        <span className={styles.uploadFailuresTitle}>
+          {t("drive.uploadFailuresTitle", { count: tasks.length.toLocaleString() })}
+        </span>
+        <button
+          className={styles.textBtn}
+          onClick={() => tasks.forEach((task) => onRetry(task.id))}
+          title={t("drive.uploadFailuresRetryAllHint")}
+        >
+          {t("drive.uploadFailuresRetryAll")}
+        </button>
+      </div>
+      <ul className={styles.uploadFailuresList}>
+        {tasks.map((task) => (
+          <li className={styles.uploadFailure} key={task.id}>
+            <span className={styles.uploadFailurePath} title={`/${task.path}`}>{`/${task.path}`}</span>
+            <span className={styles.uploadFailureReason} title={task.error}>
+              {task.error ?? t("drive.uploadFailed")}
+            </span>
+            <button className={styles.textBtn} onClick={() => onRetry(task.id)}>
+              {t("common.retry")}
+            </button>
+            <button
+              className={`${styles.ghostBtn} ${styles.cancelUpload}`}
+              onClick={() => onCancel(task.id)}
+              title={t("drive.cancelUpload")}
+              aria-label={t("drive.cancelUploadNamed", { name: task.path })}
+            >
+              <CloseIcon size={13} />
+            </button>
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+  // A publish tick rebuilds the task array every 100ms while bytes move, and only a failure
+  // appearing or leaving changes this list. Comparing by identity keeps a large failure list
+  // from re-rendering ten times a second beside a transfer that has nothing new to say.
+}, (previous, next) => previous.tasks.length === next.tasks.length
+  && previous.tasks.every((task, index) =>
+    task.id === next.tasks[index]?.id && task.error === next.tasks[index]?.error));
 
 /**
  * The question is the whole decision: confirming closes the dialog and hands the request
@@ -981,6 +1037,8 @@ export function FilesPage() {
     return buildUploadRows(items, uploads, listPath);
   }, [activeQuery, items, listPath, uploads]);
   const visibleUploads = entries.filter((entry) => entry.upload);
+  // Retry is a transfer action, not a folder action: the list above the rows owns it.
+  const failed = useMemo(() => failedTasks(uploads), [uploads]);
   const uploadDirectory = isUploadDirectory(uploads, path);
 
   const listKey = `${loadedPath ?? ""}|${activeQuery}`;
@@ -1599,6 +1657,8 @@ export function FilesPage() {
               {/* A switch has no skeleton to show, so a hairline at the card's edge carries the wait. */}
               {pending && !firstLoad && <span className={styles.loadLine} aria-hidden="true" />}
 
+              <UploadFailures tasks={failed} onRetry={retryUpload} onCancel={cancelUpload} />
+
               {creating && (
                 <div className={styles.newRow}>
                   <input
@@ -1628,7 +1688,6 @@ export function FilesPage() {
                       key={entry.path}
                       entry={entry}
                       onCancel={cancelUpload}
-                      onRetry={retryUpload}
                       onResume={resumeUpload}
                     />
                   ))}
@@ -1658,7 +1717,6 @@ export function FilesPage() {
                         key={entry.path}
                         entry={entry}
                         onCancel={cancelUpload}
-                        onRetry={retryUpload}
                         onResume={resumeUpload}
                       />
                     ) : entry.item ? (

@@ -5,7 +5,7 @@ import { transformWithOxc } from "vite";
 
 const source = await readFile(new URL("../src/pages/uploadRows.ts", import.meta.url), "utf8");
 const { code } = await transformWithOxc(source, "uploadRows.ts");
-const { buildUploadRows, isUploadDirectory, isUploadRowActive } = await import(
+const { buildUploadRows, failedTasks, isUploadDirectory, isUploadRowActive } = await import(
   `data:text/javascript;base64,${Buffer.from(code).toString("base64")}`
 );
 
@@ -71,7 +71,7 @@ test("shows only immediate children and aggregates all selected descendants", ()
     folders: 2, completedFolders: 2, items: 5, completedItems: 3,
     progressUnit: "bytes", preparing: false, waitingForSlot: false, failed: 0,
     size: 500, loaded: 220, speed: 50, percent: 44,
-    cancelIds: ["task:health/apple-health"], retryIds: [], resumeIds: [],
+    cancelIds: ["task:health/apple-health"], resumeIds: [],
   });
   assert.deepEqual(paths(buildUploadRows([], tasks, "health/apple-health")), [
     "health/apple-health/2015", "health/apple-health/2025",
@@ -139,7 +139,6 @@ test("navigation remains available after the root directory task completes", () 
   assert.equal(row.upload.files, 1);
   assert.equal(row.upload.completedFiles, 1);
   assert.deepEqual(row.upload.cancelIds, []);
-  assert.deepEqual(row.upload.retryIds, []);
 });
 
 test("a finished batch stops being an upload row once the listing carries the entry", () => {
@@ -190,7 +189,6 @@ test("failed directories and files propagate to their folder while successful si
   assert.equal(summary.files, 4);
   assert.equal(summary.completedFiles, 1);
   assert.equal(summary.loaded, 180);
-  assert.deepEqual(summary.retryIds, ["task:health/root/broken", "task:health/root/b.txt"]);
   assert.deepEqual(summary.cancelIds, ["task:health/root"]);
 });
 
@@ -318,4 +316,23 @@ test("a file waiting its turn is queued, and a file that already sent bytes keep
   const making = buildUploadRows([], [folder("health/empty", "uploading")], "health")[0];
   assert.equal(making.upload.status, "uploading");
   assert.equal(making.upload.waitingForSlot, false);
+});
+
+test("the failure list holds every failed task in path order and nothing else", () => {
+  const tasks = [
+    task("health/root/b.txt", { status: "failed", error: "409 conflict" }),
+    folder("health/root/broken", "failed"),
+    task("health/root/a.txt", { status: "completed" }),
+    task("health/root/c.txt", { status: "uploading" }),
+    // A wait for a deletion is not a failure: retrying it would re-read the same record and
+    // park again, so it stays out of the list that offers Retry.
+    task("health/root/d.txt", { status: "waiting" }),
+    task("health/other/e.txt", { status: "failed" }),
+  ];
+  assert.deepEqual(failedTasks(tasks).map((entry) => entry.path), [
+    "health/other/e.txt", "health/root/b.txt", "health/root/broken",
+  ]);
+  // The reason travels with the row, because the list is the only place a person reads it.
+  assert.equal(failedTasks(tasks)[1].error, "409 conflict");
+  assert.deepEqual(failedTasks([]), []);
 });

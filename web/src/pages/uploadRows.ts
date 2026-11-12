@@ -21,7 +21,6 @@ export interface UploadSummary {
   speed: number;
   percent: number;
   cancelIds: string[];
-  retryIds: string[];
   /**
    * Tasks waiting on a deletion that ended without deleting anything.
    *
@@ -94,6 +93,25 @@ function visibleStatus(task: UploadTask): UploadStatus {
 export function isUploadRowActive(entry: UploadRowEntry): boolean {
   if (!entry.upload) return false;
   return entry.upload.status !== "completed" || !entry.item;
+}
+
+/**
+ * Every failed task, in path order — the set the failure list offers to retry.
+ *
+ * A failure is noticed on a folder row but can never be handled there: the file may sit
+ * twenty thousand items down a tree the person is not looking at, so a row that answered
+ * "3 failed" with a Retry button asked them to act on work they could not see. This
+ * projection is where retry lives, and it deliberately stays a view of the queue rather than
+ * a record of its own: the tab is the whole lifetime of a failure, so a refresh clears it
+ * exactly like every other transfer, with nothing left behind to disagree with the folder.
+ */
+export function failedTasks(tasks: UploadTask[]): UploadTask[] {
+  return tasks.filter((task) => task.status === "failed").sort((a, b) => {
+    const left = normalize(a.path).toLowerCase();
+    const right = normalize(b.path).toLowerCase();
+    if (left !== right) return left < right ? -1 : 1;
+    return a.path < b.path ? -1 : a.path > b.path ? 1 : 0;
+  });
 }
 
 /** Project every selected descendant onto its immediate child in the browsed directory. */
@@ -200,7 +218,6 @@ export function buildUploadRows(items: Item[], tasks: UploadTask[], directory: s
         : progressUnit === "items" ? (items > 0 ? Math.floor(completedItems / items * 100) : 0)
           : size > 0 ? Math.floor(loaded / size * 100) : 0,
       cancelIds: cancelable.length === 0 ? [] : row.task?.isDir ? [row.task.id] : cancelable.map((task) => task.id),
-      retryIds: failed.map((task) => task.id),
       resumeIds: waiting
         .filter((task) => task.waitingFor?.state === "failed" || task.waitingFor?.state === "cancelled")
         .map((task) => task.id),

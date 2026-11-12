@@ -1036,6 +1036,71 @@ a.crumb:hover {
   overflow-wrap: anywhere;
 }
 
+/* ---------- Failed uploads ---------- */
+
+/* The list sits above the rows, inside the sheet, so it is reachable from any folder: the
+   files it names may be nowhere near the directory a person is looking at. Its own height is
+   bounded because a bad link can fail hundreds of files, and the sheet must stay scrollable. */
+.uploadFailures {
+  border-bottom: 1px solid var(--border);
+  background: color-mix(in srgb, var(--hover) 55%, var(--surface));
+}
+
+.uploadFailuresHead {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 14px 6px;
+}
+
+.uploadFailuresTitle {
+  flex: 1;
+  min-width: 0;
+  color: var(--text-2);
+  font-size: 13px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.uploadFailuresList {
+  max-height: 224px;
+  overflow-y: auto;
+  padding: 0 8px 8px;
+}
+
+.uploadFailure {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.1fr) auto auto;
+  align-items: center;
+  gap: 10px;
+  padding: 4px 6px;
+  border-radius: 8px;
+  font-size: 13px;
+  line-height: 1.35;
+}
+
+.uploadFailure:hover {
+  background: var(--surface);
+}
+
+/* One line per failure: a long path must not push the reason and the buttons out of the row,
+   and the title carries the untruncated path for the ones that do not fit. */
+.uploadFailurePath {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text);
+}
+
+.uploadFailureReason {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-3);
+}
+
 .uploadSep {
   opacity: 0.45;
 }
