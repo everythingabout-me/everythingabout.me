@@ -347,7 +347,7 @@ func newObjectsAPIFixture(t *testing.T) *objectsAPIFixture {
 	provider := newObjectAPIProvider()
 	native := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { provider.serve(t, w, r) }))
 	t.Cleanup(native.Close)
-	proof := objectmutation.Admission{ConnectionID: "default", Endpoint: native.URL, Bucket: "bucket", Region: "test-region", CheckedAt: time.Now().UTC(), ProbeReference: "isolated stateful S3 SDK fixture, not live cloud evidence", AtomicPublish: true, ConditionalCreate: true, SingleGateway: true, MultipartUploads: true}
+	proof := objectmutation.Admission{Version: objectmutation.AdmissionVersion, ConnectionID: "default", Endpoint: native.URL, Bucket: "bucket", Region: "test-region", CheckedAt: time.Now().UTC(), ProbeReference: "isolated stateful S3 SDK fixture, not live cloud evidence", AtomicPublish: true, ConditionalCreate: true, SingleGateway: true, MultipartUploads: true}
 	proofPath := filepath.Join(t.TempDir(), "admission.json")
 	encoded, _ := json.Marshal(proof)
 	if err = os.WriteFile(proofPath, encoded, 0600); err != nil {

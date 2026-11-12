@@ -111,7 +111,7 @@ func TestStorageAdmitObjectsPostgresCLI(t *testing.T) {
 		}
 	}))
 	defer provider.Close()
-	admission := objectmutation.Admission{ConnectionID: "objects", Endpoint: provider.URL, Bucket: "fixture-bucket", Region: "test-region", CheckedAt: time.Now().UTC(), ProbeReference: "isolated-http-fixture", AtomicPublish: true, ConditionalCreate: true, SingleGateway: true}
+	admission := objectmutation.Admission{Version: objectmutation.AdmissionVersion, ConnectionID: "objects", Endpoint: provider.URL, Bucket: "fixture-bucket", Region: "test-region", CheckedAt: time.Now().UTC(), ProbeReference: "isolated-http-fixture", AtomicPublish: true, ConditionalCreate: true, SingleGateway: true}
 	admissionFile := filepath.Join(root, "admission.json")
 	data, _ := json.Marshal(admission)
 	if err = os.WriteFile(admissionFile, data, 0600); err != nil {

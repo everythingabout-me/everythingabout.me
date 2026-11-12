@@ -240,7 +240,7 @@ func fixture(t *testing.T) (*Driver, *fakeBackend, storage.Config, Options) {
 	t.Helper()
 	b := newFake()
 	cfg := storage.Config{OwnerID: "owner", ConnectionID: "fixture", Generation: 1, ContentRoot: "drive/owner/", SystemRoot: "system/owner/"}
-	options := Options{SpoolRoot: t.TempDir(), MaxPublishBytes: 1024, Admission: Admission{ConnectionID: cfg.ConnectionID, Endpoint: "https://fixture.invalid", Bucket: "bucket", Region: "region", CheckedAt: time.Now().UTC(), ProbeReference: "isolated-positive-negative-test", AtomicPublish: true, ConditionalCreate: true, SingleGateway: true}}
+	options := Options{SpoolRoot: t.TempDir(), MaxPublishBytes: 1024, Admission: Admission{Version: AdmissionVersion, ConnectionID: cfg.ConnectionID, Endpoint: "https://fixture.invalid", Bucket: "bucket", Region: "region", CheckedAt: time.Now().UTC(), ProbeReference: "isolated-positive-negative-test", AtomicPublish: true, ConditionalCreate: true, SingleGateway: true}}
 	d, err := New(&fakeTree{backend: b, root: cfg.ContentRoot}, cfg, b, options)
 	if err != nil {
 		t.Fatal(err)
