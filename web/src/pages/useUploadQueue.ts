@@ -19,11 +19,15 @@ const PART_POOL_SIZE = 16;
 // look-ahead; commits are bounded by the worker pool that settles them.
 const CREATE_BATCH_SIZE = 32;
 const COMMIT_BATCH_SIZE = 16;
-// Pages that may be in flight at once: the server's settlement pool (1024) divided by this
-// page size, so the client can fill the pool without ever being refused for a slot. The pages
-// belong to the settlement stage alone — a file gives its transfer slot back before it waits
-// here — so a pending page never holds up the bytes behind it.
-const COMMIT_PAGES = 64;
+// No page cap: a settlement is queued by the server's own pool (1024 operations), so the
+// client never has to decide how many may be outstanding — it sends every page it has a full
+// one for, and the server admits what it can and defers the rest to the durable Operation the
+// client already polls. Pages belong to the settlement stage alone: a file gives its transfer
+// slot back before it waits here, so a pending page never holds up the bytes behind it.
+//
+// The browser itself bounds how many are actually on the wire (six sockets per HTTP/1.1
+// origin, shared with the create pages), so this is a queue, not a flood.
+
 // Sessions kept in hand ahead of the transfer window: four part pools, so the window can be
 // refilled four times over before a create page (~1.7 s for 32, measured in 741f910 against
 // this bucket) has to answer. The page the server admits is 32, so 64 in hand is two
@@ -278,8 +282,6 @@ interface BatchState<T> {
   items: T[];
   timer?: ReturnType<typeof setTimeout>;
   flushing: boolean;
-  /** Pages in flight; settlement allows more than one. */
-  active: number;
 }
 
 interface PendingCreate { input: FileUploadInput; key: string; resolve: (session: FileUploadSession) => void; reject: (error: unknown) => void; cancelled: boolean }
@@ -327,8 +329,8 @@ export function useUploadQueue(onUploaded: (task: UploadTask, item: Item) => voi
   // which is why a prepare costs one request for a whole window rather than one per file.
   // A test double without the batch calls keeps the per-file path, so the queue's own
   // behaviour stays covered by the existing suite.
-  const createBatch = useRef<BatchState<PendingCreate>>({ items: [], flushing: false, active: 0 });
-  const settleBatch = useRef<BatchState<PendingSettle>>({ items: [], flushing: false, active: 0 });
+  const createBatch = useRef<BatchState<PendingCreate>>({ items: [], flushing: false });
+  const settleBatch = useRef<BatchState<PendingSettle>>({ items: [], flushing: false });
 
   const flushCreates = useCallback(async () => {
     const state = createBatch.current;
@@ -372,12 +374,12 @@ export function useUploadQueue(onUploaded: (task: UploadTask, item: Item) => voi
   // A page leaves the moment it has anything to carry: the endpoint takes one to sixteen
   // items, so waiting for the page to fill only delays every settlement by the wait — which
   // is exactly the state an import shows when its transfers are done and one commit page sits
-  // pending. Two pages may overlap, and a returning page sends the next immediately.
+  // pending. Every queued item goes out now; a returning page drains whatever arrived while
+  // it was out.
   const flushSettles = useCallback(() => {
     const state = settleBatch.current;
-    while (state.active < COMMIT_PAGES && state.items.length) {
+    while (state.items.length) {
       const batch = state.items.splice(0, COMMIT_BATCH_SIZE);
-      state.active++;
       void (async () => {
         try {
           const results = await api.commitUploadBatch(batch.map(({ id }) => id));
@@ -391,7 +393,6 @@ export function useUploadQueue(onUploaded: (task: UploadTask, item: Item) => voi
         } catch (error) {
           batch.forEach((item) => { if (!item.cancelled) item.reject(error); });
         } finally {
-          state.active--;
           if (state.items.length) flushSettles();
         }
       })();
