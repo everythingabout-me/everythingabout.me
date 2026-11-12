@@ -46,11 +46,21 @@ type objectAPIVersion struct {
 	Metadata  map[string]string
 	Deleted   bool
 }
+
+// objectAPICopy records one provider-side copy request by target key, so a test
+// can prove the driver copied inside the provider and bound the source revision
+// and target absence natively instead of relaying bytes through the gateway.
+type objectAPICopy struct {
+	Source     string
+	SourceETag string
+	Absent     bool
+}
 type objectAPIProvider struct {
 	mu               sync.Mutex
 	versions         map[string][]objectAPIVersion
 	puts             map[string]int
 	deletes          map[string]int
+	copies           map[string]objectAPICopy
 	lostReplyKey     string
 	invalidETagKey   string
 	sequence         int
@@ -65,7 +75,7 @@ type objectAPIProvider struct {
 }
 
 func newObjectAPIProvider() *objectAPIProvider {
-	return &objectAPIProvider{versions: map[string][]objectAPIVersion{}, puts: map[string]int{}, deletes: map[string]int{}, versionReads: map[string]int{}, etagReads: map[string]int{}}
+	return &objectAPIProvider{versions: map[string][]objectAPIVersion{}, puts: map[string]int{}, deletes: map[string]int{}, copies: map[string]objectAPICopy{}, versionReads: map[string]int{}, etagReads: map[string]int{}}
 }
 func (p *objectAPIProvider) current(key string) (objectAPIVersion, bool) {
 	v := p.versions[key]
@@ -85,6 +95,78 @@ func (p *objectAPIProvider) record(key string, body []byte, media string, meta m
 		p.versions[key] = append(p.versions[key], v)
 	}
 	return v
+}
+
+// copySourceKey decodes the x-amz-copy-source header. The driver escapes the
+// source per path segment, so segment separators are split before unescaping.
+func (p *objectAPIProvider) copySourceKey(raw string) (string, bool) {
+	raw = strings.TrimPrefix(raw, "/")
+	bucket, encoded, ok := strings.Cut(raw, "/")
+	if !ok || bucket != "bucket" || encoded == "" {
+		return "", false
+	}
+	segments := strings.Split(encoded, "/")
+	for i, segment := range segments {
+		decoded, err := url.PathUnescape(segment)
+		if err != nil {
+			return "", false
+		}
+		segments[i] = decoded
+	}
+	return strings.Join(segments, "/"), true
+}
+
+// copyObject serves the provider-side CopyObject operation. It answers with a
+// real CopyObjectResult: a copy is only confirmable from that response, so the
+// fixture must produce it. The source revision and target absence are enforced
+// natively, exactly as the driver requests them.
+func (p *objectAPIProvider) copyObject(t *testing.T, w http.ResponseWriter, r *http.Request, target string) {
+	t.Helper()
+	source, ok := p.copySourceKey(r.Header.Get("X-Amz-Copy-Source"))
+	if !ok {
+		w.WriteHeader(400)
+		io.WriteString(w, `<Error><Code>InvalidRequest</Code></Error>`)
+		return
+	}
+	sourceObject, presented := p.current(source)
+	if !presented {
+		w.WriteHeader(404)
+		io.WriteString(w, `<Error><Code>NoSuchKey</Code></Error>`)
+		return
+	}
+	if match := r.Header.Get("X-Amz-Copy-Source-If-Match"); match != "" && match != sourceObject.ETag {
+		w.WriteHeader(412)
+		io.WriteString(w, `<Error><Code>PreconditionFailed</Code></Error>`)
+		return
+	}
+	if r.Header.Get("If-None-Match") == "*" {
+		if _, exists := p.current(target); exists {
+			w.WriteHeader(412)
+			io.WriteString(w, `<Error><Code>PreconditionFailed</Code></Error>`)
+			return
+		}
+	}
+	if match := r.Header.Get("If-Match"); match != "" {
+		current, exists := p.current(target)
+		if !exists || match != current.ETag {
+			w.WriteHeader(412)
+			io.WriteString(w, `<Error><Code>PreconditionFailed</Code></Error>`)
+			return
+		}
+	}
+	meta := map[string]string{}
+	for name, values := range r.Header {
+		if strings.HasPrefix(strings.ToLower(name), "x-amz-meta-") {
+			meta[strings.TrimPrefix(strings.ToLower(name), "x-amz-meta-")] = values[0]
+		}
+	}
+	if meta["eam-intent"] == "" {
+		t.Error("provider-side copy omitted its private intent nonce")
+	}
+	p.copies[target] = objectAPICopy{Source: source, SourceETag: r.Header.Get("X-Amz-Copy-Source-If-Match"), Absent: r.Header.Get("If-None-Match") == "*"}
+	result := p.record(target, sourceObject.Body, r.Header.Get("Content-Type"), meta, false)
+	w.Header().Set("Content-Type", "application/xml")
+	fmt.Fprintf(w, `<CopyObjectResult><ETag>%s</ETag><LastModified>2026-11-02T01:00:00Z</LastModified></CopyObjectResult>`, result.ETag)
 }
 func (p *objectAPIProvider) serve(t *testing.T, w http.ResponseWriter, r *http.Request) {
 	t.Helper()
@@ -107,6 +189,10 @@ func (p *objectAPIProvider) serve(t *testing.T, w http.ResponseWriter, r *http.R
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	if copySource := r.Header.Get("X-Amz-Copy-Source"); copySource != "" && r.Method == "PUT" {
+		p.copyObject(t, w, r, key)
+		return
+	}
 	if p.serveMultipart(t, w, r, key) {
 		return
 	}
@@ -446,12 +532,17 @@ func objectsAPIJSON(t *testing.T, w *httptest.ResponseRecorder, status int) map[
 func (f *objectsAPIFixture) metadata(t *testing.T, path string) map[string]any {
 	return objectsAPIJSON(t, f.request(t, "GET", "", path, nil, nil), 200)
 }
-func (f *objectsAPIFixture) usage(t *testing.T, owner int, logical, physical int64) {
+func (f *objectsAPIFixture) usageAt(t *testing.T, owner int) fileops.Usage {
 	t.Helper()
 	u, err := fileops.NewPostgres(f.db.Pool()).Usage(f.ctx, f.roots[owner], fileops.Actor{ID: "owner:" + f.owners[owner], CanRead: true, CanWrite: true, ManageOwner: true})
 	if err != nil {
 		t.Fatal(err)
 	}
+	return u
+}
+func (f *objectsAPIFixture) usage(t *testing.T, owner int, logical, physical int64) {
+	t.Helper()
+	u := f.usageAt(t, owner)
 	if u.LogicalBytes != logical || u.PhysicalBytes != physical || u.LogicalReserved != 0 || u.PhysicalReserved != 0 {
 		t.Fatalf("usage=%+v want logical%d physical%d with no retained reservation", u, logical, physical)
 	}
@@ -530,19 +621,27 @@ func TestFilesObjectsPostgresS3MutationConformance(t *testing.T) {
 		f.usage(t, 0, 6, 6)
 	})
 	t.Run("native_marker_copy_move_and_current_key_delete", func(t *testing.T) {
+		// This fixture is shared with the subtests before and after this one, so
+		// account for bytes from this subtest only, against its own baseline.
+		base := f.usageAt(t, 0)
 		objectsAPIJSON(t, f.request(t, "POST", "", "", []byte(`{"kind":"folder","path":"/Folder/Empty","parents":true}`), nil), 201)
 		objectsAPIJSON(t, f.request(t, "PUT", "/content", "/Folder/file", []byte("abcdef"), nil), 201)
-		f.usage(t, 0, 12, 12)
+		f.usage(t, 0, base.LogicalBytes+6, base.PhysicalBytes+6)
 		source := f.metadata(t, "/Folder")
 		objectsAPIJSON(t, f.request(t, "POST", "/copy", "", []byte(fmt.Sprintf(`{"from":"/Folder","to":"/Copy","ifSourceRevision":%q}`, source["revision"])), nil), 201)
-		f.usage(t, 0, 18, 18)
+		f.usage(t, 0, base.LogicalBytes+12, base.PhysicalBytes+12)
 		f.provider.mu.Lock()
 		sourceKey := "drive/" + f.owners[0] + "/Folder/file"
+		targetKey := "drive/" + f.owners[0] + "/Copy/file"
 		nativeSource, _ := f.provider.current(sourceKey)
-		conditionalReads := f.provider.etagReads[sourceKey+"?"+nativeSource.ETag]
+		copyRequest, copied := f.provider.copies[targetKey]
+		relayed := f.provider.etagReads[sourceKey+"?"+nativeSource.ETag]
 		f.provider.mu.Unlock()
-		if conditionalReads == 0 {
-			t.Fatal("copy did not read its source with native If-Match")
+		if !copied || copyRequest.Source != sourceKey || copyRequest.SourceETag != nativeSource.ETag || !copyRequest.Absent {
+			t.Fatalf("copy did not bind source revision and target absence natively: %+v", copyRequest)
+		}
+		if relayed != 0 {
+			t.Fatal("provider-side copy also relayed the source through the gateway")
 		}
 		before := f.metadata(t, "/Copy/file")
 		original := f.metadata(t, "/Folder/file")
@@ -551,7 +650,7 @@ func TestFilesObjectsPostgresS3MutationConformance(t *testing.T) {
 		}
 		folder := f.metadata(t, "/Copy")
 		objectsAPIJSON(t, f.request(t, "POST", "/move", "", []byte(fmt.Sprintf(`{"from":"/Copy","to":"/Moved","ifRevision":%q}`, folder["revision"])), nil), 200)
-		f.usage(t, 0, 18, 18)
+		f.usage(t, 0, base.LogicalBytes+12, base.PhysicalBytes+12)
 		after := f.metadata(t, "/Moved/file")
 		if after["contentRevision"] != before["contentRevision"] {
 			t.Fatal("copy/delete move lost content generation")
@@ -563,7 +662,7 @@ func TestFilesObjectsPostgresS3MutationConformance(t *testing.T) {
 		if deleted.Code != 204 {
 			t.Fatalf("delete HTTP%d %s", deleted.Code, deleted.Body.String())
 		}
-		f.usage(t, 0, 12, 12)
+		f.usage(t, 0, base.LogicalBytes+6, base.PhysicalBytes+6)
 		missing := f.request(t, "GET", "/content", "/Moved/file", nil, nil)
 		objectsAPIJSON(t, missing, 404)
 		key := "drive/" + f.owners[0] + "/Moved/file"
@@ -578,7 +677,7 @@ func TestFilesObjectsPostgresS3MutationConformance(t *testing.T) {
 			t.Fatal("deleted/current-key recreation reused an old content generation")
 		}
 		objectsAPIJSON(t, f.request(t, "PUT", "/content", "/Moved/file", []byte("stale"), http.Header{"If-Match": {strconv.Quote(after["contentRevision"].(string))}}), 412)
-		f.usage(t, 0, 17, 17)
+		f.usage(t, 0, base.LogicalBytes+11, base.PhysicalBytes+11)
 		body := f.request(t, "GET", "/content", "/Moved/file", nil, nil)
 		if body.Code != 200 || body.Body.String() != "again" {
 			t.Fatalf("recreated current key wrong %d %s", body.Code, body.Body.String())
