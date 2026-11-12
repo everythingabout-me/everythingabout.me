@@ -100,7 +100,7 @@ Cloud sub-account key pair.
 ```bash
 cp .env.example .env    # fill in DATABASE_URL / COS_*; never commit .env
 make install            # go mod download + frontend npm install
-make migrate            # run sql/*.sql in filename order
+make migrate            # apply pending sql/*.sql migrations in filename order
 make dev                # backend :8080 + Vite :5173 (/api is proxied)
 ```
 
@@ -231,10 +231,25 @@ Common commands:
 
 - Name new migrations `sql/0NN_xxx.sql`: increasing number, one topic per file, with a header explaining what
   changed and why.
-- **There is no version table, so `make migrate` re-runs every file on every invocation.** Therefore:
-  - use `create table if not exists` / `add column if not exists`;
-  - guard destructive DDL or put it in a separate transitional step (see `sql/010_drop_soft_delete.sql`);
-  - keep data backfills in the same file and make them idempotent.
+- **`eam migrate` records applied files in `schema_migrations` (`sql/044_schema_migrations.sql`) and applies
+  only files that are not recorded.** Each file runs in its own transaction together with its history row,
+  so a failed file is not recorded and a second run is a no-op. Files are matched by base name: never rename
+  or delete one. Keep new files cheaply re-runnable (`create table if not exists` / `add column if not
+  exists`), guard destructive DDL, and keep data backfills in the same file — after a lost version table the
+  bootstrap rule can only adopt files before 044, so files from 044 on are re-executed.
+- **Bootstrap rule.** A database that predates the version table has the schema but no history: on its first
+  run `schema_migrations` is empty while the core `nodes` table from 001 already exists. The old runner
+  applied all files in one transaction, so a database last migrated by a release containing 001–043 has
+  all of them; one last migrated by an older release could be behind, which this history-less rule cannot
+  detect. Replaying the old files is no longer safe: `035` recreates a global unique index that `036`
+  replaced, and that fails once two owners have a connection named "nas". The runner therefore records
+  every file before `044_schema_migrations.sql` as `method='baseline'`, writes the reason into `reason`,
+  and does not execute it. A genuinely empty database has no `nodes`, so every file runs in order. Once
+  the table has rows it is the authority.
+- **The run is bounded, not timed.** It takes a session advisory lock (`eam-migrate-v1`) so two deploys
+  cannot migrate concurrently, and sets `lock_timeout=10s` so a migration waiting behind a running query
+  fails naming the lock and the file instead of hanging. That bounds lock waits, not wall-clock work; there
+  is deliberately no total timeout.
 - `nodes` is an index, not a copy: **never write file bytes into the database**; the `path` / `key` mapping
   lives in `internal/nodes` and `internal/paths`. Parent/name links are canonical; current paths resolve
   through file_entries and legacy path/parent/key columns may be null/stale derived caches.
@@ -270,7 +285,7 @@ Common commands:
 2. Run `gofmt` on Go code (or `make fmt`); keep the existing TS style (2 spaces, double quotes, semicolons).
 3. If you changed an API or a field: update `docs/api/api.md`, the endpoint table in the README, and the types
    in `web/src/api/client.ts`.
-4. If you changed the schema: append a migration under `sql/` and confirm `make migrate` is re-runnable.
+4. If you changed the schema: append a migration under `sql/` and confirm a second `make migrate` is a no-op.
 5. If you added UI copy: add both the `en` and `zh` versions.
 6. If you added or changed a contract, write its reason where the contract lives, and update the reason when
    you update the rule ([Contracts carry their reasons](#contracts-carry-their-reasons)).
@@ -448,5 +463,5 @@ Variants: `Committed locally main@abc1234, not pushed` / `Not committed (tests f
 - The timeline does not refresh immediately after a move / copy: wait for the sweeper or call
   `POST /api/timeline/rebuild` manually.
 - Upgrading from an older version: `sql/013_events.sql` clears the snapshot watermark and queues a recompute
-  (it only runs while there are no events yet, so a repeated `migrate` does not reset the timeline every
-  time); events only appear after the background pass finishes.
+  (it only runs while there are no events yet, so it is harmless if the file is ever re-executed);
+  events only appear after the background pass finishes.

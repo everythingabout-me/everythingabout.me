@@ -1,7 +1,7 @@
 // Command eam is the Everything About Me backend server and maintenance tool.
 //
 //	eam server                      start the HTTP server (default)
-//	eam migrate                     run sql/*.sql in filename order
+//	eam migrate                     apply pending sql/*.sql migrations in filename order
 //	eam doctor [--owner-id UUID] [--write]  self-check configuration / database / selected storage
 //	eam reconcile --owner email-or-UUID [--inventory inventory.csv] [--dry-run]
 //	eam storage-admit --owner-id UUID --writers-quiesced --evidence proof.json [--dry-run]
@@ -82,7 +82,7 @@ func usage() {
 
 usage:
   eam [server]                     start the HTTP server
-  eam migrate                      create tables / run sql/*.sql
+  eam migrate                      apply pending migrations / create tables
   eam doctor [--owner-id UUID] [--write]  check config, database, selected storage
   eam reconcile --owner email-or-UUID [--inventory inventory.csv] [--dry-run]
   eam backup snapshot --owner email-or-UUID [--connection NAME] [--date YYYY-MM-DD]

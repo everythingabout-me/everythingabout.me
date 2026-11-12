@@ -13,8 +13,10 @@ import (
 )
 
 // cacheTestDatabase creates a scratch database on an explicitly supplied disposable
-// server and applies every migration twice, which is what `make migrate` does on each
-// deploy. No application config or environment file is loaded.
+// server and applies every migration twice. The runner applies each file once now
+// (schema_migrations), but the second pass keeps the DDL safe for the bootstrap boundary
+// and for a database whose version table was lost: files from 044 on are re-executed in
+// that case. No application config or environment file is loaded.
 func cacheTestDatabase(t *testing.T) *pgxpool.Pool {
 	t.Helper()
 	url := os.Getenv("EAM_TEST_DATABASE_URL")

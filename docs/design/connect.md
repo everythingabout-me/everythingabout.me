@@ -294,9 +294,10 @@ create index if not exists api_tokens_user_active
   where revoked_at is null;
 ```
 
-Existing rows were all minted for apps, so they default to `app`. The file is idempotent because `make migrate`
-replays every migration. No check constraint: the Go layer rejects unknown kinds, and a bad label is not a
-security issue.
+Existing rows were all minted for apps, so they default to `app`. `eam migrate` applies this file once and
+records it in `schema_migrations`, so the default is written once; the `add column if not exists` /
+`create index if not exists` forms are now only insurance against a hand-run. No check constraint: the Go
+layer rejects unknown kinds, and a bad label is not a security issue.
 
 `auth.Token` now carries `Kind` and `RevokedAt`; `NewTokenInput` carries `Kind`. `CreateToken` validates the
 kind, the rune-counted name and the lifetime; an app may pass an empty name, a token may not.
