@@ -327,11 +327,27 @@ func actualEntryKey(root fileops.Root, entry storage.Entry) string {
 
 // settleNewEntry is used only after native absence/create proof. A retained
 // index row describes an earlier incarnation and must not donate its identity.
+//
+// The rows to retire are found by ancestry, not by filtering the file_entries view by path.
+// That view derives every row's current path with file_tree_path(), so `path=$2 or path like
+// $3` could use no index: it read the whole tree and walked every row's ancestry, which cost
+// 93,914 buffer hits to select the 2,178 rows of one folder subtree, and it runs once per
+// settlement inside the owner's lock. A subtree is exactly what a prefix meant for a path
+// that is derived from identity, so resolving the destination once and walking parent_id
+// deletes the same rows for one index probe per child: 6,415 buffer hits on that subtree, 12
+// for a file path, whose subtree is itself.
+//
+// `union` rather than `union all` bounds a corrupt index: ancestry that cycles is a bug, and
+// a delete that loops forever over it would be the worse one.
 func retireStaleDestination(ctx context.Context, tx pgx.Tx, root fileops.Root, path storage.Path) error {
-	pattern := EscapeLike(string(path)) + "/%"
-	if _, err := tx.Exec(ctx, `delete from nodes where id in(select id from file_entries where owner_id=$1::uuid and (path=$2 or path like $3))`, root.OwnerID, string(path), pattern); err != nil {
+	if _, err := tx.Exec(ctx, `with recursive stale as (
+ select id from nodes where owner_id=$1::uuid and id=file_tree_resolve($1::uuid,$2)
+ union
+ select n.id from nodes n join stale s on n.parent_id=s.id where n.owner_id=$1::uuid
+) delete from nodes where id in (select id from stale)`, root.OwnerID, string(path)); err != nil {
 		return err
 	}
+	pattern := EscapeLike(string(path)) + "/%"
 	_, err := tx.Exec(ctx, `delete from file_content_generations where owner_id=$1::uuid and root_namespace=$2 and node_id is null and (path=$3 or path like $4)`, root.OwnerID, fileRootNamespace(root), string(path), pattern)
 	return err
 }
