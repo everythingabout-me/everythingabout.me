@@ -113,6 +113,40 @@ func (d *Driver) BeginDirectPut(ctx context.Context, in storage.WriteIntent, met
 	return backend.SignPut(ctx, d.key(in.Target, storage.File), in.Size, in.MediaType, in.Conditions, expires)
 }
 
+// SupportsDirectPost reports whether the backend can sign a form upload whose policy
+// refuses to replace an occupied key. A backend without that capability keeps the
+// conditional PUT.
+func (d *Driver) SupportsDirectPost() bool {
+	_, ok := d.backend.(DirectPostBackend)
+	return ok && d.SignedUploadSupported()
+}
+
+// BeginDirectPost signs one create as a form upload. Nothing is staged and no provider
+// request is made here: the client's POST creates the object, and the session's commit
+// verifies it exactly as it verifies a direct PUT. Only a create can be expressed — the
+// provider's form upload has no "replace only this revision" condition — so a replacement
+// keeps the conditional PUT.
+func (d *Driver) BeginDirectPost(ctx context.Context, in storage.WriteIntent, metadata storage.UploadMetadata, expires time.Time) (storage.SignedPartGrant, error) {
+	var grant storage.SignedPartGrant
+	if err := d.validateUploadIntent(in); err != nil {
+		return grant, err
+	}
+	backend, ok := d.backend.(DirectPostBackend)
+	if !ok || !d.SupportsDirectPost() {
+		return grant, fail("unsupported", in.Target)
+	}
+	if in.Size <= 0 || in.Size > nativePartSize {
+		return grant, fail("unsupported", in.Target)
+	}
+	if !in.Conditions.Absent {
+		return grant, fail("precondition_required", in.Target)
+	}
+	if !expires.After(time.Now()) || expires.Sub(time.Now()) > time.Hour {
+		return grant, fail("invalid_request", in.Target)
+	}
+	return backend.SignPost(ctx, d.key(in.Target, storage.File), in.Size, in.MediaType, expires)
+}
+
 func (d *Driver) SignUploadParts(ctx context.Context, in storage.WriteIntent, numbers []int, metadata storage.UploadMetadata, expires time.Time) ([]storage.SignedPartGrant, error) {
 	if err := d.validateUploadIntent(in); err != nil {
 		return nil, err

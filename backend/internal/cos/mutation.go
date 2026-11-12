@@ -18,6 +18,9 @@ import (
 type mutationBackend struct {
 	client         *sdk.Client
 	bucket, region string
+	// The form-post signature is computed here, not by the SDK, so the backend keeps the
+	// credential the connection was built with. It never leaves the process.
+	secretID, secretKey, token string
 }
 
 var _ objectmutation.Backend = (*mutationBackend)(nil)
@@ -40,7 +43,7 @@ func (c *Client) MutationBackend() (objectmutation.Backend, error) {
 	client.Conf.RetryOpt.Count = 1
 	client.Conf.RetryOpt.Interval = 0
 	client.Conf.RetryOpt.AutoSwitchHost = false
-	return &mutationBackend{client: client, bucket: c.bucket, region: c.region}, nil
+	return &mutationBackend{client: client, bucket: c.bucket, region: c.region, secretID: c.cred.SecretID, secretKey: c.cred.SecretKey, token: token}, nil
 }
 
 type mutationTransport struct{ base http.RoundTripper }
@@ -91,6 +94,10 @@ func (b *mutationBackend) Put(ctx context.Context, in objectmutation.Put) (objec
 	headers := make(http.Header)
 	if in.Absent {
 		headers.Set("If-None-Match", "*")
+		headers.Set("x-cos-forbid-overwrite", "true")
+	}
+	if in.ForbidOverwrite {
+		// Only the provider's own switch, which is all a form upload can rely on.
 		headers.Set("x-cos-forbid-overwrite", "true")
 	}
 	if in.ExpectedETag != "" {
@@ -198,6 +205,13 @@ func mutationWriteError(key string, err error) error {
 		switch response.Response.StatusCode {
 		case 412:
 			code = "precondition_failed"
+		case 409:
+			// The overwrite switch answers FileAlreadyExists with 409. Only that code is a
+			// statement about the condition; any other 409 says nothing about it and stays
+			// unresolved, which is why this is not a blanket status mapping.
+			if response.Code == "FileAlreadyExists" {
+				code = "precondition_failed"
+			}
 		}
 	}
 	return storage.NewError(code, storage.Path(key), err)

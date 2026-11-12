@@ -150,6 +150,37 @@ The server lists native parts, verifies that every number is present with its ex
 `CompleteMultipartUpload` once at the final key and settles the index and quota. The client reports no ETags,
 and the receipt records "provider-listed length" as its evidence.
 
+### Direct publication of one small file
+
+A file that fits in one part may be published by the client itself instead of by a server-side
+complete: the create request signs a grant at the destination, the client's write *is* the
+publication, and the commit verifies the object and settles the index. That saves the staging
+round trips a multipart session costs, but the condition that keeps identity safe has to travel
+with the client's write.
+
+The grant has two shapes, chosen by the connection, never by the client:
+
+| Shape | Request | How the condition travels |
+|---|---|---|
+| conditional PUT | `PUT` at the destination with `If-None-Match: *` (create) or `If-Match` (replace), plus the provider's overwrite switch | the condition is in the **signed headers**, so the signature covers it |
+| form upload | `POST` `multipart/form-data` to the bucket root, every value in the body | the condition is in the **signed policy**: exact key, exact length, media type, `x-cos-forbid-overwrite: true` |
+
+The form upload exists for one reason: a browser sends `multipart/form-data` as a CORS-simple
+request, so it is **not preflighted**, while a cross-origin `PUT` always is. With six sockets per
+HTTP/1.1 origin, that halves what a page of small files costs — one round trip per file instead of
+two. It is not a weaker write: a client that drops the overwrite field, changes the key, or sends
+another length gets a policy refusal, and the commit still verifies the object it finds.
+
+What a form upload cannot express is a **replacement**: there is no "only if the current revision
+is X" in a form, and the provider ignores `If-None-Match` on it. Replacement therefore keeps the
+conditional PUT. A form upload is also unusable through the edge upload ingress, which rewrites
+provider URLs to a same-origin path that serves `PUT` only.
+
+The capability is evidence, not configuration: the connection probe measures a `PUT` carrying only
+the provider's overwrite switch on an occupied key, records `formPost` in the admission evidence,
+and a probe version that predates that measurement invalidates the file and is re-measured on the
+next start. A connection that cannot prove it keeps the conditional PUT.
+
 ## 5. Class B — cloud-drive sessions
 
 The server creates the provider upload session directly at the destination, with the conflict rule set at

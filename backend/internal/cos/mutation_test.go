@@ -121,11 +121,13 @@ func TestMutationPutConditionalNotModifiedIsPreconditionFailure(t *testing.T) {
 		absent bool
 		etag   string
 		want   string
+		body   string
 	}{
-		{"create_not_modified", http.StatusNotModified, true, "", "precondition_failed"},
-		{"create_conflict", http.StatusConflict, true, "", "outcome_unknown"},
-		{"replace_not_modified", http.StatusNotModified, false, `"old"`, "outcome_unknown"},
-		{"unconditional_not_modified", http.StatusNotModified, false, "", "outcome_unknown"},
+		{"create_not_modified", http.StatusNotModified, true, "", "precondition_failed", ""},
+		{"create_conflict", http.StatusConflict, true, "", "outcome_unknown", `<Error><Code>Other</Code></Error>`},
+		{"create_file_already_exists", http.StatusConflict, true, "", "precondition_failed", `<Error><Code>FileAlreadyExists</Code></Error>`},
+		{"replace_not_modified", http.StatusNotModified, false, `"old"`, "outcome_unknown", ""},
+		{"unconditional_not_modified", http.StatusNotModified, false, "", "outcome_unknown", ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var calls atomic.Int32
@@ -143,12 +145,38 @@ func TestMutationPutConditionalNotModifiedIsPreconditionFailure(t *testing.T) {
 				}
 				_, _ = io.Copy(io.Discard, r.Body)
 				w.WriteHeader(tc.status)
+				if tc.body != "" {
+					io.WriteString(w, tc.body)
+				}
 			}))
 			_, err := backend.Put(context.Background(), objectmutation.Put{Key: "occupied", Size: 4, Body: strings.NewReader("data"), Absent: tc.absent, ExpectedETag: tc.etag})
 			if !storage.IsCode(err, tc.want) || calls.Load() != 1 {
 				t.Fatalf("calls=%d error=%v; want one attempt and %s", calls.Load(), err, tc.want)
 			}
 		})
+	}
+}
+
+// The overwrite switch on its own is the whole guarantee a form upload has, so it is tested
+// without any conditional header: a create-only probe that also sent If-None-Match would
+// prove nothing about the form path.
+func TestMutationForbidOverwriteAloneRefusesOccupiedKeys(t *testing.T) {
+	var calls atomic.Int32
+	_, backend, _ := mutationFixture(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		if r.Header.Get("If-None-Match") != "" || r.Header.Get("If-Match") != "" {
+			t.Error("the overwrite switch probe must not send a conditional header")
+		}
+		if r.Header.Get("X-Cos-Forbid-Overwrite") != "true" {
+			t.Error("overwrite switch missing")
+		}
+		_, _ = io.Copy(io.Discard, r.Body)
+		w.WriteHeader(http.StatusConflict)
+		_, _ = io.WriteString(w, `<Error><Code>FileAlreadyExists</Code></Error>`)
+	}))
+	_, err := backend.Put(context.Background(), objectmutation.Put{Key: "occupied", Size: 4, Body: strings.NewReader("data"), ForbidOverwrite: true})
+	if !storage.IsCode(err, "precondition_failed") || calls.Load() != 1 {
+		t.Fatalf("calls=%d error=%v; want one attempt and precondition_failed", calls.Load(), err)
 	}
 }
 

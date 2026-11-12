@@ -3,6 +3,11 @@ package cos
 import (
 	"bytes"
 	"context"
+	"crypto/hmac"
+	"crypto/sha1"
+	"encoding/base64"
+	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -180,5 +185,95 @@ func TestMutationClassAReadGrantUsesControlCredentials(t *testing.T) {
 	}
 	if parsed.Query().Get("response-content-type") != "text/plain" || !strings.Contains(parsed.Query().Get("response-content-disposition"), "filename*=") {
 		t.Fatal("read representation parameters were not signed", parsed.Query())
+	}
+}
+
+// A form upload has no conditional header, so the condition has to be inside the signed
+// policy. This pins everything the provider will check: the exact key, the exact length,
+// the media type, and the overwrite switch the create depends on.
+func TestMutationFormPostPolicyCarriesTheCondition(t *testing.T) {
+	base, _ := url.Parse("https://fixture-1250000000.cos.ap-hongkong.myqcloud.com/")
+	backend := &mutationBackend{
+		client: sdk.NewClient(&sdk.BaseURL{BucketURL: base}, &http.Client{}),
+		bucket: "fixture-1250000000", region: "ap-hongkong",
+		secretID: "fixture-id", secretKey: "fixture-secret",
+	}
+	expires := time.Now().Add(15 * time.Minute).UTC().Truncate(time.Second)
+	grant, err := backend.SignPost(context.Background(), "drive/owner/照片.json", 12, "application/json", expires)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if grant.Method != http.MethodPost || grant.URL != "https://fixture-1250000000.cos.ap-hongkong.myqcloud.com/" || grant.FileField != "file" || grant.Size != 12 {
+		t.Fatalf("unexpected grant %+v", grant)
+	}
+	if !grant.ExpiresAt.Equal(expires) || len(grant.Headers) != 0 {
+		t.Fatalf("a form upload carries no headers and expires with the grant: %+v", grant)
+	}
+	fields := map[string]string{}
+	var order []string
+	for _, field := range grant.Form {
+		fields[field.Name] = field.Value
+		order = append(order, field.Name)
+	}
+	for _, required := range []string{"key", "policy", "q-sign-algorithm", "q-ak", "q-key-time", "q-signature", "x-cos-forbid-overwrite", "Content-Type", "success_action_status"} {
+		if _, ok := fields[required]; !ok {
+			t.Fatalf("form is missing %q: %v", required, order)
+		}
+	}
+	if fields["key"] != "drive/owner/照片.json" || fields["Content-Type"] != "application/json" || fields["x-cos-forbid-overwrite"] != "true" {
+		t.Fatalf("form fields lost their values: %v", fields)
+	}
+	policyJSON, err := base64.StdEncoding.DecodeString(fields["policy"])
+	if err != nil {
+		t.Fatal(err)
+	}
+	var policy struct {
+		Expiration string `json:"expiration"`
+		Conditions []any  `json:"conditions"`
+	}
+	if err = json.Unmarshal(policyJSON, &policy); err != nil {
+		t.Fatal(err)
+	}
+	if policy.Expiration != expires.Format("2006-01-02T15:04:05.000Z") {
+		t.Fatalf("policy expiration %q", policy.Expiration)
+	}
+	var conditions []string
+	for _, condition := range policy.Conditions {
+		switch typed := condition.(type) {
+		case map[string]any:
+			for name, value := range typed {
+				conditions = append(conditions, fmt.Sprintf("%s=%v", name, value))
+			}
+		case []any:
+			values := make([]string, len(typed))
+			for i, value := range typed {
+				values[i] = fmt.Sprint(value)
+			}
+			conditions = append(conditions, strings.Join(values, "|"))
+		}
+	}
+	joined := strings.Join(conditions, " ; ")
+	for _, want := range []string{
+		"bucket=fixture-1250000000",
+		"q-sign-algorithm=sha1",
+		"q-ak=fixture-id",
+		"q-sign-time=" + fields["q-key-time"],
+		"eq|$key|drive/owner/照片.json",
+		"eq|$Content-Type|application/json",
+		"content-length-range|12|12",
+		"x-cos-forbid-overwrite=true",
+	} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("policy is missing %q: %s", want, joined)
+		}
+	}
+	// The signature is the form-post one: SignKey over SHA1(policy), both lowercase hex.
+	signKey := hmac.New(sha1.New, []byte("fixture-secret"))
+	signKey.Write([]byte(fields["q-key-time"]))
+	policySum := sha1.Sum(policyJSON)
+	signature := hmac.New(sha1.New, []byte(hex.EncodeToString(signKey.Sum(nil))))
+	signature.Write([]byte(hex.EncodeToString(policySum[:])))
+	if fields["q-signature"] != hex.EncodeToString(signature.Sum(nil)) {
+		t.Fatalf("signature %q does not match the documented form-post formula", fields["q-signature"])
 	}
 }

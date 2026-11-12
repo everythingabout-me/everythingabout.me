@@ -993,6 +993,17 @@ export function useUploadQueue(onUploaded: (task: UploadTask, item: Item) => voi
         const task = tasks.current.get(id);
         const waitingFor: FileOperationWait = { operationId: error.operationId, path: task?.path ?? "", state: "running", kind: waitKind(error.operationKind), from: "conflict" };
         patch(id, { status: "waiting", waitingFor, waitMessage: waitMessage(waitingFor), speed: 0 });
+      } else if (error instanceof ApiError && error.status === 409 && error.code === "name_conflict" && !(tasks.current.get(id)?.overwrite)) {
+        // A direct publication that lost the race for the destination is the same decision
+        // the create endpoint reports: replace the file, or leave it. The abandoned session
+        // needs nothing from here — the next admission for this path ends it.
+        const current = tasks.current.get(id);
+        const old = current ? await api.metadata(current.path) : null;
+        if (current && old?.kind === "file" && window.confirm(t("drive.overwriteConfirm", { name: current.name }))) {
+          patch(id, { overwrite: true, intent: undefined, uploadId: undefined, createKey: taskId(), status: "queued", error: undefined, speed: 0 });
+        } else {
+          patch(id, { status: "failed", error: message(error), speed: 0 });
+        }
       } else { patch(id, { status: "failed", error: message(error), speed: 0 }); }
     } finally {
       running.current.delete(id);

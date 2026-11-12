@@ -370,7 +370,16 @@ func (s *Server) handleFilesCreateUpload(w http.ResponseWriter, r *http.Request,
 			resource["state"] = "expired"
 		}
 		if old.State == "open" && filesUploadExpired(old) == nil {
-			transport, e := s.filesUploadTransport(r.Context(), native, old)
+			// A replayed create answers with the transport that session actually uses. A
+			// direct session publishes with one request at the destination, so handing it the
+			// multipart transport would send the browser to parts that do not exist.
+			var transport any
+			var e error
+			if old.Mode == fileops.UploadModeDirect {
+				transport, e = s.filesDirectPutTransport(r.Context(), native, old)
+			} else {
+				transport, e = s.filesUploadTransport(r.Context(), native, old)
+			}
 			if e != nil {
 				return e
 			}
@@ -541,16 +550,34 @@ func (s *Server) filesCreateUpload(ctx context.Context, req fileops.BeginRequest
 	}
 }
 
-// filesDirectPutTransport signs the one conditional PUT a direct session uploads. It is
-// shaped like a one-part presigned upload so the browser needs no second transport.
+// filesDirectPutTransport signs the one request a direct session uploads. It is shaped like
+// a one-part presigned upload so the browser needs no second transport.
+//
+// A create is signed as a form upload when the connection can, because the browser sends a
+// form upload as a CORS-simple request: no preflight, one round trip per small file instead
+// of two. A replacement keeps the conditional PUT, which carries the revision a form upload
+// cannot express. The edge ingress rewrites provider URLs to a same-origin path that serves
+// PUT only, so a form upload is not offered there.
 func (s *Server) filesDirectPutTransport(ctx context.Context, native fileops.NativeActions, u fileops.Upload) (any, error) {
-	writer, ok := native.(storage.DirectPutWriter)
-	if !ok {
-		return nil, fc.NewProblem(503, "temporarily_unavailable", "This connection cannot sign a conditional destination PUT.")
-	}
 	intent, err := filesUploadIntent(u)
 	if err != nil {
 		return nil, filesMutationProblem(err)
+	}
+	formPost := intent.Conditions.Absent && (s.cfg == nil || !s.cfg.EdgeOneUploadIngress())
+	if post, ok := native.(storage.DirectPostWriter); ok && formPost && post.SupportsDirectPost() {
+		grant, err := post.BeginDirectPost(ctx, intent, nil, s.filesPartGrantExpiry(u))
+		if err != nil {
+			return nil, filesMutationProblem(err)
+		}
+		payload, err := s.filesPartGrantPayload(grant)
+		if err != nil {
+			return nil, err
+		}
+		return map[string]any{"kind": storage.TransferPresignedParts, "parts": []any{payload}, "expiresAt": grant.ExpiresAt.UTC()}, nil
+	}
+	writer, ok := native.(storage.DirectPutWriter)
+	if !ok {
+		return nil, fc.NewProblem(503, "temporarily_unavailable", "This connection cannot sign a conditional destination PUT.")
 	}
 	grant, err := writer.BeginDirectPut(ctx, intent, nil, s.filesPartGrantExpiry(u))
 	if err != nil {

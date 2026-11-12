@@ -2,6 +2,11 @@ package cos
 
 import (
 	"context"
+	"crypto/hmac"
+	"crypto/sha1"
+	"encoding/base64"
+	"encoding/hex"
+	"encoding/json"
 	"mime"
 	"net/http"
 	"net/url"
@@ -150,4 +155,98 @@ func (b *mutationBackend) PresignRead(ctx context.Context, key string, options s
 		return out, err
 	}
 	return storage.ReadGrant{Kind: "url", URL: signed.String(), ExpiresAt: expires.UTC()}, nil
+}
+
+var _ objectmutation.DirectPostBackend = (*mutationBackend)(nil)
+
+// DirectPostSupported reports whether this connection can sign a form upload that refuses
+// to create an existing key. The switch it depends on is the same one the admitted
+// conditional PUT sends, so the connection's conditional-create evidence covers it.
+func (b *mutationBackend) DirectPostSupported() bool { return b.client != nil }
+
+// SignPost signs one form upload (POST Object) that creates key only if it is absent.
+//
+// A form upload cannot carry a conditional request header, so the condition lives inside
+// the signed policy: the exact key, the exact length, the media type, and COS's
+// x-cos-forbid-overwrite switch. A client that drops the switch answers a policy refusal
+// ("Condition key x-cos-forbid-overwrite doesn't match the value true"), and a client that
+// publishes to another key or another length answers a policy refusal too — the browser
+// does not have to be trusted with any of it.
+//
+// The signature is the form-post one, which is not the URL signature: SignKey is
+// HMAC-SHA1(secret, keyTime), StringToSign is SHA1 of the policy JSON, and the signature is
+// HMAC-SHA1(SignKey, StringToSign), all lowercase hex. The bucket is HTTP/1.1 and cannot
+// multiplex, so a request with no custom header — this one — is also the only upload the
+// browser sends without a CORS preflight.
+func (b *mutationBackend) SignPost(ctx context.Context, key string, size int64, mediaType string, expires time.Time) (storage.SignedPartGrant, error) {
+	var out storage.SignedPartGrant
+	if b.client == nil || b.secretID == "" || b.secretKey == "" || key == "" || size <= 0 {
+		return out, storage.NewError("unsupported", storage.Path(key), nil)
+	}
+	if mediaType == "" {
+		mediaType = "application/octet-stream"
+	}
+	if strings.ContainsAny(key+mediaType, "\r\n\x00") || size > 5<<30 {
+		return out, storage.NewError("invalid_request", storage.Path(key), nil)
+	}
+	duration := time.Until(expires)
+	if duration <= 0 || duration > time.Hour {
+		return out, storage.NewError("invalid_request", storage.Path(key), nil)
+	}
+	start := time.Now().Unix()
+	end := expires.Unix()
+	keyTime := strconv.FormatInt(start, 10) + ";" + strconv.FormatInt(end, 10)
+	policy, err := json.Marshal(map[string]any{
+		"expiration": expires.UTC().Format("2006-01-02T15:04:05.000Z"),
+		"conditions": []any{
+			map[string]string{"bucket": b.bucket},
+			map[string]string{"q-sign-algorithm": "sha1"},
+			map[string]string{"q-ak": b.secretID},
+			map[string]string{"q-sign-time": keyTime},
+			[]string{"eq", "$key", key},
+			[]string{"eq", "$Content-Type", mediaType},
+			[]any{"content-length-range", size, size},
+			map[string]string{"x-cos-forbid-overwrite": "true"},
+		},
+	})
+	if err != nil {
+		return out, err
+	}
+	signKey := hmacSHA1Hex(b.secretKey, keyTime)
+	policySum := sha1.Sum(policy)
+	signature := hmacSHA1Hex(signKey, hex.EncodeToString(policySum[:]))
+	return storage.SignedPartGrant{
+		Number: 1, Size: size, Method: http.MethodPost,
+		URL: "https://" + b.bucket + ".cos." + b.region + ".myqcloud.com/",
+		Form: withSecurityToken([]storage.FormField{
+			{Name: "key", Value: key},
+			{Name: "policy", Value: base64.StdEncoding.EncodeToString(policy)},
+			{Name: "q-sign-algorithm", Value: "sha1"},
+			{Name: "q-ak", Value: b.secretID},
+			{Name: "q-key-time", Value: keyTime},
+			{Name: "q-signature", Value: signature},
+			{Name: "x-cos-forbid-overwrite", Value: "true"},
+			{Name: "Content-Type", Value: mediaType},
+			{Name: "success_action_status", Value: "201"},
+		}, b.token),
+		FileField: "file",
+		Headers:   map[string]string{},
+		ExpiresAt: expires.UTC(),
+	}, nil
+}
+
+// hmacSHA1Hex returns the lowercase hex digest of one HMAC-SHA1.
+func hmacSHA1Hex(key, message string) string {
+	mac := hmac.New(sha1.New, []byte(key))
+	mac.Write([]byte(message))
+	return hex.EncodeToString(mac.Sum(nil))
+}
+
+// withSecurityToken appends the temporary-credential form field when the connection signs
+// with one. A permanent key pair sends none.
+func withSecurityToken(fields []storage.FormField, token string) []storage.FormField {
+	if token == "" {
+		return fields
+	}
+	return append(fields, storage.FormField{Name: "x-cos-security-token", Value: token})
 }

@@ -688,7 +688,12 @@ session/source state or performing authorized recovery. This does not restore th
 ```
 
 **Class A.** `parts` is the first window of signed URLs. Each URL binds PUT, object key, native upload, part
-number and exact length, and no content digest. Request more with
+number and exact length, and no content digest. A one-part session on a connection that admits direct
+publication instead carries a single grant for the **destination itself**: `method` is `PUT` with the
+conditional `headers` it was signed for (create or replace), or `POST` with `fields` and `fileField` — a
+conditional form upload whose whole body is signed, answered `201` on success and `409` with the usual
+`name_conflict` when the destination already exists. A form grant carries no request headers and cannot
+express a replacement. Request more with
 `POST B/uploads/{id}/parts/sign {"numbers":[...]}` when fewer than a quarter of unsent URLs remain, and re-sign
 any part whose URL expired or returned 403; a re-signed number keeps its bound length. A client may add an
 unsigned `Content-MD5` header as a transmission check. Until commit a part URL's holder can rewrite that part;

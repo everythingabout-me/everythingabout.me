@@ -114,6 +114,11 @@ func (b *mutationBackend) Put(ctx context.Context, in objectmutation.Put) (objec
 	if err := validateMutationPut(in); err != nil {
 		return objectmutation.Object{}, err
 	}
+	if in.ForbidOverwrite {
+		// S3 has no overwrite switch; only the conditional header expresses this, and a form
+		// upload cannot send one. The form-post evidence stays false for this backend.
+		return objectmutation.Object{}, storage.NewError("unsupported", storage.Path(in.Key), nil)
+	}
 	ctx, cancel := mutationTransferBudget(ctx, in.Size)
 	defer cancel()
 	input := &s3.PutObjectInput{Bucket: aws.String(b.bucket), Key: aws.String(in.Key), Body: in.Body, ContentLength: aws.Int64(in.Size), ContentType: aws.String(in.MediaType), Metadata: cloneMutationMetadata(in.Metadata)}

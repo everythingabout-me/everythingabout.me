@@ -72,6 +72,14 @@ func EnsureAdmission(ctx context.Context, cfg *config.Config) error {
 	// publisher), not something a request can measure. Carry the operator's
 	// previous assertion instead of inventing one.
 	admission.SingleGateway = loadErr != nil || previous.SingleGateway
+	// These two are not measured by this probe, so dropping them would silently retire a
+	// measured optimization on the next start. They describe the same connection — a probe
+	// version bump or a re-measure changes nothing about the endpoint — so they carry over
+	// only when the identity fields still match.
+	if previous.Matches(cfg.Storage.ConnectionID, endpoint, bucket, region) {
+		admission.ListingETag = previous.ListingETag
+		admission.SignedMultipartParts = previous.SignedMultipartParts
+	}
 	record := filepath.Join(filepath.Dir(path), filepath.Base(path)+".probe.json")
 	if err := writeJSONFile(record, observations); err != nil {
 		return err
@@ -143,7 +151,7 @@ func ProbeAdmission(ctx context.Context, backend objectmutation.Backend) (object
 	root := probeRoot + suffix + "/"
 	createKey, multipartKey := root+"create-only", root+"multipart"
 	observations := []probeObservation{}
-	admission := objectmutation.Admission{CheckedAt: time.Now().UTC()}
+	admission := objectmutation.Admission{CheckedAt: time.Now().UTC(), Version: objectmutation.AdmissionVersion}
 
 	created, err := backend.Put(ctx, objectmutation.Put{Key: createKey, Body: strings.NewReader("probe-original"), Size: int64(len("probe-original")), MediaType: "application/octet-stream", Absent: true})
 	if err != nil {
@@ -170,6 +178,22 @@ func ProbeAdmission(ctx context.Context, backend objectmutation.Backend) (object
 	} else {
 		observations = append(observations, probeObservation{Property: "atomicPublish", Request: "GET If-Match <created ETag>", Result: "unchanged", Bytes: "probe-original"})
 		admission.AtomicPublish = admission.ConditionalCreate
+	}
+
+	// The overwrite switch on its own, with no conditional header: that is the whole
+	// guarantee a form upload has, because a form cannot send If-None-Match. Asked last so
+	// a provider that ignores it (and replaces the object) cannot spoil the checks above.
+	_, err = backend.Put(ctx, objectmutation.Put{Key: createKey, Body: strings.NewReader("probe-forbid"), Size: int64(len("probe-forbid")), MediaType: "application/octet-stream", ForbidOverwrite: true})
+	switch {
+	case storage.IsCode(err, "precondition_failed"):
+		observations = append(observations, probeObservation{Property: "formPost", Request: "PUT forbid-overwrite on an occupied key", Result: "rejected", Bytes: "probe-original"})
+		admission.FormPost = true
+	case err == nil:
+		observations = append(observations, probeObservation{Property: "formPost", Request: "PUT forbid-overwrite on an occupied key", Result: "accepted (provider replaced the object)", Bytes: "probe-forbid"})
+	case storage.IsCode(err, "unsupported"):
+		observations = append(observations, probeObservation{Property: "formPost", Request: "PUT forbid-overwrite on an occupied key", Result: "unsupported"})
+	default:
+		return admission, observations, fmt.Errorf("object admission probe: overwrite switch on %s: %w", createKey, err)
 	}
 
 	if multipart != nil {

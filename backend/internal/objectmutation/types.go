@@ -14,6 +14,10 @@ import (
 // file must describe positive/negative isolated probes for this exact connection.
 // Capability assertions apply only to the selected publication strategy.
 type Admission struct {
+	// Version names the probe that produced this evidence. A probe that learns a new
+	// property invalidates earlier evidence instead of silently leaving that property off:
+	// the file is re-measured on the next start rather than aging into a half-answer.
+	Version           int       `json:"version"`
 	ConnectionID      string    `json:"connectionId"`
 	Endpoint          string    `json:"endpoint"`
 	Bucket            string    `json:"bucket"`
@@ -27,6 +31,10 @@ type Admission struct {
 	// create on Complete for this exact provider endpoint. Existing PUT evidence
 	// alone never enables numbered native uploads.
 	MultipartUploads bool `json:"multipartUploads,omitempty"`
+	// FormPost attests that a form upload with no conditional header is still refused on
+	// an occupied key: the provider's overwrite switch alone, which is the whole guarantee
+	// a form post has.
+	FormPost bool `json:"formPost,omitempty"`
 	// SignedMultipartParts attests COS Content-MD5 rejection and no-SSE part ETag=MD5.
 	SignedMultipartParts bool `json:"signedMultipartParts,omitempty"`
 	// ListingETag additionally attests, for this exact endpoint, that a delimiter
@@ -61,7 +69,11 @@ type Put struct {
 	MediaType    string
 	Metadata     map[string]string
 	Absent       bool
-	ExpectedETag string // optional real native condition; never Stat-then-write fallback
+	// ForbidOverwrite asks only the provider's own refuse-to-replace switch. A form upload
+	// cannot send If-None-Match, so the connection's form-post evidence has to measure that
+	// switch by itself instead of inferring it from a conditional PUT.
+	ForbidOverwrite bool
+	ExpectedETag    string // optional real native condition; never Stat-then-write fallback
 }
 
 // Copy is one provider-side copy request. SourceETag binds the exact source
@@ -125,6 +137,19 @@ type SignedPartBackend interface {
 	SignedPartsSupported() bool
 	SignPart(context.Context, string, string, int, int64, time.Time) (storage.SignedPartGrant, error)
 	ListParts(context.Context, string, string, int, int) ([]storage.NativeUploadPart, bool, error)
+}
+
+// DirectPostBackend signs one form upload that creates a destination key only if it is
+// absent. A form upload cannot carry If-None-Match, so the condition travels inside the
+// signed policy (the provider's overwrite switch plus the exact key and length); a client
+// that omits it gets a refused policy, not an unprotected write.
+type DirectPostBackend interface {
+	// DirectPostSupported reports whether the provider's overwrite switch is honoured by a
+	// form upload on this connection.
+	DirectPostSupported() bool
+	// SignPost returns the endpoint, the policy-signed fields and the file field name. No
+	// provider request is made here.
+	SignPost(ctx context.Context, key string, size int64, mediaType string, expires time.Time) (storage.SignedPartGrant, error)
 }
 
 // DirectPutBackend signs one conditional PUT at a destination key, for a driver whose

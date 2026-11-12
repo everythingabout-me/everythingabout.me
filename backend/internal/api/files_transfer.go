@@ -52,6 +52,11 @@ func filesUnderlyingDriver(driver storage.Driver) storage.Driver {
 // to the reserved same-origin prefix without decoding the native key.
 func (s *Server) filesPartGrantPayload(grant storage.SignedPartGrant) (map[string]any, error) {
 	value := grant.URL
+	if len(grant.Form) > 0 && s.cfg != nil && s.cfg.EdgeOneUploadIngress() {
+		// The edge ingress rewrites a provider URL to a same-origin path that serves PUT
+		// only; a form upload carries every signed value in its body and cannot be rewritten.
+		return nil, fc.NewProblem(503, "temporarily_unavailable", "A form upload cannot use the edge upload ingress.")
+	}
 	if s.cfg != nil && s.cfg.EdgeOneUploadIngress() {
 		private, err := url.Parse(grant.URL)
 		if err != nil || private.Scheme != "https" && private.Scheme != "http" || private.Host == "" || private.User != nil || private.Fragment != "" || !strings.HasPrefix(private.EscapedPath(), "/") {
@@ -66,7 +71,18 @@ func (s *Server) filesPartGrantPayload(grant storage.SignedPartGrant) (map[strin
 	if headers == nil {
 		headers = map[string]string{}
 	}
-	return map[string]any{"number": grant.Number, "size": grant.Size, "method": grant.Method, "url": value, "headers": headers, "expiresAt": grant.ExpiresAt.UTC()}, nil
+	payload := map[string]any{"number": grant.Number, "size": grant.Size, "method": grant.Method, "url": value, "headers": headers, "expiresAt": grant.ExpiresAt.UTC()}
+	if len(grant.Form) > 0 {
+		// A form upload carries every signed value in the body, so the edge relay cannot
+		// rewrite it and the browser must not attach any header: the fields are the grant.
+		fields := make([]any, 0, len(grant.Form))
+		for _, field := range grant.Form {
+			fields = append(fields, map[string]any{"name": field.Name, "value": field.Value})
+		}
+		payload["fields"] = fields
+		payload["fileField"] = grant.FileField
+	}
+	return payload, nil
 }
 
 func filesGrantExpiry(now time.Time) time.Time {

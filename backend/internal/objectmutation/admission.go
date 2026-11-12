@@ -53,8 +53,19 @@ func LoadAdmission(path string) (Admission, error) {
 	if err = ValidateAdmission(a); err != nil {
 		return a, err
 	}
+	// Evidence records which probe produced it. A file written by an older probe cannot
+	// answer for a property that probe never measured, so it is refused here and re-measured
+	// by the caller instead of aging into a half-answer.
+	if a.Version < AdmissionVersion {
+		return a, invalidAdmission("object admission evidence was written by probe %d and this build needs probe %d; it will be re-measured", a.Version, AdmissionVersion)
+	}
 	return a, nil
 }
+// AdmissionVersion names the probe whose evidence this build requires. It advances when a
+// probe learns a property an older file cannot answer, because a capability measured by an
+// older probe is not evidence about today's connection.
+const AdmissionVersion = 2
+
 func ValidateAdmission(a Admission) error {
 	var problems []string
 	if strings.TrimSpace(a.ConnectionID) == "" {

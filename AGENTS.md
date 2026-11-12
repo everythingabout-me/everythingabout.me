@@ -413,8 +413,11 @@ Variants: `Committed locally main@abc1234, not pushed` / `Not committed (tests f
   **A staged transfer is never published by its client**: multipart parts stay unpublished until the server
   completes them, class C bytes stay in the spool until the server publishes, and class B is a client contract.
   The exception is a **direct** class A session (one file that fits in a single part, on a connection admitted
-  for conditional writes): its URL signs a conditional PUT at the destination itself, so the client's PUT is
-  the publication and the commit only verifies the object and settles the index. That swap costs one window in
+  for conditional writes): its grant writes the destination itself — a conditional PUT, or a form upload whose
+  signed policy carries the same condition (`x-cos-forbid-overwrite`, exact key and length) because a browser
+  sends `multipart/form-data` without a CORS preflight — so the client's write is the publication and the
+  commit only verifies the object and settles the index. A replacement always keeps the conditional PUT: a
+  form upload cannot say "only this revision". That swap costs one window in
   which the native tree holds a file the index has not recorded (reconcile adopts it, and a purge must not
   treat it as an orphan), in exchange for one provider write instead of five per small file. A provider
   credential is never issued to a principal whose scope is narrower than its reach. See

@@ -16,6 +16,17 @@ type signedTestBackend struct {
 
 func (b *signedTestBackend) SignedPartsSupported() bool { return true }
 
+func (b *signedTestBackend) DirectPostSupported() bool { return true }
+
+func (b *signedTestBackend) SignPost(_ context.Context, key string, size int64, mediaType string, expires time.Time) (storage.SignedPartGrant, error) {
+	b.signCalls++
+	return storage.SignedPartGrant{
+		Number: 1, Size: size, Method: "POST", URL: "https://bucket.example/",
+		Form:      []storage.FormField{{Name: "key", Value: key}, {Name: "policy", Value: "policy"}, {Name: "q-signature", Value: "signature"}, {Name: "x-cos-forbid-overwrite", Value: "true"}, {Name: "Content-Type", Value: mediaType}},
+		FileField: "file", Headers: map[string]string{}, ExpiresAt: expires,
+	}, nil
+}
+
 func (b *signedTestBackend) SignPart(_ context.Context, key, id string, n int, size int64, expires time.Time) (storage.SignedPartGrant, error) {
 	b.signCalls++
 	if b.signFail {
@@ -169,6 +180,33 @@ func TestBeginDirectPutSignsOneConditionalDestinationPut(t *testing.T) {
 	}
 	if backend.signCalls != 1 || backend.beginCalls != 0 {
 		t.Fatalf("direct put touched the provider: signed=%d begins=%d", backend.signCalls, backend.beginCalls)
+	}
+}
+
+// A form upload is the create path when the connection signs one: it has no conditional
+// header, so the condition lives in the signed policy, and nothing is staged.
+func TestBeginDirectPostSignsOneConditionalFormUpload(t *testing.T) {
+	driver, backend, metadata := signedFixture(t)
+	defer driver.Close()
+	if !driver.SupportsDirectPost() {
+		t.Fatal("a backend that signs form posts was not offered")
+	}
+	intent := storage.WriteIntent{ID: "own-1", Target: "folder/file.txt", Size: 4, MediaType: "text/plain", Conditions: storage.Conditions{Absent: true}}
+	grant, err := driver.BeginDirectPost(context.Background(), intent, metadata, time.Now().Add(time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if grant.Method != "POST" || grant.FileField != "file" || len(grant.Form) == 0 || len(grant.Headers) != 0 {
+		t.Fatalf("unexpected form grant: %+v", grant)
+	}
+	if backend.signCalls != 1 || backend.beginCalls != 0 {
+		t.Fatalf("form post touched the provider: signed=%d begins=%d", backend.signCalls, backend.beginCalls)
+	}
+	// A replacement has no form-post expression: it keeps the conditional PUT.
+	replace := intent
+	replace.Conditions = storage.Conditions{ExpectedRevision: []byte("native-etag:\"abc\"")}
+	if _, err = driver.BeginDirectPost(context.Background(), replace, metadata, time.Now().Add(time.Minute)); err == nil {
+		t.Fatal("a form upload cannot express a replacement")
 	}
 }
 

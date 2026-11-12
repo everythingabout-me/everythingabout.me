@@ -20,12 +20,24 @@ const (
 // client-set headers bound by the signature (Content-Type and part length); no
 // content digest is signed.
 type SignedPartGrant struct {
-	Number    int
-	Size      int64
-	Method    string
-	URL       string
-	Headers   map[string]string
+	Number  int
+	Size    int64
+	Method  string
+	URL     string
+	Headers map[string]string
+	// Form makes this grant a form upload rather than a request: the client POSTs
+	// multipart/form-data to URL, writing these fields in this order and then the file under
+	// FileField. The provider's form signature requires the signed fields to precede the
+	// file, so the order is part of the grant. Empty means a plain request with Headers.
+	Form      []FormField
+	FileField string
 	ExpiresAt time.Time
+}
+
+// FormField is one multipart/form-data field of a form upload.
+type FormField struct {
+	Name  string
+	Value string
 }
 
 // PlannedUpload is the class A plan persisted at session open. Handle is the
@@ -84,6 +96,20 @@ type DirectPutWriter interface {
 	// BeginDirectPut signs one exact-length conditional PUT at the destination and returns
 	// it as a one-part grant. No provider request is made here.
 	BeginDirectPut(context.Context, WriteIntent, UploadMetadata, time.Time) (SignedPartGrant, error)
+}
+
+// DirectPostWriter is the class A writer for a destination whose conditional create is a
+// form upload instead of a conditional PUT. A form request carries no custom header, so it
+// is a CORS-simple request: the browser sends no preflight, which halves the round trips a
+// small file costs. The condition still exists — it travels inside the signed policy — so a
+// driver that cannot sign one simply does not implement this interface.
+type DirectPostWriter interface {
+	// SupportsDirectPost reports whether the provider's overwrite switch refuses a form
+	// upload on an occupied key. Only an admitted connection answers true.
+	SupportsDirectPost() bool
+	// BeginDirectPost returns the endpoint, the signed fields and the file field name for
+	// one create. No provider request is made here.
+	BeginDirectPost(context.Context, WriteIntent, UploadMetadata, time.Time) (SignedPartGrant, error)
 }
 
 // ReadGrantOptions selects one provider representation. Disposition is

@@ -139,6 +139,7 @@ func TestNewReportsAdmissionEvidenceFromAnotherConnection(t *testing.T) {
 	dir := t.TempDir()
 	evidence := filepath.Join(dir, "admission.json")
 	admission := objectmutation.Admission{
+		Version:           objectmutation.AdmissionVersion,
 		ConnectionID:      "default",
 		Endpoint:          "https://old-bucket-1250000000.cos.ap-hongkong.myqcloud.com",
 		Bucket:            "old-bucket-1250000000",

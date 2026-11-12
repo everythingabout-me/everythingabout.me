@@ -298,9 +298,14 @@ export type FileTransferKind = "presigned-parts" | "resumable-session" | "relay"
 export interface FileUploadPartGrant {
   number: number;
   size: number;
-  method: "PUT";
+  /** "POST" is a conditional form upload: the provider's own refuse-to-replace switch
+   *  travels inside the signed policy, because a form cannot send If-None-Match. */
+  method: "PUT" | "POST";
   url: string;
   headers: Record<string, string>;
+  /** Form-upload fields, in the order the signature requires; the file goes last. */
+  fields?: { name: string; value: string }[];
+  fileField?: string;
   expiresAt: string;
 }
 
@@ -829,6 +834,34 @@ function filePost<T>(resource: string, body?: unknown, headers?: HeadersInit, si
 // trying to widen what the browser sends to the provider and is refused.
 const signedRequestHeaders = new Set(["content-type", "if-none-match", "if-match", "x-cos-forbid-overwrite"]);
 
+/** One field name the provider accepts beside the file. Anything else is not a grant. */
+const formFieldName = /^[A-Za-z0-9][A-Za-z0-9_-]*$/;
+
+function formPostTarget(grant: FileUploadPartGrant): { url: string; fields: { name: string; value: string }[]; fileField: string } {
+  if (typeof grant.url !== "string" || !/^https:\/\//i.test(grant.url) || !Number.isSafeInteger(grant.size) || grant.size < 0
+    || !Number.isSafeInteger(grant.number) || grant.number < 1) throw new Error("Invalid form upload grant.");
+  const parsed = new URL(grant.url);
+  if (parsed.username || parsed.password || parsed.hash || parsed.search || parsed.pathname !== "/") throw new Error("Invalid form upload target.");
+  if (Object.keys(grant.headers ?? {}).length) throw new Error("A form upload carries no request headers.");
+  if (!Number.isFinite(Date.parse(grant.expiresAt)) || Date.parse(grant.expiresAt) <= Date.now()) throw new Error("The form upload grant has expired.");
+  const fields = grant.fields;
+  if (!Array.isArray(fields) || fields.length === 0 || fields.length > 32) throw new Error("Invalid form upload fields.");
+  const seen = new Set<string>();
+  for (const field of fields) {
+    if (!field || typeof field.name !== "string" || typeof field.value !== "string" || !formFieldName.test(field.name)
+      || /[\r\n\0]/.test(field.value) || seen.has(field.name)) throw new Error("Invalid form upload field.");
+    seen.add(field.name);
+  }
+  // The three fields a provider's form signature cannot work without, and the overwrite
+  // switch that makes the create conditional. A grant missing one of them is not a grant.
+  for (const required of ["key", "policy", "q-signature", "x-cos-forbid-overwrite"]) {
+    if (!seen.has(required)) throw new Error("Invalid form upload fields.");
+  }
+  const fileField = grant.fileField ?? "file";
+  if (!formFieldName.test(fileField) || seen.has(fileField)) throw new Error("Invalid form upload file field.");
+  return { url: parsed.toString(), fields: fields.map(({ name, value }) => ({ name, value })), fileField };
+}
+
 function presignedPartTarget(grant: FileUploadPartGrant): { url: string; headers: Record<string, string> } {
   if (grant?.method !== "PUT" || typeof grant.url !== "string" || typeof grant.size !== "number"
     || !Number.isSafeInteger(grant.number) || grant.number < 1 || !Number.isSafeInteger(grant.size) || grant.size < 0) {
@@ -894,8 +927,58 @@ function sendPresignedPart(target: { url: string; headers: Record<string, string
 async function uploadPresignedPart(grant: FileUploadPartGrant, blob: Blob, signal?: AbortSignal,
   onProgress?: (progress: UploadProgress) => void): Promise<void> {
   if (grant.size !== blob.size) throw new Error("The presigned part length changed.");
+  if (grant?.method === "POST") {
+    await sendFormPost(formPostTarget(grant), blob, signal, onProgress);
+    return;
+  }
   const target = presignedPartTarget(grant);
   await sendPresignedPart(target, blob, signal, onProgress);
+}
+
+/**
+ * One conditional form upload. Every signed value travels in the body, so the request has no
+ * custom header and the browser sends no CORS preflight — the difference between one round
+ * trip per small file and two.
+ *
+ * A refusal to replace an existing object arrives as 409 FileAlreadyExists; it is reported
+ * as the same name conflict the create endpoint answers, so the queue offers the overwrite
+ * it already knows how to confirm.
+ */
+function sendFormPost(target: { url: string; fields: { name: string; value: string }[]; fileField: string }, blob: Blob,
+  signal?: AbortSignal, onProgress?: (progress: UploadProgress) => void): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) { reject(new DOMException("Upload canceled", "AbortError")); return; }
+    const body = new FormData();
+    for (const field of target.fields) body.append(field.name, field.value);
+    body.append(target.fileField, blob, "blob");
+    const xhr = new XMLHttpRequest();
+    let settled = false;
+    const finish = (error?: unknown) => {
+      if (settled) return;
+      settled = true;
+      signal?.removeEventListener("abort", abort);
+      if (error) reject(error); else resolve();
+    };
+    const abort = () => { xhr.abort(); finish(new DOMException("Upload canceled", "AbortError")); };
+    xhr.open("POST", target.url);
+    xhr.withCredentials = false;
+    xhr.upload.onprogress = (event) => {
+      if (!settled && !signal?.aborted) onProgress?.({ loaded: event.loaded, total: blob.size });
+    };
+    xhr.onload = () => {
+      if (xhr.status >= 200 && xhr.status < 300) { finish(); return; }
+      if (xhr.status === 409) {
+        finish(new ApiError("the destination already exists", 409, { code: "name_conflict" }));
+        return;
+      }
+      finish(new ApiError("form upload failed", xhr.status));
+    };
+    xhr.onerror = () => finish(new ApiError("upload connection interrupted", 0));
+    xhr.ontimeout = () => finish(new ApiError("upload request timed out", 0));
+    xhr.onabort = () => finish(new DOMException("Upload canceled", "AbortError"));
+    signal?.addEventListener("abort", abort, { once: true });
+    try { xhr.send(body); } catch (error) { finish(error); }
+  });
 }
 
 async function uploadRelayPart(id: string, number: number, blob: Blob, signal?: AbortSignal,

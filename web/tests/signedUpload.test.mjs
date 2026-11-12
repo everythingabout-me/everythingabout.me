@@ -158,3 +158,67 @@ for (const [label, changes] of [
     assert.equal(FakeXHR.instances.length, 0);
   });
 }
+
+// A form upload is the create path when the connection signs one. Every signed value rides
+// in the body, so the request carries no custom header and the browser sends no preflight:
+// one round trip per small file instead of two.
+const formGrant = (overrides = {}) => ({
+  number: 1, size: 3, method: "POST", url: "https://bucket.cos.ap-hongkong.myqcloud.com/",
+  headers: {},
+  fields: [
+    { name: "key", value: "drive/owner/照片.json" },
+    { name: "policy", value: "eyJjb25kaXRpb25zIjpbXX0=" },
+    { name: "q-sign-algorithm", value: "sha1" },
+    { name: "q-ak", value: "AKIDfixture" },
+    { name: "q-key-time", value: "1700000000;1700000600" },
+    { name: "q-signature", value: "0123456789abcdef" },
+    { name: "x-cos-forbid-overwrite", value: "true" },
+    { name: "Content-Type", value: "application/json" },
+    { name: "success_action_status", value: "201" },
+  ],
+  fileField: "file",
+  expiresAt: new Date(Date.now() + 300000).toISOString(),
+  ...overrides,
+});
+
+test("a form upload posts every signed field and no request header", async (t) => {
+  const { api, xhr } = await setup(t);
+  const blob = new Blob(["abc"]);
+  const request = api.uploadPresignedPart(formGrant(), blob);
+  const settled = request.then(() => "sent", (error) => error.message);
+  const data = await xhr();
+  assert.equal(data.method, "POST");
+  assert.equal(data.url, "https://bucket.cos.ap-hongkong.myqcloud.com/");
+  assert.equal(data.withCredentials, false);
+  assert.deepEqual(data.headers, {}, "a form upload is simple only while it carries no header");
+  assert.ok(data.body instanceof FormData);
+  const entries = [...data.body.entries()];
+  assert.deepEqual(entries.slice(0, -1), formGrant().fields.map(({ name, value }) => [name, value]));
+  const [fileField, file] = entries.at(-1);
+  assert.equal(fileField, "file");
+  assert.equal(file.size, 3, "the file goes last, after every signed field");
+  data.respond(201);
+  assert.equal(await settled, "sent");
+});
+
+test("a refused form upload is the same name conflict the create endpoint reports", async (t) => {
+  const { api, xhr } = await setup(t);
+  const request = api.uploadPresignedPart(formGrant(), new Blob(["abc"]));
+  const settled = request.then(() => "sent", (error) => error);
+  const data = await xhr();
+  data.respond(409);
+  const error = await settled;
+  assert.equal(error.status, 409);
+  assert.equal(error.code, "name_conflict");
+});
+
+test("a form grant that drops the overwrite switch never sends", async (t) => {
+  const { api } = await setup(t);
+  const withoutSwitch = formGrant({ fields: formGrant().fields.filter(({ name }) => name !== "x-cos-forbid-overwrite") });
+  await assert.rejects(() => api.uploadPresignedPart(withoutSwitch, new Blob(["abc"])), /Invalid form upload fields/);
+  const withHeader = formGrant({ headers: { "Content-Type": "application/json" } });
+  await assert.rejects(() => api.uploadPresignedPart(withHeader, new Blob(["abc"])), /no request headers/);
+  const relative = formGrant({ url: "/api/files/transfer/drive/owner/file" });
+  await assert.rejects(() => api.uploadPresignedPart(relative, new Blob(["abc"])), /Invalid form upload/);
+  assert.equal(FakeXHR.instances.length, 0, "a broken grant fails before a byte moves");
+});
