@@ -28,6 +28,16 @@ An event written by a third party lives in the user's account, not as a foreign 
 
 This is exactly where "a personal chronicle" and "a third-party activity wall" part ways. Doing it the other way (events belong to the app and vanish on disconnect) would turn the timeline into an unstable aggregator.
 
+**An app-pushed event is also a cache, and that has one consequence worth stating.** `events.payload` is
+the only copy of that card, so losing the database loses it — the tree keeps no record of a run, a ticket
+stub or a poster. That is accepted because the app is the source of truth and re-pushing the same
+`external_id` recreates the event (an update, not an edit), so the loss is recoverable by the party that
+owns the content. The condition that makes it acceptable, and the reason it is written down rather than
+implied: **an app that cannot re-push must not put irreplaceable content in `payload`** — it writes the
+bytes into the user's tree where the file rules apply, and the event carries a link and a thumbnail. A
+timeline card is a view of something that lives elsewhere; the moment it is the only copy, it has stopped
+being a card.
+
 ### 1.2 Cards are typed, not one fixed set of slots
 
 Each card type has its own `type` and `payload`; the server validates by type, and the renderer emits by type. Four are built in:
