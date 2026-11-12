@@ -16,15 +16,14 @@ import { pendingFileOperation, setUploadOwner, settleFileOperation } from "./upl
 const PART_POOL_SIZE = 16;
 // Sessions admitted per request, and settlements per request. A page of creates is cheap
 // (one conditional URL each, signed locally), so one request may carry a whole page of the
-// look-ahead; commits are bounded by the worker pool that settles them, and one page in
-// flight is what keeps that pool from being flooded — a page of sixteen is half of the
-// server's thirty-two settlement slots. Only one page is in flight at a time: the second
-// would take the other half and starve the folder creations and deletions that share the
-// pool. The two-second linger only delays a page that cannot fill, which is the tail of an
-// import, not its body.
+// look-ahead; commits are bounded by the worker pool that settles them.
 const CREATE_BATCH_SIZE = 32;
 const COMMIT_BATCH_SIZE = 16;
-const COMMIT_LINGER_MS = 2000;
+// Two settlement pages may be in flight: 32 items, which is exactly the server's settlement
+// pool, so the client never queues inside the server either. The pages belong to the
+// settlement stage alone — a file gives its transfer slot back before it waits here — so a
+// pending page never holds up the bytes behind it.
+const COMMIT_PAGES = 2;
 // Sessions kept in hand ahead of the transfer window: four part pools, so the window can be
 // refilled four times over before a create page (~1.7 s for 32, measured in 741f910 against
 // this bucket) has to answer. The page the server admits is 32, so 64 in hand is two
@@ -279,6 +278,8 @@ interface BatchState<T> {
   items: T[];
   timer?: ReturnType<typeof setTimeout>;
   flushing: boolean;
+  /** Pages in flight; settlement allows more than one. */
+  active: number;
 }
 
 interface PendingCreate { input: FileUploadInput; key: string; resolve: (session: FileUploadSession) => void; reject: (error: unknown) => void; cancelled: boolean }
@@ -301,7 +302,7 @@ export function useUploadQueue(onUploaded: (task: UploadTask, item: Item) => voi
   // Admission in flight or in hand, one per file. Its presence is the right to start that
   // file without waiting for a create: whoever starts it awaits this promise instead of
   // sending a second request, and the session it carries is used once.
-  const admissions = useRef(new Map<string, { controller: AbortController; promise: Promise<FileUploadSession> }>());
+  const admissions = useRef(new Map<string, { controller: AbortController; promise: Promise<FileUploadSession>; ready: boolean }>());
   // Files a look-ahead admission already refused. The window is the authority for a
   // refusal — it owns the row's error and its retry — so retrying the same refusal on
   // every completion would only turn one bad destination into an endless request loop.
@@ -326,8 +327,8 @@ export function useUploadQueue(onUploaded: (task: UploadTask, item: Item) => voi
   // which is why a prepare costs one request for a whole window rather than one per file.
   // A test double without the batch calls keeps the per-file path, so the queue's own
   // behaviour stays covered by the existing suite.
-  const createBatch = useRef<BatchState<PendingCreate>>({ items: [], flushing: false });
-  const settleBatch = useRef<BatchState<PendingSettle>>({ items: [], flushing: false });
+  const createBatch = useRef<BatchState<PendingCreate>>({ items: [], flushing: false, active: 0 });
+  const settleBatch = useRef<BatchState<PendingSettle>>({ items: [], flushing: false, active: 0 });
 
   const flushCreates = useCallback(async () => {
     const state = createBatch.current;
@@ -368,25 +369,32 @@ export function useUploadQueue(onUploaded: (task: UploadTask, item: Item) => voi
     }
   }), [flushCreates]);
 
-  const flushSettles = useCallback(async () => {
+  // A page leaves the moment it has anything to carry: the endpoint takes one to sixteen
+  // items, so waiting for the page to fill only delays every settlement by the wait — which
+  // is exactly the state an import shows when its transfers are done and one commit page sits
+  // pending. Two pages may overlap, and a returning page sends the next immediately.
+  const flushSettles = useCallback(() => {
     const state = settleBatch.current;
-    if (state.flushing) return;
-    state.flushing = true;
-    const batch = state.items.splice(0, COMMIT_BATCH_SIZE);
-    try {
-      const results = await api.commitUploadBatch(batch.map(({ id }) => id));
-      batch.forEach((item, index) => {
-        if (item.cancelled) return;
-        const result = results[index];
-        if (result?.result) item.resolve(result.result);
-        else if (result?.error) item.reject(new FileApiError(result.error));
-        else item.reject(new Error("The settlement page was incomplete."));
-      });
-    } catch (error) {
-      batch.forEach((item) => { if (!item.cancelled) item.reject(error); });
-    } finally {
-      state.flushing = false;
-      if (state.items.length) state.timer = setTimeout(() => { state.timer = undefined; void flushSettles(); }, 0);
+    while (state.active < COMMIT_PAGES && state.items.length) {
+      const batch = state.items.splice(0, COMMIT_BATCH_SIZE);
+      state.active++;
+      void (async () => {
+        try {
+          const results = await api.commitUploadBatch(batch.map(({ id }) => id));
+          batch.forEach((item, index) => {
+            if (item.cancelled) return;
+            const result = results[index];
+            if (result?.result) item.resolve(result.result);
+            else if (result?.error) item.reject(new FileApiError(result.error));
+            else item.reject(new Error("The settlement page was incomplete."));
+          });
+        } catch (error) {
+          batch.forEach((item) => { if (!item.cancelled) item.reject(error); });
+        } finally {
+          state.active--;
+          if (state.items.length) flushSettles();
+        }
+      })();
     }
   }, []);
 
@@ -397,12 +405,8 @@ export function useUploadQueue(onUploaded: (task: UploadTask, item: Item) => voi
     const item: PendingSettle = { id, resolve, reject, cancelled: false };
     signal?.addEventListener("abort", () => { item.cancelled = true; reject(new DOMException("Upload canceled", "AbortError")); }, { once: true });
     state.items.push(item);
-    if (state.items.length >= COMMIT_BATCH_SIZE) {
-      if (state.timer !== undefined) { clearTimeout(state.timer); state.timer = undefined; }
-      void flushSettles();
-    } else if (state.timer === undefined) {
-      state.timer = setTimeout(() => { state.timer = undefined; void flushSettles(); }, COMMIT_LINGER_MS);
-    }
+    if (state.timer !== undefined) { clearTimeout(state.timer); state.timer = undefined; }
+    flushSettles();
   }), [flushSettles]);
   const deadlines = useRef(new Set<ReturnType<typeof setTimeout>>());
   // Global part pool: the file at the head of the queue takes every slot it has parts to
@@ -586,10 +590,17 @@ export function useUploadQueue(onUploaded: (task: UploadTask, item: Item) => voi
     // An entry this tab prepares and then never starts (a cancellation) must not surface as
     // an unhandled rejection; whoever drives the row handles the refusal.
     promise.catch(() => {});
-    const entry = { controller, promise };
+    const entry = { controller, promise, ready: false };
     admissions.current.set(task.id, entry);
     void promise.then(
-      () => { admissionFailed.current.delete(task.id); },
+      () => {
+        entry.ready = true;
+        admissionFailed.current.delete(task.id);
+        // A file starts the moment its own session is in hand, not when its wave does: a
+        // transfer slot handed to a file that is still waiting for a create page is a slot
+        // that is not moving bytes.
+        pumpRef.current();
+      },
       () => {
         if (admissions.current.get(task.id) === entry) admissions.current.delete(task.id);
         // The window owns a refusal — it decides between waiting on the blocker, retrying

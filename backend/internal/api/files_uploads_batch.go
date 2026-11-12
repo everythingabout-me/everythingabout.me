@@ -18,11 +18,11 @@ import (
 // page when it needs it.
 //
 // The commit page is sixteen because the page, not the transfer, was the pipeline's gate:
-// a settlement costs 0.63 s (p50, measured against this bucket) and the client sends one
-// page at a time, so eight items per page plus the queue's two-second fill wait capped an
-// import at ~3.8 files/s while creates ran at 13/s. Sixteen items occupy half of the
-// thirty-two settlement slots, which leaves the other half for folder creations, moves and
-// deletions that share the same pool.
+// a settlement costs 0.63 s (p50, measured against this bucket), so eight items per page
+// plus the queue's two-second fill wait capped an import at ~3.8 files/s while creates ran
+// at 13/s. Two pages may be in flight — thirty-two items, exactly the settlement slots — so
+// the client never queues inside the server either, and a page that returns is replaced
+// immediately instead of waiting for the queue to fill another one.
 const (
 	filesUploadCreateBatchLimit = 32
 	filesUploadCommitBatchLimit = 16
@@ -33,9 +33,14 @@ const (
 // whose folders do not exist yet, a chain of four to seven more. Nothing in it is
 // CPU-bound, so run one at a time a page of eight costs the sum of eight provider waits and
 // the client can start its next page only when the last item returns — which is how a page
-// came back in 44 seconds. Overlapped, the page costs about its slowest item. The bound is
-// the queue's own in-flight window, so a page never outruns the clients it serves.
-const filesUploadBatchParallel = 8
+// came back in 44 seconds. Overlapped, the page costs about its slowest item.
+//
+// A page is 32 items, and eight at a time makes it cost four items instead of one: with the
+// queue's look-ahead drained, that is the pause a large import shows between waves of
+// transfers. Thirty-two in flight matches the provider transport's sixty-four connections
+// (each item waits on one request at a time) and the client's page size, so one page is one
+// wave.
+const filesUploadBatchParallel = 32
 
 // filesUploadCommitParallel bounds one commit page's items. A settlement costs a handful of
 // provider reads and one index transaction, so all sixteen running together cost the page
