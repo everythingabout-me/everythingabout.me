@@ -946,7 +946,15 @@ func executeAction(ctx context.Context, native NativeActions, intent storage.Eff
 	case "mkdir":
 		return native.Mkdir(ctx, storage.Mutation{ID: intent.ID, Path: intent.Target, Conditions: intent.Conditions}, save)
 	case "delete":
-		return native.Remove(ctx, storage.Mutation{ID: intent.ID, Path: intent.Source, Conditions: storage.Conditions{ExpectedRevision: intent.SourceRevision}}, save)
+		return native.Remove(ctx, storage.Mutation{ID: intent.ID, Path: intent.Source, Conditions: storage.Conditions{
+			ExpectedRevision: intent.SourceRevision,
+			// The manifest admits a captured entry with no revision only for a folder
+			// (requireRevision refuses it for a file): that is a marker-less prefix folder,
+			// which its provider builds from its children. Say so instead of asking for a
+			// revision-less delete, which is refused because it would settle without a
+			// native effect.
+			ImplicitFolder: len(intent.SourceRevision) == 0,
+		}}, save)
 	case "move":
 		if !native.Describe().NativeTreeMove {
 			return storage.MutationResult{}, E("unsupported", nil)

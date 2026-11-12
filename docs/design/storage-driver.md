@@ -128,10 +128,17 @@ type Tree interface {
 type Conditions struct {
     Absent          bool // atomic create-only at the destination
     ExpectedRevision []byte // conditional mutation of a native revision, exclusive with Absent
+    // ImplicitFolder states that the addressed folder has no marker object: the provider
+    // makes the folder from its children, so it exists only while they do. Valid only for
+    // Remove and only when the caller observed no revision; see Remover below.
+    ImplicitFolder bool
 }
 
 type Mutation struct {
-    ID string // durable unique intent; not a claim of native idempotency
+    // Durable unique intent; not a claim of native idempotency. An id names one accepted
+    // operation, never a path alone: a driver retains a settled receipt for IntentRetention,
+    // so a path-keyed id would answer a later operation from an earlier one's receipt.
+    ID string
     Path Path
     Conditions Conditions
 }
@@ -156,6 +163,13 @@ type Remover interface {
     Remove(context.Context, Mutation, Checkpoint) (MutationResult, error)
     // Removes a file or an empty folder only. The service must explicitly enumerate
     // and journal recursive deletion; this call never recurses implicitly.
+    //
+    // The native state to remove is named, never guessed. A file or a folder with a
+    // marker object is removed with Conditions.ExpectedRevision set to the revision the
+    // caller observed. A folder reported with no revision has no marker object, so
+    // removing its children removed it; that case is expressed with
+    // Conditions.ImplicitFolder, and the driver must verify that no marker and no child
+    // appeared since. A removal with neither is refused with `missing_revision`.
 }
 
 type MoveRequest struct {
@@ -563,6 +577,17 @@ any accepted checksum, and returns only durable complete staging. Checkpoint per
 phases and receipt/evidence under the intent fence. Both writers obey the same rule: a retry under one intent
 cannot overwrite a different in-flight attempt, and lost allocation handles require
 discoverability/expiry/reconciliation rather than an exactly-once allocation claim.
+
+A relay writer stages one entry at a time, so its staging bound is a property of the
+work, not of the connection's interactive request policy. A whole-tree copy declares
+the size of each entry it is about to hand over through `storage.StagingBound`
+(`AdmitStagedBytes`), which raises the writer's single-entry ceiling up to the
+provider's one-request publication limit and never lowers it. The 32 MiB default of
+`FILE_MAX_SINGLE_PUT_BYTES` describes an interactive `PUT` a person made; using it as
+the copy's bound made a backup stop at its first larger file after part of the tree had
+already been written. The provider ceiling is not negotiable, so an entry above it is
+refused by name (`too_large`) before the attempt rather than inside a native request.
+A writer without `StagingBound` keeps its own bound.
 
 Publish changes the actual readable destination using an admitted no-replace/replace operation. Check the
 captured target conditions and record final native-effect intent before sending it. Local rename or S3 object

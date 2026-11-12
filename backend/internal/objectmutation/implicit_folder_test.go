@@ -36,7 +36,7 @@ func TestObjectRecursiveDeleteOfImplicitFolder(t *testing.T) {
 	if err != nil || folder.Revision != nil {
 		t.Fatalf("implicit folder=%+v %v", folder, err)
 	}
-	_, err = d.Remove(ctx, storage.Mutation{ID: "early", Path: "Prefix"}, cpOK)
+	_, err = d.Remove(ctx, storage.Mutation{ID: "early", Path: "Prefix", Conditions: storage.Conditions{ImplicitFolder: true}}, cpOK)
 	var none *storage.NoFinalEffect
 	if !errors.As(err, &none) {
 		t.Fatalf("nonempty implicit folder delete=%v", err)
@@ -50,7 +50,7 @@ func TestObjectRecursiveDeleteOfImplicitFolder(t *testing.T) {
 		t.Fatal(err)
 	}
 	deletes := b.deletes
-	result, err := d.Remove(ctx, storage.Mutation{ID: "anchor", Path: "Prefix"}, cpOK)
+	result, err := d.Remove(ctx, storage.Mutation{ID: "anchor", Path: "Prefix", Conditions: storage.Conditions{ImplicitFolder: true}}, cpOK)
 	if err != nil || len(result.Evidence) == 0 {
 		t.Fatalf("implicit folder delete=%+v %v", result, err)
 	}

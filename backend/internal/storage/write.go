@@ -12,6 +12,18 @@ type Conditions struct {
 	Absent bool
 	// ExpectedRevision requires the native state to still be this exact revision.
 	ExpectedRevision []byte
+	// ImplicitFolder states that the addressed folder has no native marker object:
+	// the provider makes a folder from its children, so the folder exists only while
+	// they do (see Descriptor.ImplicitParents). It is valid only for Remove, and only
+	// when the caller observed no revision. It asks the driver to settle removal of a
+	// marker-less folder rather than to delete anything native.
+	//
+	// It is explicit because the alternative — treating any revision-less Remove as
+	// this case — is indistinguishable from a caller that forgot the revision, and a
+	// delete that silently settles without a native effect looks identical to one that
+	// removed the object. A driver whose folders always have a marker (a filesystem)
+	// refuses it as unsupported instead of pretending it did something.
+	ImplicitFolder bool
 }
 type Mutation struct {
 	ID         string
@@ -89,6 +101,23 @@ type BoundStagedWriter interface {
 	StorageNameRules() NameRules
 }
 
+// StagingBound is implemented by a staged writer whose one-entry staging ceiling must
+// be computed from the work rather than fixed when the writer was built.
+//
+// A relay write stages one entry at a time, so the bound the writer needs is the
+// largest entry it will be handed — for a snapshot, the largest file the copy admits.
+// A fixed interactive-request policy (32 MiB by default on an object connection)
+// instead fails a whole-tree copy at the first larger file, after the copy has already
+// written part of the tree; the bound it was given described a different piece of work.
+//
+// AdmitStagedBytes raises the ceiling to size for the lifetime of this writer and
+// returns a named error when the provider cannot publish an entry that large in one
+// request. It never lowers the ceiling, and a writer without this interface simply
+// keeps its own bound.
+type StagingBound interface {
+	AdmitStagedBytes(size int64) error
+}
+
 type EffectIntent struct {
 	ID, Action     string
 	Source, Target Path
@@ -131,6 +160,18 @@ type MarkerReassertor interface {
 	Reassert(context.Context, Mutation, Checkpoint) (MutationResult, error)
 }
 
+// Remover removes a file or an empty folder. It never recurses: the service
+// explicitly enumerates and journals a recursive deletion.
+//
+// The native state to remove is named, not guessed. A file or a folder with a marker
+// object is removed with Conditions.ExpectedRevision set to the revision the caller
+// observed. A folder the driver reported with no revision has no marker object (its
+// provider makes it from its children), so removing its children removed it; that case
+// is expressed with Conditions.ImplicitFolder instead, and the driver must verify that
+// no marker and no child appeared. A removal with neither is refused with a named
+// error (`missing_revision`) rather than settled as a no-op: a delete that reports
+// success without issuing the conditional effect is indistinguishable from a real
+// deletion, and the caller then records a state that the tree does not have.
 type Remover interface {
 	Remove(context.Context, Mutation, Checkpoint) (MutationResult, error)
 }

@@ -57,7 +57,10 @@ func (w *MutationDriver) validateAction(in storage.EffectIntent) error {
 			return storage.NewError("invalid_intent", in.Target, nil)
 		}
 	case "remove":
-		if in.Source != "" || len(in.SourceRevision) != 0 || in.Conditions.Absent || len(in.Conditions.ExpectedRevision) != sha256.Size {
+		if in.Source != "" || len(in.SourceRevision) != 0 || in.Conditions.Absent || in.Conditions.ImplicitFolder || len(in.Conditions.ExpectedRevision) != sha256.Size {
+			// Local folders are directory inodes, so every one of them has a native
+			// marker. There is no marker-less folder to settle, and pretending to
+			// settle one would report a deletion with no effect.
 			return storage.NewError("unsupported", in.Target, nil)
 		}
 		return nil
@@ -77,7 +80,7 @@ func (w *MutationDriver) validateAction(in storage.EffectIntent) error {
 	default:
 		return storage.NewError("unsupported", in.Target, nil)
 	}
-	if !in.Conditions.Absent || len(in.Conditions.ExpectedRevision) != 0 {
+	if !in.Conditions.Absent || len(in.Conditions.ExpectedRevision) != 0 || in.Conditions.ImplicitFolder {
 		return storage.NewError("unsupported", in.Target, nil)
 	}
 	return nil

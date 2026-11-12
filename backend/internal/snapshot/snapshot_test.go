@@ -3,6 +3,7 @@ package snapshot
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"fmt"
 	"io"
 	"sort"
@@ -37,12 +38,25 @@ func (f *fakeTree) put(p storage.Path, data string) *fakeTree {
 
 func (f *fakeTree) dir(p storage.Path) *fakeTree { f.dirs[p] = true; return f }
 
+// revision is the fake's native state token. A file's revision covers its bytes; a
+// folder's identity is its path, not its children, so adding or removing one does not
+// invalidate a delete that named the folder. Remove enforces it, which is what makes a
+// revision-less prune fail here instead of silently succeeding.
+func (f *fakeTree) revision(p storage.Path) []byte {
+	if data, ok := f.files[p]; ok {
+		sum := sha256.Sum256(append([]byte("file\x00"), data...))
+		return sum[:]
+	}
+	sum := sha256.Sum256([]byte("folder\x00" + string(p)))
+	return sum[:]
+}
+
 func (f *fakeTree) Stat(_ context.Context, p storage.Path) (storage.Entry, error) {
 	if data, ok := f.files[p]; ok {
-		return storage.Entry{Path: p, Kind: storage.File, Size: int64(len(data))}, nil
+		return storage.Entry{Path: p, Kind: storage.File, Revision: f.revision(p), Size: int64(len(data))}, nil
 	}
 	if f.dirs[p] || p == "" {
-		return storage.Entry{Path: p, Kind: storage.Folder}, nil
+		return storage.Entry{Path: p, Kind: storage.Folder, Revision: f.revision(p)}, nil
 	}
 	return storage.Entry{}, storage.NewError("not_found", p, nil)
 }
@@ -75,6 +89,7 @@ func (f *fakeTree) List(_ context.Context, dir storage.Path, _ storage.PageReque
 		} else {
 			entry = storage.Entry{Path: child, Kind: storage.Folder}
 		}
+		entry.Revision = f.revision(child)
 		seen[name] = entry
 	}
 	for p := range f.files {
@@ -133,7 +148,47 @@ func (f *fakeTree) Inspect(context.Context, storage.WriteIntent, []byte) (storag
 }
 func (f *fakeTree) Discard(context.Context, storage.WriteIntent, []byte) error { return nil }
 
-func (f *fakeTree) Remove(_ context.Context, m storage.Mutation, _ storage.Checkpoint) (storage.MutationResult, error) {
+// Remove enforces the driver contract the snapshot relies on: a file or a folder with a
+// marker is removed only with the revision observed for it, and a marker-less folder is
+// removed only when the caller says so explicitly.
+func (f *fakeTree) Remove(ctx context.Context, m storage.Mutation, _ storage.Checkpoint) (storage.MutationResult, error) {
+	entry, err := f.Stat(ctx, m.Path)
+	if err != nil {
+		return storage.MutationResult{}, err
+	}
+	if m.Conditions.ImplicitFolder {
+		if len(m.Conditions.ExpectedRevision) > 0 {
+			return storage.MutationResult{}, storage.NewError("unsupported", m.Path, nil)
+		}
+		if entry.Kind != storage.Folder {
+			return storage.MutationResult{}, storage.NewError("changed", m.Path, nil)
+		}
+		page, err := f.List(ctx, m.Path, storage.PageRequest{})
+		if err != nil {
+			return storage.MutationResult{}, err
+		}
+		if len(page.Entries) > 0 {
+			return storage.MutationResult{}, storage.NewError("not_empty", m.Path, nil)
+		}
+		delete(f.dirs, m.Path)
+		f.removed = append(f.removed, m.Path)
+		return storage.MutationResult{}, nil
+	}
+	if len(m.Conditions.ExpectedRevision) == 0 {
+		return storage.MutationResult{}, storage.NewError("missing_revision", m.Path, nil)
+	}
+	if !bytes.Equal(m.Conditions.ExpectedRevision, entry.Revision) {
+		return storage.MutationResult{}, storage.NewError("changed", m.Path, nil)
+	}
+	if entry.Kind == storage.Folder {
+		page, err := f.List(ctx, m.Path, storage.PageRequest{})
+		if err != nil {
+			return storage.MutationResult{}, err
+		}
+		if len(page.Entries) > 0 {
+			return storage.MutationResult{}, storage.NewError("not_empty", m.Path, nil)
+		}
+	}
 	delete(f.files, m.Path)
 	delete(f.dirs, m.Path)
 	f.removed = append(f.removed, m.Path)

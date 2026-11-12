@@ -302,6 +302,13 @@ func (a *Actions) purgeEntry(ctx context.Context, op Operation, entry storage.En
 			return purgeResult{deleted: true}
 		}
 		revision = current.Revision
+		if len(revision) == 0 {
+			// Still no revision after an observation: this is a marker-less prefix folder.
+			// Its children are the native objects and this pass removes them, so there is
+			// nothing native to delete here. Issuing the unconditional delete this branch
+			// would otherwise reach could remove a marker that appeared after capture.
+			return purgeResult{deleted: true}
+		}
 	}
 	// One conditional request where the driver can do it, the journalled removal otherwise:
 	// both refuse to delete an object whose revision moved, and both are safe to repeat.

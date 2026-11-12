@@ -420,7 +420,7 @@ func cloneEffect(in storage.EffectIntent) *storage.EffectIntent {
 }
 
 func (d *Driver) Mkdir(ctx context.Context, in storage.Mutation, cp storage.Checkpoint) (storage.MutationResult, error) {
-	if in.Path == "" || !in.Conditions.Absent || len(in.Conditions.ExpectedRevision) > 0 {
+	if in.Path == "" || !in.Conditions.Absent || len(in.Conditions.ExpectedRevision) > 0 || in.Conditions.ImplicitFolder {
 		return storage.MutationResult{}, fail("unsupported", in.Path)
 	}
 	intent := storage.WriteIntent{ID: in.ID, Target: in.Path, Conditions: in.Conditions, Size: 0, MediaType: "application/octet-stream"}
@@ -523,7 +523,7 @@ func (d *Driver) copyRelay(ctx context.Context, in storage.MoveRequest, etag str
 		if source.Kind != storage.File || !bytes.Equal(source.Revision, in.SourceRevision) {
 			return storage.MutationResult{}, fail("changed", in.Source)
 		}
-		if source.Size > d.options.MaxPublishBytes {
+		if source.Size > d.stageBound.Load() {
 			return storage.MutationResult{}, fail("unsupported", in.Source)
 		}
 		intent.Size = source.Size
@@ -554,10 +554,15 @@ func (d *Driver) copyRelay(ctx context.Context, in storage.MoveRequest, etag str
 	return result, err
 }
 
-// singleCopyLimit is the largest object one provider copy request moves: COS and
-// S3 both document 5 GiB for PutObject - Copy. Larger objects use numbered part
-// copies, which completion still publishes with one conditional request.
-const singleCopyLimit int64 = 5 << 30
+// singleRequestLimit is the largest object COS and S3 move with one request:
+// PutObject, and the same ceiling for PutObject - Copy. It is the hard bound for a
+// relay stage, because one staged entry is published with one request. Larger objects
+// need a numbered multipart publication, which the relay path does not perform.
+const singleRequestLimit int64 = 5 << 30
+
+// singleCopyLimit is the same provider ceiling applied to a copy: one copy request
+// moves an object up to this size, and larger ones use conditional part copies.
+const singleCopyLimit = singleRequestLimit
 
 // copyPartBytes keeps every part below the provider's 5 GiB part limit and a
 // 5 TiB object below the 10,000-part maximum.
@@ -860,11 +865,18 @@ func (d *Driver) resolveCopied(ctx context.Context, r *ledger) (*storage.Mutatio
 	return &result, true, nil
 }
 func (d *Driver) Remove(ctx context.Context, in storage.Mutation, cp storage.Checkpoint) (storage.MutationResult, error) {
-	if in.Path == "" || storage.ValidatePath(in.Path) != nil || in.Conditions.Absent {
+	if in.Path == "" || storage.ValidatePath(in.Path) != nil || in.Conditions.Absent || in.Conditions.ImplicitFolder && len(in.Conditions.ExpectedRevision) > 0 {
 		return storage.MutationResult{}, fail("unsupported", in.Path)
 	}
-	if len(in.Conditions.ExpectedRevision) == 0 {
+	if in.Conditions.ImplicitFolder {
 		return d.removeImplicitFolder(ctx, in)
+	}
+	if len(in.Conditions.ExpectedRevision) == 0 {
+		// A delete that names no native state cannot be a conditional effect. Settling it
+		// as an implicit-folder removal made a forgotten revision look like a successful
+		// delete: no object was removed, yet the caller recorded the path gone. The
+		// marker-less case is expressed with Conditions.ImplicitFolder instead.
+		return storage.MutationResult{}, fail("missing_revision", in.Path)
 	}
 	if _, err := parseRevision(in.Conditions.ExpectedRevision); err != nil {
 		return storage.MutationResult{}, err
@@ -1046,32 +1058,42 @@ func (d *Driver) InspectEffect(ctx context.Context, in storage.EffectIntent, evi
 	}
 }
 
-// removeImplicitFolder settles deletion of a prefix folder that has no marker
-// object. It issues no native request: the prefix vanished with its last child.
-// A marker or child that appeared since capture is reported as a change.
+// removeImplicitFolder settles removal of a prefix folder that has no marker
+// object. It issues no native request: the prefix vanished with its last child. The
+// caller has to ask for this explicitly (Conditions.ImplicitFolder); a revision-less
+// Remove is refused before it can be mistaken for it.
 func (d *Driver) removeImplicitFolder(ctx context.Context, in storage.Mutation) (storage.MutationResult, error) {
 	ctx, done, err := d.operation(ctx)
 	if err != nil {
 		return storage.MutationResult{}, err
 	}
 	defer done()
-	if _, err = d.backend.Head(ctx, d.key(in.Path, storage.Folder)); err == nil {
-		return storage.MutationResult{}, &storage.NoFinalEffect{Cause: fail("changed", in.Path)}
-	} else if !storage.IsCode(err, "not_found") {
+	current, err := d.Stat(ctx, in.Path)
+	if storage.IsCode(err, "not_found") {
+		// The last child was already removed, so the marker-less prefix is gone too.
+		return storage.MutationResult{Evidence: d.implicitFolderEvidence(in)}, nil
+	}
+	if err != nil {
 		return storage.MutationResult{}, err
 	}
-	evidence, _ := json.Marshal(map[string]string{"binding": d.namespace, "kind": "implicit-folder-delete", "id": in.ID, "path": string(in.Path)})
-	page, err := d.tree.List(ctx, in.Path, storage.PageRequest{Limit: 1})
-	if storage.IsCode(err, "not_found") {
-		return storage.MutationResult{Evidence: evidence}, nil
+	if current.Kind != storage.Folder || len(current.Revision) > 0 {
+		// A marker appeared after the caller observed none, or the path is a file: the
+		// condition the caller declared does not hold, so nothing was settled.
+		return storage.MutationResult{}, &storage.NoFinalEffect{Cause: fail("changed", in.Path)}
 	}
+	page, err := d.tree.List(ctx, in.Path, storage.PageRequest{Limit: 1})
 	if err != nil {
 		return storage.MutationResult{}, err
 	}
 	if len(page.Entries) > 0 || page.NextCursor != "" {
 		return storage.MutationResult{}, &storage.NoFinalEffect{Cause: fail("not_empty", in.Path)}
 	}
-	return storage.MutationResult{Evidence: evidence}, nil
+	return storage.MutationResult{Evidence: d.implicitFolderEvidence(in)}, nil
+}
+
+func (d *Driver) implicitFolderEvidence(in storage.Mutation) []byte {
+	evidence, _ := json.Marshal(map[string]string{"binding": d.namespace, "kind": "implicit-folder-delete", "id": in.ID, "path": string(in.Path)})
+	return evidence
 }
 
 // Reassert rewrites a folder marker so it no longer matches the revision a concurrent
@@ -1091,7 +1113,7 @@ func (d *Driver) removeImplicitFolder(ctx context.Context, in storage.Mutation) 
 // are covered by the single-gateway writer model, exactly like the other replacements.
 // A lost reply is safe to repeat: the effect only rewrites an empty marker.
 func (d *Driver) Reassert(ctx context.Context, in storage.Mutation, _ storage.Checkpoint) (storage.MutationResult, error) {
-	if in.Path == "" || storage.ValidatePath(in.Path) != nil || in.Conditions.Absent || len(in.Conditions.ExpectedRevision) > 4096 {
+	if in.Path == "" || storage.ValidatePath(in.Path) != nil || in.Conditions.Absent || in.Conditions.ImplicitFolder || len(in.Conditions.ExpectedRevision) > 4096 {
 		return storage.MutationResult{}, fail("invalid_request", in.Path)
 	}
 	ctx, done, err := d.operation(ctx)

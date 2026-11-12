@@ -476,7 +476,7 @@ password sign-in: 30 per 15 minutes per IP, 10 per 15 minutes per email).
 | `FILE_COORDINATED_WRITES` | Default false; enable only after native evidence, legacy drain and root budget admission |
 | `FILE_TRANSFER_CLASS` | `presigned-parts` (class A) or `relay` (class C); class B is reserved until a cloud-drive driver exists |
 | `FILE_UPLOAD_INGRESS` | `embedded` for direct provider class A URLs, or `edgeone` for the optional same-origin class A edge relay |
-| `FILE_MAX_SINGLE_PUT_BYTES` | Simple PUT/object publication policy on class C; default 32 MiB, admitted object maximum 5 GiB |
+| `FILE_MAX_SINGLE_PUT_BYTES` | Simple PUT/object publication policy for interactive class C requests; default 32 MiB, admitted object maximum 5 GiB. A snapshot or restore derives its staging bound from the entries it copies instead |
 | `FILE_OBJECT_ADMISSION_FILE` / `FILE_OBJECT_SPOOL_ROOT` | Exact-connection capability evidence and durable shared object spool |
 | `COS_SECRET_ID` / `COS_SECRET_KEY` | Server-side COS control and class A URL signing; never give them to the frontend |
 | `COS_BUCKET` / `COS_REGION` | The bucket must include the APPID |

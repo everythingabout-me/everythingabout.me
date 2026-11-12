@@ -409,3 +409,20 @@ func TestMutationFailedReplacementInputKeepsOldBytes(t *testing.T) {
 		t.Fatal("bad input changed target")
 	}
 }
+
+// A local folder is a directory inode, so every folder has a native marker. There is no
+// marker-less folder to settle here, and the request must be refused rather than
+// reported as a deletion that never happened.
+func TestMutationRefusesAnImplicitFolderRemoval(t *testing.T) {
+	w, _, _ := mutationFixture(t)
+	ctx := context.Background()
+	if _, err := w.Mkdir(ctx, storage.Mutation{ID: "folder", Path: "Folder", Conditions: storage.Conditions{Absent: true}}, stageOK); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := w.Remove(ctx, storage.Mutation{ID: "implicit", Path: "Folder", Conditions: storage.Conditions{ImplicitFolder: true}}, stageOK); !storage.IsCode(err, "unsupported") {
+		t.Fatalf("implicit folder removal = %v, want unsupported", err)
+	}
+	if _, err := w.Stat(ctx, "Folder"); err != nil {
+		t.Fatalf("the refused removal deleted the folder: %v", err)
+	}
+}

@@ -8,11 +8,13 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	"everythingabout.me/backend/internal/storage"
 )
@@ -33,10 +35,15 @@ type Driver struct {
 	cancel    context.CancelFunc
 	once      sync.Once
 	closeErr  error
+	// stageBound is the largest single entry this writer may stage. It starts at the
+	// connection's interactive single-PUT policy; a caller that derives a larger bound
+	// from its own work raises it through AdmitStagedBytes.
+	stageBound atomic.Int64
 }
 
 var _ storage.Driver = (*Driver)(nil)
 var _ storage.BoundStagedWriter = (*Driver)(nil)
+var _ storage.StagingBound = (*Driver)(nil)
 var _ storage.BoundEffectRecovery = (*Driver)(nil)
 var _ storage.FolderWriter = (*Driver)(nil)
 var _ storage.Remover = (*Driver)(nil)
@@ -104,7 +111,9 @@ func New(tree storage.Driver, binding storage.Config, backend Backend, options O
 		return nil, err
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	return &Driver{tree: tree, binding: binding, backend: backend, options: options, root: root, namespace: namespace, lifetime: ctx, cancel: cancel}, nil
+	d := &Driver{tree: tree, binding: binding, backend: backend, options: options, root: root, namespace: namespace, lifetime: ctx, cancel: cancel}
+	d.stageBound.Store(options.MaxPublishBytes)
+	return d, nil
 }
 func fail(code string, path storage.Path) error  { return storage.NewError(code, path, nil) }
 func (d *Driver) StorageBinding() storage.Config { return d.binding }
@@ -133,6 +142,30 @@ func (d *Driver) Describe() storage.Descriptor {
 	desc.Names = d.StorageNameRules()
 	return desc
 }
+
+// AdmitStagedBytes raises the single-entry staging ceiling to a bound the caller
+// computed from its own work (see storage.StagingBound). A whole-tree copy stages one
+// entry at a time, so the bound it declares is each entry it is about to hand over;
+// the connection's interactive single-PUT policy describes a request a person made,
+// not that copy, and refusing the copy at its first larger file would stop a backup
+// midway. The provider's own one-request publication limit is not negotiable, so a
+// larger entry is refused by name instead of failing later inside a native PUT.
+func (d *Driver) AdmitStagedBytes(size int64) error {
+	if size < 0 {
+		return fail("invalid_intent", "")
+	}
+	if size > singleRequestLimit {
+		return storage.NewError("too_large", "", fmt.Errorf("entry of %d bytes exceeds the %d-byte single-request publication limit", size, singleRequestLimit))
+	}
+	for {
+		current := d.stageBound.Load()
+		if size <= current || d.stageBound.CompareAndSwap(current, size) {
+			return nil
+		}
+	}
+}
+
+// Close closes this view and its underlying tree.
 func (d *Driver) Close() error {
 	d.once.Do(func() { d.cancel(); d.closeErr = errors.Join(d.root.Close(), d.tree.Close()) })
 	return d.closeErr
@@ -501,7 +534,7 @@ func (d *Driver) validateIntent(in storage.WriteIntent) error {
 	if len(d.binding.ContentRoot)+len(in.Target) > 1024 {
 		return fail("invalid_name", in.Target)
 	}
-	if in.ID == "" || len(in.ID) > 1024 || strings.ContainsAny(in.ID, "\r\n\x00") || in.Target == "" || storage.ValidatePath(in.Target) != nil || in.Size < 0 || in.Size > d.options.MaxPublishBytes || len(in.MediaType) > 1024 || in.Conditions.Absent == (len(in.Conditions.ExpectedRevision) > 0) {
+	if in.ID == "" || len(in.ID) > 1024 || strings.ContainsAny(in.ID, "\r\n\x00") || in.Target == "" || storage.ValidatePath(in.Target) != nil || in.Size < 0 || in.Size > d.stageBound.Load() || in.Conditions.ImplicitFolder || len(in.MediaType) > 1024 || in.Conditions.Absent == (len(in.Conditions.ExpectedRevision) > 0) {
 		return fail("invalid_intent", in.Target)
 	}
 	if len(in.Conditions.ExpectedRevision) > 0 {

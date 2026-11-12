@@ -78,6 +78,10 @@ removes the visible split. It is an improvement to predictability, not a correct
   gone.
 - **Retention keeps whole dates.** The schedule and the number of snapshots kept are per-owner settings the
   user can change. Rotation removes an entire date; it never removes individual files from a kept snapshot.
+- **A rotation deletes what it reports removed.** Every removed entry names the native revision the
+  observation reported, and a marker-less prefix folder is expressed as one instead of being inferred from a
+  missing revision. A prune that settled without a native effect would leave the objects behind while `eam
+  backup list` stopped showing the date.
 - **Retention never depends on the newest snapshot's health, and never mirrors.** If the newest snapshot
   differs from its predecessor beyond a configured ratio (or shows a jump in entropy), pruning is skipped
   and an operator alert is raised. The correct response to suspected encryption is to keep more history,
@@ -228,6 +232,18 @@ Rules, each answering a specific failure:
   pattern as the existing database dump. There is no scheduler in the process today, and a long job does
   not belong inside the server's request lifecycle.
 - The job bounds itself by entries and bytes processed, never by a wall clock (see `AGENTS.md`).
+- **Intent ids name the run, not the path.** One `eam backup snapshot` or `eam backup prune` invocation mints a
+  run id, and every create/delete intent inside it includes that id; the path stays the target. A driver keeps a
+  settled receipt per intent for `storage.IntentRetention` (24 hours), so a path-keyed id answered a later run
+  from an earlier run's receipt: re-taking a date that had been pruned silently created nothing, and re-pruning
+  a re-created date could replay a settled delete while its objects stayed. A retry of the same driver call
+  still replays its own receipt, which is what keeps one intent idempotent.
+- **The staging bound is the work.** A copy stages one entry at a time, so the largest file it admits is the
+  bound the destination needs; it declares each entry's size to the writer (`storage.StagingBound`) instead
+  of inheriting the connection's interactive single-PUT policy (32 MiB by default). That policy describes a
+  request a person made, not a backup: using it stopped a snapshot at its first larger file, after the copy
+  had already written part of the tree. The only fixed bound left is the provider's one-request publication
+  limit (5 GiB on COS and S3), and an entry above it is refused by name before the attempt.
 - One snapshot per owner per day is the default. RPO is therefore one day, which matches the stated need:
   this is backup, not sync, and the copy does not have to be reachable immediately.
 

@@ -50,7 +50,7 @@ func (w *MutationDriver) lockPath(p storage.Path) func() {
 // purge already removed the marker, a fresh folder is created so the create still ends
 // with a native folder.
 func (w *MutationDriver) Reassert(ctx context.Context, in storage.Mutation, _ storage.Checkpoint) (storage.MutationResult, error) {
-	if in.Path == "" || storage.ValidatePath(in.Path) != nil || in.Conditions.Absent {
+	if in.Path == "" || storage.ValidatePath(in.Path) != nil || in.Conditions.Absent || in.Conditions.ImplicitFolder {
 		return storage.MutationResult{}, storage.NewError("invalid_request", in.Path, nil)
 	}
 	release := w.lockPath(in.Path)
