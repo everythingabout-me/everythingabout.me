@@ -189,6 +189,23 @@ func uploadState(u Upload) UploadState {
 	}
 }
 
+// uploadStateAt projects the stored session state at now. It derives the two states that are
+// facts about time or about the operation rather than columns: a committing session follows
+// its operation (uploadState), and an open session past expires_at is expired.
+//
+// Deriving expiry is what lets a listing report a lapsed session without writing the row. A
+// read-only transaction cannot terminate it (SQLSTATE 25006), and a read must not release the
+// logical reservation or cancel the operation even when it could; ExpireUploads owns that
+// transition. The derived state therefore matches the answer a status read gives, without
+// claiming the row was settled.
+func uploadStateAt(u Upload, now time.Time) UploadState {
+	state := uploadState(u)
+	if state == UploadOpen && !u.ExpiresAt.After(now) {
+		return UploadExpired
+	}
+	return state
+}
+
 // NativeUploadWriter adapts a numbered native upload to the staged writer contract.
 // Stage seals durable part receipts only; Publish and Inspect come from NativeActions;
 // Discard releases the unpublished allocation. The server worker and the operator

@@ -13,6 +13,10 @@ import (
 
 var _ UploadJournal = (*Postgres)(nil)
 
+// readUpload reads a session for a transition. The caller already holds the owner lock,
+// which orders every transition of this owner, and both rows are locked: operation first,
+// then session, the order every transition uses (see terminateOpenUpload and freezeUpload).
+// It is the only session read that locks, so it is the only one a write path may call.
 func readUpload(ctx context.Context, tx pgx.Tx, root Root, actor Actor, id string, write bool) (Upload, error) {
 	var u Upload
 	if err := validateRoot(root); err != nil {
@@ -21,7 +25,6 @@ func readUpload(ctx context.Context, tx pgx.Tx, root Root, actor Actor, id strin
 	if !validID(id) {
 		return u, E("not_found", nil)
 	}
-	// All transitions acquire the owner lock, then operation, then session rows.
 	op, err := readOperation(ctx, tx, id)
 	if err != nil {
 		return u, err
@@ -30,15 +33,62 @@ func readUpload(ctx context.Context, tx pgx.Tx, root Root, actor Actor, id strin
 		return u, err
 	}
 	u.ID, u.Operation = id, op
-	err = tx.QueryRow(ctx, `select part_size,part_count,mode,state,received_parts,received_bytes,created_at,expires_at,chunks_cleaned_at from file_uploads where operation_id=$1 and owner_id=$2 for update`, id, root.OwnerID).Scan(&u.PartSize, &u.PartCount, &u.Mode, &u.State, &u.ReceivedParts, &u.ReceivedBytes, &u.CreatedAt, &u.ExpiresAt, &u.ChunksCleanedAt)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return Upload{}, E("not_found", nil)
-	}
-	if err != nil {
+	if err = scanUpload(tx.QueryRow(ctx, `select part_size,part_count,mode,state,received_parts,received_bytes,created_at,expires_at,chunks_cleaned_at from file_uploads where operation_id=$1 and owner_id=$2 for update`, id, root.OwnerID), &u); err != nil {
 		return Upload{}, err
 	}
 	u.State = uploadState(u)
 	return u, nil
+}
+
+// readUploadSnapshot reads one session for a listing: no `for update`, no owner lock, and
+// no write. Both are load-bearing, not a shortcut.
+//
+// A listing takes no owner lock because it has nothing to order: the pages of a session are
+// read while that session settles, so an owner-locked listing waited for the next settlement
+// (and every settlement waited for the listings) — the queue's poller and commit response
+// produced exactly that traffic. `p.readOnly` also sets the transaction to READ ONLY, so an
+// edit that reintroduces a lock or a write here fails at query time (SQLSTATE 25006) instead
+// of quietly widening what a read may do.
+//
+// An elapsed open session is reported as expired by deriving the state (uploadStateAt)
+// rather than by terminating it here. Terminating is a transition: it cancels the operation
+// and releases the logical reservation, which this transaction must not do. The row stays
+// `open` for ExpireUploads (driven by Service.Sweep), which makes the same decision under the
+// owner lock; until then the derived state is the answer a status read gives, and the
+// listing must not depend on the sweeper having run.
+func readUploadSnapshot(ctx context.Context, tx pgx.Tx, root Root, actor Actor, id string) (Upload, error) {
+	var u Upload
+	if err := validateRoot(root); err != nil {
+		return u, err
+	}
+	if !validID(id) {
+		return u, E("not_found", nil)
+	}
+	op, err := readOperationSnapshot(ctx, tx, id)
+	if err != nil {
+		return u, err
+	}
+	if err = authorizeOperation(op, root, actor, false); err != nil {
+		return u, err
+	}
+	u.ID, u.Operation = id, op
+	if err = scanUpload(tx.QueryRow(ctx, `select part_size,part_count,mode,state,received_parts,received_bytes,created_at,expires_at,chunks_cleaned_at from file_uploads where operation_id=$1 and owner_id=$2`, id, root.OwnerID), &u); err != nil {
+		return Upload{}, err
+	}
+	now, err := dbNow(ctx, tx)
+	if err != nil {
+		return Upload{}, err
+	}
+	u.State = uploadStateAt(u, now)
+	return u, nil
+}
+
+func scanUpload(row pgx.Row, u *Upload) error {
+	err := row.Scan(&u.PartSize, &u.PartCount, &u.Mode, &u.State, &u.ReceivedParts, &u.ReceivedBytes, &u.CreatedAt, &u.ExpiresAt, &u.ChunksCleanedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return E("not_found", nil)
+	}
+	return err
 }
 
 func replayUploadTx(ctx context.Context, tx pgx.Tx, root Root, actor Actor, key, fingerprint string) (Upload, bool, error) {
@@ -316,7 +366,9 @@ func (p *Postgres) ListUploads(ctx context.Context, root Root, actor Actor, limi
 	}
 	var out []Upload
 	// A listing writes nothing, so it takes no owner lock: the pages of a session are read while
-	// the session settles, and both used to wait for each other.
+	// the session settles, and both used to wait for each other. The READ ONLY transaction makes
+	// that structural, and readUploadSnapshot is the only reader used here because it takes no
+	// `for update` (SQLSTATE 25006 would otherwise turn every list into a 500).
 	err := p.readOnly(ctx, func(tx pgx.Tx) error {
 		rootJSON, err := json.Marshal(root)
 		if err != nil {
@@ -341,11 +393,11 @@ func (p *Postgres) ListUploads(ctx context.Context, root Root, actor Actor, limi
 			return err
 		}
 		for _, id := range ids {
-			u, err := readUpload(ctx, tx, root, actor, id, false)
+			// An elapsed open session comes back as expired from the read itself. It is not
+			// terminated here: that would cancel the operation and release its reservation,
+			// which is a write, and ExpireUploads settles the row under the owner lock.
+			u, err := readUploadSnapshot(ctx, tx, root, actor, id)
 			if err != nil {
-				return err
-			}
-			if err = expireLoadedUpload(ctx, tx, &u); err != nil {
 				return err
 			}
 			out = append(out, u)
@@ -449,7 +501,10 @@ func (p *Postgres) ListUploadParts(ctx context.Context, root Root, actor Actor, 
 	}
 	var out []PartReceipt
 	err := p.readOnly(ctx, func(tx pgx.Tx) error {
-		if _, err := readUpload(ctx, tx, root, actor, id, false); err != nil {
+		// Authorization only; this path reports receipts, so the session's derived expiry
+		// state is not part of the answer. The snapshot read is required all the same: the
+		// transaction is READ ONLY and any `for update` here is SQLSTATE 25006.
+		if _, err := readUploadSnapshot(ctx, tx, root, actor, id); err != nil {
 			return err
 		}
 		var current int64

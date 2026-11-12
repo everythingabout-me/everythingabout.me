@@ -297,9 +297,11 @@ func TestPostgresUploads(t *testing.T) {
 			t.Fatalf("terminal replay %+v %v %v", replayed, replay, err)
 		}
 	})
-	t.Run("status replay and list expire without waiting for sweep", func(t *testing.T) {
+	t.Run("status and replay settle expiry while listings derive it without writing", func(t *testing.T) {
 		p, r, a := seedOwner(t, pool, provenBaseline(0, 0, 100, 1000))
-		for _, mode := range []string{"get", "replay", "list"} {
+		// A single-status read and an idempotent replay may settle an elapsed session: each
+		// already holds the owner lock, so retiring the row is part of their answer.
+		for _, mode := range []string{"get", "replay"} {
 			u := mustUpload(t, p, r, a, storage.Path("folder/lazy-"+mode), 4, "lazy-"+mode)
 			if _, err := pool.Exec(ctx, `update file_uploads set expires_at=clock_timestamp()-interval '1 second' where operation_id=$1`, u.ID); err != nil {
 				t.Fatal(err)
@@ -316,24 +318,71 @@ func TestPostgresUploads(t *testing.T) {
 				if !found {
 					t.Fatal("expired replay identity lost")
 				}
-			case "list":
-				var list []Upload
-				list, err = p.ListUploads(ctx, r, a, 100, "")
-				for _, candidate := range list {
-					if candidate.ID == u.ID {
-						expired = candidate
-					}
-				}
 			}
 			if err != nil || expired.State != UploadExpired || expired.Operation.State != Cancelled || expired.Operation.CleanedAt != nil {
 				t.Fatalf("%s lazy expiry %+v %v", mode, expired, err)
 			}
 		}
-		if usage := mustUsage(t, p, r, a); usage.LogicalReserved != 0 || usage.PhysicalReserved != 72 {
+		if usage := mustUsage(t, p, r, a); usage.LogicalReserved != 0 || usage.PhysicalReserved != 48 {
 			t.Fatalf("lazy expiry released physical bytes %+v", usage)
 		}
 		if expired, err := p.ExpireUploads(ctx, 10); err != nil || len(expired) != 0 {
 			t.Fatalf("already expired rows swept again: %+v %v", expired, err)
+		}
+
+		// A listing runs in a READ ONLY transaction: it must not take `for update` (SQLSTATE
+		// 25006 turned every list into a 500) and it must not terminate a session. An elapsed
+		// open session is reported as expired from the row it reads, and pagination still works
+		// with that session on a page.
+		lapsed := mustUpload(t, p, r, a, "folder/lazy-list", 4, "lazy-list")
+		live := mustUpload(t, p, r, a, "folder/live-list", 5, "live-list")
+		if _, err := pool.Exec(ctx, `update file_uploads set expires_at=clock_timestamp()-interval '1 second' where operation_id=$1`, lapsed.ID); err != nil {
+			t.Fatal(err)
+		}
+		first, err := p.ListUploads(ctx, r, a, 2, "")
+		if err != nil || len(first) != 2 {
+			t.Fatalf("first listing page %+v %v", first, err)
+		}
+		second, err := p.ListUploads(ctx, r, a, 2, first[len(first)-1].ID)
+		if err != nil || len(second) != 2 || second[0].ID == first[len(first)-1].ID {
+			t.Fatalf("second listing page %+v %v", second, err)
+		}
+		if third, err := p.ListUploads(ctx, r, a, 2, second[len(second)-1].ID); err != nil || len(third) != 0 {
+			t.Fatalf("third listing page %+v %v", third, err)
+		}
+		seen := append(first, second...)
+		var listed Upload
+		foundLapsed, foundLive := false, false
+		for _, u := range seen {
+			switch u.ID {
+			case lapsed.ID:
+				listed, foundLapsed = u, true
+			case live.ID:
+				foundLive = true
+			}
+		}
+		if !foundLapsed || !foundLive || listed.State != UploadExpired {
+			t.Fatalf("listing pages %+v", seen)
+		}
+		// The row is untouched, so the sweeper still owns the transition.
+		var stored string
+		if err := pool.QueryRow(ctx, `select state from file_uploads where operation_id=$1`, lapsed.ID).Scan(&stored); err != nil || stored != "open" {
+			t.Fatalf("listing wrote the session row: %q %v", stored, err)
+		}
+		if listed.Operation.State != Queued || listed.Operation.Phase != Admitted || listed.Operation.CancelRequested {
+			t.Fatalf("listing terminated the operation: %+v", listed.Operation)
+		}
+		// The parts listing takes the same read-only path, including for the elapsed session.
+		if page, _, err := p.ListUploadParts(ctx, r, a, lapsed.ID, 100, 0, 0); err != nil || len(page) != 0 {
+			t.Fatalf("parts listing on an elapsed open session %+v %v", page, err)
+		}
+		// The sweeper makes the same decision under the owner lock.
+		expired, err := p.ExpireUploads(ctx, 10)
+		if err != nil || len(expired) != 1 || expired[0].ID != lapsed.ID || expired[0].State != UploadExpired {
+			t.Fatalf("sweep of the derived session %+v %v", expired, err)
+		}
+		if usage := mustUsage(t, p, r, a); usage.LogicalReserved != 5 {
+			t.Fatalf("sweep released the wrong reservation: %+v", usage)
 		}
 	})
 	t.Run("idle progress hard cap and bounded expiry", func(t *testing.T) {

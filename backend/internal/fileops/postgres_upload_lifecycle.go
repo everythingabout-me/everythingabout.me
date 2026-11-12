@@ -9,9 +9,12 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
-// expireLoadedUpload is called only after authorization under the owner lock.
-// Status reads can retire an elapsed open session without waiting for the sweeper;
-// all physical liability remains until actual temporary-byte cleanup.
+// expireLoadedUpload retires an elapsed open session durably. It is called only after
+// authorization under the owner lock, from paths that may write: GetUpload (a single-status
+// read that can settle the row it reports) and ReplayUpload. Listings do not call it: they
+// run in a READ ONLY transaction and derive the expired state instead (uploadStateAt), so
+// ExpireUploads remains the writer. All physical liability remains until actual
+// temporary-byte cleanup.
 func expireLoadedUpload(ctx context.Context, tx pgx.Tx, u *Upload) error {
 	if u.State != UploadOpen {
 		return nil
