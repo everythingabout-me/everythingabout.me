@@ -18,7 +18,7 @@ test("combined progress includes every active part exactly once as ACKs arrive o
     return send(...args);
   };
   const harness = await mount(t, server.api);
-  harness.render().enqueue([entry("abcdefghijklm")], "", () => false);
+  harness.render().enqueue([entry("abcdefghijklm")], "");
   await harness.until(() => pending.size === 4);
   pending.get(1).progress({ loaded: 2 });
   pending.get(2).progress({ loaded: 1 });
@@ -70,7 +70,7 @@ for (const [ordering, expected] of [["any", 5], ["ascending", 1]]) {
       try { await gate.promise; return await send(...args); } finally { active--; }
     };
     const harness = await mount(t, server.api);
-    harness.render().enqueue([entry("abcdefghij")], "", () => false);
+    harness.render().enqueue([entry("abcdefghij")], "");
     await harness.until(() => active === expected);
     assert.equal(peak, expected);
     gate.resolve();
@@ -96,7 +96,7 @@ test("class A sessions share the global part pool without application parts", as
     } finally { active--; }
   };
   const harness = await mount(t, server.api);
-  harness.render().enqueue(["a", "b", "c", "d"].map((path) => ({ path, file: new File(["abcdefgh"], path) })), "", () => false);
+  harness.render().enqueue(["a", "b", "c", "d"].map((path) => ({ path, file: new File(["abcdefgh"], path) })), "");
   await harness.until(() => active === 8);
   await harness.tick();
   assert.equal(peak, 8, "all class A parts across four files run together");
@@ -119,7 +119,7 @@ test("class A transient part failure checks provider state then retries the same
     return send(...args);
   };
   const harness = await mount(t, server.api);
-  harness.render().enqueue([entry("ab")], "", () => false);
+  harness.render().enqueue([entry("ab")], "");
   await harness.until(() => [...harness.timers.values()].some(({ delay }) => delay === 250));
   assert.equal(attempts.length, 1);
   assert.ok(server.calls.some(([kind]) => kind === "status"));
@@ -141,7 +141,7 @@ test("a transient failure checks receipts then retries the same part with bounde
     return send(...args);
   };
   const harness = await mount(t, server.api);
-  harness.render().enqueue([entry("ab")], "", () => false);
+  harness.render().enqueue([entry("ab")], "");
   await harness.until(() => [...harness.timers.values()].some(({ delay }) => delay === 250));
   assert.equal(attempts.length, 1);
   assert.ok(server.calls.some(([kind]) => kind === "status"));
@@ -162,7 +162,7 @@ test("automatic part retries stop after five attempts and preserve the original 
   let attempts = 0;
   server.api.uploadPart = async () => { attempts++; throw new TestApiError("server error", 500); };
   const harness = await mount(t, server.api);
-  harness.render().enqueue([entry("ab")], "", () => false);
+  harness.render().enqueue([entry("ab")], "");
   // Four waits for five attempts, each twice the last: a phone that lost its link for a
   // quarter of a minute still finishes the part.
   for (const delay of [250, 500, 1000, 2000]) {
@@ -187,7 +187,7 @@ test("receiver backpressure waits without spending a part attempt or failing the
     return send(...args);
   };
   const harness = await mount(t, server.api);
-  harness.render().enqueue([entry("ab")], "", () => false);
+  harness.render().enqueue([entry("ab")], "");
   await harness.until(() => [...harness.timers.values()].some(({ delay }) => delay === 500));
   assert.equal(server.calls.filter(([kind]) => kind === "part").length, 0);
   // Backpressure is not an ambiguous ACK: no status or receipt query is needed.
@@ -213,7 +213,7 @@ test("a conflicting receipt after an ambiguous ACK never resends or commits", as
     throw new TestApiError("response lost");
   };
   const harness = await mount(t, server.api);
-  harness.render().enqueue([entry("ab")], "", () => false);
+  harness.render().enqueue([entry("ab")], "");
   const queue = await harness.until((queue) => queue.tasks[0]?.status === "failed");
   assert.equal(queue.tasks[0].error, "drive.reselectedFileChanged");
   assert.equal(attempts, 1);
@@ -230,7 +230,7 @@ test("cancel aborts every parallel request and a pending retry delay", async (t)
     return new Promise((resolve, reject) => signal.addEventListener("abort", () => reject(new DOMException("aborted", "AbortError")), { once: true }));
   };
   const harness = await mount(t, server.api);
-  harness.render().enqueue([entry("abcdefgh")], "", () => false);
+  harness.render().enqueue([entry("abcdefgh")], "");
   await harness.until(() => signals.length === 4 && [...harness.timers.values()].some(({ delay }) => delay === 250));
   harness.render().cancel(harness.render().tasks[0].id);
   await harness.until((queue) => queue.tasks.length === 0);
@@ -251,7 +251,7 @@ test("a started file holds no part slot until the earlier file releases one", as
     try { await gate.promise; return await send(...args); } finally { active--; }
   };
   const harness = await mount(t, server.api);
-  harness.render().enqueue(["a", "b", "c"].map((path) => ({ path, file: new File(["x".repeat(16)], path) })), "", () => false);
+  harness.render().enqueue(["a", "b", "c"].map((path) => ({ path, file: new File(["x".repeat(16)], path) })), "");
   // Three files of eight parts each over one sixteen-slot pool: the first two take every
   // slot, and the third holds none although it already has an open session. That file is
   // queued for the user, whatever its task status says.
@@ -277,7 +277,7 @@ test("a selection queues in the order the list shows, not the order the drop del
   const harness = await mount(t, server.api);
   // Sixteen parts each, so one file can fill the whole six-slot pool and the order the
   // files are served in is visible without waiting for anything to finish.
-  harness.render().enqueue(["b", "a"].map((path) => ({ path, file: new File(["x".repeat(32)], path) })), "", () => false);
+  harness.render().enqueue(["b", "a"].map((path) => ({ path, file: new File(["x".repeat(32)], path) })), "");
   const queue = await harness.until((queue) => queue.tasks.some((task) => task.activeParts === 16));
   // The drop delivered b first; the list shows a first, so a holds the pool and finishes
   // first. The other order would make a row switch from uploading to waiting for a reason
@@ -303,7 +303,7 @@ test("the transfer stage claims its window while the look-ahead prepares session
   server.api.uploadPart = async (...args) => { await gate.promise; return send(...args); };
   const harness = await mount(t, server.api);
   const files = Array.from({ length: 100 }, (_, i) => named(`f${String(i).padStart(3, "0")}`));
-  harness.render().enqueue(files, "", () => false);
+  harness.render().enqueue(files, "");
   // Sixty-four files belong to the transfer stage: a claim is what gives a queued row an
   // owner, and it deliberately does not wait for its session — that wait used to consume a
   // slot and left the part pool with nothing to hand out. The sessions are prepared behind
@@ -332,7 +332,7 @@ test("a settling file holds no transfer slot, so the window keeps moving while i
   };
   const harness = await mount(t, server.api);
   const files = Array.from({ length: 40 }, (_, i) => named(`c${String(i).padStart(2, "0")}`));
-  harness.render().enqueue(files, "", () => false);
+  harness.render().enqueue(files, "");
   const queue = await harness.until((queue) =>
     queue.tasks.filter((task) => task.status === "finalizing").length === 32
     && queue.tasks.filter((task) => task.status === "uploading").length === 8);
@@ -352,7 +352,7 @@ test("cancelling a prepared row aborts its session instead of leaving it open", 
   server.api.uploadPart = async (...args) => { await gate.promise; return send(...args); };
   const harness = await mount(t, server.api);
   const files = Array.from({ length: 100 }, (_, i) => named(`p${String(i).padStart(3, "0")}`));
-  harness.render().enqueue(files, "", () => false);
+  harness.render().enqueue(files, "");
   const queue = await harness.until((queue) => server.sessions.size > 32
     && queue.tasks.some((task) => task.status === "queued" && task.uploadId));
   const prepared = queue.tasks.find((task) => task.status === "queued" && task.uploadId);
@@ -380,7 +380,7 @@ test("the look-ahead never reserves more than a gigabyte of quota", async (t) =>
   // work in progress, not speculation; what must stay under a gigabyte is what is admitted
   // for files nobody has started yet.
   const files = Array.from({ length: 200 }, (_, i) => named(`big-${String(i).padStart(2, "0")}`, "x".repeat(100_000_000)));
-  harness.render().enqueue(files, "", () => false);
+  harness.render().enqueue(files, "");
   const queue = await harness.until((queue) => queue.tasks.some((task) => task.status === "queued" && task.uploadId));
   const held = queue.tasks.filter((task) => task.status === "queued" && task.uploadId);
   const reserved = held.reduce((sum, task) => sum + task.size, 0);

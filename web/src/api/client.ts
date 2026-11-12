@@ -41,6 +41,14 @@ export interface FileProblem {
   operationId?: string;
   /** What holds the path when this is an operation_in_progress conflict. */
   operationKind?: string;
+  /**
+   * The content revision the destination held when a create was refused because it exists.
+   *
+   * A replacement names the bytes it may overwrite, so the client would otherwise have to
+   * read the destination before it could ask — one round trip per already-existing file in
+   * a re-import. The server already looked; this carries the answer.
+   */
+  observedRevision?: string;
 }
 
 export class FileApiError extends ApiError {
@@ -578,7 +586,19 @@ export interface AccountSummary {
   activity: ActivityItem[];
 }
 
-export type FileUploadCondition = { mode: "create" } | { mode: "replace"; contentRevision: string };
+/**
+ * What the client claims about the destination it is writing.
+ *
+ * `overwrite` names no revision: the destination may hold a file, which these bytes replace,
+ * or nothing, which they create. It is what a re-import sends after the person answered
+ * "replace every file that already exists" — one admission per file with no read in front of
+ * it. The server observes the destination at admission and binds that revision, so the write
+ * is still conditional; only the client's own revision claim is dropped.
+ */
+export type FileUploadCondition =
+  | { mode: "create" }
+  | { mode: "overwrite" }
+  | { mode: "replace"; contentRevision: string };
 
 export type FileUploadInput = {
   size: number;
@@ -710,7 +730,7 @@ function uploadInput(input: FileUploadInput): Record<string, unknown> {
   if (!input || typeof input !== "object" || ["path", "target", "destination"].filter((key) => hasOwn(input, key)).length !== 1) return invalidSelector();
   if (hasOwn(input, "condition") && (!input.condition || typeof input.condition !== "object" || !hasOwn(input.condition, "mode"))) return invalidSelector();
   const mode = input.condition?.mode ?? "create";
-  if (mode !== "create" && mode !== "replace") return invalidSelector();
+  if (mode !== "create" && mode !== "replace" && mode !== "overwrite") return invalidSelector();
   if (mode === "replace" && (input.condition?.mode !== "replace" || typeof input.condition.contentRevision !== "string" || input.condition.contentRevision === "")) return invalidSelector();
   if (hasOwn(input, "path")) {
     if (typeof input.path !== "string" || input.path === "") return invalidSelector();

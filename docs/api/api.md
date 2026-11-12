@@ -148,7 +148,9 @@ JSON successes are the resource directly, without an `ok/data` envelope. Collect
 }
 ```
 
-`code` is stable; `detail` is an English explanation. Raw content, HEAD, `204`, and `304` are not wrapped in
+`code` is stable; `detail` is an English explanation. A `409 name_conflict` answering a create carries
+`observedRevision`, the content revision the service observed at the destination; a client that replaces the
+file uses it instead of reading the destination again. Raw content, HEAD, `204`, and `304` are not wrapped in
 JSON. Dates are RFC 3339 UTC. Byte counts are integers in `0..9007199254740991`; service/backend limits may
 be smaller and are discoverable. No provider error body, secret, or internal native reference is returned.
 
@@ -632,7 +634,19 @@ parent is still `409 parent_missing`, and a destination whose parent is a file i
 Create mode (default) accepts `destination:Destination` and forbids `target`. For example,
 `destination:{"parent":{"id":"14baf74e-feb7-47b4-acf1-c4d3146eea91"},"name":"a.mp4"}` creates under an existing folder.
 Replace mode requires `target:EntrySelector`, `condition:{"mode":"replace","contentRevision":"cr_observed"}`,
-and forbids destination. Both `target:{"id":"1384edac-0543-4c86-a185-5b9b3ae829b3"}` and `target:{"path":"/Videos/a.mp4"}` select an
+and forbids destination.
+
+Overwrite mode is `condition:{"mode":"overwrite"}`, with no revision, and selects its destination the way a
+replacement does (`path` or `target`, never `destination`). If a file is there these bytes replace it and keep
+its ID; if nothing is there they create it. The service observes the destination at admission and binds that
+revision to the session, so the publication still cannot land over a change made before the observation.
+
+The mode exists for re-importing a tree a person already has — the workflow that produced the standing answer
+"replace every file that already exists". A named revision makes that workflow pay twice per file: a read to
+learn the bytes, and a create refused because the read had not happened yet. That is one wasted round trip and
+one 409 per already-existing file, which on a 23k-file export is most of the import's control traffic. What the
+mode drops is the caller's own claim about bytes it is about to overwrite anyway, which the standing answer has
+already decided; it does not drop the condition on the write itself. Both `target:{"id":"1384edac-0543-4c86-a185-5b9b3ae829b3"}` and `target:{"path":"/Videos/a.mp4"}` select an
 existing file; an unknown ID returns 404. Replacement preserves ID; creation publishes a fresh ID.
 Session IDs and any reserved future entry ID are separate; an open upload is not a live file.
 

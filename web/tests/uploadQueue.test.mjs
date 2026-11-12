@@ -5,7 +5,7 @@ import { conflict, deferred, digest, item, memoryStorage, operation, setup, Test
 const entry = (path, bytes = "abc") => ({ path, file: new File([bytes], path.split("/").at(-1), { type: "application/json", lastModified: 1443268800000 }) });
 const allComplete = (queue) => queue.tasks.length > 0 && queue.tasks.every((task) => task.status === "completed");
 async function mount(t, api, options) { const harness = await setup(api, options); t.after(harness.unmount); return harness; }
-function enqueue(harness, entries, dir = "") { harness.render().enqueue(entries, dir, () => false); }
+function enqueue(harness, entries, dir = "") { harness.render().enqueue(entries, dir); }
 const callsOf = (server, type) => server.calls.filter(([kind]) => kind === type);
 function assertGuard(harness, active) {
   assert.equal(harness.render().hasActiveUploads, active);
@@ -448,11 +448,13 @@ test("one standing answer settles every later conflict and later creates carry i
   assert.equal(queue.conflict, null, "a standing answer leaves nothing to ask about");
   assert.equal(queue.conflictPolicy, "replace");
   assert.deepEqual(creates.filter(([mode]) => mode === "replace").map(([, path]) => path), ["a", "b"]);
-  // A selection made under the standing answer, whose destination the page already lists,
-  // asks for the replacement before its first create: no refusal, no question, one request.
-  harness.render().enqueue([entry("c", "ef")], "", () => true);
+  // A file selected after the standing answer needs neither a read nor a refusal: its first
+  // create says "these bytes replace whatever is at this path", and the server binds the
+  // revision it observes there. Naming one instead cost a metadata read per file, which is
+  // the round trip a 23k-file re-import could not afford.
+  harness.render().enqueue([entry("c", "ef")], "");
   await harness.until((queue) => queue.tasks.every((task) => task.status === "completed"));
-  assert.deepEqual(creates.at(-1), ["replace", "c"]);
+  assert.deepEqual(creates.at(-1), ["overwrite", "c"]);
   assert.equal(creates.filter(([mode, path]) => path === "c" && mode === "create").length, 0);
 });
 
@@ -488,7 +490,10 @@ test("a standing replace creates the file when the destination disappeared befor
   vanished = true;
   queue.answerConflict("replace-all");
   await harness.until(allComplete, "a vanished destination must not fail the row");
-  assert.equal(callsOf(server, "create").at(-1)[1].condition.mode, "create");
+  // The row's first replacement named the revision the refusal observed, and that revision
+  // is gone. Its next attempt needs no decision: the standing answer replaces whatever is
+  // there, and "nothing is there" is one of the states that answer covers.
+  assert.equal(callsOf(server, "create").at(-1)[1].condition.mode, "overwrite");
 });
 
 test("a new import does not inherit the previous import's standing answer", async (t) => {

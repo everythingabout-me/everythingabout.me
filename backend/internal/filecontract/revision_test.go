@@ -7,6 +7,29 @@ import (
 	fc "everythingabout.me/backend/internal/filecontract"
 )
 
+// Overwrite is not a header form: it arrives as a JSON condition, and it names no revision,
+// so there is nothing to compare. Both destination states are accepted — that is what makes a
+// re-import one admission per file instead of a read, a refusal and a second admission.
+func TestOverwriteConditionAcceptsAnyDestination(t *testing.T) {
+	existing := "cr_observed"
+	for _, test := range []struct {
+		name    string
+		current *string
+	}{{"absent", nil}, {"existing", &existing}} {
+		t.Run(test.name, func(t *testing.T) {
+			if err := fc.CheckPutCondition(fc.PutCondition{Mode: fc.PutOverwrite}, test.current); err != nil {
+				t.Fatalf("an overwrite was refused: %v", err)
+			}
+		})
+	}
+	for _, incomplete := range []fc.PutCondition{
+		{Mode: fc.PutOverwrite, ContentRevision: "cr_x"},
+		{Mode: fc.PutOverwrite, ExplicitCreate: true},
+	} {
+		assertProblem(t, fc.CheckPutCondition(incomplete, &existing), 400, "invalid_request")
+	}
+}
+
 func TestPutConditions(t *testing.T) {
 	current := "cr_observed"
 	tests := []struct {
@@ -60,7 +83,7 @@ func TestPutConditions(t *testing.T) {
 			assertProblem(t, fc.CheckPutCondition(condition, test.current), test.checkStatus, test.code)
 		})
 	}
-	for _, condition := range []fc.PutCondition{{}, {Mode: fc.PutReplace}, {Mode: fc.PutReplace, ContentRevision: "cr_x", ExplicitCreate: true}, {Mode: fc.PutCreate, ContentRevision: "cr_x"}} {
+	for _, condition := range []fc.PutCondition{{}, {Mode: fc.PutReplace}, {Mode: fc.PutReplace, ContentRevision: "cr_x", ExplicitCreate: true}, {Mode: fc.PutCreate, ContentRevision: "cr_x"}, {Mode: fc.PutOverwrite, ContentRevision: "cr_x"}, {Mode: fc.PutOverwrite, ExplicitCreate: true}} {
 		assertProblem(t, fc.CheckPutCondition(condition, nil), 400, "invalid_request")
 	}
 }

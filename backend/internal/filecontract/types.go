@@ -21,6 +21,16 @@ type Problem struct {
 	// A client that must decide whether to wait has to tell a deletion it should respect
 	// from the folder creation this same upload just raced, and the id alone cannot say.
 	OperationKind string `json:"operationKind,omitempty"`
+	// ObservedRevision is the content revision the destination held when the service
+	// looked at it, attached to a create refused because that destination already exists.
+	//
+	// It is the answer to the question the refusal forces the client to ask next: without
+	// it, every refused file costs a metadata read before its replacement can name the bytes
+	// it may overwrite — one round trip per already-existing file in a re-import. The value
+	// is observed from the object rather than read from the index, because an interrupted
+	// import leaves the two disagreeing and only the observed one satisfies the replacement
+	// precondition.
+	ObservedRevision string `json:"observedRevision,omitempty"`
 }
 
 func (p *Problem) Error() string { return p.Code + ": " + p.Detail }

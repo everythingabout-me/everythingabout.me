@@ -831,3 +831,59 @@ func TestFilesUploadsMaterializeParentsAtSettlement(t *testing.T) {
 		t.Fatalf("folder rows after two files = %d", count)
 	}
 }
+
+// An overwrite is the condition a re-import sends after the person answered "replace every
+// file that already exists": it names no revision, so the client never reads the destination
+// first, and the service binds the revision it observes itself.
+func TestFilesUploadsOverwriteCondition(t *testing.T) {
+	f := newFileWorkerFixture(t)
+	h := newUploadsHTTPFixture(t, f)
+	open := func(path, key string, condition map[string]any, size int) *httptest.ResponseRecorder {
+		data, _ := json.Marshal(map[string]any{"path": path, "size": size, "mediaType": "text/plain", "condition": condition})
+		headers := make(http.Header)
+		headers.Set("Idempotency-Key", key)
+		headers.Set("Content-Type", "application/json")
+		return h.request("POST", "/api/files/uploads", h.bearer, data, headers)
+	}
+	overwrite := func(t *testing.T, path, key, body string) map[string]any {
+		t.Helper()
+		data := []byte(body)
+		id := uploadsHTTPJSON(t, open(path, key, map[string]any{"mode": "overwrite"}, len(data)), 201)["id"].(string)
+		uploadsHTTPJSON(t, h.part(id, 1, data, nil), 201)
+		return h.commit(t, id)
+	}
+
+	first := uploadsHTTPJSON(t, h.request("PUT", "/api/files/content?"+url.Values{"path": {"/overwrite.txt"}}.Encode(), h.bearer,
+		[]byte("one"), http.Header{"If-None-Match": {"*"}}), 201)
+
+	// A refused create names the revision the service observed, so the client's next attempt
+	// can name it without a metadata read of its own.
+	problem := uploadsHTTPJSON(t, open("/overwrite.txt", "overwrite-refused", map[string]any{"mode": "create"}, 3), 409)
+	if problem["code"] != "name_conflict" || problem["observedRevision"] != first["contentRevision"] {
+		t.Fatalf("refusal did not name the destination: %v (metadata %v)", problem, first["contentRevision"])
+	}
+
+	// Overwriting an existing file replaces the bytes the condition names and keeps the
+	// identity: a replacement never allocates a new ID.
+	replaced := overwrite(t, "/overwrite.txt", "overwrite-existing", "two")
+	if replaced["id"] != first["id"] {
+		t.Fatalf("overwrite changed the file identity: %v then %v", first["id"], replaced["id"])
+	}
+	if content := h.request("GET", "/api/files/content?"+url.Values{"path": {"/overwrite.txt"}}.Encode(), h.bearer, nil, nil); content.Body.String() != "two" {
+		t.Fatalf("replaced content = %q", content.Body.String())
+	}
+
+	// Overwriting a destination that holds nothing creates it, exactly as a create would.
+	created := overwrite(t, "/overwrite-new.txt", "overwrite-absent", "new")
+	if created["id"] == "" || created["id"] == first["id"] {
+		t.Fatalf("an absent destination did not get a fresh identity: %v", created)
+	}
+	if content := h.request("GET", "/api/files/content?"+url.Values{"path": {"/overwrite-new.txt"}}.Encode(), h.bearer, nil, nil); content.Body.String() != "new" {
+		t.Fatalf("created content = %q", content.Body.String())
+	}
+
+	// An overwrite names no revision, so one sent with a revision is a client bug that must
+	// be refused rather than silently treated as a replacement.
+	uploadsHTTPProblem(t, open("/overwrite.txt", "overwrite-with-revision", map[string]any{"mode": "overwrite", "contentRevision": "cr_x"}, 3), 400, "invalid_request")
+	f.checkNoLiability(t, h.root)
+}

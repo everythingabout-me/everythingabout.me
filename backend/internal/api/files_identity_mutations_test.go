@@ -131,6 +131,11 @@ func TestFilesIdentityMutationUploadSelection(t *testing.T) {
 		{`{"target":{"id":"` + mutationFileID + `"},"condition":{"mode":"replace","contentRevision":"cr_test"}}`, "/Scope/current.txt", "id"},
 		{`{"target":{"path":"/Scope/current.txt"},"condition":{"mode":"replace"}}`, "/Scope/current.txt", "path"},
 		{`{"path":"/Scope/current.txt","condition":{"mode":"replace"}}`, "/Scope/current.txt", "path"},
+		// Overwrite selects its destination like a replacement, but it does not require the
+		// entry to exist: a re-import also carries files that were deleted since the last one.
+		{`{"path":"/Scope/new.txt","condition":{"mode":"overwrite"}}`, "/Scope/new.txt", "path"},
+		{`{"path":"/Scope/current.txt","condition":{"mode":"overwrite"}}`, "/Scope/current.txt", "path"},
+		{`{"target":{"path":"/Scope/current.txt"},"condition":{"mode":"overwrite"}}`, "/Scope/current.txt", "path"},
 	} {
 		var req filesCreateUploadRequest
 		if err := strictFilesJSON(httptest.NewRequest(http.MethodPost, "/api/files/uploads", strings.NewReader(tc.body)), &req); err != nil {
@@ -149,6 +154,7 @@ func TestFilesIdentityMutationUploadSelection(t *testing.T) {
 		`{"target":null,"destination":{"path":"/Scope/new.txt"}}`,
 		`{"target":{"path":"/Scope/current.txt"},"path":"/Scope/current.txt","condition":{"mode":"replace"}}`,
 		`{"destination":{"path":"/Scope/current.txt"},"condition":{"mode":"replace"}}`,
+		`{"destination":{"path":"/Scope/new.txt"},"condition":{"mode":"overwrite"}}`,
 		`{"destination":{"path":"/Scope/new.txt"},"target":{"id":"` + mutationFileID + `"}}`,
 		`{"destination":{"parent":{"id":"` + mutationFolderID + `","path":"/Scope"},"name":"new.txt"}}`,
 		`{"destination":{"path":"/Scope/a"},"destination":{"path":"/Scope/b"}}`,

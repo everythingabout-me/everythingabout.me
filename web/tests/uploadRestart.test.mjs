@@ -10,7 +10,7 @@ async function mount(t, api, options) {
   t.after(harness.unmount);
   return harness;
 }
-function enqueue(harness) { harness.render().enqueue([entry()], "folder", () => false); }
+function enqueue(harness) { harness.render().enqueue([entry()], "folder"); }
 
 // A creation is refused by an upload only while that upload is committing; an open session
 // for the same path is ended by the server when the new one is admitted (supersedingServer).
@@ -272,19 +272,19 @@ test("shared ownership uses the authenticated owner and normalized exact target 
   let sending = false;
   firstServer.api.uploadPart = async () => { sending = true; return gate.promise; };
   const first = await mount(t, firstServer.api, { locks });
-  first.render().enqueue([{ ...entry(), path: "cafe\u0301" }], "/folder", () => false);
+  first.render().enqueue([{ ...entry(), path: "cafe\u0301" }], "/folder");
   await first.until(() => sending);
   const secondServer = uploadServer();
   const second = await mount(t, secondServer.api, { locks });
-  second.render().enqueue([{ ...entry(), path: "caf\u00e9" }], "folder", () => false);
+  second.render().enqueue([{ ...entry(), path: "caf\u00e9" }], "folder");
   const busy = await second.until((queue) => queue.tasks[0]?.status === "failed");
   assert.equal(busy.tasks[0].error, "drive.uploadAlreadyInProgress");
   assert.deepEqual(secondServer.calls, []);
   const otherOwner = await mount(t, { ...secondServer.api, me: async () => ({ id: "owner-b" }) }, { locks });
-  otherOwner.render().enqueue([{ ...entry(), path: "caf\u00e9" }], "folder", () => false);
+  otherOwner.render().enqueue([{ ...entry(), path: "caf\u00e9" }], "folder");
   await otherOwner.until(complete);
   const otherPath = await mount(t, secondServer.api, { locks });
-  otherPath.render().enqueue([{ ...entry(), path: "caf\u00e9-child" }], "folder", () => false);
+  otherPath.render().enqueue([{ ...entry(), path: "caf\u00e9-child" }], "folder");
   await otherPath.until(complete);
   assert.equal(secondServer.sessions.size, 2, "other owners and sibling paths claim independently");
   first.unmount();

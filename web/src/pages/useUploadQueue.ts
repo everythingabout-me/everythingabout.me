@@ -210,7 +210,7 @@ export interface UploadQueue {
   tasks: UploadTask[];
   hasActiveUploads: boolean;
   /** The ids of the tasks this selection created; a path that was already queued adds none. */
-  enqueue(entries: UploadEntry[], dir: string, exists: (path: string) => boolean): string[];
+  enqueue(entries: UploadEntry[], dir: string): string[];
   /**
    * Cancel one row, or a whole selection of rows in one gesture.
    *
@@ -753,7 +753,17 @@ export function useUploadQueue(onUploaded: (task: UploadTask, item: Item) => voi
       if (!task.file) throw new Error(t("drive.uploadFileUnavailable"));
       let condition: FileUploadInput["condition"] = { mode: "create" };
       if (task.overwrite && task.observedRevision) {
+        // The refusal that raised the question observed the destination, so this row can
+        // name the exact bytes it may replace without another read.
         condition = { mode: "replace", contentRevision: task.observedRevision };
+      } else if (policyRef.current === "replace") {
+        // The person answered "replace every file that already exists" for this import, and
+        // that answer is the authorization: this row names no revision at all. Naming one
+        // means reading the destination before the create can be sent — one round trip per
+        // file — and naming the wrong one (an index left behind by an interrupted import)
+        // is refused forever. The server observes the destination and binds that revision
+        // instead, so the write stays conditional on the bytes it found.
+        condition = { mode: "overwrite" };
       } else if (task.overwrite) {
         // A replace condition names the bytes it is allowed to overwrite, and a standing
         // "replace" is a decision about a destination that can be gone by the time this
@@ -950,7 +960,12 @@ export function useUploadQueue(onUploaded: (task: UploadTask, item: Item) => voi
             return;
           }
           if (error instanceof ApiError && error.status === 409 && error.code === "name_conflict" && !task.overwrite) {
-            const old = await observedEntry(task.path);
+            // The refusal already names the revision the server observed at the destination,
+            // which is the only value a replacement can prove it may overwrite: reading the
+            // same file again would spend a round trip per file to learn what this answer
+            // just said. A refusal without it (a provider's own 409, a folder) still reads.
+            const named = error instanceof FileApiError ? error.problem.observedRevision : undefined;
+            const old = named === undefined ? await observedEntry(task.path) : { kind: "file" as const, contentRevision: named };
             if (!old) { patch(id, { status: "queued", intent: undefined, createKey: taskId() }); return; }
             if (old.kind === "file") {
               if (await askConflict(task.path) === "replace") {
@@ -1425,7 +1440,7 @@ export function useUploadQueue(onUploaded: (task: UploadTask, item: Item) => voi
     publish();
     pumpRef.current();
   }, [patch, publish]);
-  const enqueue = useCallback((entries: UploadEntry[], dir: string, exists: (path: string) => boolean) => {
+  const enqueue = useCallback((entries: UploadEntry[], dir: string) => {
     // A selected tree keeps only the folders that stay empty: every other folder is
     // created by the upload that first needs it, inside that upload's request.
     //
@@ -1451,17 +1466,15 @@ export function useUploadQueue(onUploaded: (task: UploadTask, item: Item) => voi
         }
         continue;
       }
-      // The listing knows this folder's own children and nothing deeper, so what it can save
-      // is one refused create — and only once this import has already answered the question.
-      // It is allowed to add work, never to remove it: a stale hit under a standing
-      // "replace" costs a read the server was about to do anyway (an absent destination is
-      // created instead), while a stale hit under "keep" would drop a file the person
-      // dropped because the name it thought was taken may be gone. What is already there is
-      // the server's answer to give, so a kept file is decided there.
-      const overwrite = !!entry.file && exists(path) && policyRef.current === "replace";
+      // Whether this destination already exists is the server's answer to give, and giving
+      // it here would be wrong twice: the listing knows this folder's own children and
+      // nothing deeper (a re-imported tree is all nested files), and what it says now may be
+      // stale by the time the file's turn comes. A standing "replace" answer is not a
+      // property of this row at all — it is the import's, so admission applies it when the
+      // row starts rather than freezing it at selection time.
       const id = taskId();
       const task: UploadTask = { id, file: entry.file, isDir: !entry.file, name: entry.path, dir: relative(dir), path, size: entry.file?.size ?? 0, modifiedAt: entry.file?.lastModified,
-        overwrite, parents: !!entry.file && path.includes("/"), status: "queued", loaded: 0, speed: 0, activeParts: 0, uploaded: false, createKey: id };
+        overwrite: false, parents: !!entry.file && path.includes("/"), status: "queued", loaded: 0, speed: 0, activeParts: 0, uploaded: false, createKey: id };
       added.push(task);
       taken.set(path, task);
     }

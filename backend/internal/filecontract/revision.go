@@ -10,6 +10,21 @@ type PutMode string
 const (
 	PutCreate  PutMode = "create"
 	PutReplace PutMode = "replace"
+	// PutOverwrite names no revision: the destination may hold a file, which these bytes
+	// replace, or nothing, which they create.
+	//
+	// It exists for one workflow — re-importing a tree a person already has — and for the
+	// standing answer that import produces ("replace every file that already exists"). A
+	// named revision makes that workflow pay for itself twice: the client must read the
+	// destination before it can name the bytes, and a create sent without that read is
+	// refused per file. On a 23k-file export that is one wasted round trip per file, and a
+	// wall of 409s the person reads as failure.
+	//
+	// The write is still conditional. The server observes the destination at admission and
+	// binds *that* revision to the session, so the publication cannot land over a change
+	// made before the observation; what the mode drops is the caller's own claim about
+	// bytes it is about to overwrite anyway, which the standing answer already decided.
+	PutOverwrite PutMode = "overwrite"
 )
 
 // PutCondition distinguishes default create conflicts (409) from explicit
@@ -81,6 +96,14 @@ func CheckPutCondition(condition PutCondition, currentRevision *string) error {
 		}
 		if currentRevision == nil || *currentRevision != condition.ContentRevision {
 			return problem(http.StatusPreconditionFailed, "precondition_failed", "The file changed before publication.")
+		}
+		return nil
+	case PutOverwrite:
+		// There is no caller-visible revision to evaluate: the server observes the
+		// destination and binds that observation to the session, so the client naming bytes
+		// it is about to replace anyway would only cost it a read per file.
+		if condition.ContentRevision != "" || condition.ExplicitCreate {
+			return problem(http.StatusBadRequest, "invalid_request", "An overwrite condition names no revision.")
 		}
 		return nil
 	default:

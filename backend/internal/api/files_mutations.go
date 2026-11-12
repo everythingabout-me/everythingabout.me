@@ -365,6 +365,12 @@ func filesPutClientCondition(c fc.PutCondition) string {
 	if c.Mode == fc.PutReplace {
 		return "replace:" + c.ContentRevision
 	}
+	if c.Mode == fc.PutOverwrite {
+		// A replayed overwrite must answer the session it opened, not a create of the same
+		// path: the two conditions differ, and the fingerprint is what keeps a retry from
+		// being read as a new statement of intent.
+		return "overwrite"
+	}
 	if c.ExplicitCreate {
 		return "create:explicit"
 	}

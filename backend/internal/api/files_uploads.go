@@ -140,7 +140,11 @@ func filesUploadClientTarget(req filesCreateUploadRequest) (storage.WriteIntent,
 			selector = *destination.Parent
 		}
 		return storage.WriteIntent{Target: target, ParentID: parentID, Selection: filesDestinationSelection(destination)}, []filesReplaySelection{{selector: selector, write: true}}, nil
-	case "replace":
+	case "replace", "overwrite":
+		// An overwrite selects its destination the way a replacement does, because the same
+		// path may hold a file whose identity this write has to keep, but it does not
+		// require that the entry exist: a re-import also carries files that were deleted
+		// since the last one.
 		if req.Destination != nil || (req.Target == nil) == (req.Path == nil) {
 			return storage.WriteIntent{}, nil, filesSelectorError()
 		}
@@ -175,7 +179,7 @@ func (s *Server) filesResolveUploadTarget(ctx context.Context, f *fileRequest, r
 			selectedID = destination.Parent.ID
 		}
 		return p, filesDestinationSelection(destination), selectedID, err
-	case "replace":
+	case "replace", "overwrite":
 		if req.Destination != nil || (req.Target == nil) == (req.Path == nil) {
 			return "", "", "", filesSelectorError()
 		}
@@ -327,6 +331,11 @@ func (s *Server) handleFilesCreateUpload(w http.ResponseWriter, r *http.Request,
 		if err != nil {
 			return err
 		}
+	case "overwrite":
+		if req.Condition.ContentRevision != "" {
+			return fc.NewProblem(400, "invalid_request", "Overwrite does not accept a content revision; the server observes the destination itself.")
+		}
+		condition = fc.PutCondition{Mode: fc.PutOverwrite}
 	default:
 		return fc.NewProblem(400, "invalid_request", "The upload condition is invalid.")
 	}
@@ -348,7 +357,7 @@ func (s *Server) handleFilesCreateUpload(w http.ResponseWriter, r *http.Request,
 	if s.cfg.BackendName() != "local" && req.SourceModifiedAt != nil {
 		return fc.NewProblem(422, "unsupported_option", "This object route cannot set native source modification time.")
 	}
-	if condition.Mode == fc.PutReplace && !native.Describe().AtomicReplace {
+	if (condition.Mode == fc.PutReplace || condition.Mode == fc.PutOverwrite) && !native.Describe().AtomicReplace {
 		return fc.NewProblem(422, "unsupported_option", "This storage connection supports new files only.")
 	}
 	if req.SourceModifiedAt != nil {
@@ -410,8 +419,8 @@ func (s *Server) handleFilesCreateUpload(w http.ResponseWriter, r *http.Request,
 	// bought nothing: the marker is the same object the first child's key already implies.
 	// A filesystem cannot do this — it needs the directory before the file — so it keeps the
 	// explicit mkdir, which is what ImplicitParents reports.
-	implicitParents := req.Parents && condition.Mode == fc.PutCreate && native.Describe().ImplicitParents
-	if storage.IsCode(err, "not_found") && req.Parents && condition.Mode == fc.PutCreate && !implicitParents {
+	implicitParents := req.Parents && condition.Mode != fc.PutReplace && native.Describe().ImplicitParents
+	if storage.IsCode(err, "not_found") && req.Parents && condition.Mode != fc.PutReplace && !implicitParents {
 		if err = s.filesEnsureParents(r.Context(), r, f, native, root, actor, parentPath); err != nil {
 			return err
 		}
@@ -453,17 +462,26 @@ func (s *Server) handleFilesCreateUpload(w http.ResponseWriter, r *http.Request,
 		if existing.Kind != storage.File {
 			return fc.NewProblem(409, "name_conflict", "A folder occupies the destination.")
 		}
-		if condition.Mode == fc.PutCreate {
+		switch condition.Mode {
+		case fc.PutCreate:
 			// Adoption needs the bytes to be provably this owner's own failed publication
 			// and a transfer class that can publish without the client uploading again.
 			if writer, ok := native.(storage.DirectPutWriter); ok && writer.SupportsDirectPut() && s.filesTransferClass() == storage.TransferPresignedParts {
 				published = s.filesReclaimsPublication(r.Context(), root.OwnerID, string(intent.Target), existing, *req.Size)
 			}
 			if !published {
-				return fc.NewProblem(409, "name_conflict", "The destination already exists.")
+				return s.filesDestinationConflict(r.Context(), f, existing)
 			}
 			intent.Conditions.Absent = true
-		} else {
+		case fc.PutOverwrite:
+			// The destination the person decided to overwrite is the file that is here now:
+			// bind the revision observed at this moment, not one the client had to read and
+			// name first. The publication therefore still cannot land over a change made
+			// between this observation and the PUT, while a re-import of 23k files costs one
+			// admission per file instead of a read, a refused create and a second admission.
+			intent.Conditions.ExpectedRevision = existing.Revision
+			oldBytes = existing.Size
+		default:
 			revision, e := s.filesObservedContentRevision(r.Context(), f, existing)
 			if e != nil {
 				return e
@@ -477,6 +495,11 @@ func (s *Server) handleFilesCreateUpload(w http.ResponseWriter, r *http.Request,
 	} else {
 		if condition.Mode == fc.PutReplace {
 			return fc.NewProblem(412, "target_changed", "The destination no longer exists.")
+		}
+		if condition.Mode == fc.PutOverwrite {
+			// Nothing is overwritten: this creates the file, so it allocates a fresh identity
+			// exactly as a create would.
+			intent.EntryID = ""
 		}
 		intent.Conditions.Absent = true
 	}
@@ -1127,4 +1150,23 @@ func (s *Server) runUploadOperation(ctx context.Context, op fileops.Operation, a
 		err = service.Cleanup(ctx, op.Root, actor, op.ID, writer)
 	}
 	return op, err
+}
+
+// filesDestinationConflict answers a create whose destination already exists, naming the
+// revision the tree holds there now.
+//
+// The client's next move is a decision about this exact file — replace it or leave it — and
+// naming the observed revision here is what makes that decision cost one Create instead of a
+// metadata read and then a Create. The observation, not the index, is what it can rely on: an
+// interrupted import leaves the index holding bytes the object no longer has, and a
+// replacement precondition built from that stale value is refused forever.
+func (s *Server) filesDestinationConflict(ctx context.Context, f *fileRequest, existing storage.Entry) error {
+	problem := fc.NewProblem(409, "name_conflict", "The destination already exists.")
+	if existing.Kind != storage.File {
+		return problem
+	}
+	if revision, err := s.filesObservedContentRevision(ctx, f, existing); err == nil && revision != nil {
+		problem.ObservedRevision = *revision
+	}
+	return problem
 }

@@ -1182,11 +1182,6 @@ export function FilesPage() {
     else void load(listingRef.current.path);
   };
 
-  const itemExists = useCallback(
-    (target: string) => items.some((item) => item.path === filePath(target)),
-    [items],
-  );
-
   const createFolder = async () => {
     const name = newName;
     if (!name) {
@@ -1475,7 +1470,7 @@ export function FilesPage() {
     void droppedUploadEntries(event.dataTransfer, {
       signal: walk.controller.signal,
       onProgress: setReadingUploads,
-      onFiles: (files) => { for (const id of enqueue(files, path, itemExists)) walk.ids.add(id); },
+      onFiles: (files) => { for (const id of enqueue(files, path)) walk.ids.add(id); },
     })
       .then((entries) => {
         setReadingUploads(null);
@@ -1483,7 +1478,7 @@ export function FilesPage() {
         // A folder that holds a file is created by that file, so only fileless folders still
         // need a task of their own — and whether a folder holds a file is known only now.
         const folders = foldersWithoutFiles(entries).filter((entry) => entry.file === null);
-        if (folders.length) enqueue(folders, path, itemExists);
+        if (folders.length) enqueue(folders, path);
       })
       .catch((error) => {
         setReadingUploads(null);
@@ -1500,7 +1495,7 @@ export function FilesPage() {
     event.target.value = "";
     try {
       beginImport();
-      enqueue(filesToUploadEntries(files), path, itemExists);
+      enqueue(filesToUploadEntries(files), path);
     } catch (error) {
       showToast(error instanceof Error ? error.message : t("drive.readUploadFailed"), "error");
     }

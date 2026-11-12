@@ -29,7 +29,7 @@ test("a folder selection publishes once and stays linear in its entry count", as
     const queue = harness.render();
     const before = harness.updates();
     const started = performance.now();
-    queue.enqueue(directory(count), "", () => false);
+    queue.enqueue(directory(count), "");
     const elapsed = performance.now() - started;
     assert.equal(harness.render().tasks.length, count);
     assert.ok(harness.updates() - before <= 2, `a ${count}-entry selection published ${harness.updates() - before} list states`);
@@ -48,7 +48,7 @@ test("a running folder upload paints on the queue's cadence, not once per file",
   t.after(harness.unmount);
   const queue = harness.render();
   const enqueued = harness.updates();
-  queue.enqueue(directory(300), "", () => false);
+  queue.enqueue(directory(300), "");
   await harness.until(allComplete);
   assert.equal(harness.completed.length, 300);
   // Every task changes state several times (queued, uploading, finalizing, completed). Each
@@ -77,7 +77,7 @@ test("a large selection holds a bounded page of upload sessions at once", async 
   };
   const harness = await setup(server.api);
   t.after(harness.unmount);
-  harness.render().enqueue(directory(200), "", () => false);
+  harness.render().enqueue(directory(200), "");
   await harness.until(allComplete, "every queued file eventually starts");
   // Admission runs four pages ahead of the transfer stage: 128 sessions may be open, while
   // bytes stay bounded by the part pool. A selection of 200 must never open 200.
@@ -97,7 +97,7 @@ test("cancelling a folder row is one gesture, linear in the tree it stops", asyn
     const harness = await setup(server.api);
     t.after(harness.unmount);
     const queue = harness.render();
-    queue.enqueue(directory(count), "", () => false);
+    queue.enqueue(directory(count), "");
     // Exactly what the row's Cancel button hands the queue.
     const [row] = buildUploadRows([], harness.render().tasks, "");
     assert.ok(row.upload, "the selection is one folder row");
@@ -129,7 +129,7 @@ test("cancelling a folder does not allocate sessions for the files it is cancell
   const server = uploadServer();
   const harness = await setup(server.api);
   t.after(harness.unmount);
-  harness.render().enqueue(directory(1200), "", () => false);
+  harness.render().enqueue(directory(1200), "");
   await harness.settle();
   const [row] = buildUploadRows([], harness.render().tasks, "");
   const before = server.calls.filter(([kind]) => kind === "create").length;
@@ -153,7 +153,7 @@ test("cancelling a folder claims no path for the files still queued behind it", 
   const locks = memoryLocks();
   const harness = await setup(server.api, { locks });
   t.after(harness.unmount);
-  harness.render().enqueue(directory(1200), "", () => false);
+  harness.render().enqueue(directory(1200), "");
   await harness.settle();
   const [row] = buildUploadRows([], harness.render().tasks, "");
   const claimed = locks.requests.length;
