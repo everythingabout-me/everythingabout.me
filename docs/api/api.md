@@ -750,14 +750,16 @@ authority nor proves inactivity of other clients, origins or devices.
 ### Batched admission and settlement
 
 `POST /api/files/uploads/batch` admits up to 32 sessions in one request and
-`POST /api/files/uploads/commit/batch` settles up to eight. Each item is the single-item body
+`POST /api/files/uploads/commit/batch` settles up to sixteen. Each item is the single-item body
 (each create item carries its own `idempotencyKey`) and each answers independently: a
 refused destination is one item's `error`, never the page's. An item is handed to the
 single-item handler as the bytes the client sent: re-encoding a decoded request fills every
 absent field with `null`, and the single handler reads a `null` `destination` beside a `path`
 as a mixed selector, which fails the item while the page still answers 200. The browser sends a create page
-when it needs URLs, and a settle page of eight or after a two-second linger for a partial
-page; bytes stay bounded by the eight-part pool either way.
+when it needs URLs — a page leaves the moment it holds its page size, and the pages it sends
+are not serialized, so one slow admission delays one wave rather than the import — and a settle
+page of sixteen, or after half a second for a partial page; bytes stay bounded by the part pool
+either way.
 
 ### Direct publication for one-part uploads
 

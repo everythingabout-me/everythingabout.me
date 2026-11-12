@@ -525,12 +525,31 @@ func (s *Server) handleFilesCreateUpload(w http.ResponseWriter, r *http.Request,
 			transport, err = s.filesUploadTransport(r.Context(), native, u)
 		}
 		if err != nil {
+			// A create that cannot hand the client its transport has admitted a session
+			// nobody can finish: it holds a guard on the path and a quota reservation
+			// until the idle window, and every retry of the same row opens another. The
+			// refusal is the answer, so the session goes with it.
+			s.discardUnusableUpload(r.Context(), root, actor, u)
 			return err
 		}
 		resource["transport"] = transport
 	}
 	w.Header().Set("Location", "/api/files/uploads/"+u.ID)
 	return writeFilesJSON(w, 201, resource)
+}
+
+// discardUnusableUpload aborts a session the create admitted but cannot give the client a
+// transport for. Aborting is not a publication: it releases the path's guard and the
+// reservation the same way a client's own abort does, and queues the cleanup that retires
+// the operation. The request context is detached because the usual reason to be here is a
+// signing failure on a request the client may already have abandoned.
+func (s *Server) discardUnusableUpload(ctx context.Context, root fileops.Root, actor fileops.Actor, u fileops.Upload) {
+	aborted, err := s.filesJournal.AbortUpload(context.WithoutCancel(ctx), root, actor, u.ID)
+	if err != nil {
+		slog.Warn("could not abort an upload session that has no usable transport", "upload", u.ID, "cause", err)
+		return
+	}
+	_ = s.queueFileOperation(aborted.Operation)
 }
 
 // filesCreateUpload admits a session, waiting out a folder creation that is still settling a

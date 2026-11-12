@@ -370,7 +370,6 @@ async function withVerifySlot<T>(run: () => Promise<T>): Promise<T> {
 interface BatchState<T> {
   items: T[];
   timer?: ReturnType<typeof setTimeout>;
-  flushing: boolean;
 }
 
 interface PendingCreate { input: FileUploadInput; key: string; resolve: (session: FileUploadSession) => void; reject: (error: unknown) => void; cancelled: boolean }
@@ -427,28 +426,40 @@ export function useUploadQueue(onUploaded: (task: UploadTask, item: Item) => voi
   // which is why a prepare costs one request for a whole window rather than one per file.
   // A test double without the batch calls keeps the per-file path, so the queue's own
   // behaviour stays covered by the existing suite.
-  const createBatch = useRef<BatchState<PendingCreate>>({ items: [], flushing: false });
-  const settleBatch = useRef<BatchState<PendingSettle>>({ items: [], flushing: false });
+  const createBatch = useRef<BatchState<PendingCreate>>({ items: [] });
+  const settleBatch = useRef<BatchState<PendingSettle>>({ items: [] });
 
-  const flushCreates = useCallback(async () => {
+  // Every filled page leaves at once; a partial one leaves on the next turn of the loop,
+  // which is what a look-ahead that fills a page synchronously produces anyway.
+  //
+  // Pages are deliberately not serialized. Sending one and waiting for it made the import's
+  // admission rate one page per page latency — 32 files per 5.8 s, about six sessions a
+  // second, with the other twenty-six waiting for that page's slowest item — and a page that
+  // never returned stopped every later file behind it, so the sheet read 0 / 23,373 with the
+  // transfer stage completely empty and nothing on screen to say why. The depth is already
+  // bounded where it belongs: the look-ahead admits at most ADMIT_AHEAD sessions and
+  // ADMIT_AHEAD_BYTES bytes, so the pages in flight cannot outrun the work that asked for
+  // them. The settlement path has the same shape for the same reason.
+  const flushCreates = useCallback(() => {
     const state = createBatch.current;
-    if (state.flushing) return;
-    state.flushing = true;
-    const batch = state.items.splice(0, CREATE_BATCH_SIZE);
-    try {
-      const results = await api.createUploadBatch(batch.map(({ input, key }) => ({ input, key })));
-      batch.forEach((item, index) => {
-        if (item.cancelled) return;
-        const result = results[index];
-        if (result?.upload) item.resolve(result.upload);
-        else if (result?.error) item.reject(new FileApiError(result.error));
-        else item.reject(new Error("The admission page was incomplete."));
-      });
-    } catch (error) {
-      batch.forEach((item) => { if (!item.cancelled) item.reject(error); });
-    } finally {
-      state.flushing = false;
-      if (state.items.length) state.timer = setTimeout(() => { state.timer = undefined; void flushCreates(); }, 0);
+    while (state.items.length) {
+      const batch = state.items.splice(0, CREATE_BATCH_SIZE);
+      void (async () => {
+        try {
+          const results = await api.createUploadBatch(batch.map(({ input, key }) => ({ input, key })));
+          batch.forEach((item, index) => {
+            if (item.cancelled) return;
+            const result = results[index];
+            if (result?.upload) item.resolve(result.upload);
+            else if (result?.error) item.reject(new FileApiError(result.error));
+            else item.reject(new Error("The admission page was incomplete."));
+          });
+        } catch (error) {
+          batch.forEach((item) => { if (!item.cancelled) item.reject(error); });
+        } finally {
+          if (state.items.length) flushCreates();
+        }
+      })();
     }
   }, []);
 

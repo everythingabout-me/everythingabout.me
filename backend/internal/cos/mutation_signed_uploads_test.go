@@ -277,3 +277,73 @@ func TestMutationFormPostPolicyCarriesTheCondition(t *testing.T) {
 		t.Fatalf("signature %q does not match the documented form-post formula", fields["q-signature"])
 	}
 }
+
+// signPutSigner returns the driver's direct-publication signer.
+func signPutSigner(t *testing.T) objectmutation.DirectPutBackend {
+	t.Helper()
+	_, backend, _ := mutationFixture(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Errorf("signing a grant sent a provider request: %s %s", r.Method, r.URL)
+	}))
+	signer, ok := backend.(objectmutation.DirectPutBackend)
+	if !ok {
+		t.Fatalf("mutation backend does not sign direct PUTs: %T", backend)
+	}
+	return signer
+}
+
+// A COS ETag arrives quoted and the revision that reaches SignPut keeps it that way, so
+// the value is `native-etag:"6a1c…"` rather than a bare digest. The grant must bind it as
+// one If-Match header in header form: quoting it again produced `""6a1c…""`, and the guard
+// that refused a quote refused every revision this service signs, so every replacement a
+// browser asked for was answered 422 after its upload session had already been created.
+func TestSignPutBindsAQuotedRevisionOnce(t *testing.T) {
+	signer := signPutSigner(t)
+	expires := time.Date(2026, 11, 12, 10, 30, 0, 0, time.UTC)
+	grant, err := signer.SignPut(context.Background(), "drive/alice/a.json", 7, "application/json",
+		storage.Conditions{ExpectedRevision: []byte(`native-etag:"6a1c5f0d"`)}, expires)
+	if err != nil {
+		t.Fatalf("SignPut refused a COS revision: %v", err)
+	}
+	if grant.Method != http.MethodPut || grant.Number != 1 || grant.Size != 7 {
+		t.Fatalf("grant is not one conditional PUT of seven bytes: %+v", grant)
+	}
+	if got := grant.Headers["If-Match"]; got != `"6a1c5f0d"` {
+		t.Fatalf("If-Match is %q, want one pair of quotes around the ETag", got)
+	}
+	if got := grant.Headers["Content-Length"]; got != "7" {
+		t.Fatalf("Content-Length is %q, want the admitted size", got)
+	}
+	// The condition is in the signature, not only in the header map: a client that drops it
+	// must send no bytes at all.
+	parsed, err := url.Parse(grant.URL)
+	if err != nil {
+		t.Fatalf("grant URL is not a URL: %v", err)
+	}
+	if list := parsed.Query().Get("q-header-list"); !strings.Contains(strings.ToLower(list), "if-match") {
+		t.Fatalf("signed header list %q does not bind If-Match", list)
+	}
+	if strings.Contains(grant.URL, "%22%22") || strings.Contains(grant.URL, `""`) {
+		t.Fatalf("the revision was quoted twice: %s", grant.URL)
+	}
+}
+
+// A bare digest is accepted too, because a revision captured before the header form was
+// preserved is unquoted; a value that cannot be a header is still refused.
+func TestSignPutNormalizesARevisionAndRefusesHeaderText(t *testing.T) {
+	signer := signPutSigner(t)
+	expires := time.Date(2026, 11, 12, 10, 30, 0, 0, time.UTC)
+	for _, revision := range []string{"native-etag:6a1c5f0d", `native-etag:"6a1c5f0d"`} {
+		grant, err := signer.SignPut(context.Background(), "drive/alice/a.json", 7, "", storage.Conditions{ExpectedRevision: []byte(revision)}, expires)
+		if err != nil {
+			t.Fatalf("SignPut refused %q: %v", revision, err)
+		}
+		if got := grant.Headers["If-Match"]; got != `"6a1c5f0d"` {
+			t.Fatalf("%q signed If-Match %q", revision, got)
+		}
+	}
+	for _, revision := range []string{"native-etag:", `native-etag:""`, "native-etag:6a1c\n5f0d", "native-etag:6a1c\r\n5f0d", `native-etag:6a1c"5f"0d`} {
+		if _, err := signer.SignPut(context.Background(), "drive/alice/a.json", 7, "", storage.Conditions{ExpectedRevision: []byte(revision)}, expires); err == nil {
+			t.Fatalf("SignPut signed an unusable revision %q", revision)
+		}
+	}
+}

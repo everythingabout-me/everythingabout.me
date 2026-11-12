@@ -1,0 +1,21 @@
+-- A retried create for a destination that already exists natively asks one question before
+-- it answers name_conflict: did this owner's own failed direct publication leave these
+-- bytes here? Until now the only way to ask was to read every operation row, pull the
+-- target out of its snapshot document and test it: 40,607 rows discarded and 864 ms of
+-- buffer reads for one 8-row answer, paid once per file of a re-import. An Apple Health
+-- folder of 23,373 files ran 32 of those scans at once, kept 33 of the pool's 40
+-- connections busy, and turned a five-second create page into the whole import's ceiling.
+--
+-- The candidate set is small and self-limiting: only a *failed* upload_commit that recorded
+-- a stage (a direct session published bytes the settlement never indexed) has anything to
+-- offer. Partial, so the index holds the recovery backlog rather than the journal that this
+-- table deliberately keeps forever; a row leaves it when a retry adopts it or when it is
+-- pruned, and the bound on its size is the number of publications that failed, not the
+-- number of uploads ever made.
+--
+-- The target is the query's equality filter and the owner is its isolation, in that order
+-- so one owner's lookup never reads another's rows. CreatedAt stays out of the keys: the
+-- ordering is over the handful of rows one target can have, and `(snapshot->>'CreatedAt')`
+-- is text that only a cast — immutable-in-name-only for timestamptz parsing — could index.
+create index if not exists file_operations_reclaim on file_operations (owner_id, ((snapshot->'Intent'->>'Target')))
+ where action = 'upload_commit' and (snapshot->>'State') = 'failed' and (snapshot->'Stage') is not null;

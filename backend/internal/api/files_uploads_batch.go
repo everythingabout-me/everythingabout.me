@@ -164,7 +164,7 @@ func (s *Server) commitUploadPageItem(r *http.Request, f *fileRequest, id string
 	return map[string]any{"result": json.RawMessage(rec.body.Bytes())}
 }
 
-// handleFilesCommitUploadBatch settles up to eight sessions in one request. The answer per
+// handleFilesCommitUploadBatch settles up to sixteen sessions in one request. The answer per
 // item is whatever the single commit answered: the published file, or the Operation that
 // is still publishing it.
 func (s *Server) handleFilesCommitUploadBatch(w http.ResponseWriter, r *http.Request, f *fileRequest) error {

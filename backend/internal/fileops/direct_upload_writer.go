@@ -39,11 +39,18 @@ func (w *DirectUploadWriter) Stage(ctx context.Context, in storage.WriteIntent, 
 	if entry.Size != in.Size {
 		return storage.Staged{}, E("length_mismatch", nil)
 	}
-	if len(in.Conditions.ExpectedRevision) > 0 && bytes.Equal(entry.Revision, in.Conditions.ExpectedRevision) {
-		// Replace condition: the object must no longer be the revision the session expected,
-		// otherwise the client never wrote the replacement.
-		return storage.Staged{}, E("precondition_failed", nil)
-	}
+	// A replace names the revision it may overwrite, and the destination still holding that
+	// exact revision is *not* proof that the client skipped its PUT: bytes identical to the
+	// ones already there produce the identical ETag. Re-importing an unchanged folder — the
+	// ordinary case for a person re-uploading last month's export — therefore refused every
+	// file at settlement with body_reception_failed, after its client had already applied the
+	// PUT, and no row could ever finish. The check that refused equality read "the client
+	// never wrote the replacement" into a fact about content, which cannot say that.
+	//
+	// What remains after the length check is a destination of the admitted size: settle it.
+	// The bytes a caller asked to publish are the bytes already there, whichever way the
+	// equality came about, and a destination that no longer holds the revision the session
+	// named is refused by the PUT's own If-Match before this writer is reached.
 	return storage.Staged{Intent: in, Size: entry.Size, Handle: entry.Revision}, nil
 }
 

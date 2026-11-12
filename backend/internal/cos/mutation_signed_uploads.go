@@ -72,7 +72,13 @@ func (b *mutationBackend) SignPut(ctx context.Context, key string, size int64, m
 		headers.Set("If-None-Match", "*")
 		headers.Set("x-cos-forbid-overwrite", "true")
 	} else {
-		etag := strings.TrimPrefix(string(cond.ExpectedRevision), "native-etag:")
+		// The revision is the ETag *in header form*: a COS ETag arrives quoted, and
+		// nativeRevision keeps it that way, so the value is `"6a1c…"` — quotes and all.
+		// Quoting it again produced `""6a1c…""`, and the injection guard that rejected a
+		// quote refused every revision this service signs, because every revision carries
+		// one. A grant is signed by the server, never by the client, so the header form is
+		// what must be bound: strip a surrounding pair, refuse the rest.
+		etag := strings.Trim(strings.TrimPrefix(string(cond.ExpectedRevision), "native-etag:"), `"`)
 		if etag == "" || strings.ContainsAny(etag, "\r\n\x00\"") {
 			return out, storage.NewError("unsupported", storage.Path(key), nil)
 		}

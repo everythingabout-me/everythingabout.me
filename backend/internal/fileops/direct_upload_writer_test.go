@@ -63,3 +63,32 @@ func TestDirectWriterAnswersWithTheObservedRevision(t *testing.T) {
 		t.Fatalf("recovery evidence %q is not the observed revision", inspection.Result.Evidence)
 	}
 }
+
+// Re-importing a folder whose files did not change replaces every one of them with bytes
+// it already has. That produces the identical ETag, so a writer that reads "still the
+// revision I expected" as "the client never wrote anything" fails every file of the second
+// import — after its PUT has already been applied — and the folder can never finish.
+func TestDirectWriterSettlesAReplacementOfIdenticalBytes(t *testing.T) {
+	entry := storage.Entry{Path: "trip/a.txt", Kind: storage.File, Size: 5, Revision: []byte(`native-etag:"5d41402abc4b2a76b9719d911017c592"`)}
+	writer := NewDirectUploadWriter(directTestNative{entry: entry})
+	intent := storage.WriteIntent{Target: entry.Path, Size: entry.Size, Conditions: storage.Conditions{ExpectedRevision: entry.Revision}}
+	ctx := context.Background()
+
+	staged, err := writer.Stage(ctx, intent, nil, nil)
+	if err != nil {
+		t.Fatalf("an unchanged replacement was refused: %v", err)
+	}
+	if !bytes.Equal(staged.Handle, entry.Revision) {
+		t.Fatalf("stage handle %q", staged.Handle)
+	}
+	if _, err = writer.Publish(ctx, staged, nil); err != nil {
+		t.Fatal(err)
+	}
+	// A replacement of *different* length is still not this session's publication: the
+	// presigned URL bound the length, so the object cannot be the bytes it admitted.
+	short := intent
+	short.Size = entry.Size + 1
+	if _, err = writer.Stage(ctx, short, nil, nil); err == nil {
+		t.Fatal("a destination of another length was accepted")
+	}
+}
