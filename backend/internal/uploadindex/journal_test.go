@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"everythingabout.me/backend/internal/testpg"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -15,10 +16,7 @@ import (
 // This test never loads .env or application configuration. An explicitly supplied
 // disposable Postgres gets a private database, removed when the test completes.
 func TestPostgresJournalConformance(t *testing.T) {
-	url := os.Getenv("EAM_TEST_DATABASE_URL")
-	if url == "" {
-		t.Skip("EAM_TEST_DATABASE_URL unset; disposable journal integration not run")
-	}
+	url := testpg.Require(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 	defer cancel()
 	admin, err := pgx.Connect(ctx, url)

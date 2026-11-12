@@ -23,6 +23,7 @@ import (
 	"everythingabout.me/backend/internal/paths"
 	"everythingabout.me/backend/internal/storage"
 	"everythingabout.me/backend/internal/store"
+	"everythingabout.me/backend/internal/testpg"
 	"everythingabout.me/backend/internal/uploadindex"
 	"github.com/jackc/pgx/v5"
 )
@@ -143,10 +144,7 @@ func (r *interruptedUploadReader) Read(out []byte) (int, error) {
 }
 
 func TestBrowserUploadIndexPostgresRecovery(t *testing.T) {
-	address := os.Getenv("EAM_TEST_DATABASE_URL")
-	if address == "" {
-		t.Skip("EAM_TEST_DATABASE_URL unset; disposable Postgres integration not run")
-	}
+	address := testpg.Require(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 	admin, err := pgx.Connect(ctx, address)

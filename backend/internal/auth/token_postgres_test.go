@@ -12,16 +12,14 @@ import (
 
 	"everythingabout.me/backend/internal/config"
 	"everythingabout.me/backend/internal/store"
+	"everythingabout.me/backend/internal/testpg"
 	"github.com/jackc/pgx/v5"
 )
 
 // Each run creates its own database on the explicitly selected disposable service.
 func tokenPostgresService(t *testing.T) (context.Context, *store.DB, *Service, string) {
 	t.Helper()
-	address := os.Getenv("EAM_TEST_DATABASE_URL")
-	if address == "" {
-		t.Skip("EAM_TEST_DATABASE_URL unset; disposable token policy integration not run")
-	}
+	address := testpg.Require(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	t.Cleanup(cancel)
 	admin, err := pgx.Connect(ctx, address)

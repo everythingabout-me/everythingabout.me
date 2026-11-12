@@ -19,16 +19,14 @@ import (
 
 	"everythingabout.me/backend/internal/objectmutation"
 	"everythingabout.me/backend/internal/paths"
+	"everythingabout.me/backend/internal/testpg"
 	"github.com/jackc/pgx/v5"
 )
 
 // This is the actual CLI, official S3 SDK and a native HTTP fixture. Provider
 // mutation methods are forbidden; the fixture cannot establish live COS guarantees.
 func TestStorageAdmitObjectsPostgresCLI(t *testing.T) {
-	address := os.Getenv("EAM_TEST_DATABASE_URL")
-	if address == "" {
-		t.Skip("EAM_TEST_DATABASE_URL unset; disposable object baseline integration not run")
-	}
+	address := testpg.Require(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
 	admin, err := pgx.Connect(ctx, address)

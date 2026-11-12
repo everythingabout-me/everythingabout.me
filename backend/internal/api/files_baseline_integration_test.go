@@ -18,6 +18,7 @@ import (
 	"everythingabout.me/backend/internal/config"
 	"everythingabout.me/backend/internal/storagebackend"
 	"everythingabout.me/backend/internal/store"
+	"everythingabout.me/backend/internal/testpg"
 	"github.com/jackc/pgx/v5"
 )
 
@@ -25,10 +26,7 @@ import (
 // content and no index/accounting row. This opt-in suite drives the real HTTP,
 // session/CSRF and Postgres path for that case and for the fail-closed neighbor.
 func TestEmptyOwnerAutomaticBaseline(t *testing.T) {
-	databaseURL := os.Getenv("EAM_TEST_DATABASE_URL")
-	if databaseURL == "" {
-		t.Skip("EAM_TEST_DATABASE_URL unset; disposable empty-owner admission not run")
-	}
+	databaseURL := testpg.Require(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
 	admin, err := pgx.Connect(ctx, databaseURL)

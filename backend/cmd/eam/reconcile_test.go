@@ -16,6 +16,7 @@ import (
 
 	"everythingabout.me/backend/internal/nodes"
 	"everythingabout.me/backend/internal/storage"
+	"everythingabout.me/backend/internal/testpg"
 	"everythingabout.me/backend/internal/treescan"
 )
 
@@ -63,10 +64,7 @@ func (t singleScanTree) Open(context.Context, storage.Path, storage.ReadOptions)
 // Explicit opt-in only. This test never loads application config or .env and
 // creates an isolated schema in the supplied disposable Postgres database.
 func TestReconcilePostgresIdentityDryRunAndAtomicity(t *testing.T) {
-	url := os.Getenv("EAM_TEST_DATABASE_URL")
-	if url == "" {
-		t.Skip("EAM_TEST_DATABASE_URL is unset; disposable Postgres integration was not run")
-	}
+	url := testpg.Require(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 	defer cancel()
 	admin, err := pgx.Connect(ctx, url)

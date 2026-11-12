@@ -30,6 +30,7 @@ import (
 	"everythingabout.me/backend/internal/storage"
 	"everythingabout.me/backend/internal/storagebackend"
 	"everythingabout.me/backend/internal/store"
+	"everythingabout.me/backend/internal/testpg"
 	"everythingabout.me/backend/internal/treescan"
 	"github.com/jackc/pgx/v5"
 )
@@ -292,10 +293,7 @@ type objectsAPIFixture struct {
 
 func newObjectsAPIFixture(t *testing.T) *objectsAPIFixture {
 	t.Helper()
-	address := os.Getenv("EAM_TEST_DATABASE_URL")
-	if address == "" {
-		t.Skip("EAM_TEST_DATABASE_URL unset; real SDK/object mutation/P4 API conformance requires disposable Postgres")
-	}
+	address := testpg.Require(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	t.Cleanup(cancel)
 	admin, err := pgx.Connect(ctx, address)

@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"net/url"
-	"os"
 	"reflect"
 	"strings"
 	"testing"
@@ -13,6 +12,7 @@ import (
 	"everythingabout.me/backend/internal/paths"
 	"everythingabout.me/backend/internal/storage"
 	"everythingabout.me/backend/internal/store"
+	"everythingabout.me/backend/internal/testpg"
 	"everythingabout.me/backend/internal/treescan"
 )
 
@@ -21,7 +21,7 @@ func TestIndexedBrowsingPaginationScopeAndHiddenRoots(t *testing.T) {
 	ctx := context.Background()
 	owner := actionOwner(t, pool)
 	other := actionOwner(t, pool)
-	testURL, err := url.Parse(os.Getenv("EAM_TEST_DATABASE_URL"))
+	testURL, err := url.Parse(testpg.Require(t))
 	if err != nil {
 		t.Fatal(err)
 	}

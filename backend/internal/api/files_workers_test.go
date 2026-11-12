@@ -21,6 +21,7 @@ import (
 	"everythingabout.me/backend/internal/storage"
 	"everythingabout.me/backend/internal/storagebackend"
 	"everythingabout.me/backend/internal/store"
+	"everythingabout.me/backend/internal/testpg"
 	"github.com/jackc/pgx/v5"
 )
 
@@ -35,10 +36,7 @@ type fileWorkerFixture struct {
 
 func newFileWorkerFixture(t *testing.T) *fileWorkerFixture {
 	t.Helper()
-	address := os.Getenv("EAM_TEST_DATABASE_URL")
-	if address == "" {
-		t.Skip("EAM_TEST_DATABASE_URL unset; disposable P4 worker/auth integration not run")
-	}
+	address := testpg.Require(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	t.Cleanup(cancel)
 	admin, err := pgx.Connect(ctx, address)

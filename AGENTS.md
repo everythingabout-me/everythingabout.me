@@ -111,10 +111,21 @@ Common commands:
 | `make dev` | Run the Go backend and Vite together | Postgres + COS |
 | `make server` | Backend only (also serves the frontend if `web/dist` exists) | Same |
 | `make build` | Build `web/dist`, then compile `bin/eam` | None (needs node_modules) |
-| `make test` | `go test ./...` + `tsc --noEmit` | None |
+| `make test` | `go test ./...` + `tsc --noEmit`; Postgres-backed tests skip and are counted | None |
+| `make test-pg` | Go tests with the Postgres-backed suite required; fails instead of skipping when the URL is unset | Postgres (disposable, `CREATEDB`) |
 | `make fmt` | `gofmt -w` the backend | None |
 | `make migrate` | Create / upgrade tables | Postgres |
 | `make check` / `make check-write` | `eam doctor` self-check (`--write` writes a probe object, then deletes it) | Postgres + COS (+ SES) |
+
+`EAM_TEST_DATABASE_URL` is the only switch for the Postgres-backed tests. It must name a **disposable**
+PostgreSQL service with `CREATEDB`: those tests create random databases, apply every `sql/*.sql` file to each
+one twice, and drop them, so never point it at a live database. Without the URL they skip, and `make test`
+ends with `WARNING: N Postgres-backed test(s) skipped` — a green run that quietly executed none of them is
+exactly the hole this count exists to close. `make test-pg` sets `EAM_TEST_REQUIRE_DATABASE_URL=1`, so a
+missing database fails the run. This matters because the upload journal, the operation journal and the change
+stream are only actually exercised against Postgres; a `ListUploads` read-only-transaction regression shipped
+while its tests were skipping. CI (`.github/workflows/test.yml`) runs `make migrate`, `make test` and
+`make test-pg` against a `postgres:17` service container.
 
 - Every backend maintenance command lives in one binary: `cd backend && go run ./cmd/eam <cmd>` (or `./bin/eam`).
 - `internal/config` loads `.env` automatically, searching up to three directories upward, so you never export
@@ -282,6 +293,11 @@ Common commands:
 ## After changing something
 
 1. `make test` must pass (Go tests + frontend typecheck); run it even if you only touched the frontend.
+   A change that touches uploads, the upload journal, operations or the change stream must also pass
+   `make test-pg` against a disposable database — the suites covering `internal/browserupload`,
+   `internal/uploadindex`, `internal/fileops`, `internal/filechanges`, `internal/nodes` and the upload/operation
+   paths in `internal/api` skip without `EAM_TEST_DATABASE_URL`, so a green `make test` alone is not evidence.
+   If no database is available, say so in the handoff instead of merging on skipped coverage.
 2. Run `gofmt` on Go code (or `make fmt`); keep the existing TS style (2 spaces, double quotes, semicolons).
 3. If you changed an API or a field: update `docs/api/api.md`, the endpoint table in the README, and the types
    in `web/src/api/client.ts`.

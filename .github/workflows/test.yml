@@ -1,0 +1,57 @@
+name: test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: eam
+          POSTGRES_PASSWORD: eam
+          POSTGRES_DB: eam
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U eam -d eam"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      DATABASE_URL: postgres://eam:eam@127.0.0.1:5432/eam?sslmode=disable
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: backend/go.mod
+          cache-dependency-path: backend/go.sum
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Install dependencies
+        run: make install
+
+      - name: Run migrations
+        run: make migrate
+
+      # Deliberately without EAM_TEST_DATABASE_URL: this proves the no-database
+      # path still works and prints how many Postgres-backed tests it skipped.
+      - name: Test without a database
+        run: make test
+
+      # The release gate: every Postgres-backed test must run against the
+      # service container. A missing or unreachable database fails this step.
+      - name: Test with the Postgres-backed suite
+        run: make test-pg
+        env:
+          EAM_TEST_DATABASE_URL: postgres://eam:eam@127.0.0.1:5432/eam?sslmode=disable

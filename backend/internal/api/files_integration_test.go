@@ -22,6 +22,7 @@ import (
 	"everythingabout.me/backend/internal/storage"
 	"everythingabout.me/backend/internal/storagebackend"
 	"everythingabout.me/backend/internal/store"
+	"everythingabout.me/backend/internal/testpg"
 	"everythingabout.me/backend/internal/treescan"
 	"github.com/jackc/pgx/v5"
 )
@@ -66,10 +67,7 @@ func (d *unavailableBrowseDriver) Open(context.Context, storage.Path, storage.Re
 // factory and index. It never loads application configuration or a .env file and
 // creates/drops its own database in an explicitly supplied disposable Postgres.
 func TestFilesRuntimePostgresConformance(t *testing.T) {
-	databaseURL := os.Getenv("EAM_TEST_DATABASE_URL")
-	if databaseURL == "" {
-		t.Skip("EAM_TEST_DATABASE_URL unset; disposable actual runtime integration not run")
-	}
+	databaseURL := testpg.Require(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
 	admin, err := pgx.Connect(ctx, databaseURL)

@@ -18,6 +18,7 @@ import (
 	"everythingabout.me/backend/internal/config"
 	"everythingabout.me/backend/internal/paths"
 	"everythingabout.me/backend/internal/storage"
+	"everythingabout.me/backend/internal/testpg"
 	"everythingabout.me/backend/internal/treescan"
 )
 
@@ -118,10 +119,7 @@ func TestAdmissionEvidenceIsBoundedNonemptyJSON(t *testing.T) {
 	}
 }
 func TestStorageAdmitPostgresCLI(t *testing.T) {
-	adminURL := os.Getenv("EAM_TEST_DATABASE_URL")
-	if adminURL == "" {
-		t.Skip("EAM_TEST_DATABASE_URL is unset; disposable baseline admission integration was not run")
-	}
+	adminURL := testpg.Require(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
 	admin, err := pgx.Connect(ctx, adminURL)

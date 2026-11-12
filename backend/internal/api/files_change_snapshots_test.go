@@ -23,6 +23,7 @@ import (
 	"everythingabout.me/backend/internal/nodes"
 	"everythingabout.me/backend/internal/storage"
 	"everythingabout.me/backend/internal/store"
+	"everythingabout.me/backend/internal/testpg"
 	"github.com/jackc/pgx/v5"
 )
 
@@ -34,10 +35,7 @@ type changeSnapshotFixture struct {
 
 func changeSnapshotDatabase(t *testing.T) *store.DB {
 	t.Helper()
-	target := os.Getenv("EAM_TEST_DATABASE_URL")
-	if target == "" {
-		t.Skip("EAM_TEST_DATABASE_URL unset; isolated snapshot conformance requires PostgreSQL")
-	}
+	target := testpg.Require(t)
 	ctx := context.Background()
 	admin, err := pgx.Connect(ctx, target)
 	if err != nil {

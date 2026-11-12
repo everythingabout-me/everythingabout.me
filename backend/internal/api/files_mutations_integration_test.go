@@ -26,6 +26,7 @@ import (
 	"everythingabout.me/backend/internal/nodes"
 	"everythingabout.me/backend/internal/storagebackend"
 	"everythingabout.me/backend/internal/store"
+	"everythingabout.me/backend/internal/testpg"
 	"github.com/jackc/pgx/v5"
 )
 
@@ -33,10 +34,7 @@ import (
 // admitted native local actions. It creates its own database and empty owner roots;
 // it never loads application environment files or touches an existing user's tree.
 func TestFilesMutationsPostgresLocalConformance(t *testing.T) {
-	databaseURL := os.Getenv("EAM_TEST_DATABASE_URL")
-	if databaseURL == "" {
-		t.Skip("EAM_TEST_DATABASE_URL unset; disposable P4 HTTP mutation conformance not run")
-	}
+	databaseURL := testpg.Require(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
 	admin, err := pgx.Connect(ctx, databaseURL)

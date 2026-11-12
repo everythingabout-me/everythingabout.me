@@ -11,15 +11,13 @@ import (
 	"testing"
 	"time"
 
+	"everythingabout.me/backend/internal/testpg"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 func TestPostgresJournalLifecycle(t *testing.T) {
-	address := os.Getenv("EAM_TEST_DATABASE_URL")
-	if address == "" {
-		t.Skip("EAM_TEST_DATABASE_URL unset; disposable PostgreSQL integration not run")
-	}
+	address := testpg.Require(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 	admin, err := pgx.Connect(ctx, address)

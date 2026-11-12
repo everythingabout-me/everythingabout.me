@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"everythingabout.me/backend/internal/testpg"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -19,10 +20,7 @@ import (
 // that case. No application config or environment file is loaded.
 func cacheTestDatabase(t *testing.T) *pgxpool.Pool {
 	t.Helper()
-	url := os.Getenv("EAM_TEST_DATABASE_URL")
-	if url == "" {
-		t.Skip("EAM_TEST_DATABASE_URL unset; disposable Postgres integration not run")
-	}
+	url := testpg.Require(t)
 	ctx := context.Background()
 	admin, err := pgx.Connect(ctx, url)
 	if err != nil {

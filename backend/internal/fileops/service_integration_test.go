@@ -22,6 +22,7 @@ import (
 	"everythingabout.me/backend/internal/localstorage"
 	"everythingabout.me/backend/internal/nodes"
 	"everythingabout.me/backend/internal/storage"
+	"everythingabout.me/backend/internal/testpg"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -31,10 +32,7 @@ import (
 // applies every migration twice. The parent owns the shared Docker test service.
 func coordinatorDatabase(t *testing.T) *pgxpool.Pool {
 	t.Helper()
-	target := os.Getenv("EAM_TEST_DATABASE_URL")
-	if target == "" {
-		t.Skip("EAM_TEST_DATABASE_URL is not set; coordinator integration requires disposable PostgreSQL")
-	}
+	target := testpg.Require(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	admin, err := pgx.Connect(ctx, target)

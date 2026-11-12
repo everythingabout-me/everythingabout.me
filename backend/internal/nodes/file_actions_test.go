@@ -16,6 +16,7 @@ import (
 	"everythingabout.me/backend/internal/filerevision"
 	"everythingabout.me/backend/internal/paths"
 	"everythingabout.me/backend/internal/storage"
+	"everythingabout.me/backend/internal/testpg"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -24,10 +25,7 @@ import (
 // application config or environment file is loaded.
 func actionTestDatabase(t *testing.T) *pgxpool.Pool {
 	t.Helper()
-	url := os.Getenv("EAM_TEST_DATABASE_URL")
-	if url == "" {
-		t.Skip("EAM_TEST_DATABASE_URL is not set")
-	}
+	url := testpg.Require(t)
 	ctx := context.Background()
 	admin, err := pgx.Connect(ctx, url)
 	if err != nil {

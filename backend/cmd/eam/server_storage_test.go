@@ -23,6 +23,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"everythingabout.me/backend/internal/auth"
+	"everythingabout.me/backend/internal/testpg"
 )
 
 // Run the real command entry point in a separate process so signal handling,
@@ -44,10 +45,7 @@ func TestLocalStorageServerCommand(t *testing.T) {
 // Explicit opt-in: the URL must permit creating a disposable database. Nothing
 // loads .env or inherits application/provider credentials from the parent process.
 func TestLocalStorageServerStartupPostgres(t *testing.T) {
-	databaseURL := os.Getenv("EAM_TEST_DATABASE_URL")
-	if databaseURL == "" {
-		t.Skip("EAM_TEST_DATABASE_URL is unset; real server startup integration was not run")
-	}
+	databaseURL := testpg.Require(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
 	admin, err := pgx.Connect(ctx, databaseURL)
