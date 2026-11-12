@@ -30,8 +30,15 @@ func newID() string {
 	s := hex.EncodeToString(b[:])
 	return s[:8] + "-" + s[8:12] + "-" + s[12:16] + "-" + s[16:20] + "-" + s[20:]
 }
+
+// OwnerLockKey is the advisory-lock key expression that admits one owner's writes.
+// It is exported because a scan must take the same key: two lock spaces cannot
+// exclude each other, and a scan on a different key would prune an upload or
+// resurrect a deletion that settled after its native walk.
+const OwnerLockKey = `hashtextextended($1::uuid::text, 1739)`
+
 func ownerLock(ctx context.Context, tx pgx.Tx, owner string) error {
-	_, err := tx.Exec(ctx, `select pg_advisory_xact_lock(hashtextextended($1::uuid::text, 1739))`, owner)
+	_, err := tx.Exec(ctx, `select pg_advisory_xact_lock(`+OwnerLockKey+`)`, owner)
 	return err
 }
 func dbNow(ctx context.Context, tx pgx.Tx) (time.Time, error) {
