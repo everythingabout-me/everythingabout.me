@@ -114,26 +114,24 @@ func ApplyScan(ctx context.Context, db ScanDB, ownerID string, result *treescan.
 	// The session namespace lock precedes the serializable snapshot. Taking a
 	// transaction advisory lock as the first SELECT would establish a snapshot
 	// before the lock and could miss a deletion that just committed.
-	pending, err := tx.Query(ctx, `select from_path from fs_jobs where user_id=$1::uuid and op='delete' and status<>'done'`, ownerID)
+	//
+	// A delete that is still purging is exactly an accepted operation whose index
+	// rows are already gone but whose native objects may still exist, so a scan
+	// that imported them would resurrect paths the user deleted. The operation
+	// journal is the source of truth for that state; the retired fs_jobs table was
+	// consulted here and could not see a /api/files delete at all.
+	namespace := ""
+	if opts.ChangeRoot != nil {
+		namespace = opts.ChangeRoot.Namespace()
+	}
+	pending, err := fileops.PendingDeleteRoots(ctx, tx, ownerID, namespace)
 	if err != nil {
-		return report, err
-	}
-	var roots []string
-	for pending.Next() {
-		var root string
-		if err := pending.Scan(&root); err != nil {
-			pending.Close()
-			return report, err
-		}
-		roots = append(roots, norm.NFC.String(root))
-	}
-	pending.Close()
-	if err := pending.Err(); err != nil {
-		return report, err
+		return report, fmt.Errorf("read pending deletions for scan import: %w", err)
 	}
 	for _, record := range records {
 		p := norm.NFC.String(string(record.Entry.Path))
-		for _, root := range roots {
+		for _, root := range pending {
+			root = norm.NFC.String(root)
 			if p == root || strings.HasPrefix(p, root+"/") {
 				return report, fmt.Errorf("scan path %q is pending permanent deletion; finish deletion before reconciling this subtree", record.Entry.Path)
 			}

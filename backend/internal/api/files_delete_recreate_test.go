@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -13,7 +14,9 @@ import (
 	fc "everythingabout.me/backend/internal/filecontract"
 	"everythingabout.me/backend/internal/fileops"
 	"everythingabout.me/backend/internal/nodes"
+	"everythingabout.me/backend/internal/paths"
 	"everythingabout.me/backend/internal/storage"
+	"everythingabout.me/backend/internal/treescan"
 )
 
 // An accepted deletion is final for every read at once, but it is not a fence on the name:
@@ -182,5 +185,66 @@ func TestPendingDeleteCoversIsScoped(t *testing.T) {
 	}
 	if got, err := h.server.filesPendingDeleteCovers(f.ctx, request, "/Scope/Empty"); err != nil || got {
 		t.Fatalf("terminal delete still covered the path: %v %v", got, err)
+	}
+}
+
+// The CLI reconcile guard and the index scan read the operation journal, not the retired
+// fs_jobs table. A delete that `/api/files` accepted is already out of the index while its
+// native objects still exist, so a reconcile that could not see that purge imported them and
+// resurrected the subtree. This is the acceptance transaction DELETE /api/files commits
+// (nodes.CommitPrefixDelete, wired as the API's PrefixCommit); only the purge worker is
+// withheld here, so the operation stays non-terminal exactly as it does for the whole purge.
+func TestReconcileSeesAcceptedFilesDeletePurge(t *testing.T) {
+	f := newFileWorkerFixture(t)
+	h := newUploadsHTTPFixture(t, f)
+	uploadsHTTPJSON(t, h.request("POST", "/api/files", h.bearer, []byte(`{"kind":"folder","path":"/Gone"}`), http.Header{"Content-Type": {"application/json"}}), 201)
+	if w := h.request("PUT", "/api/files/content?path=%2FGone%2Fold.txt", h.bearer, []byte("old"), http.Header{"Content-Type": {"text/plain"}}); w.Code != 201 {
+		t.Fatalf("seed file: HTTP%d %s", w.Code, w.Body.String())
+	}
+	intent, err := json.Marshal(fileops.ActionRequest{Kind: "delete", From: "Gone", Recursive: true, Root: h.root, Actor: workerActor(h.root)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	begun, _, err := f.journal.Begin(f.ctx, fileops.BeginRequest{Root: h.root, Actor: workerActor(h.root), Kind: "delete", Intent: intent, Guards: []fileops.Guard{{Path: "Gone", Subtree: true}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	claimed, err := f.journal.Claim(f.ctx, h.root, workerActor(h.root), begun.ID, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	accepted, err := f.journal.AcceptPrefixDelete(f.ctx, claimed.Lease, "Gone", nodes.CommitPrefixDelete)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if accepted.State != fileops.Running || accepted.Purge == nil {
+		t.Fatalf("delete is not an accepted pending purge: %+v", accepted)
+	}
+	// The exact read the CLI reconcile guard makes.
+	roots, err := fileops.PendingDeleteRoots(f.ctx, f.db.Pool(), h.root.OwnerID, h.root.Namespace())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(roots) != 1 || roots[0] != "Gone" {
+		t.Fatalf("reconcile guard saw %q, want the accepted purge of %q", roots, "Gone")
+	}
+	// And the scan itself refuses to import the objects the purge has not reached yet.
+	prefix := paths.OwnerPrefix(h.root.OwnerID)
+	inventory, err := treescan.Inventory(f.ctx, strings.NewReader("key,size,lastmodifieddate\n"+prefix+"Gone/,0,\n"+prefix+"Gone/old.txt,3,2020-01-02T03:04:05Z\n"), prefix, treescan.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := nodes.ApplyScan(f.ctx, f.db.Pool(), h.root.OwnerID, inventory, nodes.ScanApplyOptions{DryRun: true, ChangeRoot: &h.root}); err == nil || !strings.Contains(err.Error(), "pending permanent deletion") {
+		t.Fatalf("scan imported a subtree whose /api/files delete is still purging: %v", err)
+	}
+	// A settled purge stops blocking both.
+	if _, err := f.journal.FinishPurge(f.ctx, claimed.Lease, fileops.Succeeded, json.RawMessage(`{"deleted":true,"purged":2,"adopted":0}`), nil); err != nil {
+		t.Fatal(err)
+	}
+	if roots, err = fileops.PendingDeleteRoots(f.ctx, f.db.Pool(), h.root.OwnerID, h.root.Namespace()); err != nil || len(roots) != 0 {
+		t.Fatalf("settled purge still blocked reconcile: %q %v", roots, err)
+	}
+	if _, err := nodes.ApplyScan(f.ctx, f.db.Pool(), h.root.OwnerID, inventory, nodes.ScanApplyOptions{DryRun: true, ChangeRoot: &h.root}); err != nil {
+		t.Fatalf("settled purge blocked the scan: %v", err)
 	}
 }

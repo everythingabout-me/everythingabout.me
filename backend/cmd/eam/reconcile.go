@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -18,6 +19,33 @@ import (
 	"everythingabout.me/backend/internal/store"
 	"everythingabout.me/backend/internal/treescan"
 )
+
+// pendingDeleteBlocker refuses a reconcile while the owner has a permanent
+// deletion whose native purge has not settled. A delete that `/api/files`
+// accepted has already lost its index rows, so a scan started after the
+// acceptance would import the native objects the purge has not reached yet and
+// resurrect a path the user deleted. The operation journal is the only durable
+// record of that state — the legacy fs_jobs table this command used to read never
+// saw a `/api/files` delete, so it answered "no pending deletion" and let the scan
+// through.
+//
+// The scan namespace lock is already held by the caller, so no new delete can be
+// accepted while this reads; the journal answers for deletions that are already
+// purging.
+func pendingDeleteBlocker(ctx context.Context, q fileops.Queryer, ownerID, namespace string) error {
+	roots, err := fileops.PendingDeleteRoots(ctx, q, ownerID, namespace)
+	if err != nil {
+		return fmt.Errorf("read pending deletions for reconcile owner %s: %w", ownerID, err)
+	}
+	if len(roots) == 0 {
+		return nil
+	}
+	message := fmt.Sprintf("permanent deletion of %q has not finished purging; wait for it to settle before reconciling this owner", roots[0])
+	if len(roots) > 1 {
+		message = fmt.Sprintf("permanent deletions of %d paths (including %q) have not finished purging; wait for them to settle before reconciling this owner", len(roots), roots[0])
+	}
+	return errors.New(message)
+}
 
 // runReconcile imports existing native names and metadata without changing native
 // content. P1 deliberately never prunes: complete enumeration and CSV claims do
@@ -95,12 +123,8 @@ func runReconcile(args []string) error {
 		return err
 	}
 	defer unlock()
-	var deleting bool
-	if err := scanConn.QueryRow(ctx, `select exists(select 1 from fs_jobs where user_id=$1::uuid and op='delete' and status<>'done')`, ownerID).Scan(&deleting); err != nil {
+	if err := pendingDeleteBlocker(ctx, scanConn, ownerID, changeRoot.Namespace()); err != nil {
 		return err
-	}
-	if deleting {
-		return fmt.Errorf("permanent deletion is unfinished; finish deletion before reconciling this owner")
 	}
 	opts := treescan.Options{Names: driver.Describe().Names, MaxEntries: *maxEntries, MaxPages: *maxPages, MaxDepth: *maxDepth, PageSize: *pageSize, MaxInventoryBytes: *maxInventoryBytes}
 	fmt.Printf("scan owner: %s; index pruning: disabled; dry-run: %t\n", ownerID, *dryRun)

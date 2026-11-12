@@ -207,6 +207,16 @@ when it stopped between allocating and committing, and the folder holding them a
       with `parents:true` fences its destination but not every missing ancestor it creates under the purge
       root; upload parents fence each level they create. These orderings need a separate decision if they
       matter.
+- [x] The pending-delete guard reads the operation journal. `eam reconcile`, the index scan
+      (`nodes.ApplyScan`, shared by `POST /api/files/sync`) and the read overlay's legacy arm used to ask the
+      retiring `fs_jobs` table, which never records a `/api/files` delete: a scan could therefore import the
+      native objects an accepted purge had not reached yet and resurrect a subtree the user had deleted. All
+      three now ask for a non-terminal delete carrying a `Purge` path in `file_operations`, scoped to the
+      owner's native root; an accepted purge is a guard, a terminal one is not, and a legacy `fs_jobs` row no
+      longer answers the question at all. The overlay's own fs_jobs leg is gone with it: acceptance detaches
+      the rows in the same transaction, so index absence already conceals the subtree and the guard query only
+      has to cover the admission window. Dropping the now-unread `fs_jobs` table follows the separate removal
+      of its last writer, the legacy `internal/jobs` runner.
 - [ ] Tombstone object (`__eam_system__/<owner>/tombstones/<operation>`) so a rebuild after index loss does not
       resurrect a half-purged delete. Same predicate as the worker; the tombstone is the durable copy.
 - [ ] `move`/`copy` keep the frozen manifest: their effects are conditional on both endpoints and a re-walk

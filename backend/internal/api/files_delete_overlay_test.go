@@ -168,17 +168,13 @@ func TestFilesDeleteOverlayHidesAcceptedDeletesPostgres(t *testing.T) {
 	insert(owner, "succeeded", "settled.txt", 7)
 	insert(owner, "running", "other-generation.txt", 8)
 	insert(other, "running", "other-owner.txt", 7)
-	if _, err = db.Pool().Exec(ctx, `insert into fs_jobs(id,user_id,op,from_path,to_path,status,delete_binding)
-		values('m_legacy_overlay',$1::uuid,'delete','legacy.txt','', 'pending', $2)`, owner, uploadIndexBinding(server.cfg)); err != nil {
-		t.Fatal(err)
-	}
 	driver := &filesReadTestDriver{descriptor: storage.Descriptor{Names: storage.NameRules{CaseSensitive: true}}}
 	wrapped, err := server.filesDeleteOverlay(ctx, owner, namespace, driver)
 	if err != nil {
 		t.Fatal(err)
 	}
 	roots := filesHiddenRoots(&fileRequest{Driver: wrapped})
-	want := []string{"Photos/old.jpg", "Photos/trip", "café", "legacy.txt"}
+	want := []string{"Photos/old.jpg", "Photos/trip", "café"}
 	if len(roots) != len(want) {
 		t.Fatalf("hidden roots = %q, want %q", roots, want)
 	}
@@ -201,7 +197,7 @@ func TestFilesDeleteOverlayHidesAcceptedDeletesPostgres(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if roots = filesHiddenRoots(&fileRequest{Driver: wrapped}); len(roots) != 3 {
+	if roots = filesHiddenRoots(&fileRequest{Driver: wrapped}); len(roots) != 2 {
 		t.Fatalf("terminal delete still hidden: %q", roots)
 	}
 }

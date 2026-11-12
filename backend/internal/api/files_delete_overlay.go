@@ -39,10 +39,19 @@ func (s *Server) filesDeleteOverlay(ctx context.Context, owner, namespace string
 	return overlay, nil
 }
 
-// pendingDeleteRoots lists the root-relative paths of deletions that have been accepted
-// but are not terminal yet. Pending legacy jobs (fs_jobs) and current actions
-// (file_operations) both contribute: in either case the user has already confirmed the
-// deletion, so every read treats the path as gone while the native purge runs.
+// pendingDeleteRoots lists the root-relative paths of deletions that are pending in this
+// namespace. The rows a delete removes are the durable concealment once it is accepted
+// (deletes.md): an accepted purge has no index row left to resolve, so every read answers
+// 404 from the index and the overlay has nothing to add. What this query must still cover
+// is the window before acceptance, when a delete operation holds its guards and the entry
+// is still readable; those guard rows are released by the acceptance transaction, so a
+// purge in flight deliberately contributes no root here — otherwise a path the user
+// re-created during the purge would be hidden from reads too, which the contract forbids.
+//
+// This used to union the legacy fs_jobs rows. That runner's rows are detached from the
+// index by the same atomic acceptance, so they added nothing a read could still resolve,
+// and no route can create a new one (the legacy delete route is retired). The current
+// action journal answers the question that is left.
 func (s *Server) pendingDeleteRoots(ctx context.Context, owner, namespace string) ([]string, error) {
 	if s.db == nil {
 		return nil, nil
@@ -56,27 +65,6 @@ func (s *Server) pendingDeleteRoots(ctx context.Context, owner, namespace string
 		}
 		seen[root] = true
 		roots = append(roots, root)
-	}
-	// Accepted deletions of the retiring legacy job runner keep their own binding.
-	if s.cfg != nil && s.cfg.BackendName() == "cos" {
-		rows, err := s.db.Pool().Query(ctx, `select from_path from fs_jobs
-			where user_id=$1::uuid and op='delete' and status<>'done' and delete_binding=$2`, owner, uploadIndexBinding(s.cfg))
-		if err != nil {
-			return nil, err
-		}
-		for rows.Next() {
-			var root string
-			if err := rows.Scan(&root); err != nil {
-				rows.Close()
-				return nil, err
-			}
-			add(root)
-		}
-		err = rows.Err()
-		rows.Close()
-		if err != nil {
-			return nil, err
-		}
 	}
 	// A delete action is hidden from its own namespace only: an adopted or restored
 	// native root must never inherit a stale hidden path from another generation.

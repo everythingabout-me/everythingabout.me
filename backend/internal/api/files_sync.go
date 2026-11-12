@@ -1,10 +1,12 @@
 package api
 
 import (
+	"fmt"
 	"log/slog"
 	"net/http"
 
 	fc "everythingabout.me/backend/internal/filecontract"
+	"everythingabout.me/backend/internal/fileops"
 	"everythingabout.me/backend/internal/nodes"
 	"everythingabout.me/backend/internal/treescan"
 )
@@ -57,15 +59,17 @@ func (s *Server) handleFilesSync(w http.ResponseWriter, r *http.Request, f *file
 		return fc.NewProblem(409, "sync_in_progress", "Another scan or write session holds this owner's storage lock.")
 	}
 	defer unlock()
-	var deleting bool
-	// A scan must not race a deletion: the index still lists the path while the
-	// native purge runs, and re-importing or pruning it mid-flight would fight settlement.
-	if err := conn.QueryRow(ctx, `select exists(select 1 from fs_jobs where user_id=$1::uuid and op='delete' and status<>'done')
-		or exists(select 1 from file_operations where owner_id=$1::uuid and action='delete' and snapshot->>'State' in ('queued','running','outcome_unknown'))`, owner).Scan(&deleting); err != nil {
+	// A scan must not race a deletion: an accepted delete has already lost its index
+	// rows while its native purge still runs, so re-importing those objects would
+	// resurrect a subtree the user deleted. The operation journal records that
+	// accepted-but-not-settled purge; the legacy fs_jobs table this check used to
+	// consult could not see a `/api/files` delete at all.
+	deleting, err := fileops.PendingDeleteRoots(ctx, conn, owner, root.Namespace())
+	if err != nil {
 		return err
 	}
-	if deleting {
-		return fc.NewProblem(409, "delete_in_progress", "Finish the pending permanent deletion before syncing.")
+	if len(deleting) > 0 {
+		return fc.NewProblem(409, "delete_in_progress", fmt.Sprintf("The permanent deletion of %q has not finished purging; wait for it to settle before syncing.", deleting[0]))
 	}
 	descriptor := native.Describe()
 	result, err := treescan.Scan(ctx, native, treescan.Options{
