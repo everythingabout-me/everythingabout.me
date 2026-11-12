@@ -186,12 +186,15 @@ Rules, each answering a specific failure:
   name as reserved: creating, renaming or scanning an entry with that name fails, and a snapshot refuses to
   copy it. Containment is therefore bounded by a refusal, not hidden by a skip — nothing under a content
   root is skipped today, and a silent skip is how system material would become user-visible.
-- **The account API may name a `cos` bucket, or an `s3` endpoint host the operator listed.** A `local`
-  row would let an account read and write arbitrary host paths; an `s3` endpoint is an outbound request
-  this process makes on the account's behalf, so it is bounded by `FILE_ACCOUNT_S3_HOSTS` rather than by
-  the account's choice of host. A COS row needs no such list because its endpoint is derived from bucket
-  and region. The operator CLI may bind any backend to one account, because it already has host access
-  and refusing it would leave "move this account's tree onto another provider" impossible.
+- **The account API may name a `cos` bucket or an `s3` endpoint; `local` stays operator-only, and so does
+  `authority`.** Attaching your own store is the point of the feature, so naming an endpoint is the
+  account's call: a host allowlist would make the deployment's owner a gatekeeper for their own drive and
+  answer the wrong question (which hosts exist, not whether this one can hold a tree). What bounds it is
+  that the row is a *backup destination* — never an authority — and that the probe must prove publication
+  before the row is saved. That reasoning rests on accounts being people the deployment trusts; if signup
+  is open to strangers, the control belongs at registration (`ALLOW_REGISTRATION`), because an open
+  signup is a far larger grant than any single endpoint. The operator CLI is not bound by any of this: it
+  already has host access.
 - **A destination is measured before it is recorded.** The account API runs the same probe the operator
   CLI does, so a bucket that cannot answer or ignores the conditional headers publication depends on is
   refused instead of becoming a row whose first snapshot fails. Both paths derive that connection's own

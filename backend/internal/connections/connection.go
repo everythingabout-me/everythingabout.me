@@ -214,14 +214,13 @@ func (c Connection) Validate() error {
 }
 
 // ValidateAccountAdded is the rule for a row an account asked for through the API.
-// It is stricter than Validate because that request is untrusted: `local` would let
-// an account read and write arbitrary host paths, and an `s3` endpoint is an outbound
-// request this process would make on the account's behalf. A COS row cannot choose a
-// host (its endpoint is derived from bucket and region), so it needs no further rule;
-// an S3 row may only name a host the operator listed. The operator CLI is deliberately
-// not bound by this: it already has host access, and refusing it would leave "make this
-// one account's tree live on another provider" impossible.
-func (c Connection) ValidateAccountAdded(allowedS3Hosts []string) error {
+// It is stricter than Validate because that request comes from a signed-in account, not
+// an operator: `local` would let it read and write arbitrary host paths, and authority is
+// the operator's decision, not something an account can grant itself. Naming an endpoint
+// is the account's call — attaching your own NAS is the point of the feature — and the
+// probe is what decides whether that endpoint can actually hold a tree. The operator CLI
+// is not bound by this: it already has host access.
+func (c Connection) ValidateAccountAdded() error {
 	if err := c.Validate(); err != nil {
 		return err
 	}
@@ -235,12 +234,8 @@ func (c Connection) ValidateAccountAdded(allowedS3Hosts []string) error {
 	case "cos":
 		return nil
 	case "s3":
-		host, err := S3EndpointHost(c.Config.S3.Endpoint)
-		if err != nil {
+		if _, err := S3EndpointHost(c.Config.S3.Endpoint); err != nil {
 			return fmt.Errorf("storage connection %q: %w", c.Name, err)
-		}
-		if !HostAllowed(host, allowedS3Hosts) {
-			return fmt.Errorf("storage connection %q: endpoint host %q is not one this deployment lets an account attach; the operator lists hosts in FILE_ACCOUNT_S3_HOSTS", c.Name, host)
 		}
 		return nil
 	default:
@@ -259,21 +254,6 @@ func S3EndpointHost(endpoint string) (string, error) {
 		return "", fmt.Errorf("endpoint %q must be an http(s) URL for the storage service alone, with no credentials, path, query or fragment (for example https://nas.example.com:9000)", endpoint)
 	}
 	return strings.ToLower(parsed.Hostname()), nil
-}
-
-// HostAllowed matches an endpoint host against the operator's list. `*.example.com`
-// matches every subdomain; nothing else is a pattern, so a list entry is never wider
-// than what was written.
-func HostAllowed(host string, allowed []string) bool {
-	for _, pattern := range allowed {
-		if pattern == host {
-			return true
-		}
-		if suffix, ok := strings.CutPrefix(pattern, "*."); ok && suffix != "" && strings.HasSuffix(host, "."+suffix) {
-			return true
-		}
-	}
-	return false
 }
 
 // Apply folds this row into the process configuration so the existing driver

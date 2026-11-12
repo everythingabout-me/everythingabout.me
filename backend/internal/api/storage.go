@@ -177,7 +177,7 @@ func (s *Server) handleStorageConnectionAdd(w http.ResponseWriter, r *http.Reque
 		return err
 	}
 	c.Identity = identity
-	if err := c.ValidateAccountAdded(s.cfg.AccountS3Hosts); err != nil {
+	if err := c.ValidateAccountAdded(); err != nil {
 		return httpx.BadRequest(err.Error())
 	}
 	// Measure before recording: a bucket that cannot answer, or that ignores the
