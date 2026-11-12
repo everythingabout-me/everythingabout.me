@@ -14,21 +14,34 @@ import (
 
 // Batch bounds. Create is the only call whose cost is paid per file before any bytes
 // move, so one request admits a page of a small-file import; commit is bounded by the
-// worker pool that settles it, eight being what one request can finish inside a couple of
-// seconds. Both are page sizes, not rates: the client sends the next page when it needs it.
+// worker pool that settles it. Both are page sizes, not rates: the client sends the next
+// page when it needs it.
+//
+// The commit page is sixteen because the page, not the transfer, was the pipeline's gate:
+// a settlement costs 0.63 s (p50, measured against this bucket) and the client sends one
+// page at a time, so eight items per page plus the queue's two-second fill wait capped an
+// import at ~3.8 files/s while creates ran at 13/s. Sixteen items occupy half of the
+// thirty-two settlement slots, which leaves the other half for folder creations, moves and
+// deletions that share the same pool.
 const (
 	filesUploadCreateBatchLimit = 32
-	filesUploadCommitBatchLimit = 8
+	filesUploadCommitBatchLimit = 16
 )
 
-// filesUploadBatchParallel bounds how many items of one page are admitted at once. An
-// admission is mostly waiting: one provider round trip for the parent, and, for a path
+// filesUploadBatchParallel bounds how many items of one create page are admitted at once.
+// An admission is mostly waiting: one provider round trip for the parent, and, for a path
 // whose folders do not exist yet, a chain of four to seven more. Nothing in it is
 // CPU-bound, so run one at a time a page of eight costs the sum of eight provider waits and
 // the client can start its next page only when the last item returns — which is how a page
 // came back in 44 seconds. Overlapped, the page costs about its slowest item. The bound is
 // the queue's own in-flight window, so a page never outruns the clients it serves.
 const filesUploadBatchParallel = 8
+
+// filesUploadCommitParallel bounds one commit page's items. A settlement costs a handful of
+// provider reads and one index transaction, so all sixteen running together cost the page
+// about its slowest item; run in waves it would cost the sum, and the page size that
+// unblocked the pipeline would only move the gate inside the page.
+const filesUploadCommitParallel = 16
 
 // batchRecorder is a ResponseWriter for one inner handler: the batch reuses the single
 // resource's handler instead of a second implementation of admission, authorization and
@@ -162,7 +175,7 @@ func (s *Server) handleFilesCommitUploadBatch(w http.ResponseWriter, r *http.Req
 		return fc.NewProblem(400, "invalid_request", fmt.Sprintf("Between one and %d items are required.", filesUploadCommitBatchLimit))
 	}
 	items := make([]any, len(req.Items))
-	slots := make(chan struct{}, min(filesUploadBatchParallel, len(req.Items)))
+	slots := make(chan struct{}, min(filesUploadCommitParallel, len(req.Items)))
 	var page sync.WaitGroup
 	for i, item := range req.Items {
 		if item.ID == "" {

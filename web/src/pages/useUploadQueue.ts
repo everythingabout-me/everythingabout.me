@@ -16,12 +16,14 @@ import { pendingFileOperation, setUploadOwner, settleFileOperation } from "./upl
 const PART_POOL_SIZE = 16;
 // Sessions admitted per request, and settlements per request. A page of creates is cheap
 // (one conditional URL each, signed locally), so one request may carry a whole page of the
-// look-ahead; commits are bounded by the worker pool that settles them, so eight per
-// request and a two-second linger for a partial page, which keeps a slow tail from waiting
-// for a full batch. A settlement no longer holds a transfer slot, so that linger now costs
-// one row's latency instead of the pipeline's throughput.
+// look-ahead; commits are bounded by the worker pool that settles them, and one page in
+// flight is what keeps that pool from being flooded — a page of sixteen is half of the
+// server's thirty-two settlement slots. Only one page is in flight at a time: the second
+// would take the other half and starve the folder creations and deletions that share the
+// pool. The two-second linger only delays a page that cannot fill, which is the tail of an
+// import, not its body.
 const CREATE_BATCH_SIZE = 32;
-const COMMIT_BATCH_SIZE = 8;
+const COMMIT_BATCH_SIZE = 16;
 const COMMIT_LINGER_MS = 2000;
 // Sessions kept in hand ahead of the transfer window: four part pools, so the window can be
 // refilled four times over before a create page (~1.7 s for 32, measured in 741f910 against

@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -723,6 +724,26 @@ func TestFilesUploadBatchPageAsSent(t *testing.T) {
 	if list, _ := parent["items"].([]any); len(list) != 0 {
 		t.Fatalf("the upload page published entries before their bytes arrived: %v", list)
 	}
+}
+
+// A commit page carries sixteen sessions. The page, not the transfer, is what gated an
+// import: sixteen settle inside half of the worker pool, and a seventeenth is refused
+// rather than silently truncated, so a client cannot believe it published a file it did not.
+func TestFilesUploadCommitBatchPageLimit(t *testing.T) {
+	f := newFileWorkerFixture(t)
+	h := newUploadsHTTPFixture(t, f)
+	page := func(count int) []byte {
+		items := make([]string, count)
+		for i := range items {
+			items[i] = `{"id":"6f1c0d0e-0000-4000-8000-0000000000` + fmt.Sprintf("%02d", i) + `"}`
+		}
+		return []byte(`{"items":[` + strings.Join(items, ",") + `]}`)
+	}
+	value := uploadsHTTPJSON(t, h.request("POST", "/api/files/uploads/commit/batch", h.bearer, page(16), http.Header{"Content-Type": {"application/json"}}), 200)
+	if items, _ := value["items"].([]any); len(items) != 16 {
+		t.Fatalf("a full page answered %d items", len(items))
+	}
+	uploadsHTTPProblem(t, h.request("POST", "/api/files/uploads/commit/batch", h.bearer, page(17), http.Header{"Content-Type": {"application/json"}}), 400, "invalid_request")
 }
 
 // A destination whose folders do not exist yet is admitted without creating them; the
