@@ -817,6 +817,21 @@ func (s *Server) handleFilesUploadPart(w http.ResponseWriter, r *http.Request, f
 		return uploadspool.Part{Number: receipt.Number, Size: receipt.Size, SHA256: receipt.SHA256, Handle: receipt.Handle}, nil
 	})
 	if err != nil {
+		// This body may be the last receiver holding the session's staged bytes. An abort
+		// or expiry that raced it wrote the session's tombstone but could not discard the
+		// bytes while this request still held the spool: uploadspool.Discard answers
+		// ErrBusy instead of waiting for an arbitrarily slow client body. The receiver
+		// that fences the session is therefore the one that ends the cleanup, now that
+		// its locks are released; without that trigger a terminal operation keeps its
+		// staged bytes and physical reservation until a later sweep retries it.
+		if uploadSessionEnded(err) {
+			// The worker decides from the operation's current state whether it may still
+			// settle or only has to clean up, so it needs the terminal operation, not this
+			// request's pre-abort snapshot (which would look like a session still open).
+			if latest, e := s.filesJournal.GetUpload(r.Context(), root, actor, u.ID); e == nil {
+				_ = s.startFileCleanup(latest.Operation)
+			}
+		}
 		return filesUploadSpoolProblem(err)
 	}
 	status := 201
@@ -825,6 +840,23 @@ func (s *Server) handleFilesUploadPart(w http.ResponseWriter, r *http.Request, f
 	}
 	return writeFilesJSON(w, status, filesUploadReceipt(receipt))
 }
+
+// uploadSessionEnded reports whether a refused part body was refused because its session
+// is already terminal, which is what makes the refusal the cleanup trigger above: the
+// spool tombstone (ErrDiscarded) and the journal's own end states are the only ways a
+// receiver learns that the abort or expiry it raced has already decided the session.
+func uploadSessionEnded(err error) bool {
+	if errors.Is(err, uploadspool.ErrDiscarded) {
+		return true
+	}
+	for _, code := range []string{"upload_aborted", "upload_expired", "upload_failed", "upload_gone"} {
+		if fileops.IsCode(err, code) {
+			return true
+		}
+	}
+	return false
+}
+
 func filesUploadSpoolProblem(err error) error {
 	switch {
 	case storage.IsCode(err, "upload_aborted"):

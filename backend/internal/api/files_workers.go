@@ -14,13 +14,21 @@ import (
 	"everythingabout.me/backend/internal/fileops"
 	"everythingabout.me/backend/internal/nodes"
 	"everythingabout.me/backend/internal/storage"
+	"everythingabout.me/backend/internal/uploadspool"
 )
 
 type fileWorkers struct {
 	mu      sync.Mutex
 	active  map[string]bool
 	retries map[string]*fileWorkerRetry
-	slots   chan struct{}
+	// cleanupAgain carries an operation whose running attempt was asked for one more round
+	// after it finishes: a receiver it found busy has just released the staged bytes the
+	// attempt was trying to discard, and a plain queue call would be dropped while that
+	// attempt still owns the id. The stored operation is the terminal state the receiver
+	// read, not the snapshot the running attempt was started with: only a terminal one
+	// tells the worker to skip settlement and clean up.
+	cleanupAgain map[string]fileops.Operation
+	slots        chan struct{}
 	// operations counts admitted operations, including the ones whose settlement
 	// deliberately outlives cancellation. draining closes admission so WaitBackground
 	// can wait for it without racing a new Add.
@@ -112,11 +120,12 @@ func (s *Server) workers() *fileWorkers {
 	defer s.fileWorkerMu.Unlock()
 	if s.fileWorkers == nil {
 		s.fileWorkers = &fileWorkers{
-			active:  make(map[string]bool),
-			retries: make(map[string]*fileWorkerRetry),
-			slots:   make(chan struct{}, fileOperationSlots),
-			wake:    make(chan struct{}, 1),
-			ctx:     context.Background(),
+			active:       make(map[string]bool),
+			retries:      make(map[string]*fileWorkerRetry),
+			cleanupAgain: make(map[string]fileops.Operation),
+			slots:        make(chan struct{}, fileOperationSlots),
+			wake:         make(chan struct{}, 1),
+			ctx:          context.Background(),
 		}
 	}
 	return s.fileWorkers
@@ -124,6 +133,29 @@ func (s *Server) workers() *fileWorkers {
 func (s *Server) queueFileOperation(op fileops.Operation) error {
 	_, _, err := s.startFileOperation(op)
 	return err
+}
+
+// startFileCleanup asks for one more cleanup attempt on a terminal operation after its
+// caller released what that cleanup was waiting on: a part receiver that held the
+// session's staged bytes has just finished, so the abort or expiry that could not discard
+// them before can now do it.
+//
+// A plain queue call is not enough here. The abort worker's attempt may still own the
+// operation id when the last receiver returns, and startFileOperation drops a second
+// admission for an active operation, so the cleanup would fall through to the periodic
+// sweep — up to a sweep interval, or far longer while the busy failure is still in its
+// recovery backoff — while the staged bytes and their physical reservation stay held.
+// Marking the running attempt instead guarantees the retry happens right after it ends.
+func (s *Server) startFileCleanup(op fileops.Operation) error {
+	worker := s.workers()
+	worker.mu.Lock()
+	if worker.active[op.ID] {
+		worker.cleanupAgain[op.ID] = op
+		worker.mu.Unlock()
+		return nil
+	}
+	worker.mu.Unlock()
+	return s.queueFileOperation(op)
 }
 
 // startFileOperation admits one operation into the pool. started reports that this call took
@@ -171,8 +203,16 @@ func (s *Server) startFileOperation(op fileops.Operation) (bool, <-chan struct{}
 		defer func() {
 			worker.mu.Lock()
 			delete(worker.active, op.ID)
+			again, againOK := worker.cleanupAgain[op.ID]
+			delete(worker.cleanupAgain, op.ID)
 			worker.mu.Unlock()
 			<-worker.slots
+			if againOK {
+				// A receiver released the staged bytes this attempt found busy, so retry
+				// now that the id is free instead of leaving a settled operation's
+				// temporary cleanup to the periodic sweep.
+				_ = s.queueFileOperation(again)
+			}
 			// The scan that would have admitted the next operation already stopped at
 			// the busy pool, so a freed slot is the only moment that work can start.
 			// Tell the scanner instead of leaving it to the periodic sweep.
@@ -192,6 +232,17 @@ func (s *Server) startFileOperation(op fileops.Operation) (bool, <-chan struct{}
 			s.fileOperationProgressed(op.ID)
 		case errors.Is(err, context.Canceled):
 			slog.Debug("file operation stopped with the server", "operation", op.ID)
+		case errors.Is(err, uploadspool.ErrBusy):
+			// A busy staged store is not an operation that cannot make progress. The
+			// operation is already terminal; the only work left is discarding temporary
+			// bytes that a part receiver in this process still holds under its
+			// session lock. That receiver is fenced (Discard wrote the tombstone first)
+			// and ends the cleanup itself once it returns, so a recovery backoff here
+			// would only delay a release whose trigger has already fired — and the 30s
+			// floor would keep the reservation for a condition that lasts as long as one
+			// body read.
+			s.fileOperationProgressed(op.ID)
+			slog.Debug("upload cleanup deferred to its last receiver", "operation", op.ID)
 		default:
 			s.fileOperationRetained(op, err)
 		}
