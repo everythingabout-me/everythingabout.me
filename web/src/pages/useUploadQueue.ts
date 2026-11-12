@@ -23,13 +23,6 @@ const COMMIT_BATCH_SIZE = 16;
 // Sending each item the moment it arrived — what this did — made every page a page of one, so
 // every file cost one request of its own and the page size never meant anything.
 const SETTLE_PAGE_WAIT_MS = 500;
-// Pages of settlements in flight at once. The server settles one owner's operations through
-// one advisory lock, so a second page waits for the first whether or not this constant lets it
-// go: more pages buy no throughput, they only queue. Unbounded pages were measured climbing
-// from 0.6 s to 10 s per page during one import while the tree grew by two files a second,
-// because the browser's six connections were held by settlement pages and the screen had none
-// left for anything a person could see.
-const SETTLE_PAGES_IN_FLIGHT = 2;
 
 // Sessions kept in hand ahead of the transfer window: four part pools, so the window can be
 // refilled four times over before a create page (~1.7 s for 32, measured in 741f910 against
@@ -313,8 +306,6 @@ interface BatchState<T> {
   items: T[];
   timer?: ReturnType<typeof setTimeout>;
   flushing: boolean;
-  /** Settlement pages on the wire; a create page is serialized by `flushing` instead. */
-  pages: number;
 }
 
 interface PendingCreate { input: FileUploadInput; key: string; resolve: (session: FileUploadSession) => void; reject: (error: unknown) => void; cancelled: boolean }
@@ -363,8 +354,8 @@ export function useUploadQueue(onUploaded: (task: UploadTask, item: Item) => voi
   // which is why a prepare costs one request for a whole window rather than one per file.
   // A test double without the batch calls keeps the per-file path, so the queue's own
   // behaviour stays covered by the existing suite.
-  const createBatch = useRef<BatchState<PendingCreate>>({ items: [], flushing: false, pages: 0 });
-  const settleBatch = useRef<BatchState<PendingSettle>>({ items: [], flushing: false, pages: 0 });
+  const createBatch = useRef<BatchState<PendingCreate>>({ items: [], flushing: false });
+  const settleBatch = useRef<BatchState<PendingSettle>>({ items: [], flushing: false });
 
   const flushCreates = useCallback(async () => {
     const state = createBatch.current;
@@ -405,21 +396,19 @@ export function useUploadQueue(onUploaded: (task: UploadTask, item: Item) => voi
     }
   }), [flushCreates]);
 
-  // A page leaves when it is full, and otherwise its oldest item waits SETTLE_PAGE_WAIT_MS.
-  // Sending every item the moment it arrived sent a page of one per file, so the page size
-  // never applied and each settlement cost a request of its own — the import's request count
-  // matched its file count one to one.
+  // A page leaves when it is full; a partial page leaves when its oldest item has waited
+  // SETTLE_PAGE_WAIT_MS. Sending every item the moment it arrived — what this did — made every
+  // page a page of one, so the page size never applied and each settlement cost a request of
+  // its own: an import's settlement requests matched its file count one to one, and the page
+  // latency climbed from 0.6 s to 10 s as that queue grew.
   //
-  // At most SETTLE_PAGES_IN_FLIGHT pages are outstanding. The server settles one owner's
-  // operations through one advisory lock, so a deeper queue cannot settle more per second; it
-  // only makes every page wait behind the ones before it, which is what a page time climbing
-  // from 0.6 s to 10 s over one import was, with the browser's six connections spent on pages
-  // nobody could see instead of on the screen's own requests.
+  // Nothing here bounds how many pages are outstanding. The server's pool is the queue —
+  // Operations, a thousand slots, its own retry and deferral — and a page that waits for that
+  // pool is the server reporting saturation, not something a client constant should mask.
   const flushSettles = useCallback(() => {
     const state = settleBatch.current;
-    while (state.items.length && state.pages < SETTLE_PAGES_IN_FLIGHT) {
+    while (state.items.length) {
       const batch = state.items.splice(0, COMMIT_BATCH_SIZE);
-      state.pages += 1;
       void (async () => {
         try {
           const results = await api.commitUploadBatch(batch.map(({ id }) => id));
@@ -433,14 +422,9 @@ export function useUploadQueue(onUploaded: (task: UploadTask, item: Item) => voi
         } catch (error) {
           batch.forEach((item) => { if (!item.cancelled) item.reject(error); });
         } finally {
-          state.pages -= 1;
           if (state.items.length) flushSettles();
         }
       })();
-    }
-    // Whatever is left is waiting for a page to return; if none is out, nothing will wake it.
-    if (state.items.length && state.pages === 0 && state.timer === undefined) {
-      state.timer = setTimeout(() => { state.timer = undefined; flushSettles(); }, SETTLE_PAGE_WAIT_MS);
     }
   }, []);
 
