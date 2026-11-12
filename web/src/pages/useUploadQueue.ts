@@ -167,10 +167,24 @@ export interface UploadTask {
   waitMessage?: string;
   error?: string;
 }
+/**
+ * What one cancel gesture took with it.
+ *
+ * A cancelled row leaves the sheet at once (the projection drops it), so the counts it was
+ * carrying leave with it. The gesture has to report them itself, or an import stopped at 3%
+ * of twenty thousand files is indistinguishable from one that never held more than six
+ * hundred — and the person is left reading 489 / 609, 80% for a folder they cancelled.
+ */
+export interface UploadCancelSummary {
+  /** Files and the folders that needed a task of their own, in the cancelled selection. */
+  items: number;
+  completedItems: number;
+}
 export interface UploadQueue {
   tasks: UploadTask[];
   hasActiveUploads: boolean;
-  enqueue(entries: UploadEntry[], dir: string, exists: (path: string) => boolean): void;
+  /** The ids of the tasks this selection created; a path that was already queued adds none. */
+  enqueue(entries: UploadEntry[], dir: string, exists: (path: string) => boolean): string[];
   /**
    * Cancel one row, or a whole selection of rows in one gesture.
    *
@@ -178,8 +192,14 @@ export interface UploadQueue {
    * the sheet hands the whole list over. Resolving each id separately walked the queue once
    * per id and published once per id, which is quadratic in the cancelled tree — the shape
    * that froze the tab when a large import was stopped.
+   *
+   * Cancelling is a decision about the whole gesture, not a per-row status: `uploadRows`
+   * drops a requested cancellation from the projection immediately, so the gesture answers
+   * with what it covered and the page reports it once. A teardown that then fails keeps its
+   * task — as a failure, where the person can retry the cancel — because a still-open
+   * session holds its reservation against the owner's quota until someone ends it.
    */
-  cancel(ids: string | string[]): void;
+  cancel(ids: string | string[]): UploadCancelSummary | null;
   retry(id: string): void;
   /**
    * Clear a wait whose deletion ended without deleting anything.
@@ -1127,6 +1147,13 @@ export function useUploadQueue(onUploaded: (task: UploadTask, item: Item) => voi
     for (const task of tasks.current.values()) {
       if (wanted.has(task.id) || subtrees.some((prefix) => task.path.startsWith(prefix))) targets.push(task);
     }
+    // Counted before anything is torn down: `uploadRows` stops showing a requested
+    // cancellation at once, and a row that is gone cannot say what it covered. An empty
+    // gesture answers null so the page reports nothing it did not do.
+    const summary: UploadCancelSummary = {
+      items: targets.length,
+      completedItems: targets.filter((task) => task.status === "completed").length,
+    };
     for (const task of targets) {
       running.current.get(task.id)?.controller.abort();
       // A prepared session is this row's, so cancelling the row must discard it too: the
@@ -1178,6 +1205,7 @@ export function useUploadQueue(onUploaded: (task: UploadTask, item: Item) => voi
     }
     // Cancelling is a gesture: the rows must answer now, not on the next publish tick.
     publish();
+    return targets.length === 0 ? null : summary;
   }, [applyOperation, complete, dropAdmission, patch, publish, remove, requestPump]);
   const retry = useCallback((id: string) => {
     const task = tasks.current.get(id);
@@ -1250,6 +1278,10 @@ export function useUploadQueue(onUploaded: (task: UploadTask, item: Item) => voi
     // The user just picked the files; publish the rows before the first network hop.
     publish();
     pumpRef.current();
+    // The new ids let a caller that feeds the queue from a live source — a dropped tree being
+    // read page by page — follow what it has handed over, so cancelling that import can stop
+    // the source instead of cancelling the page it had reached.
+    return added.map((task) => task.id);
   }, [dropAdmission, insert, patch, publish]);
   useEffect(() => {
     mounted.current = true;

@@ -128,6 +128,21 @@ export function buildUploadRows(items: Item[], tasks: UploadTask[], directory: s
   // Latest metadata wins if the same path is selected again in an active batch.
   const unique = new Map(tasks.map((task) => [normalize(task.path), task]));
   for (const [path, task] of unique) {
+    // A cancelled task is no longer part of the import. Cancelling is a decision about the
+    // gesture, not a state one row can be in: the sheet answers it by letting the row go at
+    // once, so everything left on screen describes bytes that are still going to land.
+    //
+    // Keeping the row was what a large import showed after a cancel — a folder reading
+    // "Finishing" over a shrunken subset, 489 / 609, 80%, where 609 was whatever had not
+    // been torn down yet rather than the tree the person dropped. The numbers could only
+    // move: each teardown removed a row, so the denominator fell under the bar and the
+    // percentage rose or fell with it, and the row finally settled as "completed" — a
+    // cancelled 20k-file import announcing itself as a finished 489-file one.
+    //
+    // A teardown that then fails keeps its task, as a `failed` one: `failedTasks` lists it
+    // with a retry, because a session still open holds its reservation against the owner's
+    // quota and needs the person's decision, not a row that pretends to be progress.
+    if (task.cancelRequested) continue;
     if (!path.startsWith(prefix)) continue;
     const relative = path.slice(prefix.length);
     if (!relative) continue;

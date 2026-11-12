@@ -354,3 +354,34 @@ test("folders that contain a file are left to the upload, empty ones stay", () =
   const kept = foldersWithoutFiles(entries).map((entry) => entry.path);
   assert.deepEqual(kept, ["apple-health/2025/07/01/steps.json", "apple-health/empty"]);
 });
+
+test("aborting the walk stops the handover before the next directory is read", async () => {
+  const controller = new AbortController();
+  const handed = [];
+  const tree = directoryEntry("root", [[
+    directoryEntry("first", [[fileEntry(makeFile("one.json"))]]),
+    directoryEntry("second", [[fileEntry(makeFile("two.json"))]]),
+  ]]);
+  await assert.rejects(
+    droppedUploadEntries(transferWithEntries(tree), {
+      signal: controller.signal,
+      // The upload this page starts is precisely what a cancel takes back: the walk must not
+      // go on reading the rest of the tree and enqueue it after the person said stop.
+      onFiles: (files) => { handed.push(...paths(files)); controller.abort(); },
+    }),
+    (error) => error.name === "AbortError",
+  );
+  assert.deepEqual(handed, ["root/first/one.json"]);
+});
+
+test("an already aborted walk hands nothing over", async () => {
+  const controller = new AbortController();
+  controller.abort();
+  const handed = [];
+  const tree = directoryEntry("root", [[directoryEntry("first", [[fileEntry(makeFile("one.json"))]])]]);
+  await assert.rejects(
+    droppedUploadEntries(transferWithEntries(tree), { signal: controller.signal, onFiles: (files) => handed.push(...paths(files)) }),
+    (error) => error.name === "AbortError",
+  );
+  assert.deepEqual(handed, []);
+});

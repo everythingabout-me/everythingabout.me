@@ -90,6 +90,16 @@ export interface DroppedTreeOptions {
    */
   onFiles?: (files: UploadEntry[]) => void;
   batchSize?: number;
+  /**
+   * Stop the walk.
+   *
+   * A dropped tree is read while its first files upload, so the walk can outlive the import
+   * it feeds by minutes. Without a way to stop it, cancelling that import cancelled only the
+   * files handed over so far and every later page was enqueued — and started — after the
+   * person had already said no. The check sits at each handover and between directories, so
+   * an abort ends the walk within one page instead of reading the rest of the tree first.
+   */
+  signal?: AbortSignal;
 }
 
 /**
@@ -113,6 +123,10 @@ export async function droppedUploadEntries(
 ): Promise<UploadEntry[]> {
   type Source = { entry: FileSystemEntry } | { file: File };
   const sources: Source[] = [];
+  const signal = options.signal;
+  /** The one way out of a walk: every handover and every directory passes it. */
+  const stop = (): never => { throw new DOMException("The upload walk was cancelled.", "AbortError"); };
+  const stopped = () => signal?.aborted === true;
 
   // Drag data can become inaccessible as soon as the drop handler yields.
   for (const item of Array.from(transfer.items ?? [])) {
@@ -126,6 +140,7 @@ export async function droppedUploadEntries(
     }
   }
   if (sources.length === 0) {
+    if (stopped()) stop();
     // No entry API: the drop handed over a flat list, already read by the browser. There is
     // nothing left to walk, so it is one handover — but it still goes through `onFiles`, so a
     // caller that streams never loses the files of a browser that cannot stream.
@@ -140,11 +155,13 @@ export async function droppedUploadEntries(
   const batch: UploadEntry[] = [];
   let handedAt = Number.NEGATIVE_INFINITY;
   const flush = () => {
+    if (stopped()) stop();
     if (!batch.length) return;
     handedAt = performance.now();
     options.onFiles?.(batch.splice(0, batch.length));
   };
   const hand = (file: File, path: string) => {
+    if (stopped()) stop();
     if (!options.onFiles) return;
     batch.push({ path, file });
     // A steady walk fills whole pages; a slow one (a network volume, a cold directory) must
@@ -177,6 +194,7 @@ export async function droppedUploadEntries(
     const reader = directory.createReader();
     const children: FileSystemEntry[] = [];
     while (true) {
+      if (stopped()) stop();
       const page = await new Promise<FileSystemEntry[]>((resolve, reject) => {
         reader.readEntries(resolve, reject);
       });
@@ -202,6 +220,7 @@ export async function droppedUploadEntries(
     let next = 0;
     const worker = async () => {
       while (next < entries.length) {
+        if (stopped()) stop();
         const at = next++;
         files[at] = await readFile(entries[at]);
       }
@@ -214,6 +233,7 @@ export async function droppedUploadEntries(
     }
   }
   async function visit(entry: FileSystemEntry, parent: string): Promise<void> {
+    if (stopped()) stop();
     const name = normalizePath(entry.name);
     if (name.includes("/")) throw new Error(`Invalid upload entry name: ${entry.name}`);
     const path = parent ? `${parent}/${name}` : name;
@@ -237,6 +257,7 @@ export async function droppedUploadEntries(
   }
 
   for (const source of sources) {
+    if (stopped()) stop();
     if ("entry" in source) await visit(source.entry, "");
     else {
       const file = source.file;

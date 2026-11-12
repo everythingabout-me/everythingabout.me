@@ -875,9 +875,22 @@ export function FilesPage() {
     setTransferCancelling(false);
   }, [transfer]);
 
+  /**
+   * The tree a drop is still reading.
+   *
+   * A dropped tree hands its files over page by page while it uploads, so the sheet holds
+   * only what has been read so far and the reading carries on after the first rows exist.
+   * That makes the walk something the page can — and on a cancel, must — stop: the files it
+   * reads later are enqueued and started like any other, so a cancel that only reached the
+   * queue would be followed by the rest of the tree uploading itself.
+   */
+  const uploadWalk = useRef<{ controller: AbortController; ids: Set<string> } | null>(null);
+
   /** Only settled upload resources replace placeholder rows. */
-  const handleUploaded = useCallback((_task: UploadTask, item: Item) => {
+  const handleUploaded = useCallback((task: UploadTask, item: Item) => {
     completedUploads.current += 1;
+    // A file that landed is no longer something the walk is still feeding.
+    uploadWalk.current?.ids.delete(task.id);
     if (listingRef.current.searching || filePath(listingRef.current.path) !== item.parentPath) return;
     setItems((currentItems) => {
       const next = currentItems.filter((existing) => existing.path !== item.path);
@@ -896,8 +909,59 @@ export function FilesPage() {
     resume: resumeUpload,
   } = useUploadQueue(handleUploaded);
 
+  // The queue's latest published state, for a gesture that is a prop of every row: reading it
+  // from the render would rebuild the callback on every publish, ten times a second, and throw
+  // away the rows' memoization while bytes move.
+  const tasksRef = useRef<UploadTask[]>([]);
+  tasksRef.current = uploads;
+
   const uploadBlocker = useBlocker(({ nextLocation }) =>
     hasActiveUploads && !/^\/files(?:\/|$)/.test(nextLocation.pathname));
+
+  /**
+   * Cancelling a row, answered once.
+   *
+   * The rows leave the sheet at once — the projection stops showing a requested cancellation
+   * — which is what a person who pressed Cancel expects, and it is also why the gesture has
+   * to say what it took: the rows that carried "489 / 609" are gone, so nothing on screen
+   * would report that 3% of a dropped tree had landed. One sentence does, and only for a
+   * gesture over more than one item: cancelling a single row is its own answer.
+   *
+   * A cancel that covers the tree a drop is still reading also stops the walk. Until it did,
+   * the files read after the click were enqueued and started like any other, so pressing
+   * Cancel on a 20k-file import cancelled the page it had reached and uploaded the rest.
+   */
+  const cancelUploadRow = useCallback((ids: string[]) => {
+    const summary = cancelUpload(ids);
+    // The batch now ends with nothing running, and the page's own notice would announce a
+    // cancelled import as a finished one.
+    completedUploads.current = 0;
+    if (summary && summary.items > 1) {
+      showToast(t("drive.uploadCancelledSummary", {
+        done: summary.completedItems.toLocaleString(),
+        total: summary.items.toLocaleString(),
+      }));
+    }
+    const walk = uploadWalk.current;
+    if (walk) {
+      for (const id of ids) walk.ids.delete(id);
+      // Nothing this walk fed is still waiting to upload, so there is nothing left to read for.
+      // A failed row is not waiting either — it is a decision the failure list already asks for.
+      // The tasks come from a ref because this callback must not be rebuilt by every publish:
+      // it is a prop of every row.
+      const feeding = tasksRef.current.some((task) =>
+        walk.ids.has(task.id) && task.status !== "completed" && task.status !== "failed");
+      if (!feeding) {
+        uploadWalk.current = null;
+        walk.controller.abort();
+      }
+    }
+    // The rows are gone, and the folder they were describing may have existed only as those
+    // rows: the listing is what shows it with the files that did land, so read it again
+    // instead of leaving the destination with nothing in it.
+    reloadView.current();
+  }, [cancelUpload, showToast]);
+
   useEffect(() => {
     if (uploadBlocker.state !== "blocked") return;
     if (window.confirm(t("drive.leaveUploadsConfirm"))) uploadBlocker.proceed();
@@ -1279,13 +1343,22 @@ export function FilesPage() {
     // Capture entries while the drop data store is still readable, before awaiting traversal.
     // Files are handed to the queue as the walk finds them, so the first bytes move while the
     // rest of the tree is still being read; only the empty folders have to wait for the end.
+    //
+    // A new drop replaces the walk in flight: two trees reading into one queue would make
+    // "cancel this import" mean two different things. Files the earlier walk already handed
+    // over keep uploading — those are rows with their own cancel, and their own sentence.
+    uploadWalk.current?.controller.abort();
+    const walk = { controller: new AbortController(), ids: new Set<string>() };
+    uploadWalk.current = walk;
     setReadingUploads(0);
     void droppedUploadEntries(event.dataTransfer, {
+      signal: walk.controller.signal,
       onProgress: setReadingUploads,
-      onFiles: (files) => enqueue(files, path, itemExists),
+      onFiles: (files) => { for (const id of enqueue(files, path, itemExists)) walk.ids.add(id); },
     })
       .then((entries) => {
         setReadingUploads(null);
+        if (uploadWalk.current === walk) uploadWalk.current = null;
         // A folder that holds a file is created by that file, so only fileless folders still
         // need a task of their own — and whether a folder holds a file is known only now.
         const folders = foldersWithoutFiles(entries).filter((entry) => entry.file === null);
@@ -1293,6 +1366,10 @@ export function FilesPage() {
       })
       .catch((error) => {
         setReadingUploads(null);
+        if (uploadWalk.current === walk) uploadWalk.current = null;
+        // A cancelled walk was answered by the cancel itself; only a read that failed has
+        // something the person has not been told.
+        if (error instanceof DOMException && error.name === "AbortError") return;
         showToast(error instanceof Error ? error.message : t("drive.readUploadFailed"), "error");
       });
   };
@@ -1682,7 +1759,7 @@ export function FilesPage() {
                 </div>
               )}
 
-              <UploadFailures tasks={failed} onRetry={retryUpload} onCancel={cancelUpload} />
+              <UploadFailures tasks={failed} onRetry={retryUpload} onCancel={cancelUploadRow} />
 
               {creating && (
                 <div className={styles.newRow}>
@@ -1712,7 +1789,7 @@ export function FilesPage() {
                     <UploadRow
                       key={entry.path}
                       entry={entry}
-                      onCancel={cancelUpload}
+                      onCancel={cancelUploadRow}
                       onResume={resumeUpload}
                     />
                   ))}
@@ -1741,7 +1818,7 @@ export function FilesPage() {
                       <UploadRow
                         key={entry.path}
                         entry={entry}
-                        onCancel={cancelUpload}
+                        onCancel={cancelUploadRow}
                         onResume={resumeUpload}
                       />
                     ) : entry.item ? (

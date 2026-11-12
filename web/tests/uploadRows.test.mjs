@@ -214,9 +214,32 @@ test("clamps sent bytes and handles zero-byte files and finalization without NaN
   assert.equal(row.upload.percent, 100);
   assert.equal(row.upload.status, "finalizing");
   assert.deepEqual(row.upload.cancelIds, ["task:health/file"]);
-  const cancelling = buildUploadRows([], [task("health/file", { status: "finalizing", cancelRequested: true })], "health")[0];
-  assert.deepEqual(cancelling.upload.cancelIds, []);
+  const cancelling = buildUploadRows([], [task("health/file", { status: "finalizing", cancelRequested: true })], "health");
+  // A requested cancellation is not a row: the gesture is answered once, and a row that kept
+  // "Finishing" over the files not yet torn down was what made a cancel look like a rewrite.
+  assert.deepEqual(cancelling, []);
   assert.equal(buildUploadRows([], [task("health/file", { loaded: -1 })], "health")[0].upload.loaded, 0);
+});
+
+test("a cancelled task leaves the batch and a failed cancellation becomes a failure", () => {
+  const tasks = [
+    folder("health/tree"),
+    task("health/tree/landed", { status: "completed", size: 10 }),
+    task("health/tree/queued", { status: "queued", size: 10, cancelRequested: true }),
+    // A teardown the server refused: the session is still open and holds its reservation,
+    // so it is the one thing about a cancelled row a person can still act on.
+    task("health/tree/stuck", { status: "failed", size: 10, cancelRequested: true, error: "offline" }),
+  ];
+  const rows = buildUploadRows([], tasks, "health");
+  assert.deepEqual(paths(rows), ["health/tree"]);
+  const summary = rows[0].upload;
+  // Only what is still going to land is counted: the two cancelled rows are gone from the
+  // numbers as well as from the sheet, because the gesture reports what it took.
+  assert.equal(summary.files, 1);
+  assert.equal(summary.items, 1);
+  assert.equal(summary.completedItems, 1);
+  assert.deepEqual(summary.cancelIds, []);
+  assert.deepEqual(failedTasks(tasks).map((entry) => entry.path), ["health/tree/stuck"]);
 });
 
 test("a large tree counts folder creation as progress instead of bytes that cannot move yet", () => {

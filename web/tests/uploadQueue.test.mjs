@@ -509,6 +509,21 @@ test("cancel lost allocation ACK recovers and aborts the same idempotent session
   assert.equal(callsOf(server, "part").length, 0);
 });
 
+test("cancel answers with what the gesture covered, and an empty gesture answers nothing", async (t) => {
+  const server = uploadServer();
+  const harness = await mount(t, server.api);
+  enqueue(harness, [entry("tree/one"), entry("tree/two")]);
+  const queue = harness.render();
+  // The rows leave the sheet at once, so the gesture — not a row — is what can still say how
+  // many items it covered. Without it a cancelled import at 3% of 20,000 looked exactly like
+  // one that had never held more than the handful of rows not yet torn down.
+  const summary = queue.cancel(queue.tasks.map((task) => task.id));
+  assert.deepEqual(summary, { items: 2, completedItems: 0 });
+  assert.equal(queue.cancel(["unknown"]), null);
+  await harness.until((queue) => queue.tasks.length === 0);
+  for (const session of server.sessions.values()) assert.equal(session.state, "aborted");
+});
+
 test("cancel waiting folder removes descendants and a late poll cannot revive replacement tasks", async (t) => {
   const server = uploadServer();
   const gate = deferred();

@@ -202,6 +202,7 @@ const en = {
   "drive.overwriteConfirm": "“{name}” already exists. Overwrite it?",
   "drive.uploadCompleted": "Upload complete",
   "drive.uploadCompletedMany": "{files} uploaded",
+  "drive.uploadCancelledSummary": "Import cancelled · {done} of {total} items were already uploaded",
 
   "file.details": "File details",
   "file.path": "Path",
@@ -622,6 +623,7 @@ const zh: Record<MessageKey, string> = {
   "drive.overwriteConfirm": "「{name}」已经存在，覆盖它？",
   "drive.uploadCompleted": "上传完成",
   "drive.uploadCompletedMany": "已上传 {files}",
+  "drive.uploadCancelledSummary": "已取消导入 · 已上传 {done} / {total} 项",
 
   "file.details": "文件信息",
   "file.path": "路径",
