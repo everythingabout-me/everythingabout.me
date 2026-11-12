@@ -914,7 +914,10 @@ writers to spend the same old file's size credit. Temporary upload data and reta
 a separate physical budget. Missing index entries alone never make ordinary native files garbage.
 
 Idempotency keys are scoped by owner, principal, route/action and canonical request fingerprint. Same key with
-different intent returns `409 idempotency_conflict`. Store the durable operation/session/result with the key;
+different intent returns `409 idempotency_conflict`. The fingerprint covers what the client asked for, never what
+admission derived from the connection: native conditions and revisions, a resolved parent, and the connection's
+implicit-parents capability are evidence stored with the operation, so the same request must fingerprint the same
+whether it is being admitted or replayed. Store the durable operation/session/result with the key;
 retry after a lost response returns that identity. A replay never bypasses current authorization. Keys cannot
 provide exactly-once effects at arbitrary third parties; journals, native conditions and explicit uncertain
 outcome handling define the actual guarantee. Retention is explicit; retrying a key after expiry is a new request.

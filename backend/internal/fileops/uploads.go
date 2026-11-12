@@ -122,11 +122,20 @@ func clientUploadFingerprint(w storage.WriteIntent) (string, error) {
 	if w.ID != "" || w.Target == "" && (w.Selection != "id" || w.EntryID == "") || storage.ValidatePath(w.Target) != nil || w.Size < 0 || strings.ContainsRune(w.ClientCondition, 0) {
 		return "", E("invalid_request", nil)
 	}
-	// Native Conditions, ParentPath and ParentRevision are captured admission evidence.
-	// ClientCondition is the canonical original API precondition.
+	// Native Conditions, ParentPath, ParentRevision and Parents are captured admission
+	// evidence. ClientCondition is the canonical original API precondition.
+	//
+	// Parents is not even the client's flag: admission rewrites it to the connection's
+	// ImplicitParents capability, so with a provider that makes a folder with its first
+	// child (COS) an admitted create stores true while the replay of the same request —
+	// which runs before resolution — computes false. Every parents:true create replay then
+	// answered idempotency_conflict, and the one path that replays a create is the repair of
+	// a lost ACK, so a cancelled import reported one failed row per file whose session it
+	// was about to discard.
 	w.Conditions = storage.Conditions{}
 	w.ParentPath = ""
 	w.ParentRevision = nil
+	w.Parents = false
 	w = clientWriteIdentity(w)
 	if w.SourceModifiedAt != nil {
 		t := w.SourceModifiedAt.UTC()

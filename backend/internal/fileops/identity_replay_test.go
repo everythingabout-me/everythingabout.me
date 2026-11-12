@@ -46,6 +46,24 @@ func TestIdentityReplayClientIntent(t *testing.T) {
 			t.Fatalf("%s client identity omitted selected ID", tc.mode)
 		}
 	}
+	// A create that asked for missing ancestors stores the connection's ImplicitParents
+	// answer as Parents, but its replay runs before resolution and computes the flag as
+	// false. Admission evidence must not split a fingerprint: the stored intent that an
+	// admitted session carries and the client request that replays it are the same intent.
+	admitted := legacy
+	admitted.Parents = true
+	replayed := legacy
+	storedPrint, err := clientUploadFingerprint(admitted)
+	if err != nil {
+		t.Fatal(err)
+	}
+	replayedPrint, err := clientUploadFingerprint(replayed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if storedPrint != replayedPrint {
+		t.Fatal("implicit-parents admission changed the client fingerprint")
+	}
 	base := ActionRequest{Kind: "move", From: "before/file", To: "dest/file", IfRevision: "nr_original"}
 	captured := base
 	captured.Selection, captured.EntryID, captured.ParentID = "path:path", "captured-source", "captured-parent"
