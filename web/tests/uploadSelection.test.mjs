@@ -103,6 +103,24 @@ test("picker normalizes Unicode relative paths and deduplicates normalized ances
   assert.equal(first.name, "re\u0301sume\u0301.txt");
 });
 
+// Reading a dropped tree is one stat per file in the browser, so a large folder spends
+// seconds there before the queue exists. The page can only say so if the walk reports what
+// it has read: without a count on screen the drop looked like a freeze.
+test("a dropped tree reports how much of it has been read", async () => {
+  const root = directoryEntry("Health", [
+    [directoryEntry("day-1", [[fileEntry(makeFile("a.json")), fileEntry(makeFile("b.json"))]]), fileEntry(makeFile("c.json"))],
+    [],
+  ]);
+  const reports = [];
+  const entries = await droppedUploadEntries(transferWithEntries(root), (count) => reports.push(count));
+  assert.deepEqual(paths(entries), ["Health", "Health/day-1", "Health/day-1/a.json", "Health/day-1/b.json", "Health/c.json"]);
+  assert.ok(reports.length > 0, "the walk reported nothing while it read");
+  assert.equal(reports.at(-1), entries.length, "the last report is the whole selection");
+  for (let index = 1; index < reports.length; index += 1) {
+    assert.ok(reports[index] > reports[index - 1], "reports never go backwards");
+  }
+});
+
 test("picker rejects empty, dot, and dotdot path segments", () => {
   for (const path of ["/file", "root/", "root//file", ".", "..", "./file", "../file", "root/./file", "root/../file"]) {
     assert.throws(() => filesToUploadEntries([makeFile("file", path)]), /Invalid upload path/);

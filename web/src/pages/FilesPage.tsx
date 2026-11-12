@@ -646,6 +646,10 @@ export function FilesPage() {
   const [newName, setNewName] = useState("");
   const [toast, setToast] = useState<{ text: string; kind: "info" | "error" } | null>(null);
   const [dragging, setDragging] = useState(false);
+  // Entries read from a dropped tree so far. The walk stats every file (one round trip
+  // each), so a large folder takes seconds before the queue has anything to show; this is
+  // the only feedback that the drop was received and is being read.
+  const [readingUploads, setReadingUploads] = useState<number | null>(null);
   const [searchOpen, setSearchOpen] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
   const [downloadError, setDownloadError] = useState<string | null>(null);
@@ -1273,11 +1277,13 @@ export function FilesPage() {
     dragDepth.current = 0;
     setDragging(false);
     // Capture entries while the drop data store is still readable, before awaiting traversal.
-    void droppedUploadEntries(event.dataTransfer)
-      .then((entries) => enqueue(entries, path, itemExists))
-      .catch((error) => showToast(
-        error instanceof Error ? error.message : t("drive.readUploadFailed"), "error",
-      ));
+    setReadingUploads(0);
+    void droppedUploadEntries(event.dataTransfer, setReadingUploads)
+      .then((entries) => { setReadingUploads(null); enqueue(entries, path, itemExists); })
+      .catch((error) => {
+        setReadingUploads(null);
+        showToast(error instanceof Error ? error.message : t("drive.readUploadFailed"), "error");
+      });
   };
 
   const onFilesSelected = (event: React.ChangeEvent<HTMLInputElement>) => {
@@ -1657,6 +1663,13 @@ export function FilesPage() {
             <section ref={panelRef} className={styles.panel} aria-busy={pending}>
               {/* A switch has no skeleton to show, so a hairline at the card's edge carries the wait. */}
               {pending && !firstLoad && <span className={styles.loadLine} aria-hidden="true" />}
+
+              {readingUploads !== null && (
+                <div className={styles.readingFiles} role="status">
+                  <span className={styles.readingDot} aria-hidden="true" />
+                  {t("drive.readingUploadTree", { count: readingUploads.toLocaleString() })}
+                </div>
+              )}
 
               <UploadFailures tasks={failed} onRetry={retryUpload} onCancel={cancelUpload} />
 

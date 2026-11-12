@@ -1038,6 +1038,37 @@ a.crumb:hover {
 
 /* ---------- Failed uploads ---------- */
 
+/* A dropped tree is read before its queue exists: one stat per file, in the browser, with
+   nothing else to show for it. The row is a status, not a progress bar — the count is the
+   honest unit because the total is unknown until the walk ends. */
+.readingFiles {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--border);
+  color: var(--text-2);
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+}
+
+.readingDot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--accent-light);
+  animation: readingPulse 1.1s ease-in-out infinite;
+}
+
+@keyframes readingPulse {
+  0%, 100% { opacity: 0.35; transform: scale(0.85); }
+  50% { opacity: 1; transform: scale(1); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .readingDot { animation: none; }
+}
+
 /* The list sits above the rows, inside the sheet, so it is reachable from any folder: the
    files it names may be nowhere near the directory a person is looking at. Its own height is
    bounded because a bad link can fail hundreds of files, and the sheet must stay scrollable. */

@@ -55,7 +55,20 @@ export function foldersWithoutFiles(entries: UploadEntry[]): UploadEntry[] {
   return entries.filter((entry) => entry.file !== null || !withFile.has(entry.path));
 }
 
-export async function droppedUploadEntries(transfer: DataTransfer): Promise<UploadEntry[]> {
+/**
+ * Read a dropped tree.
+ *
+ * Reading a selected folder costs one `file()` round trip per file and one `readEntries`
+ * round trip per hundred children, so a large import spends seconds here before the first
+ * row exists. `onProgress` is how the page says so: it reports the running count at most
+ * ten times a second, which stays ahead of the eye without turning the walk into a render
+ * loop. Without it the drop looked like a freeze — the browser was reading, and nothing on
+ * screen moved until the whole tree had been walked.
+ */
+export async function droppedUploadEntries(
+  transfer: DataTransfer,
+  onProgress?: (count: number) => void,
+): Promise<UploadEntry[]> {
   type Source = { entry: FileSystemEntry } | { file: File };
   const sources: Source[] = [];
 
@@ -73,12 +86,23 @@ export async function droppedUploadEntries(transfer: DataTransfer): Promise<Uplo
   if (sources.length === 0) return filesToUploadEntries(transfer.files);
 
   const collector = entryCollector();
+  let found = 0;
+  let reportedAt = Number.NEGATIVE_INFINITY;
+  const count = () => {
+    found += 1;
+    if (!onProgress) return;
+    const now = performance.now();
+    if (now - reportedAt < 100) return;
+    reportedAt = now;
+    onProgress(found);
+  };
   async function visit(entry: FileSystemEntry, parent: string): Promise<void> {
     const name = normalizePath(entry.name);
     if (name.includes("/")) throw new Error(`Invalid upload entry name: ${entry.name}`);
     const path = parent ? `${parent}/${name}` : name;
     if (entry.isDirectory) {
       collector.add(path, null);
+      count();
       const reader = (entry as FileSystemDirectoryEntry).createReader();
       while (true) {
         // Chromium returns at most 100 children per readEntries call.
@@ -93,6 +117,7 @@ export async function droppedUploadEntries(transfer: DataTransfer): Promise<Uplo
         (entry as FileSystemFileEntry).file(resolve, reject);
       });
       collector.add(path, file);
+      count();
     } else {
       throw new Error(`Unsupported upload entry: ${path}`);
     }
@@ -100,7 +125,8 @@ export async function droppedUploadEntries(transfer: DataTransfer): Promise<Uplo
 
   for (const source of sources) {
     if ("entry" in source) await visit(source.entry, "");
-    else collector.add(source.file.webkitRelativePath || source.file.name, source.file);
+    else { collector.add(source.file.webkitRelativePath || source.file.name, source.file); count(); }
   }
+  onProgress?.(found);
   return collector.entries;
 }
