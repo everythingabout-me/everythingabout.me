@@ -36,7 +36,7 @@ import { formatNumber, intlLocale, resultsText, t } from "../i18n";
 import { formatRelativeTime } from "../i18n/format";
 import { useUploadQueue, type UploadStatus, type UploadTask } from "./useUploadQueue";
 import { resolveDeleteBlocker } from "./deleteBlocker";
-import { droppedUploadEntries, filesToUploadEntries } from "./uploadSelection";
+import { droppedUploadEntries, filesToUploadEntries, foldersWithoutFiles } from "./uploadSelection";
 import { buildUploadRows, failedTasks, isUploadDirectory, isUploadRowActive, type UploadRowEntry } from "./uploadRows";
 import { pendingFileOperations, setUploadOwner, settleFileOperation, subscribeFileOperations, trackFileOperation } from "./uploadPersistence";
 import { formatBytes, formatPreciseBytes, formatSize, formatSpeed } from "./sizeFormat";
@@ -1277,9 +1277,20 @@ export function FilesPage() {
     dragDepth.current = 0;
     setDragging(false);
     // Capture entries while the drop data store is still readable, before awaiting traversal.
+    // Files are handed to the queue as the walk finds them, so the first bytes move while the
+    // rest of the tree is still being read; only the empty folders have to wait for the end.
     setReadingUploads(0);
-    void droppedUploadEntries(event.dataTransfer, setReadingUploads)
-      .then((entries) => { setReadingUploads(null); enqueue(entries, path, itemExists); })
+    void droppedUploadEntries(event.dataTransfer, {
+      onProgress: setReadingUploads,
+      onFiles: (files) => enqueue(files, path, itemExists),
+    })
+      .then((entries) => {
+        setReadingUploads(null);
+        // A folder that holds a file is created by that file, so only fileless folders still
+        // need a task of their own — and whether a folder holds a file is known only now.
+        const folders = foldersWithoutFiles(entries).filter((entry) => entry.file === null);
+        if (folders.length) enqueue(folders, path, itemExists);
+      })
       .catch((error) => {
         setReadingUploads(null);
         showToast(error instanceof Error ? error.message : t("drive.readUploadFailed"), "error");

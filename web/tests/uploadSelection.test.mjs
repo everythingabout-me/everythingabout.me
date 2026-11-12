@@ -112,7 +112,7 @@ test("a dropped tree reports how much of it has been read", async () => {
     [],
   ]);
   const reports = [];
-  const entries = await droppedUploadEntries(transferWithEntries(root), (count) => reports.push(count));
+  const entries = await droppedUploadEntries(transferWithEntries(root), { onProgress: (count) => reports.push(count) });
   assert.deepEqual(paths(entries), ["Health", "Health/day-1", "Health/day-1/a.json", "Health/day-1/b.json", "Health/c.json"]);
   assert.ok(reports.length > 0, "the walk reported nothing while it read");
   assert.equal(reports.at(-1), entries.length, "the last report is the whole selection");
@@ -139,16 +139,70 @@ test("drops preserve nested same basenames, mixed files, and empty folders", asy
     empty,
   ]]);
   const entries = await droppedUploadEntries(transferWithEntries(root, fileEntry(loose)));
+  // Folders before files, name within a level: the order the sheet shows, so a streamed
+  // handover starts the same file the listing starts.
   assert.deepEqual(entries, [
     { path: "root", file: null },
+    { path: "root/empty", file: null },
     { path: "root/left", file: null },
     { path: "root/left/same.txt", file: left },
     { path: "root/right", file: null },
     { path: "root/right/same.txt", file: right },
-    { path: "root/empty", file: null },
     { path: "loose.txt", file: loose },
   ]);
   assert.equal(empty.reads, 1);
+});
+
+// Reading a large folder takes seconds, so a drop must not wait for the whole tree before
+// the first upload starts: files are handed over as the walk finds them, and the walk only
+// stalls on what it has not read yet.
+test("a dropped tree hands files over while the rest of it is still being read", async () => {
+  const first = makeFile("a.json");
+  const tree = directoryEntry("health", [[fileEntry(first)]]);
+  let release;
+  const blocked = new Promise((resolve) => { release = resolve; });
+  const slow = {
+    name: "zzz-slow",
+    isDirectory: true,
+    isFile: false,
+    createReader: () => ({ readEntries: (resolve) => { blocked.then(() => resolve([])); } }),
+  };
+  const handed = [];
+  const walk = droppedUploadEntries(transferWithEntries(tree, slow), {
+    batchSize: 1,
+    onFiles: (files) => handed.push(...files.map((entry) => entry.path)),
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(handed, ["health/a.json"], "the first file waited for the whole tree");
+  release();
+  const entries = await walk;
+  assert.deepEqual(paths(entries), ["health", "health/a.json", "zzz-slow"]);
+});
+
+// A folder that holds a file is created by that file; only a fileless folder needs a task of
+// its own, and whether it is one is known only after the subtree has been read. That is the
+// one part of a drop that cannot be streamed, and it is what the caller enqueues last.
+test("only fileless folders are left for the caller to enqueue", async () => {
+  const file = makeFile("a.txt");
+  const root = directoryEntry("root", [[
+    directoryEntry("left", [[fileEntry(file)]]),
+    directoryEntry("empty"),
+  ]]);
+  const entries = await droppedUploadEntries(transferWithEntries(root));
+  assert.deepEqual(paths(foldersWithoutFiles(entries).filter((entry) => entry.file === null)), ["root/empty"]);
+});
+
+// Older browsers hand a drop over as a flat list. The walk cannot be progressive there, but
+// the caller's streaming path must still receive the files it would otherwise never see.
+test("a drop without entry APIs still hands its files over", async () => {
+  const file = makeFile("a.txt", "root/a.txt");
+  const handed = [];
+  const entries = await droppedUploadEntries({ items: [], files: [file] }, {
+    onFiles: (files) => handed.push(...files.map((entry) => entry.path)),
+  });
+  assert.deepEqual(handed, ["root/a.txt"]);
+  assert.deepEqual(paths(entries), ["root", "root/a.txt"]);
+  assert.deepEqual(foldersWithoutFiles(entries).filter((entry) => entry.file === null), [], "the file creates its folder");
 });
 
 test("drops retain top-level empty folders without reading their placeholder files", async () => {
@@ -163,9 +217,13 @@ test("drops drain every readEntries batch beyond 100 children", async () => {
   const children = files.map((file) => fileEntry(file));
   const folder = directoryEntry("many", [children.slice(0, 100), children.slice(100, 200), children.slice(200)]);
   const entries = await droppedUploadEntries(transferWithEntries(folder));
+  const ordered = [...files].sort((a, b) => {
+    const left = a.name.toLowerCase(), right = b.name.toLowerCase();
+    return left !== right ? (left < right ? -1 : 1) : a.name < b.name ? -1 : a.name > b.name ? 1 : 0;
+  });
   assert.deepEqual(entries, [
     { path: "many", file: null },
-    ...files.map((file) => ({ path: `many/${file.name}`, file })),
+    ...ordered.map((file) => ({ path: `many/${file.name}`, file })),
   ]);
   assert.equal(folder.readers, 1);
   assert.equal(folder.reads, 4);
