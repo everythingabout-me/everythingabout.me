@@ -29,20 +29,30 @@ type fileWorkers struct {
 	ctx  context.Context
 }
 
-// fileOperationSlots bounds how many operations settle at once.
+// fileOperationSlots bounds how many operations may be in progress at once. It is a
+// concurrency bound, not a throughput one: settling one small upload is a few provider round
+// trips plus a short index transaction, all I/O, so raising this count does not make the
+// work cheaper — it only decides where the queue forms.
 //
-// Settling one small upload is a few provider round trips plus one index
-// transaction, roughly two seconds, and it is I/O-bound — so this count, not the
-// provider or the browser, decides how many files a second the service can finish.
-// Four slots pinned a 23k-file import at ~1.6 files/s however small the files were,
-// while a single browser tab already keeps eight chains in flight and every refused
-// operation then waited for the next five-second sweep. Thirty-two admits four such
-// clients (a second tab, a phone, an API import) and matches the provider transports'
-// idle-connection budget (MaxIdleConnsPerHost 32), so a larger pool would only move
-// the queue into the socket layer. The bound is process-wide rather than per owner:
-// one import can still starve another owner's commit, which is a scheduling question
-// this constant does not answer.
-const fileOperationSlots = 32
+// It used to be 32, sized as "four clients × eight chains", which quietly made this pool the
+// gate for one client's import: the client's settlement pages drained it exactly, and every
+// batch beyond that waited here where the browser could not see it. The pool is 1024 now, so
+// a single import never waits on it. What waits instead, in this order:
+//
+//   - the provider transport, which keeps MaxConnsPerHost (64) requests in flight and queues
+//     the rest in the socket layer;
+//   - PostgreSQL: 40 pool connections, each held only for the duration of one short
+//     transaction, so a thousand operations interleave over forty connections;
+//   - the per-owner advisory lock, which serialises every settlement transaction of one
+//     owner regardless of pool size. That is the bound on a single user's settlement rate,
+//     and it is what makes a deeper pool cost latency instead of buying throughput.
+//
+// Each operation is cheap to hold — a goroutine, one spool root handle and a small struct —
+// and it does not take a connection between transactions, so 1024 admitted operations cost
+// memory and file descriptors, not database capacity. The bound stays process-wide rather
+// than per owner: one import can still starve another owner's commit, which is a scheduling
+// question this constant does not answer.
+const fileOperationSlots = 1024
 
 // fileWorkerRetry is the consecutive-failure record for one operation. The journal
 // already knows a retry happened (it is the expiry of the lease), but it cannot say

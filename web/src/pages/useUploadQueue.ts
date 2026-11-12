@@ -19,11 +19,11 @@ const PART_POOL_SIZE = 16;
 // look-ahead; commits are bounded by the worker pool that settles them.
 const CREATE_BATCH_SIZE = 32;
 const COMMIT_BATCH_SIZE = 16;
-// Two settlement pages may be in flight: 32 items, which is exactly the server's settlement
-// pool, so the client never queues inside the server either. The pages belong to the
-// settlement stage alone — a file gives its transfer slot back before it waits here — so a
-// pending page never holds up the bytes behind it.
-const COMMIT_PAGES = 2;
+// Pages that may be in flight at once: the server's settlement pool (1024) divided by this
+// page size, so the client can fill the pool without ever being refused for a slot. The pages
+// belong to the settlement stage alone — a file gives its transfer slot back before it waits
+// here — so a pending page never holds up the bytes behind it.
+const COMMIT_PAGES = 64;
 // Sessions kept in hand ahead of the transfer window: four part pools, so the window can be
 // refilled four times over before a create page (~1.7 s for 32, measured in 741f910 against
 // this bucket) has to answer. The page the server admits is 32, so 64 in hand is two

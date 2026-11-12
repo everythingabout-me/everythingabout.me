@@ -20,9 +20,9 @@ import (
 // The commit page is sixteen because the page, not the transfer, was the pipeline's gate:
 // a settlement costs 0.63 s (p50, measured against this bucket), so eight items per page
 // plus the queue's two-second fill wait capped an import at ~3.8 files/s while creates ran
-// at 13/s. Two pages may be in flight — thirty-two items, exactly the settlement slots — so
-// the client never queues inside the server either, and a page that returns is replaced
-// immediately instead of waiting for the queue to fill another one.
+// at 13/s. A page that returns is replaced immediately instead of waiting for the queue to
+// fill another one, and the client may keep as many pages in flight as the settlement pool
+// admits (see fileOperationSlots), so a page is never refused for lack of a slot.
 const (
 	filesUploadCreateBatchLimit = 32
 	filesUploadCommitBatchLimit = 16
