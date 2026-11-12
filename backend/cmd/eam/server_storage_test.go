@@ -132,18 +132,73 @@ func TestLocalStorageServerStartupPostgres(t *testing.T) {
 	if err != nil || len(migrations) == 0 {
 		t.Fatalf("discover real migrations: %v", err)
 	}
-	for i := 1; i <= 2; i++ {
-		output := run("migrate")
-		if !strings.Contains(output, fmt.Sprintf("applied %d migrations", len(migrations))) {
-			t.Fatalf("migration pass %d: %s", i, output)
-		}
-		t.Logf("full migration pass %d succeeded (%d files)", i, len(migrations))
-	}
 	db, err := pgx.Connect(ctx, isolatedURL)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer db.Close(context.Background())
+
+	// schema_migrations is the contract; the closing line only reports it. The assertions
+	// below match a count fragment ("applied N ") instead of the singular/plural wording
+	// ("migration(s)"), so rewording the summary cannot fail a correct run, and compare the
+	// recorded rows themselves so a second pass that silently re-executed or re-recorded a
+	// file fails even if it prints the right message.
+	type migrationRecord struct {
+		name, method, appliedAt string
+	}
+	recorded := func() []migrationRecord {
+		t.Helper()
+		rows, err := db.Query(ctx, `select name, method, applied_at::text from schema_migrations order by name`)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer rows.Close()
+		var result []migrationRecord
+		for rows.Next() {
+			var record migrationRecord
+			if err := rows.Scan(&record.name, &record.method, &record.appliedAt); err != nil {
+				t.Fatal(err)
+			}
+			result = append(result, record)
+		}
+		if err := rows.Err(); err != nil {
+			t.Fatal(err)
+		}
+		return result
+	}
+
+	output := run("migrate")
+	if !strings.Contains(output, fmt.Sprintf("applied %d ", len(migrations))) {
+		t.Fatalf("first migration pass did not report applying all %d files:\n%s", len(migrations), output)
+	}
+	first := recorded()
+	if len(first) != len(migrations) {
+		t.Fatalf("first migration pass recorded %d files in %s, want %d:\n%s", len(first), versionTable, len(migrations), output)
+	}
+	seen := make(map[string]migrationRecord, len(first))
+	for _, record := range first {
+		seen[record.name] = record
+	}
+	for _, migration := range migrations {
+		name := filepath.Base(migration)
+		record, ok := seen[name]
+		if !ok {
+			t.Fatalf("first migration pass applied %s but did not record it in %s:\n%s", name, versionTable, output)
+		}
+		if record.method != "executed" {
+			t.Fatalf("first migration pass recorded %s as method=%q, want executed: the database started empty", name, record.method)
+		}
+	}
+	t.Logf("full migration pass 1: applied %d files and recorded each as executed", len(migrations))
+
+	output = run("migrate")
+	if !strings.Contains(output, "nothing to apply") || !strings.Contains(output, "already recorded") {
+		t.Fatalf("second migration pass did not report that every file is already recorded:\n%s", output)
+	}
+	if second := recorded(); !reflect.DeepEqual(first, second) {
+		t.Fatalf("second migration pass changed %s; a recorded file must not be re-executed or re-recorded:\nbefore=%v\nafter=%v", versionTable, first, second)
+	}
+	t.Logf("full migration pass 2: applied nothing; the %d recorded files are unchanged", len(migrations))
 	password := "local-startup-password"
 	hash, err := auth.HashPassword(password)
 	if err != nil {
@@ -173,7 +228,7 @@ func TestLocalStorageServerStartupPostgres(t *testing.T) {
 		return result
 	}
 	before := snapshot()
-	output := run("reconcile", "--owner", ownerID, "--dry-run")
+	output = run("reconcile", "--owner", ownerID, "--dry-run")
 	if !strings.Contains(output, "scanned 3 paths, inserted 3") || !reflect.DeepEqual(before, snapshot()) {
 		t.Fatalf("dry-run changed index or missed native files: %s", output)
 	}

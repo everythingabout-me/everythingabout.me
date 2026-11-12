@@ -121,7 +121,9 @@ func TestMigrateAppliesOnceSkipsAndRollsBackFailures(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(output, fmt.Sprintf("applied %d migration(s)", len(files))) {
+	// Match the count fragment, not the summary's singular/plural wording: the history rows
+	// below are the contract.
+	if !strings.Contains(output, fmt.Sprintf("applied %d ", len(files))) {
 		t.Fatalf("first run did not apply every migration:\n%s", output)
 	}
 	baseline, executed := countMigrations(t, pool)
