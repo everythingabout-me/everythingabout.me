@@ -12,8 +12,8 @@ import (
 // Only upload_commit has a registered staged cleanup worker in P3; generic entry
 // allocation cleanup must register its own known-identity handler in P4.
 func (p *Postgres) CleanupCandidates(ctx context.Context, limit int) ([]Operation, error) {
-	if limit < 1 || limit > 1000 {
-		return nil, E("invalid_request", nil)
+	if err := scanLimit("cleanup scan", limit, 1000); err != nil {
+		return nil, err
 	}
 	// Scheduling attempts rotate durably even when an active late body makes
 	// Discard busy. Selecting only the oldest finished rows would starve all later

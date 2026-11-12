@@ -244,8 +244,8 @@ func (p *Postgres) AbortUpload(ctx context.Context, root Root, actor Actor, id s
 // candidate is rechecked under the owner lock before cancellation, preventing a
 // receipt/commit from racing with the expiry decision.
 func (p *Postgres) ExpireUploads(ctx context.Context, limit int) ([]Upload, error) {
-	if limit < 1 || limit > 1000 {
-		return nil, E("invalid_request", nil)
+	if err := scanLimit("upload expiry scan", limit, 1000); err != nil {
+		return nil, err
 	}
 	rows, err := p.pool.Query(ctx, `select operation_id::text,owner_id::text from file_uploads where state='open' and expires_at<=clock_timestamp() order by expires_at,operation_id limit $1`, limit)
 	if err != nil {

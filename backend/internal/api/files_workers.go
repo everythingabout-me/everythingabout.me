@@ -54,6 +54,20 @@ type fileWorkers struct {
 // question this constant does not answer.
 const fileOperationSlots = 1024
 
+// pendingScanPage is how many pending operations the scanner reads per query. It is a page
+// size, not the pool size: the two were one constant until the pool grew past the journal's
+// bound and every scan was refused, so nothing deferred or interrupted was resumed.
+//
+// The scan runs on every freed slot, when there is usually one operation to admit, and on
+// the periodic sweep, when a restart may have the whole pool to refill. 256 rows is about
+// 1.3 MB of snapshot JSON per round trip (an upload commit is roughly 5 KB), which keeps the
+// common one-admission scan cheap and still refills an empty pool in four pages.
+const pendingScanPage = 256
+
+// The journal refuses a page above its bound, and a refused scan fails every five seconds
+// without stopping the server. Fail the build instead: a negative constant cannot be a uint.
+const _ = uint(fileops.PendingPageMax - pendingScanPage)
+
 // fileWorkerRetry is the consecutive-failure record for one operation. The journal
 // already knows a retry happened (it is the expiry of the lease), but it cannot say
 // how many times the same attempt failed or when the next one is due; that is the
@@ -387,7 +401,9 @@ func (s *Server) StartFileOperations(ctx context.Context) {
 		periodic := true
 		for {
 			if periodic {
-				if expired, e := s.filesJournal.ExpireUploads(ctx, 32); e == nil {
+				expired, e := s.filesJournal.ExpireUploads(ctx, 32)
+				warnFileOperationScan(ctx, "upload expiry", "expired upload sessions keep their reservations", e)
+				if e == nil {
 					for _, u := range expired {
 						_ = s.queueFileOperation(u.Operation)
 					}
@@ -395,7 +411,9 @@ func (s *Server) StartFileOperations(ctx context.Context) {
 			}
 			s.drainPendingFileOperations(ctx)
 			if periodic {
-				if cleanup, e := s.filesJournal.CleanupCandidates(ctx, 16); e == nil {
+				cleanup, e := s.filesJournal.CleanupCandidates(ctx, 16)
+				warnFileOperationScan(ctx, "cleanup", "finished uploads keep their staged data and physical reservation", e)
+				if e == nil {
 					for _, op := range cleanup {
 						if e = s.queueFileOperation(op); errors.Is(e, errFilesWorkerBusy) {
 							break
@@ -415,17 +433,25 @@ func (s *Server) StartFileOperations(ctx context.Context) {
 	}()
 }
 
-// drainPendingFileOperations admits durable work that is waiting for a slot. A refused
-// admission means the pool is full, so the scan stops there and lets the next wake (or
-// sweep) retry; pushing the rest would only park them in the busy path again.
+// drainPendingFileOperations admits durable work that is waiting for a slot, oldest first,
+// walking the whole queue a page at a time. A refused admission means the pool is full, so
+// the walk stops there and lets the next wake (or sweep) retry; pushing the rest would only
+// park them in the busy path again. An operation that is already running or waiting out a
+// retry is passed over without ending the walk, so it cannot hide the work queued behind it.
 func (s *Server) drainPendingFileOperations(ctx context.Context) {
-	pending, err := s.filesJournal.Pending(ctx, fileOperationSlots)
-	if err != nil && ctx.Err() == nil {
-		slog.Warn("file operation scan unavailable", "error", err)
+	err := s.filesJournal.EachPending(ctx, pendingScanPage, func(op fileops.Operation) bool {
+		return !errors.Is(s.queueFileOperation(op), errFilesWorkerBusy)
+	})
+	warnFileOperationScan(ctx, "pending", "deferred and interrupted operations are not resumed", err)
+}
+
+// warnFileOperationScan reports a background scan that could not read the journal. These
+// scans retry forever and nothing else surfaces their failure, so the line has to stand on
+// its own: which scan, what stays undone while it fails, and the whole cause chain — a bare
+// code here read like an outage when it was a constant the journal refused.
+func warnFileOperationScan(ctx context.Context, scan, stalled string, err error) {
+	if err == nil || ctx.Err() != nil {
+		return
 	}
-	for _, op := range pending {
-		if err := s.queueFileOperation(op); errors.Is(err, errFilesWorkerBusy) {
-			return
-		}
-	}
+	slog.Warn("file operation scan failed", "scan", scan, "stalled", stalled, "code", fileOperationErrorCode(err), "cause", errorCauseChain(err))
 }
