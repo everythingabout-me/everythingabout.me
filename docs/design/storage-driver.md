@@ -381,6 +381,21 @@ Classes A and B never hand bytes to the driver: the client writes into unpublish
 driver later verifies and publishes it. Class C stages bytes through the driver. Both end in the same
 publication state and the same ledger.
 
+The intent ledger is recovery evidence with a retention, not permanent state. A record whose operation has
+settled (`applied`, `not_applied`, `discarded`, or a failed stage that never published) may be removed once
+`storage.IntentRetention` has passed; it was kept for the minimum 24-hour window in which a terminal operation
+can still answer a retry. A record whose operation is non-terminal — reserved, receiving, ready, staging, executing,
+publishing, unknown, or unresolved — is never removed, because its native effect may still land; deletion would
+forget a possible effect. Cleanup takes the per-intent lock and rereads the record under it, and removes a
+payload before the record that names it, so it can be interrupted and rerun safely.
+
+Admission proves only what it needs. A binding may contain settled records and their permanent per-intent
+locks: they cannot hide a future effect, so they do not block an automatic baseline. Any non-terminal record,
+or any spool entry the build cannot classify, still refuses admission exactly as an unresolved effect does.
+The alternative — requiring an empty spool — made a disposable cache unrebuildable after an index loss, and
+only an undocumented manual directory deletion could recover it. `eam storage-ledger-prune --owner-id UUID
+[--dry-run]` reclaims expired settled records; admission does not depend on it having run.
+
 ```go
 package storage
 

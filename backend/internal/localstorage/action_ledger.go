@@ -10,6 +10,7 @@ import (
 	"os"
 	"strings"
 	"syscall"
+	"time"
 
 	"everythingabout.me/backend/internal/storage"
 )
@@ -25,6 +26,8 @@ type actionLedger struct {
 	Write                      *storage.WriteIntent
 	StageEvidence              []byte
 	Result                     *storage.MutationResult
+	// RetainUntil is when this settled record may leave the spool. See ledger_retention.go.
+	RetainUntil time.Time
 }
 type actionReceipt struct {
 	Version                    int
@@ -104,6 +107,7 @@ func (w *MutationDriver) saveAction(root *os.Root, r *actionLedger) error {
 	if err != nil {
 		return err
 	}
+	settleLedgerRetention(r.Phase, &r.RetainUntil, actionSettled, time.Now())
 	key := actionKey(r.Intent.ID)
 	if err := root.Remove(key + ".next"); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err

@@ -107,10 +107,11 @@ Writes stay behind explicit admission. Configure `FILE_COORDINATED_WRITES=true` 
 validate and import the native index, then run `eam storage-admit --owner-id UUID --writers-quiesced
 --evidence /secure/proof.json` for every owner that already holds content, with `--physical-bytes` and
 inventory evidence for object connections. The only automatic baseline is the zero one for a brand-new owner
-whose index, accounting and native root are all provably empty; every other missing or mismatched baseline, and
-every writer revocation, stays operator-only. Object connections use current-object ETag revisions with native
-conditions; COS ignores `If-Match`, so replacement rechecks the ETag under a coordinated PUT, and no bucket
-versioning is required. `STORAGE_BACKEND=local` or `s3` starts without COS configuration.
+whose index, accounting and native root are all provably empty and whose spool holds no non-terminal intent
+record; a settled record from a previous lifetime is evidence that no effect can still land and does not
+disqualify it. Every other missing or mismatched baseline, and every writer revocation, stays operator-only.
+Object connections use current-object ETag revisions with native conditions; COS ignores `If-Match`, so
+replacement rechecks the ETag under a coordinated PUT, and no bucket versioning is required. `STORAGE_BACKEND=local` or `s3` starts without COS configuration.
 
 Server startup requires a stable `APP_SECRET`; production also requires explicit SES credentials. Configure
 `FILE_COOKIE_ORIGINS` for cookie mutations and credentialed CORS; GET `/api/files/me` bootstraps its
@@ -511,6 +512,7 @@ go run ./cmd/eam migrate                       # create / upgrade tables
 go run ./cmd/eam doctor [--write]              # self-check (`--write` writes a probe object, then deletes it)
 go run ./cmd/eam reconcile --owner … [--inventory …] [--dry-run]
 go run ./cmd/eam storage-resolve-upload --operation-id … [--dry-run]  # operator fallback: release a discarded upload whose abort answer was lost
+go run ./cmd/eam storage-ledger-prune --owner-id UUID [--dry-run]  # reclaim expired settled intent records; non-terminal records stay
 go run ./cmd/eam file-changes-prune --owner-id UUID [--dry-run]
 go run ./cmd/eam file-changes-reset --owner-id UUID --writers-quiesced [--dry-run]
 go run ./cmd/eam claim --email … [--dry-run] [--keep-source]
@@ -520,6 +522,9 @@ go run ./cmd/eam token revoke --email … --id …
 ```
 
 Change pruning removes only an expired contiguous feed prefix, retaining effect receipts and file bytes.
+Intent-ledger pruning removes only records whose operation already settled and whose 24-hour retention has
+passed; a non-terminal record is never removed, because its native effect may still land. Admission needs no
+empty spool, so a lost-index rebuild does not depend on this command or on hand-deleting driver evidence.
 No automatic scheduler is wired. Change audit remains indefinitely; no 365-day deletion promise is made.
 Migration 032 binds each stream to one durable root/configuration namespace on first use; later mismatches
 reject access rather than silently rebind. After database restore or any root rebind, including A → B → A,

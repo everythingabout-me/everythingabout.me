@@ -24,6 +24,15 @@ type MutationResult struct {
 }
 type Checkpoint func(context.Context, []byte) error
 
+// IntentRetention is how long a driver keeps a settled intent ledger record after the
+// operation reaches a terminal phase. It is the minimum 24-hour window the operation
+// journal guarantees for a terminal operation, so a record disappears only after every
+// client retry it could still answer has itself expired. A record is recovery evidence, not user
+// data: keeping it forever made a disposable spool block the automatic baseline after an
+// index loss, while removing a non-terminal one would forget a possible effect. Cleanup
+// therefore applies this duration only to terminal records and never to any other state.
+const IntentRetention = 24 * time.Hour
+
 type WriteIntent struct {
 	EntryID    string `json:",omitempty"`
 	ParentID   string `json:",omitempty"`

@@ -18,8 +18,10 @@ import (
 )
 
 // Driver is a single-gateway admitted view over an existing read driver. Spool
-// intent records and locks are authoritative recovery evidence, never user data.
-// The caller must preserve this spool across restarts and database restoration.
+// intent records and locks are recovery evidence, never user data. A settled record
+// is kept for storage.IntentRetention and then pruned; a non-terminal one is never
+// aged out because its native effect may still land. The caller must preserve this
+// spool across restarts and database restoration.
 type Driver struct {
 	tree      storage.Driver
 	binding   storage.Config

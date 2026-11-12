@@ -11,6 +11,7 @@ import (
 	"io"
 	"os"
 	"sync"
+	"time"
 
 	"everythingabout.me/backend/internal/storage"
 )
@@ -122,6 +123,8 @@ type stageLedger struct {
 	ParentIdentity string
 	Digest         *storage.Digest
 	Result         *storage.MutationResult
+	// RetainUntil is when this settled record may leave the spool. See ledger_retention.go.
+	RetainUntil time.Time
 }
 
 func (w *StagedWriter) receipt(r *stageLedger) []byte {
@@ -214,6 +217,7 @@ func syncRoot(root *os.Root) error {
 	return f.Sync()
 }
 func (w *StagedWriter) save(root *os.Root, r *stageLedger) error {
+	settleLedgerRetention(r.Phase, &r.RetainUntil, stageSettled, time.Now())
 	b, err := json.Marshal(r)
 	if err != nil {
 		return err

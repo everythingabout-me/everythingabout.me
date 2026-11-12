@@ -40,6 +40,10 @@ type ledger struct {
 	// the receipt from before that proof (cleanup does exactly that), because the
 	// fence it would restore can never be lifted again.
 	Unpublished bool
+	// RetainUntil is when this settled record may leave the spool. It is stamped once,
+	// on the first save in a terminal phase, and cleared if a later call proves the
+	// outcome non-terminal again. See retention.go for the rule and its reason.
+	RetainUntil time.Time
 }
 type receipt struct {
 	Format                            int
@@ -115,6 +119,7 @@ func (d *Driver) load(kind, id string) (*ledger, error) {
 func (d *Driver) save(r *ledger) error {
 	r.Format = 1
 	r.Binding = d.namespace
+	settleRetention(r.Phase, &r.RetainUntil, time.Now())
 	data, err := json.Marshal(r)
 	if err != nil {
 		return err

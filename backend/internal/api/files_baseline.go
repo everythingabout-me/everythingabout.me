@@ -34,8 +34,9 @@ func filesRootFor(content storage.Driver) (fileops.Root, bool) {
 	}, true
 }
 
-// emptyOwnerVerifier proves an owner root has never held native content. Only the
-// storage backend can answer that from the exact driver and spool.
+// emptyOwnerVerifier proves an owner root holds no native content and no non-terminal
+// intent record that could still land an effect. Only the storage backend can answer
+// that from the exact driver and spool; settled records do not block the baseline.
 type emptyOwnerVerifier interface {
 	VerifyEmptyOwner(context.Context, string, storage.Driver) error
 }

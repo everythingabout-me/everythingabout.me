@@ -54,6 +54,8 @@ func main() {
 		err = runStorageBaseline(args)
 	case "storage-resolve-upload":
 		err = runStorageResolveUpload(args)
+	case "storage-ledger-prune":
+		err = runStorageLedgerPrune(args)
 	case "file-changes-prune":
 		err = runFileChangesMaintenance(args, false)
 	case "file-changes-reset":
@@ -97,6 +99,7 @@ usage:
   eam storage-baseline --owner-id UUID --output new-baseline.json [--writers-quiesced]
   eam storage-baseline --input baseline.json --output recheck.json [--quota-bytes N]
   eam storage-resolve-upload --operation-id UUID [--dry-run]  resolve a terminal upload stuck on an unconfirmed part receipt
+  eam storage-ledger-prune --owner-id UUID [--dry-run]  remove expired settled intent records, keep non-terminal evidence
   eam file-changes-prune --owner-id UUID [--dry-run]  remove expired change rows, retain deduplication receipts
   eam file-changes-reset --owner-id UUID --writers-quiesced [--dry-run]  bind current root and expire old cursors
   eam claim --email email [--dry-run] [--keep-source]

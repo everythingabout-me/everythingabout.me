@@ -221,6 +221,12 @@ cannot push the record back to `unknown`, which would restore a fence nothing ca
 was not merely cautious: a lost commit reply fenced its path, and every folder above it, permanently — one
 interrupted import made a whole folder undeletable that way.
 
+A settled record is kept for `storage.IntentRetention` (at least the 24-hour terminal operation retry window)
+and then may be pruned; a non-terminal record is never pruned, because its effect may still land. Admission therefore
+requires the spool to hold no non-terminal record, not an empty directory: settled evidence and its permanent
+locks cannot hide a future effect, and requiring their removal made a lost-index rebuild depend on hand-deleting
+the driver's recovery evidence.
+
 One-file overwrite should preserve old complete bytes until an atomic native switch. Drivers unable to meet
 a required create/replace condition must reject that write capability instead of silently falling back to
 in-place partial overwrite. Conditions against arbitrary external writers need native support or coordinated

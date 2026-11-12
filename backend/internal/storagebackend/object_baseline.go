@@ -19,7 +19,7 @@ func (b *Backend) ValidateObjectBaseline(ctx context.Context, ownerID string, en
 	if err != nil {
 		return err
 	}
-	if err = objectmutation.CheckSpoolEmpty(binding, b.objectOptions); err != nil {
+	if err = objectmutation.CheckSpoolSettled(binding, b.objectOptions); err != nil {
 		return err
 	}
 	for _, e := range entries {
@@ -49,5 +49,5 @@ func (b *Backend) ValidateObjectBaseline(ctx context.Context, ownerID string, en
 			return storage.NewError("unsupported", e.Path, nil)
 		}
 	}
-	return objectmutation.CheckSpoolEmpty(binding, b.objectOptions)
+	return objectmutation.CheckSpoolSettled(binding, b.objectOptions)
 }
