@@ -608,11 +608,12 @@ func TestFilesMutationsPostgresLocalConformance(t *testing.T) {
 		body := []byte(`{"destination":{"parent":{"id":"` + parent["id"].(string) + `"},"name":"empty.txt"},"size":0}`)
 		headers := http.Header{"Idempotency-Key": {"upload-parent-replay"}}
 		upload := object(t, request("POST", "/api/files/uploads", bearer, body, headers), 201)
-		committed := request("POST", upload["commitUrl"].(string), bearer, nil, nil)
-		object(t, committed, 202)
-		done := poll(t, operationPath(t, committed), bearer)
-		if done["state"] != "succeeded" {
-			t.Fatalf("zero-byte replay fixture upload: %v", done)
+		// An ordinary commit has nothing detached about it: the request settles the
+		// publication and answers 200 with the file it published. A 202 here would make
+		// the client poll for a result the server already had.
+		committed := object(t, request("POST", upload["commitUrl"].(string), bearer, nil, nil), 200)
+		if committed["path"] != "/UploadReplay/empty.txt" || committed["size"] != float64(0) {
+			t.Fatalf("in-request commit did not return the published file: %v", committed)
 		}
 		current := metadata(t, "/UploadReplay")
 		object(t, action("POST", "move", "/UploadReplay", "/UploadReplayMoved", current["revision"].(string), nil), 200)

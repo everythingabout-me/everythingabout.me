@@ -16,11 +16,13 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"everythingabout.me/backend/internal/auth"
 	"everythingabout.me/backend/internal/fileops"
+	"everythingabout.me/backend/internal/storagebackend"
 )
 
 // These HTTP tests reuse the explicit disposable database fixture. All byte paths
@@ -643,44 +645,203 @@ func TestFilesUploadsPostgresObjectPublicationLimitAndUnknown(t *testing.T) {
 		return f.request(t, "POST", "/uploads", "", body, http.Header{"Idempotency-Key": {key}, "Content-Type": {"application/json"}})
 	}
 	uploadsHTTPProblem(t, create("/beyond-native-limit", "limit", filesUploadPartSize*filesUploadMaxParts+1), 413, "file_too_large")
-	id := uploadsHTTPJSON(t, create("/unknown-upload", "unknown", 4), 201)["id"].(string)
-	uploadsHTTPJSON(t, f.request(t, "PUT", "/uploads/"+id+"/parts/1", "", []byte("data"), nil), 201)
-	key := "drive/" + f.owners[0] + "/unknown-upload"
-	f.provider.mu.Lock()
-	f.provider.lostReplyKey = key
-	f.provider.mu.Unlock()
-	response := f.request(t, "POST", "/uploads/"+id+"/commit", "", nil, nil)
-	uploadsHTTPJSON(t, response, 202)
-	deadline := time.Now().Add(8 * time.Second)
-	for {
-		op := uploadsHTTPJSON(t, f.request(t, "GET", "/operations/"+id, "", nil, nil), 200)
-		if op["state"] == "outcome_unknown" {
-			break
+	usage := func() fileops.Usage {
+		t.Helper()
+		u, err := fileops.NewPostgres(f.db.Pool()).Usage(f.ctx, f.roots[0], workerActor(f.roots[0]))
+		if err != nil {
+			t.Fatal(err)
 		}
-		if time.Now().After(deadline) {
-			t.Fatalf("lost native reply did not retain uncertainty: %v", op)
-		}
-		time.Sleep(2 * time.Millisecond)
+		return u
 	}
-	status := uploadsHTTPJSON(t, f.request(t, "GET", "/uploads/"+id, "", nil, nil), 200)
-	if status["state"] != "outcome_unknown" {
-		t.Fatalf("session hid unresolved publication %v", status)
-	}
-	uploadsHTTPProblem(t, f.request(t, "DELETE", "/uploads/"+id, "", nil, nil), 409, "commit_in_progress")
+
+	// A lost final reply is not by itself uncertainty. This provider applied the
+	// completion and then dropped the connection; the server reconciled that against
+	// the destination, whose intent metadata and size are this session's own, so the
+	// commit settles in the request and answers 200 with the file. The durable
+	// Operation reports the same settled publication, which is what makes the answer
+	// evidence rather than a guess.
+	observedID := uploadsHTTPJSON(t, create("/observed-upload", "observed", 4), 201)["id"].(string)
+	uploadsHTTPJSON(t, f.request(t, "PUT", "/uploads/"+observedID+"/parts/1", "", []byte("data"), nil), 201)
+	observedKey := "drive/" + f.owners[0] + "/observed-upload"
 	f.provider.mu.Lock()
-	puts := f.provider.puts[key]
-	completes := f.provider.completeRequests[key]
-	native, exists := f.provider.current(key)
+	f.provider.lostReplyKey = observedKey
 	f.provider.mu.Unlock()
-	if !exists || !bytes.Equal(native.Body, []byte("data")) || puts != 0 || completes != 1 {
-		t.Fatalf("unexpected native attempts puts=%d completes=%d exists=%v", puts, completes, exists)
+	committed := uploadsHTTPJSON(t, f.request(t, "POST", "/uploads/"+observedID+"/commit", "", nil, nil), 200)
+	if committed["path"] != "/observed-upload" || committed["size"] != float64(4) {
+		t.Fatalf("lost reply was not reconciled to the published file: %v", committed)
 	}
-	usage, err := fileops.NewPostgres(f.db.Pool()).Usage(f.ctx, f.roots[0], workerActor(f.roots[0]))
+	settled := uploadsHTTPJSON(t, f.request(t, "GET", "/operations/"+observedID, "", nil, nil), 200)
+	if settled["state"] != "succeeded" || settled["result"] == nil {
+		t.Fatalf("in-request settlement left an unsettled operation: %v", settled)
+	}
+	if session := uploadsHTTPJSON(t, f.request(t, "GET", "/uploads/"+observedID, "", nil, nil), 200); session["state"] != "committed" {
+		t.Fatalf("session did not settle with the file: %v", session)
+	}
+	f.provider.mu.Lock()
+	observedPuts, observedCompletes := f.provider.puts[observedKey], f.provider.completeRequests[observedKey]
+	observedNative, observedExists := f.provider.current(observedKey)
+	f.provider.mu.Unlock()
+	if !observedExists || !bytes.Equal(observedNative.Body, []byte("data")) || observedPuts != 0 || observedCompletes != 1 {
+		t.Fatalf("observed reply was replayed or lost: puts=%d completes=%d exists=%v", observedPuts, observedCompletes, observedExists)
+	}
+	if u := usage(); u.LogicalReserved != 0 || u.PhysicalReserved != 0 || u.LogicalBytes != 4 {
+		t.Fatalf("settled publication kept a reservation: %+v", u)
+	}
+
+	// Uncertainty is the case where the destination cannot be observed after the lost
+	// reply: the completion applied, but every read of the key fails. The commit cannot
+	// settle, so the in-request answer is the durable Operation (202 + Location), and
+	// the same uncertainty is visible on the operation and on the session. Nothing may
+	// replay the native effect, and the liability must stay reserved until it is
+	// resolved. A proxy in front of the fixture's provider drops destination reads after
+	// the completion, while the provider itself keeps the writer it already applied.
+	var proxiedOwner string
+	if err := f.db.Pool().QueryRow(f.ctx, `insert into users(email,password_hash) values('proxied@example.test','') returning id::text`).Scan(&proxiedOwner); err != nil {
+		t.Fatal(err)
+	}
+	key := "drive/" + proxiedOwner + "/unknown-upload"
+	var unobservable atomic.Bool
+	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		target := strings.TrimPrefix(r.URL.Path, "/bucket/")
+		if r.Method == http.MethodPost && r.URL.Query().Get("uploadId") != "" && target == key {
+			unobservable.Store(true)
+		}
+		if unobservable.Load() && (r.Method == http.MethodHead || r.Method == http.MethodGet) && target == key {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		f.provider.serve(t, w, r)
+	}))
+	t.Cleanup(proxy.Close)
+	evidence, err := os.ReadFile(f.cfg.Storage.ObjectAdmissionFile)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if usage.LogicalReserved == 0 || usage.PhysicalReserved == 0 {
-		t.Fatalf("unknown effect released liability %+v", usage)
+	var admission map[string]any
+	if err = json.Unmarshal(evidence, &admission); err != nil {
+		t.Fatal(err)
+	}
+	admission["endpoint"] = proxy.URL
+	if evidence, err = json.Marshal(admission); err != nil {
+		t.Fatal(err)
+	}
+	evidencePath := filepath.Join(t.TempDir(), "admission.json")
+	if err = os.WriteFile(evidencePath, evidence, 0600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := *f.cfg
+	cfg.Storage.S3.Endpoint = proxy.URL
+	cfg.Storage.ObjectAdmissionFile = evidencePath
+	proxied, err := storagebackend.New(&cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A storage binding includes the endpoint digest, so the proxied connection is a
+	// distinct root. One budget row exists per owner, so use a fresh owner whose empty
+	// native prefix makes the admission evidence true instead of rebinding an existing
+	// root.
+	driver, err := proxied.Open(f.ctx, proxiedOwner)
+	if err != nil {
+		t.Fatal(err)
+	}
+	proxiedNative, ok := driver.(fileops.NativeActions)
+	if !ok {
+		driver.Close()
+		t.Fatal("proxied object tree omitted native actions")
+	}
+	binding := proxiedNative.StorageBinding()
+	rules := proxiedNative.StorageNameRules()
+	retains := proxiedNative.Describe().RetainsVersions
+	driver.Close()
+	proxiedRoot := fileops.Root{OwnerID: binding.OwnerID, ConnectionID: binding.ConnectionID, Generation: binding.Generation, ContentRoot: binding.ContentRoot, SystemRoot: binding.SystemRoot, CaseSensitive: rules.CaseSensitive, RetainsVersions: retains}
+	proxiedJournal := fileops.NewPostgres(f.db.Pool())
+	if err = proxiedJournal.Initialize(f.ctx, proxiedRoot, fileops.Baseline{LogicalLimit: 1 << 30, PhysicalLimit: 2 << 30, NativeComplete: true, IndexCompared: true, LegacyWritersDrained: true, Evidence: json.RawMessage(`{"fixture":"fresh proxied owner prefix, no native objects and no index rows"}`)}); err != nil {
+		t.Fatal(err)
+	}
+	proxiedToken, _, err := auth.New(f.db, f.cfg).CreateToken(f.ctx, auth.NewTokenInput{UserID: proxiedOwner, Name: "proxied observation", Kind: auth.KindApp, CanRead: true, CanWrite: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := func(method, target string, body []byte, headers http.Header) *httptest.ResponseRecorder {
+		headers = headers.Clone()
+		if headers == nil {
+			headers = make(http.Header)
+		}
+		headers.Set("Authorization", "Bearer "+proxiedToken)
+		return f.request(t, method, target, "", body, headers)
+	}
+	createProxied := func(path, idempotencyKey string, size int64) *httptest.ResponseRecorder {
+		body, _ := json.Marshal(map[string]any{"path": path, "size": size})
+		return request("POST", "/uploads", body, http.Header{"Idempotency-Key": {idempotencyKey}, "Content-Type": {"application/json"}})
+	}
+	t.Cleanup(func() {
+		// The fixture's own worker wait is registered later and therefore runs after
+		// this cleanup, so retire the retries that the last polls may have queued
+		// before closing the provider they would use.
+		deadline := time.Now().Add(5 * time.Second)
+		for {
+			workers := f.server.workers()
+			workers.mu.Lock()
+			active := len(workers.active)
+			workers.mu.Unlock()
+			if active == 0 || time.Now().After(deadline) {
+				break
+			}
+			time.Sleep(time.Millisecond)
+		}
+		_ = proxied.Close()
+	})
+	f.server.SetStorageFactory(proxied)
+
+	id := uploadsHTTPJSON(t, createProxied("/unknown-upload", "unknown", 4), 201)["id"].(string)
+	uploadsHTTPJSON(t, request("PUT", "/uploads/"+id+"/parts/1", []byte("data"), nil), 201)
+	f.provider.mu.Lock()
+	f.provider.lostReplyKey = key
+	f.provider.mu.Unlock()
+	recorder := request("POST", "/uploads/"+id+"/commit", nil, nil)
+	response := uploadsHTTPJSON(t, recorder, 202)
+	if response["state"] != "outcome_unknown" || response["id"] != id {
+		t.Fatalf("unresolved commit did not return its durable operation: %v", response)
+	}
+	if location := recorder.Header().Get("Location"); location != "/api/files/operations/"+id {
+		t.Fatalf("unresolved commit Location = %q", location)
+	}
+	if recorder.Header().Get("Retry-After") == "" {
+		t.Fatal("unresolved commit has no Retry-After")
+	}
+	deadline := time.Now().Add(8 * time.Second)
+	for {
+		op := uploadsHTTPJSON(t, request("GET", "/operations/"+id, nil, nil), 200)
+		switch op["state"] {
+		case "outcome_unknown":
+		case "succeeded", "failed", "cancelled":
+			t.Fatalf("unobservable publication settled as %v: %v", op["state"], op)
+		default:
+			if time.Now().After(deadline) {
+				t.Fatalf("lost native reply did not retain uncertainty: %v", op)
+			}
+			time.Sleep(2 * time.Millisecond)
+			continue
+		}
+		break
+	}
+	status := uploadsHTTPJSON(t, request("GET", "/uploads/"+id, nil, nil), 200)
+	if status["state"] != "outcome_unknown" {
+		t.Fatalf("session hid unresolved publication %v", status)
+	}
+	uploadsHTTPProblem(t, request("DELETE", "/uploads/"+id, nil, nil), 409, "commit_in_progress")
+	f.provider.mu.Lock()
+	puts := f.provider.puts[key]
+	completes := f.provider.completeRequests[key]
+	proxiedNativeObject, exists := f.provider.current(key)
+	f.provider.mu.Unlock()
+	if !exists || !bytes.Equal(proxiedNativeObject.Body, []byte("data")) || puts != 0 || completes != 1 {
+		t.Fatalf("unexpected native attempts puts=%d completes=%d exists=%v", puts, completes, exists)
+	}
+	if u, e := proxiedJournal.Usage(f.ctx, proxiedRoot, workerActor(proxiedRoot)); e != nil {
+		t.Fatal(e)
+	} else if u.LogicalReserved == 0 || u.PhysicalReserved == 0 {
+		t.Fatalf("unknown effect released liability %+v", u)
 	}
 }
 
