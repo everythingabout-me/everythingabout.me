@@ -298,7 +298,9 @@ func signPutSigner(t *testing.T) objectmutation.DirectPutBackend {
 // browser asked for was answered 422 after its upload session had already been created.
 func TestSignPutBindsAQuotedRevisionOnce(t *testing.T) {
 	signer := signPutSigner(t)
-	expires := time.Date(2026, 11, 12, 10, 30, 0, 0, time.UTC)
+	// A grant expiry is relative to now: a fixed instant turns into a failing test the
+	// moment the wall clock passes it, which is how these two failed on 2026-11-12.
+	expires := time.Now().Add(30 * time.Minute)
 	grant, err := signer.SignPut(context.Background(), "drive/alice/a.json", 7, "application/json",
 		storage.Conditions{ExpectedRevision: []byte(`native-etag:"6a1c5f0d"`)}, expires)
 	if err != nil {
@@ -331,7 +333,9 @@ func TestSignPutBindsAQuotedRevisionOnce(t *testing.T) {
 // preserved is unquoted; a value that cannot be a header is still refused.
 func TestSignPutNormalizesARevisionAndRefusesHeaderText(t *testing.T) {
 	signer := signPutSigner(t)
-	expires := time.Date(2026, 11, 12, 10, 30, 0, 0, time.UTC)
+	// A grant expiry is relative to now: a fixed instant turns into a failing test the
+	// moment the wall clock passes it, which is how these two failed on 2026-11-12.
+	expires := time.Now().Add(30 * time.Minute)
 	for _, revision := range []string{"native-etag:6a1c5f0d", `native-etag:"6a1c5f0d"`} {
 		grant, err := signer.SignPut(context.Background(), "drive/alice/a.json", 7, "", storage.Conditions{ExpectedRevision: []byte(revision)}, expires)
 		if err != nil {
