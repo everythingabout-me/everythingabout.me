@@ -971,6 +971,19 @@ export function useUploadQueue(onUploaded: (task: UploadTask, item: Item) => voi
       }
       if (!task.file) { patch(id, { status: "failed", error: t("drive.uploadFileUnavailable"), speed: 0 }); return; }
       if (task.file.size !== session.size) throw new Error("The selected file has a different size.");
+      // A retried publication whose bytes already landed: the server recognized its own
+      // object at the destination and admitted a session that only has to settle it.
+      // Uploading again would be refused by the create condition, so the row goes straight
+      // to commit — the same trailing steps every other row takes after its bytes are in.
+      if (session.bytesPresent) {
+        patch(id, { status: "finalizing", uploaded: true, loaded: session.size, speed: 0 });
+        releaseWindow(id);
+        const settled = await commitUpload(session.id, signal, settleUpload);
+        if (signal.aborted) return;
+        if (isOperation(settled)) patch(id, { operationId: settled.id });
+        else complete(task, settled);
+        return;
+      }
       const file = task.file;
       // The session is in hand, so this file can move bytes and takes a transfer slot now.
       // Taking it at claim time instead put slots on files that were still waiting for their

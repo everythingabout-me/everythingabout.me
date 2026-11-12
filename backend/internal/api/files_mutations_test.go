@@ -94,7 +94,7 @@ func TestFilesMutationProblemsAndPUTUnknownLocation(t *testing.T) {
 	for _, tc := range []struct {
 		code   string
 		status int
-	}{{"quota_exceeded", 507}, {"staging_full", 507}, {"checksum_mismatch", 422}, {"baseline_required", 503}, {"operation_in_progress", 409}, {"precondition_required", 428}, {"idempotency_conflict", 409}, {"target_changed", 412}} {
+	}{{"quota_exceeded", 507}, {"staging_full", 507}, {"checksum_mismatch", 422}, {"baseline_required", 503}, {"operation_in_progress", 409}, {"precondition_required", 428}, {"idempotency_conflict", 409}, {"target_changed", 412}, {"storage_failure", 502}} {
 		err := filesMutationProblem(fileops.E(tc.code, io.ErrUnexpectedEOF))
 		var p *fc.Problem
 		if !errors.As(err, &p) || p.Status != tc.status {
@@ -118,5 +118,25 @@ func TestFilesGuardConflictPreservesOperationID(t *testing.T) {
 	}
 	if !strings.Contains(p.Detail, "unfinished upload") || !strings.Contains(p.Detail, "guard-operation") {
 		t.Fatalf("guard conflict detail names neither the cause nor the operation: %q", p.Detail)
+	}
+}
+
+// A provider refusal used to fall through to a bare 500, which said nothing about the
+// file and could not be reported. It answers 502 with the provider's own status, code
+// and request id, and never with its response body.
+func TestFilesMutationProblemCarriesTheProviderAnswer(t *testing.T) {
+	raw := storage.NewProviderError("backend_error", "", 503, "SlowDown", "req-42", errors.New("provider body text"))
+	err := filesMutationProblem(raw)
+	var p *fc.Problem
+	if !errors.As(err, &p) || p.Status != 502 || p.Code != "storage_failure" {
+		t.Fatalf("mapping %v", err)
+	}
+	for _, want := range []string{"HTTP 503", "SlowDown", "request req-42"} {
+		if !strings.Contains(p.Detail, want) {
+			t.Fatalf("detail %q lacks %q", p.Detail, want)
+		}
+	}
+	if strings.Contains(p.Detail, "provider body text") {
+		t.Fatal("provider response body reached the client")
 	}
 }

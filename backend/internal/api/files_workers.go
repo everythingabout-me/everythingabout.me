@@ -272,6 +272,11 @@ func errorCauseChain(err error) string {
 			part = typed.Code
 		case *storage.Error:
 			part = typed.Code
+			// A log line that says only "backend_error" cannot distinguish a throttled
+			// listing from a provider outage; its status and request id can.
+			if facts := typed.Provider.Diagnostic(); facts != "" {
+				part += " (" + facts + ")"
+			}
 		default:
 			part = current.Error()
 		}
@@ -332,6 +337,16 @@ func (s *Server) runFileOperation(ctx context.Context, op fileops.Operation) err
 			// absence is the state the session was admitted in, not a change.
 			if storage.IsCode(err, "not_found") && intent.Parents {
 				return nil
+			}
+			if err != nil && !storage.IsCode(err, "not_found") {
+				// The observation itself failed: a throttled listing, a provider 5xx, a
+				// connection that never answered. That says nothing about the destination,
+				// and reporting it as target_changed was wrong twice over — it answered 412,
+				// which the client must not retry, and it told the person the destination had
+				// changed when the truth was "we could not look". It stays retryable, and the
+				// session stays staged (see Service.Write), so the retry settles the
+				// publication the client already made.
+				return fileops.E("storage_failure", err)
 			}
 			if err != nil || parent.Kind != storage.Folder || !bytes.Equal(parent.Revision, intent.ParentRevision) {
 				return fileops.E("target_changed", err)

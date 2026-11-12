@@ -193,7 +193,7 @@ func validateMutationPut(in objectmutation.Put) error {
 func mutationPublishError(in objectmutation.Put, err error) error {
 	var response *sdk.ErrorResponse
 	if in.Absent && errors.As(err, &response) && response.Response != nil && response.Response.StatusCode == http.StatusNotModified {
-		return storage.NewError("precondition_failed", storage.Path(in.Key), err)
+		return storage.NewProviderError("precondition_failed", storage.Path(in.Key), response.Response.StatusCode, response.Code, response.RequestID, err)
 	}
 	return mutationWriteError(in.Key, err)
 }
@@ -214,7 +214,12 @@ func mutationWriteError(key string, err error) error {
 			}
 		}
 	}
-	return storage.NewError(code, storage.Path(key), err)
+	if response == nil || response.Response == nil {
+		// No answer arrived at all. The error stays without Provider facts, and that
+		// absence is the diagnosis: the request never reached the provider's refusal path.
+		return storage.NewError(code, storage.Path(key), err)
+	}
+	return storage.NewProviderError(code, storage.Path(key), response.Response.StatusCode, response.Code, response.RequestID, err)
 }
 func mutationReadError(ctx context.Context, key string, err error, versioned bool) error {
 	if ctx.Err() != nil {
@@ -232,6 +237,7 @@ func mutationReadError(ctx context.Context, key string, err error, versioned boo
 		case 412:
 			code = "changed"
 		}
+		return storage.NewProviderError(code, storage.Path(key), response.Response.StatusCode, response.Code, response.RequestID, err)
 	}
 	return storage.NewError(code, storage.Path(key), err)
 }

@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"io"
+	"strconv"
+	"strings"
 	"time"
 
 	"everythingabout.me/backend/internal/filecontract"
@@ -159,20 +161,72 @@ type Error struct {
 	Code  string
 	Path  Path
 	Cause error
+	// Provider holds what the provider answered with when it refused a request: the
+	// HTTP status, the provider's own error code and its request id. A driver sets it
+	// whenever it got a response, and leaves it nil for an error that never reached the
+	// provider (a connection reset, a TLS failure), which is itself the distinction
+	// between "the provider said no" and "we never heard back".
+	//
+	// It may cross to a client, unlike Cause: these three facts are what a person needs
+	// to report a failure — they are the provider's words for it, in a form the provider
+	// itself can look up — and none of them is response body text.
+	Provider *ProviderError
+}
+
+// ProviderError is the identity of one refused provider request.
+type ProviderError struct {
+	// Status is the HTTP status the provider answered, or 0 when no response arrived.
+	Status int
+	// Code is the provider's own error code (for COS: SlowDown, AccessDenied, ...).
+	Code string
+	// RequestID is the provider's id for this request, the only handle its support has.
+	RequestID string
+}
+
+// Diagnostic renders the provider facts for a message a person or a log will read.
+// It is empty when no response arrived, because inventing "connection reset" here
+// would replace the one fact that distinguishes it — the absence of a response.
+func (p *ProviderError) Diagnostic() string {
+	if p == nil {
+		return ""
+	}
+	var parts []string
+	if p.Status != 0 {
+		parts = append(parts, "HTTP "+strconv.Itoa(p.Status))
+	}
+	if p.Code != "" {
+		parts = append(parts, p.Code)
+	}
+	if p.RequestID != "" {
+		parts = append(parts, "request "+p.RequestID)
+	}
+	return strings.Join(parts, ", ")
 }
 
 // Error deliberately omits Cause: provider response bodies are never surfaced to
 // clients, so callers that want operator-facing detail must add it themselves
 // (see the admission errors in storagebackend).
 func (e *Error) Error() string {
-	if e.Path == "" {
-		return "storage " + e.Code
+	text := "storage " + e.Code
+	if e.Path != "" {
+		text += ": " + string(e.Path)
 	}
-	return "storage " + e.Code + ": " + string(e.Path)
+	// The provider's status and request id are safe text and are the difference between
+	// a failure a person can report and one only the server log knows about.
+	if facts := e.Provider.Diagnostic(); facts != "" {
+		text += " (" + facts + ")"
+	}
+	return text
 }
 func (e *Error) Unwrap() error { return e.Cause }
 func NewError(code string, path Path, cause error) error {
 	return &Error{Code: code, Path: path, Cause: cause}
+}
+
+// NewProviderError records what the provider answered alongside the code this
+// application gives the failure.
+func NewProviderError(code string, path Path, status int, providerCode, requestID string, cause error) error {
+	return &Error{Code: code, Path: path, Cause: cause, Provider: &ProviderError{Status: status, Code: providerCode, RequestID: requestID}}
 }
 func IsCode(err error, code string) bool { var e *Error; return errors.As(err, &e) && e.Code == code }
 func ValidatePath(path Path) error {

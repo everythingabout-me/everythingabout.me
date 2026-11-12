@@ -164,6 +164,20 @@ func (s *Service) Write(ctx context.Context, root Root, actor Actor, id string, 
 		return s.finishBeforeEffect(work, root, actor, current, writer, checkpoint, Cancelled, nil)
 	}
 	if err = s.options.Authorize(work, current); err != nil {
+		if IsCode(err, "storage_failure") {
+			// A failure of the observation itself is not an outcome of the publication.
+			// Ending the session here threw away a file that had already landed — a direct
+			// session's client writes the destination before the commit — and made the
+			// person upload it again through a path that then refused the empty destination.
+			// Keeping the staged bytes and releasing the lease lets the next attempt (the
+			// client's own retry, or the operation worker) settle the same publication.
+			persist, cancel := durableContext(ctx)
+			defer cancel()
+			if releaser, ok := s.journal.(leaseReleaser); ok {
+				releaseLease(persist, releaser, current.Lease)
+			}
+			return current, err
+		}
 		return s.finishBeforeEffect(work, root, actor, current, writer, checkpoint, Failed, problem(publicationFailureCode(err), err, &current))
 	}
 	if err = s.journal.StartEffect(work, op.Lease); err != nil {
@@ -324,9 +338,15 @@ func entrySubject(entry EntryEffect) string {
 }
 
 // describeCause renders a cause chain from this application's own vocabulary.
-// A storage error contributes its code and path and stops: what it wraps is the
-// provider's response, and that never becomes client-visible text. Anything else
-// contributes its type, which names the package that failed without leaking bytes.
+// A storage error contributes its code, path and the provider's own answer — status,
+// error code and request id — and stops: what it wraps is the provider's response body,
+// and that never becomes client-visible text. Anything else contributes its type, which
+// names the package that failed without leaking bytes.
+//
+// The provider facts are the difference between a failure a person can report and one
+// only the server log can explain: "storage backend_error" alone sent every reader back
+// to the operator, while "HTTP 503 SlowDown, request ..." is something the provider's own
+// support can look up.
 func describeCause(err error) string {
 	var parts []string
 	for current := err; current != nil; {
@@ -340,6 +360,9 @@ func describeCause(err error) string {
 			text := "storage " + typed.Code
 			if typed.Path != "" {
 				text += " at " + string(typed.Path)
+			}
+			if facts := typed.Provider.Diagnostic(); facts != "" {
+				text += " (" + facts + ")"
 			}
 			parts = append(parts, text)
 			return strings.Join(parts, " <- ")

@@ -90,7 +90,10 @@ parents stay redacted. Existing Bearer precedence, cookie Origin/CSRF and storag
 
 Long-running writes bind selected ID, parent, admitted native path/name, ancestor namespace state and root
 configuration. Moving/recreating a target or ancestor after admission fails `412 target_changed`; an upload
-or queued mutation never silently follows a later move. A new ID request admitted after a completed move
+or queued mutation never silently follows a later move. The converse is equally binding: a failure to
+observe the destination (a throttled listing, a provider 5xx) is not evidence that it changed, so it stays
+retryable (`502 storage_failure`) and the session keeps its staged bytes instead of ending as the same
+terminal 412. A new ID request admitted after a completed move
 may use its new current location. Idempotency and cursors bind selector mode and intent as well as scope.
 
 ## Folders without a marker

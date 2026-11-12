@@ -181,9 +181,30 @@ func nativeError(ctx context.Context, err error, versioned bool) error {
 		case http.StatusNotImplemented:
 			code = "unsupported"
 		}
-		return storage.NewError(code, "", err)
+		return storage.NewProviderError(code, "", response.HTTPStatusCode(), providerCode(err), providerRequestID(err), err)
 	}
 	return storage.NewError("backend_error", "", err)
+}
+
+// providerCode and providerRequestID name what the provider said and how to look it
+// up, without copying its message body (which can echo keys and is not ours to relay).
+func providerCode(err error) string {
+	var api smithy.APIError
+	if errors.As(err, &api) {
+		return api.ErrorCode()
+	}
+	return ""
+}
+
+func providerRequestID(err error) string {
+	var response *smithyhttp.ResponseError
+	if errors.As(err, &response) && response.Response != nil {
+		if id := response.Response.Header.Get("x-amz-request-id"); id != "" {
+			return id
+		}
+		return response.Response.Header.Get("x-amz-id-2")
+	}
+	return ""
 }
 
 var _ storage.Factory = (*Factory)(nil)

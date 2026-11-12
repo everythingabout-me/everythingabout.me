@@ -140,7 +140,7 @@ func cosTreeError(ctx context.Context, err error, versioned bool) error {
 		case http.StatusNotImplemented:
 			code = "unsupported"
 		}
-		return storage.NewError(code, "", err)
+		return storage.NewProviderError(code, "", response.Response.StatusCode, response.Code, response.RequestID, err)
 	}
 	return storage.NewError("backend_error", "", err)
 }

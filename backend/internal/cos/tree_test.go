@@ -1,6 +1,8 @@
 package cos
 
 import (
+	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -33,5 +35,24 @@ func TestNativeTreeConformance(t *testing.T) {
 func TestTreeFactoryRejectsMissingClient(t *testing.T) {
 	if _, err := NewTreeFactory(nil); !storage.IsCode(err, "invalid_config") {
 		t.Fatal(err)
+	}
+}
+
+func TestTreeErrorKeepsTheProviderAnswer(t *testing.T) {
+	refusal := &sdk.ErrorResponse{Code: "SlowDown", RequestID: "req-42", Response: &http.Response{StatusCode: http.StatusServiceUnavailable}}
+	var err *storage.Error
+	if !errors.As(cosTreeError(context.Background(), refusal, false), &err) {
+		t.Fatal("a provider refusal is not a storage error")
+	}
+	if err.Code != "backend_error" || err.Provider == nil || err.Provider.Status != http.StatusServiceUnavailable || err.Provider.Code != "SlowDown" || err.Provider.RequestID != "req-42" {
+		t.Fatalf("provider answer lost: %#v", err)
+	}
+	// A request that never heard back keeps no status: the absence is the fact, and
+	// inventing one would misreport a network failure as a provider refusal.
+	if !errors.As(cosTreeError(context.Background(), errors.New("connection reset by peer"), false), &err) {
+		t.Fatal("a transport failure is not a storage error")
+	}
+	if err.Code != "backend_error" || err.Provider != nil {
+		t.Fatalf("transport failure invented a provider answer: %#v", err.Provider)
 	}
 }

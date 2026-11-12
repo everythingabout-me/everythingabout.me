@@ -774,6 +774,16 @@ grant fails the file before the request leaves), and a header the grant did not 
 to widen what the browser sends to the provider. `Content-Length` is the one bound header a
 browser derives from the body itself, and the grant binds that same length.
 
+Retrying a failed direct upload must not be refused for a destination that only the native
+tree has. When a create arrives for a path whose object exists but whose index has no row,
+the server looks for one of this owner's failed direct sessions of that path whose recorded
+stage revision is still the object's revision and whose size is the size the client is
+uploading; if it finds one, the retry is the same publication coming back. The session is
+admitted in direct mode with `bytesPresent: true` and no transport: the client uploads
+nothing, commits, and the commit verifies the same revision before settling it. A create
+with no such proof keeps `409 name_conflict`, because adopting an object this owner did not
+publish would put someone else's bytes under this name.
+
 The trade is deliberate and narrow. A staged multipart upload costs five provider requests
 per file however small it is (`InitiateMultipartUpload`, two part listings, `Complete`); the
 direct path costs one PUT and one `HEAD`. In exchange, the object exists before the index
@@ -834,6 +844,14 @@ with every index settlement, so a commit and a delete or move of an ancestor are
   its quota is released, and every later commit returns `410` with the same reason. It is terminal because it
   can never pass later; the alternative is a commit that publishes under a prefix a delete already removed,
   which a rebuild from the native tree would resurrect.
+- the destination could not be *observed* at all — a throttled listing, a provider 5xx, a connection that
+  never answered (`502 storage_failure`, retryable): the session stays committed-to-nothing and keeps its
+  staged bytes, because a failed observation is not evidence of a change. The retry (the client's own, or
+  the operation worker's) proves the destination again and settles the same publication. Reporting this as
+  `412 target_changed` used to end a direct session whose client had already published the object, which
+  left the bytes in the tree and no index row for them.
+  The `detail` of such a failure names the provider's own answer — HTTP status, provider code and request
+  id (`storage backend_error (HTTP 503, SlowDown, request ...)`), never its response body.
 
 A deletion therefore never aborts an upload, and an upload never blocks a deletion; an upload into a folder
 that was deleted meanwhile is refused when it commits. From then on the server signs no new parts and rejects

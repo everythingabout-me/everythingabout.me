@@ -336,6 +336,12 @@ export interface FileUploadSession {
   commitUrl: string;
   operationId: string;
   result: FileResource | null;
+  /**
+   * The destination already holds exactly the bytes this session would upload, because a
+   * direct publication landed before its commit failed. There is nothing to transfer: the
+   * client commits, and the server verifies the same revision before indexing it.
+   */
+  bytesPresent?: boolean;
 }
 
 export interface FileUploadReceipt {

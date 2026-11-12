@@ -180,6 +180,7 @@ func mutationWriteError(key string, err error) error {
 		case http.StatusPreconditionFailed:
 			code = "precondition_failed"
 		}
+		return storage.NewProviderError(code, storage.Path(key), response.HTTPStatusCode(), providerCode(err), providerRequestID(err), err)
 	}
 	return storage.NewError(code, storage.Path(key), err)
 }
@@ -199,6 +200,7 @@ func mutationReadError(ctx context.Context, key string, err error, versioned boo
 		case 412:
 			code = "changed"
 		}
+		return storage.NewProviderError(code, storage.Path(key), response.HTTPStatusCode(), providerCode(err), providerRequestID(err), err)
 	}
 	return storage.NewError(code, storage.Path(key), err)
 }

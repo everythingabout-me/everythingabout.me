@@ -66,6 +66,11 @@ func filesMutationProblem(err error) error {
 			status = 422
 		case "length_mismatch", "body_reception_failed":
 			status = 400
+		case "storage_failure":
+			// A provider request that failed says nothing about the file, so the answer is
+			// "try again", which is exactly what a 5xx means to the upload queue. This used
+			// to fall through to 409, the one family every client is told not to retry.
+			status = 502
 		case "quota_exceeded", "staging_full":
 			status = 507
 		case "unsupported", "unbound_writer":
@@ -116,9 +121,24 @@ func filesMutationProblem(err error) error {
 			return fc.NewProblem(409, "name_conflict", "The destination already exists.")
 		case "too_large":
 			return fc.NewProblem(413, "file_too_large", "The file exceeds the copy limit for this connection.")
+		case "backend_error", "invalid_backend_response":
+			return filesStorageBackendProblem(n)
 		}
 	}
 	return err
+}
+
+// filesStorageBackendProblem answers "the provider refused or did not answer" with what
+// the provider actually said. Returning the bare error made it a 500 with no text, which
+// is both unactionable and unreportable; the status, the provider's own code and its
+// request id are exactly what its support asks for, and none of them is response body
+// text, so all three may travel to the client.
+func filesStorageBackendProblem(e *storage.Error) error {
+	detail := "The storage provider could not complete the request"
+	if facts := e.Provider.Diagnostic(); facts != "" {
+		detail += " (" + facts + ")"
+	}
+	return fc.NewProblem(502, "storage_failure", detail+".")
 }
 func (s *Server) fileMutationContext(ctx context.Context, f *fileRequest) (fileops.NativeActions, fileops.Root, fileops.Actor, error) {
 	if !s.cfg.Storage.CoordinatedWrites || s.filesJournal == nil {

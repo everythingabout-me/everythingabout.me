@@ -1159,6 +1159,25 @@ a.crumb:hover {
   font-variant-numeric: tabular-nums;
 }
 
+.uploadFailuresHint {
+  margin: 0 14px 8px;
+  color: var(--text-3);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+/* The repair is navigation, not a mutation of its own, so it is a link that borrows the
+   small text action's shape. */
+.failuresSyncLink {
+  color: var(--blue-ink);
+  text-decoration: none;
+  font-weight: 500;
+}
+
+.failuresSyncLink:hover {
+  text-decoration: underline;
+}
+
 .uploadFailuresList {
   max-height: 224px;
   overflow-y: auto;
@@ -1167,7 +1186,7 @@ a.crumb:hover {
 
 .uploadFailure {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(0, 1.1fr) auto auto;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.1fr) auto auto auto;
   align-items: center;
   gap: 10px;
   padding: 4px 6px;

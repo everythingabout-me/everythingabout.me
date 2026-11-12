@@ -444,22 +444,36 @@ func (s *Server) handleFilesCreateUpload(w http.ResponseWriter, r *http.Request,
 	if err != nil && !storage.IsCode(err, "not_found") {
 		return filesMutationProblem(err)
 	}
+	// published says the destination already holds exactly the bytes this session would
+	// upload: a direct publication whose commit failed after the client's PUT landed. The
+	// retry then has nothing to transfer, and refusing it with name_conflict would leave a
+	// file the tree has and the library does not.
+	published := false
 	if err == nil {
 		if existing.Kind != storage.File {
 			return fc.NewProblem(409, "name_conflict", "A folder occupies the destination.")
 		}
 		if condition.Mode == fc.PutCreate {
-			return fc.NewProblem(409, "name_conflict", "The destination already exists.")
+			// Adoption needs the bytes to be provably this owner's own failed publication
+			// and a transfer class that can publish without the client uploading again.
+			if writer, ok := native.(storage.DirectPutWriter); ok && writer.SupportsDirectPut() && s.filesTransferClass() == storage.TransferPresignedParts {
+				published = s.filesReclaimsPublication(r.Context(), root.OwnerID, string(intent.Target), existing, *req.Size)
+			}
+			if !published {
+				return fc.NewProblem(409, "name_conflict", "The destination already exists.")
+			}
+			intent.Conditions.Absent = true
+		} else {
+			revision, e := s.filesObservedContentRevision(r.Context(), f, existing)
+			if e != nil {
+				return e
+			}
+			if e = fc.CheckPutCondition(condition, revision); e != nil {
+				return e
+			}
+			intent.Conditions.ExpectedRevision = existing.Revision
+			oldBytes = existing.Size
 		}
-		revision, e := s.filesObservedContentRevision(r.Context(), f, existing)
-		if e != nil {
-			return e
-		}
-		if e = fc.CheckPutCondition(condition, revision); e != nil {
-			return e
-		}
-		intent.Conditions.ExpectedRevision = existing.Revision
-		oldBytes = existing.Size
 	} else {
 		if condition.Mode == fc.PutReplace {
 			return fc.NewProblem(412, "target_changed", "The destination no longer exists.")
@@ -485,7 +499,10 @@ func (s *Server) handleFilesCreateUpload(w http.ResponseWriter, r *http.Request,
 	// destination itself, so nothing is staged and the commit only verifies the object. A
 	// driver that cannot sign that condition keeps the multipart path.
 	mode := fileops.UploadModeMultipart
-	if *req.Size > 0 && *req.Size <= filesUploadPartSize && s.filesTransferClass() == storage.TransferPresignedParts {
+	if published {
+		// Nothing is staged: the writer observes the object the client already wrote.
+		mode = fileops.UploadModeDirect
+	} else if *req.Size > 0 && *req.Size <= filesUploadPartSize && s.filesTransferClass() == storage.TransferPresignedParts {
 		if writer, ok := native.(storage.DirectPutWriter); ok && writer.SupportsDirectPut() {
 			mode = fileops.UploadModeDirect
 		}
@@ -494,17 +511,24 @@ func (s *Server) handleFilesCreateUpload(w http.ResponseWriter, r *http.Request,
 	if err != nil {
 		return filesMutationProblem(err)
 	}
-	var transport any
-	if u.Mode == fileops.UploadModeDirect {
-		transport, err = s.filesDirectPutTransport(r.Context(), native, u)
-	} else {
-		transport, err = s.filesUploadTransport(r.Context(), native, u)
-	}
-	if err != nil {
-		return err
-	}
 	resource := s.filesUploadResource(u, f)
-	resource["transport"] = transport
+	if published {
+		// The client must not PUT these bytes again: the object is already the publication,
+		// and a create condition would refuse the overwrite. It commits, and the commit
+		// verifies the same revision before settling it into the index.
+		resource["bytesPresent"] = true
+	} else {
+		var transport any
+		if u.Mode == fileops.UploadModeDirect {
+			transport, err = s.filesDirectPutTransport(r.Context(), native, u)
+		} else {
+			transport, err = s.filesUploadTransport(r.Context(), native, u)
+		}
+		if err != nil {
+			return err
+		}
+		resource["transport"] = transport
+	}
 	w.Header().Set("Location", "/api/files/uploads/"+u.ID)
 	return writeFilesJSON(w, 201, resource)
 }

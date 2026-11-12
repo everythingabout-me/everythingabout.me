@@ -367,7 +367,18 @@ const UploadFailures = memo(function UploadFailures({
   onRetry: (id: string) => void;
   onCancel: (ids: string[]) => void;
 }) {
+  // The full reason only lives in a title tooltip, which cannot be selected or copied. A
+  // failure a person cannot hand to someone else is a failure nobody can act on, so the
+  // row copies the two things a report needs: which file, and what the server said.
+  const [copied, setCopied] = useState<string | null>(null);
   if (tasks.length === 0) return null;
+  const copyReason = (task: UploadTask) => {
+    const text = `/${task.path}\n${task.error ?? t("drive.uploadFailed")}`;
+    void navigator.clipboard?.writeText(text).then(() => {
+      setCopied(task.id);
+      window.setTimeout(() => setCopied((current) => (current === task.id ? null : current)), 1500);
+    }).catch(() => undefined);
+  };
   return (
     <div className={styles.uploadFailures}>
       <div className={styles.uploadFailuresHead}>
@@ -382,6 +393,17 @@ const UploadFailures = memo(function UploadFailures({
           {t("drive.uploadFailuresRetryAll")}
         </button>
       </div>
+      {/* A failed row is not always lost bytes. A direct upload publishes at the destination
+          before the commit settles it, so a failure in the index half leaves the file in
+          storage and out of the list — and retrying it then meets "already exists". The
+          index is a cache of that tree, so the user-facing repair is the same sync the
+          account page already offers; without this line the only route was an operator. */}
+      <p className={styles.uploadFailuresHint}>
+        {t("drive.uploadFailuresSyncHint")}{" "}
+        <Link className={styles.failuresSyncLink} to="/account#storage">
+          {t("drive.uploadFailuresSyncAction")}
+        </Link>
+      </p>
       <ul className={styles.uploadFailuresList}>
         {tasks.map((task) => (
           <li className={styles.uploadFailure} key={task.id}>
@@ -389,6 +411,14 @@ const UploadFailures = memo(function UploadFailures({
             <span className={styles.uploadFailureReason} title={task.error}>
               {task.error ?? t("drive.uploadFailed")}
             </span>
+            <button
+              className={`${styles.ghostBtn} ${styles.cancelUpload}`}
+              onClick={() => copyReason(task)}
+              title={copied === task.id ? t("drive.uploadFailureCopied") : t("drive.uploadFailureCopy")}
+              aria-label={t("drive.uploadFailureCopy")}
+            >
+              {copied === task.id ? t("drive.uploadFailureCopied") : <CopyIcon size={12} />}
+            </button>
             <button className={styles.textBtn} onClick={() => onRetry(task.id)}>
               {t("common.retry")}
             </button>
