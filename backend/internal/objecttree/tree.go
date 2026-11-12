@@ -73,10 +73,14 @@ const maxDirectoryEntries = 250000
 const maxNativePages = 1000
 
 type Tree struct {
-	backend  Backend
-	root     string
-	scope    string
-	secret   []byte
+	backend Backend
+	root    string
+	scope   string
+	secret  []byte
+	// reserved holds the name that must never appear as user content when the tree is
+	// rooted at the bucket: the first segment of the private system prefix lives inside
+	// the tree there, so the name is refused instead of silently skipped by traversals.
+	reserved []string
 	lifetime context.Context
 	cancel   context.CancelFunc
 }
@@ -87,16 +91,24 @@ func Bind(backend Backend, cfg storage.Config, secret []byte) (*Tree, error) {
 	if err := storage.ValidateBinding(cfg); err != nil {
 		return nil, err
 	}
-	root, err := validateRoot(cfg.ContentRoot)
+	root, err := validateRoot(cfg.ContentRoot, cfg.RootAtBucket)
 	if err != nil {
 		return nil, err
 	}
-	system, err := validateRoot(cfg.SystemRoot)
+	system, err := validateRoot(cfg.SystemRoot, false)
 	if err != nil {
 		return nil, err
 	}
+	// The private system prefix has to live outside the content root: nothing under a
+	// content root is skipped by the scan, the recursive delete or a snapshot, so a system
+	// folder inside the tree would be indexed as user content, deleted with it and copied
+	// into backups. Rooting a tree at the bucket makes that containment unavoidable, so it
+	// is handled by refusing the name rather than by skipping it below.
+	reserved := []string(nil)
 	a, b := norm.NFC.String(root), norm.NFC.String(system)
-	if strings.HasPrefix(a, b) || strings.HasPrefix(b, a) {
+	if cfg.RootAtBucket {
+		reserved = []string{firstSegment(system)}
+	} else if strings.HasPrefix(a, b) || strings.HasPrefix(b, a) {
 		return nil, storage.NewError("invalid_config", "", nil)
 	}
 	if backend == nil || len(secret) < 32 {
@@ -104,10 +116,32 @@ func Bind(backend Backend, cfg storage.Config, secret []byte) (*Tree, error) {
 	}
 	identity, _ := json.Marshal([]any{cfg.ConnectionID, cfg.Generation, cfg.OwnerID, root, system})
 	lifetime, cancel := context.WithCancel(context.Background())
-	return &Tree{backend: backend, root: root, scope: string(identity), secret: secret, lifetime: lifetime, cancel: cancel}, nil
+	return &Tree{backend: backend, root: root, scope: string(identity), secret: secret, reserved: reserved, lifetime: lifetime, cancel: cancel}, nil
 }
-func validateRoot(root string) (string, error) {
+
+// firstSegment is the top-level name a nested prefix starts with: the part a bucket
+// rooted tree could actually contain as a user-visible folder.
+func firstSegment(prefix string) string {
+	trimmed := strings.TrimSuffix(prefix, "/")
+	if i := strings.Index(trimmed, "/"); i >= 0 {
+		return trimmed[:i]
+	}
+	return trimmed
+}
+
+// validateRoot returns the prefix this tree builds keys from: normalized, with exactly
+// one trailing slash, and non-empty unless the tree is rooted at the bucket itself.
+// Emptiness is not "no prefix chosen" here: Config.RootAtBucket says a prefix-less root
+// was intended, and without that flag an empty root stays the "not configured" spelling
+// that ValidateBinding rejects.
+func validateRoot(root string, atBucket bool) (string, error) {
 	root = strings.TrimSuffix(root, "/")
+	if atBucket {
+		if root != "" {
+			return "", storage.NewError("invalid_config", "", nil)
+		}
+		return "", nil
+	}
 	if root == "" || len(root)+1 > 1024 || storage.ValidatePath(storage.Path(root)) != nil {
 		return "", storage.NewError("invalid_config", "", nil)
 	}
@@ -115,7 +149,9 @@ func validateRoot(root string) (string, error) {
 }
 func NewSecret() ([]byte, error) { b := make([]byte, 32); _, err := rand.Read(b); return b, err }
 func (t *Tree) Describe() storage.Descriptor {
-	return storage.Descriptor{RangeRead: true, ImplicitParents: true, TransferClasses: []string{storage.TransferRelay}, Names: storage.NameRules{CaseSensitive: true, MaxPathBytes: 1024}}
+	names := storage.NameRules{CaseSensitive: true, MaxPathBytes: 1024}
+	names.ReservedNames = append([]string(nil), t.reserved...)
+	return storage.Descriptor{RangeRead: true, ImplicitParents: true, TransferClasses: []string{storage.TransferRelay}, Names: names}
 }
 func (t *Tree) Close() error { t.cancel(); return nil }
 func (t *Tree) operation(ctx context.Context) (context.Context, func(), error) {

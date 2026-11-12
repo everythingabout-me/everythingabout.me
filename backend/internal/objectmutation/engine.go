@@ -53,11 +53,19 @@ func New(tree storage.Driver, binding storage.Config, backend Backend, options O
 		return nil, fail("invalid_config", "")
 	}
 	for _, p := range []string{binding.ContentRoot, binding.SystemRoot} {
+		if p == "" && binding.RootAtBucket {
+			// The tree is the bucket itself. Every other prefix rule still applies to the
+			// system root below; only the content prefix has nothing to validate.
+			continue
+		}
 		if !strings.HasSuffix(p, "/") || strings.HasPrefix(p, "/") || storage.ValidatePath(storage.Path(strings.TrimSuffix(p, "/"))) != nil {
 			return nil, fail("invalid_config", "")
 		}
 	}
-	if strings.HasPrefix(binding.ContentRoot, binding.SystemRoot) || strings.HasPrefix(binding.SystemRoot, binding.ContentRoot) {
+	// A bucket-rooted tree necessarily contains the private system prefix. The driver
+	// refuses that name instead of hiding it (objecttree.Bind advertises it as reserved),
+	// so the containment is bounded rather than ignored.
+	if !binding.RootAtBucket && (strings.HasPrefix(binding.ContentRoot, binding.SystemRoot) || strings.HasPrefix(binding.SystemRoot, binding.ContentRoot)) {
 		return nil, fail("invalid_config", "")
 	}
 	if options.MaxPublishBytes == 0 {

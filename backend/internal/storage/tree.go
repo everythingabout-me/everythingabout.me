@@ -106,6 +106,11 @@ type Config struct {
 	OwnerID      string
 	ContentRoot  string
 	SystemRoot   string
+	// RootAtBucket says ContentRoot is the bucket itself rather than a prefix inside
+	// it, so ContentRoot is empty. It exists because the empty string is also how an
+	// unconfigured root is spelled; a connection that really wants the bucket top says
+	// so, and one that forgot to say anything still fails.
+	RootAtBucket bool
 	Credentials  SecretSource
 }
 type SecretSource interface {
@@ -180,7 +185,7 @@ func ValidatePath(path Path) error {
 // ValidateBinding checks identity fields shared by all factories. Adapter-specific
 // validation must also establish physical separation of content and system roots.
 func ValidateBinding(cfg Config) error {
-	if cfg.OwnerID == "" || cfg.ConnectionID == "" || cfg.Generation < 1 || cfg.ContentRoot == "" || cfg.SystemRoot == "" {
+	if cfg.OwnerID == "" || cfg.ConnectionID == "" || cfg.Generation < 1 || cfg.SystemRoot == "" || (cfg.ContentRoot == "" && !cfg.RootAtBucket) {
 		return NewError("invalid_config", "", nil)
 	}
 	if err := ValidatePath(Path(cfg.OwnerID)); err != nil {

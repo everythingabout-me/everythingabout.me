@@ -19,6 +19,7 @@ import (
 	"strings"
 
 	"everythingabout.me/backend/internal/storage"
+	"golang.org/x/text/cases"
 )
 
 // Target is the writer half of a driver: folders plus staged publication. Both
@@ -50,34 +51,65 @@ func (r Result) String() string {
 // by comparing counts, never a torn file.
 func Copy(ctx context.Context, src storage.Tree, srcRoot storage.Path, dst Target, dstRoot storage.Path) (Result, error) {
 	var result Result
+	rules := destinationNameRules(dst)
 	if dstRoot != "" {
 		if err := mkdir(ctx, dst, dstRoot); err != nil {
 			return result, err
 		}
 		result.Folders++
 	}
-	if err := copyFolder(ctx, src, srcRoot, dst, dstRoot, srcRoot, dstRoot, &result); err != nil {
+	if err := copyFolder(ctx, src, srcRoot, dst, dstRoot, srcRoot, dstRoot, rules, &result); err != nil {
 		return result, err
 	}
 	return result, nil
 }
 
+// destinationNameRules is what the destination refuses as a user name. A target rooted
+// at the bucket reserves the private system prefix, so a source folder with that name
+// would write into service space. That is refused here, naming the path, instead of
+// being discovered later as a folder nobody can explain.
+func destinationNameRules(dst Target) storage.NameRules {
+	if namer, ok := dst.(interface{ StorageNameRules() storage.NameRules }); ok {
+		return namer.StorageNameRules()
+	}
+	return storage.NameRules{}
+}
+
+// reservedName reports whether one native segment is a name the destination reserves.
+func reservedName(segment string, rules storage.NameRules) bool {
+	for _, reserved := range rules.ReservedNames {
+		if rules.CaseSensitive {
+			if segment == reserved {
+				return true
+			}
+			continue
+		}
+		if cases.Fold().String(segment) == cases.Fold().String(reserved) {
+			return true
+		}
+	}
+	return false
+}
+
 // copyFolder mirrors one source folder into the destination. Everything below
 // srcBase keeps its relative path below dstBase, which is what makes a snapshot a
 // copy of the tree rather than a copy of the tree's location.
-func copyFolder(ctx context.Context, src storage.Tree, srcDir storage.Path, dst Target, dstDir storage.Path, srcBase, dstBase storage.Path, result *Result) error {
+func copyFolder(ctx context.Context, src storage.Tree, srcDir storage.Path, dst Target, dstDir storage.Path, srcBase, dstBase storage.Path, rules storage.NameRules, result *Result) error {
 	entries, err := listAll(ctx, src, srcDir)
 	if err != nil {
 		return err
 	}
 	for _, entry := range entries {
 		to := join(dstBase, relativeTo(srcBase, entry.Path))
+		if segment := lastSegment(entry.Path); reservedName(segment, rules) {
+			return fmt.Errorf("copy %q: %q is reserved on the destination, so the snapshot cannot contain it", entry.Path, segment)
+		}
 		if entry.Kind == storage.Folder {
 			if err := mkdir(ctx, dst, to); err != nil {
 				return fmt.Errorf("create folder %q: %w", to, err)
 			}
 			result.Folders++
-			if err := copyFolder(ctx, src, entry.Path, dst, to, srcBase, dstBase, result); err != nil {
+			if err := copyFolder(ctx, src, entry.Path, dst, to, srcBase, dstBase, rules, result); err != nil {
 				return err
 			}
 			continue
@@ -254,6 +286,16 @@ func relativeTo(base, p storage.Path) storage.Path {
 		return p
 	}
 	return storage.Path(strings.TrimPrefix(strings.TrimPrefix(string(p), string(base)), "/"))
+}
+
+// lastSegment is the native name a path ends with, which is the form a reserved-name
+// rule is written against.
+func lastSegment(p storage.Path) string {
+	name := string(p)
+	if i := strings.LastIndex(name, "/"); i >= 0 {
+		return name[i+1:]
+	}
+	return name
 }
 
 func join(root, rel storage.Path) storage.Path {

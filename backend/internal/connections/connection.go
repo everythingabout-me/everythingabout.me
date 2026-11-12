@@ -47,6 +47,10 @@ type Connection struct {
 // mirrors the subset of config.Storage a driver is constructed from, so the
 // conversion stays explicit and testable instead of reflecting over config.
 type Spec struct {
+	// RootAtBucket roots an owner-scoped connection's tree at the bucket itself instead
+	// of under a prefix. It is a flag rather than an empty prefix because the empty
+	// string already means "not configured".
+	RootAtBucket        bool      `json:"rootAtBucket,omitempty"`
 	CoordinatedWrites   bool      `json:"coordinatedWrites,omitempty"`
 	MaxSinglePutBytes   int64     `json:"maxSinglePutBytes,omitempty"`
 	ObjectAdmissionFile string    `json:"objectAdmissionFile,omitempty"`
@@ -103,10 +107,12 @@ var ErrNotFound = errors.New("storage connection not found")
 
 // Identity hashes where the tree lives, not how it is reached and not who may
 // reach it. Credentials are excluded so rotating a key does not create a second
-// row; the name is excluded so two rows cannot claim the same tree.
+// row; the name is excluded so two rows cannot claim the same tree. The account is
+// excluded too: an owner-scoped row's tree is its prefix, so the location alone says
+// where the tree is, and two accounts naming one location must be rejected by the
+// unique index rather than silently given two trees in one place.
 func (c Connection) ComputeIdentity() (string, error) {
 	shape := struct {
-		Owner        string
 		Backend      string
 		COSBucket    string
 		COSRegion    string
@@ -116,11 +122,11 @@ func (c Connection) ComputeIdentity() (string, error) {
 		S3Content    string
 		S3System     string
 		S3PathStyle  bool
+		RootAtBucket bool
 		LocalContent string
 		LocalSystem  string
 		LocalCase    bool
 	}{
-		Owner:        c.OwnerID,
 		Backend:      c.Backend,
 		COSBucket:    c.Config.COS.Bucket,
 		COSRegion:    c.Config.COS.Region,
@@ -130,6 +136,7 @@ func (c Connection) ComputeIdentity() (string, error) {
 		S3Content:    c.Config.S3.ContentPrefix,
 		S3System:     c.Config.S3.SystemPrefix,
 		S3PathStyle:  c.Config.S3.PathStyle,
+		RootAtBucket: c.Config.RootAtBucket,
 		LocalContent: c.Config.Local.ContentRoot,
 		LocalSystem:  c.Config.Local.SystemRoot,
 		LocalCase:    c.Config.Local.CaseSensitive,
@@ -160,14 +167,15 @@ func (c Connection) Validate() error {
 	if c.Generation < 1 {
 		return fmt.Errorf("storage connection %q: generation must be positive, got %d", c.Name, c.Generation)
 	}
-	missing := func(what string) error { return fmt.Errorf("storage connection %q: %s is empty", c.Name, what) }
-	// A user-supplied connection may only name a COS bucket: `local` would let an
-	// account read and write arbitrary paths on the host, and `s3` would let it point
-	// this process at any endpoint it likes, which is an SSRF primitive rather than a
-	// storage choice. Both stay operator-only.
-	if c.OwnerID != "" && c.Backend != "cos" {
-		return fmt.Errorf("storage connection %q: an account may only add a cos connection, got backend %q", c.Name, c.Backend)
+	if c.Config.RootAtBucket {
+		if c.Backend == "local" {
+			return fmt.Errorf("storage connection %q: rootAtBucket needs an object backend; a local root is already a directory", c.Name)
+		}
+		if c.OwnerID == "" {
+			return fmt.Errorf("storage connection %q: rootAtBucket needs a connection owned by one account, because a shared connection would put every account's tree at the bucket root", c.Name)
+		}
 	}
+	missing := func(what string) error { return fmt.Errorf("storage connection %q: %s is empty", c.Name, what) }
 	switch c.Backend {
 	case "cos":
 		if c.Config.COS.Bucket == "" {
@@ -204,6 +212,30 @@ func (c Connection) Validate() error {
 	return nil
 }
 
+// ValidateAccountAdded is the rule for a row an account asked for through the API.
+// It is stricter than Validate because that request is untrusted: `local` would let
+// an account read and write arbitrary host paths, and `s3` would let it point this
+// process at any endpoint it likes — an outbound request primitive rather than a
+// storage choice. A COS row cannot choose a host (its endpoint is derived from bucket
+// and region), which is why it is the one backend an account may name. The operator
+// CLI is deliberately not bound by this: it already has host access, and refusing it
+// would leave "make this one account's tree live on another provider" impossible.
+func (c Connection) ValidateAccountAdded() error {
+	if err := c.Validate(); err != nil {
+		return err
+	}
+	if c.OwnerID == "" {
+		return fmt.Errorf("storage connection %q: an account's own connection must name that account", c.Name)
+	}
+	if c.Backend != "cos" {
+		return fmt.Errorf("storage connection %q: an account may only add a cos connection, got backend %q", c.Name, c.Backend)
+	}
+	if c.Role != RoleBackup {
+		return fmt.Errorf("storage connection %q: an account may only add a backup destination, got role %q; authority is the operator's decision", c.Name, c.Role)
+	}
+	return nil
+}
+
 // Apply folds this row into the process configuration so the existing driver
 // factory can be reused unchanged. Everything connection-specific comes from the
 // row; everything deployment-specific (database, HTTP, mail) stays with the process.
@@ -216,6 +248,8 @@ func (c Connection) Apply(base config.Config) (config.Config, error) {
 		Backend:             c.Backend,
 		ConnectionID:        c.Name,
 		Generation:          c.Generation,
+		OwnerScoped:         c.OwnerID != "",
+		RootAtBucket:        c.Config.RootAtBucket,
 		CoordinatedWrites:   c.Config.CoordinatedWrites,
 		MaxSinglePutBytes:   c.Config.MaxSinglePutBytes,
 		ObjectAdmissionFile: c.Config.ObjectAdmissionFile,
@@ -262,6 +296,7 @@ func FromConfig(cfg config.Config) (Connection, error) {
 			ObjectAdmissionFile: cfg.Storage.ObjectAdmissionFile,
 			ObjectSpoolRoot:     cfg.Storage.ObjectSpoolRoot,
 			TransferClass:       cfg.Storage.TransferClass,
+			RootAtBucket:        cfg.Storage.RootAtBucket,
 			COS:                 COSSpec{Bucket: cfg.COS.Bucket, Region: cfg.COS.Region},
 			S3: S3Spec{
 				Endpoint:      cfg.Storage.S3.Endpoint,

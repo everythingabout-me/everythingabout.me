@@ -91,6 +91,7 @@ usage:
   eam backup restore  --owner email-or-UUID --date YYYY-MM-DD [--to PATH]
   eam storage-connection list
   eam storage-connection add --name NAME --backend cos|s3|local --role authority|backup [flags]
+      [--owner EMAIL|UUID] gives the connection to one account; [--root-at-bucket] puts that tree at the bucket root
   eam storage-connection probe --name NAME [--owner email-or-UUID]  measure one connection and record its write evidence
   eam storage-admit --owner-id UUID --writers-quiesced --evidence proof.json [--physical-limit N] [--dry-run]
   eam storage-baseline --owner-id UUID --output new-baseline.json [--writers-quiesced]

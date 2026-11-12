@@ -171,9 +171,27 @@ Rules, each answering a specific failure:
 - **`owner_id is null` is the deployment default every account may use; a set owner is that account's
   own connection.** Resolution always happens for a known owner, so a user row wins over a default with
   the same name and two accounts may both call their connection "nas".
-- **An account may only add a `cos` connection.** A `local` row would let an account read and write
+- **An owner-scoped row's tree is its prefix, or the bucket itself; a shared row holds one tree per account
+  under its prefix.** The account segment exists to separate trees that share a connection, so on a row
+  only one account may use, it would be a directory nobody can explain — and the path a person browses is
+  the product. This is why the account is also absent from the row's identity: with the segment gone, two
+  rows that differed only by account would put two trees in one location, so `identity` names the location
+  alone and the unique index rejects the second claim (`ErrLocationTaken`) instead of quietly reporting
+  success for a row that was never written. The private system root keeps the account segment either way;
+  it is invisible, and keeping it preserves separation from user content.
+- **Rooting a tree at the bucket is an explicit mode, and it reserves one name.** `rootAtBucket` is a flag,
+  not an empty prefix, because the empty string already means "not configured"; it is refused on a shared
+  row (every account would share one root) and on a local root (a directory is already the root). Making the
+  tree the bucket puts the private system prefix inside it, so the driver advertises that prefix's top-level
+  name as reserved: creating, renaming or scanning an entry with that name fails, and a snapshot refuses to
+  copy it. Containment is therefore bounded by a refusal, not hidden by a skip — nothing under a content
+  root is skipped today, and a silent skip is how system material would become user-visible.
+- **Only the account API is limited to `cos`.** A `local` row would let an account read and write
   arbitrary host paths, and an `s3` row would let it point this process at any endpoint — an outbound
-  request primitive rather than a storage choice. Both remain operator-only.
+  request primitive rather than a storage choice. A COS row cannot choose a host (its endpoint is derived
+  from bucket and region), which is why it is the one backend an account may name. The operator CLI may
+  bind any backend to one account, because it already has host access and refusing it would leave "move
+  this account's tree onto another provider" impossible.
 
 ## 8. Runtime
 
@@ -239,3 +257,5 @@ A passing suite is not evidence that a deployment backs up. These are the gates:
 | Retention never follows the newest snapshot | Encryption and deletion are the events being defended against | — |
 | A connection row carries its credentials | Adding a provider is one INSERT, nothing to place on the host | A second person can read the database |
 | Table, not environment, decides the location | One authority for "where"; two would fight | — |
+| An owner-scoped row's tree is its prefix or the bucket | The row already names the account; an account segment there is a directory nobody can explain, and a person should not have to open one | The connection ever serves more than one account |
+| Identity names the location, not the account | Two trees in one place is silent corruption, so the second claim must fail | — |

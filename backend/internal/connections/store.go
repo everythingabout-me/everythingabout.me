@@ -106,9 +106,17 @@ func (p postgresStore) OwnerConnection(ctx context.Context, ownerID string) (str
 	return bindingName(binding), true, nil
 }
 
-// Insert is idempotent for the same tree: a second INSERT of an identity that a row
-// already claims does nothing, so a repeated bootstrap or a re-run of an operator
-// command cannot produce two rows for one tree.
+// ErrLocationTaken reports that another row already claims this physical location.
+// One location holds one tree, so the second claim is a configuration conflict, not
+// a retry.
+var ErrLocationTaken = errors.New("storage connection location already claimed")
+
+// Insert is idempotent for the same tree: re-inserting the row that already holds an
+// identity does nothing, so a repeated bootstrap or a re-run of an operator command
+// cannot produce two rows for one tree. A *different* row claiming the same identity
+// is refused, because the rows would deliberately collide in one location — and
+// because `on conflict do nothing` would otherwise report success for a row that was
+// never written.
 func (p postgresStore) Insert(ctx context.Context, c Connection) error {
 	config, err := json.Marshal(c.Config)
 	if err != nil {
@@ -122,7 +130,7 @@ func (p postgresStore) Insert(ctx context.Context, c Connection) error {
 	if len(c.Admission) > 0 {
 		admission = []byte(c.Admission)
 	}
-	_, err = p.db.Pool().Exec(ctx, `
+	tag, err := p.db.Pool().Exec(ctx, `
 		insert into storage_connections(owner_id, name, backend, role, identity, config, secret, generation, admission, enabled)
 		values(nullif($1,'')::uuid,$2,$3,$4,$5,$6,$7,$8,$9,true)
 		on conflict (identity) do nothing`,
@@ -130,7 +138,21 @@ func (p postgresStore) Insert(ctx context.Context, c Connection) error {
 	if err != nil {
 		return fmt.Errorf("insert storage connection %q (identity %s): %w", c.Name, c.Identity, err)
 	}
-	return nil
+	if tag.RowsAffected() == 1 {
+		return nil
+	}
+	var name, owner string
+	if err := p.db.Pool().QueryRow(ctx, `select name, coalesce(owner_id::text,'') from storage_connections where identity=$1`, c.Identity).Scan(&name, &owner); err != nil {
+		return fmt.Errorf("storage connection %q: read the row that already holds identity %s: %w", c.Name, c.Identity, err)
+	}
+	if name == c.Name && owner == c.OwnerID {
+		return nil
+	}
+	holder := fmt.Sprintf("connection %q, shared by the deployment", name)
+	if owner != "" {
+		holder = fmt.Sprintf("connection %q of account %s", name, owner)
+	}
+	return fmt.Errorf("%w: %s already holds this location; a connection needs its own location, so remove that row first or name a different bucket/prefix", ErrLocationTaken, holder)
 }
 
 const connectionColumns = `id::text, coalesce(owner_id::text, ''), name, backend, role, identity, config, secret, generation, admission, enabled`

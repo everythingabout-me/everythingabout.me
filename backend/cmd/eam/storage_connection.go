@@ -38,6 +38,7 @@ func runStorageConnection(args []string) error {
 cos flags:   --cos-bucket --cos-region --cos-secret-id --cos-secret-key
 s3 flags:    --s3-endpoint --s3-region --s3-bucket --s3-access-key-id --s3-secret-access-key [--s3-path-style] [--s3-content-prefix] [--s3-system-prefix]
 local flags: --local-content-root --local-system-root [--local-case-sensitive]
+root:        [--root-at-bucket]  (with --owner: the tree is the bucket itself, not a prefix in it)
 common:      [--transfer-class] [--coordinated-writes=false] [--admission-file] [--spool-root] [--generation N]`)
 	}
 	switch args[0] {
@@ -90,11 +91,51 @@ func runStorageConnectionList(args []string) error {
 		return nil
 	}
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(w, "NAME\tROLE\tBACKEND\tGENERATION\tENABLED\tLOCATION\tIDENTITY")
+	fmt.Fprintln(w, "NAME\tROLE\tBACKEND\tSCOPE\tGENERATION\tENABLED\tLOCATION\tIDENTITY")
 	for _, c := range rows {
-		fmt.Fprintf(w, "%s\t%s\t%s\t%d\t%t\t%s\t%s\n", c.Name, c.Role, c.Backend, c.Generation, c.Enabled, connectionLocation(c), c.Identity[:12])
+		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%d\t%t\t%s\t%s\n", c.Name, c.Role, c.Backend, connectionScope(c), c.Generation, c.Enabled, connectionLocation(c), c.Identity[:12])
 	}
 	return w.Flush()
+}
+
+// connectionScope says whose tree a row holds, because that decides where the tree
+// starts: one account's tree is the prefix itself, a shared row namespaces every
+// account under it.
+func connectionScope(c connections.Connection) string {
+	if c.OwnerID == "" {
+		return "shared"
+	}
+	return "owner"
+}
+
+// reservedSystemName is the top-level folder a bucket-rooted tree must never contain
+// as user content, because the service's private prefix lives there.
+func reservedSystemName(c connections.Connection) string {
+	switch c.Backend {
+	case "cos":
+		return "__eam_system__/"
+	case "s3":
+		if pref := c.Config.S3.SystemPrefix; pref != "" {
+			return pref
+		}
+		return "__eam_system__/"
+	}
+	return ""
+}
+
+// objectPrefix is the configured native prefix, before any account segment. It is
+// what the operator chose as the location; empty means a backend that has none.
+func objectPrefix(c connections.Connection) string {
+	switch c.Backend {
+	case "cos":
+		return "drive/"
+	case "s3":
+		if c.Config.S3.ContentPrefix != "" {
+			return c.Config.S3.ContentPrefix
+		}
+		return "drive/"
+	}
+	return ""
 }
 
 func connectionLocation(c connections.Connection) string {
@@ -117,6 +158,7 @@ func runStorageConnectionAdd(args []string) error {
 	role := fs.String("role", connections.RoleAuthority, "authority or backup")
 	generation := fs.Int64("generation", 1, "generation; bump it when the location changes")
 	transferClass := fs.String("transfer-class", "", "presigned-parts, resumable-session or relay")
+	rootAtBucket := fs.Bool("root-at-bucket", false, "put this account's tree at the bucket root instead of under a prefix (needs --owner)")
 	coordinated := fs.Bool("coordinated-writes", true, "require the coordinated object write protocol")
 	admissionFile := fs.String("admission-file", "", "object admission evidence path (object backends)")
 	spoolRoot := fs.String("spool-root", "", "object spool root (object backends)")
@@ -141,6 +183,12 @@ func runStorageConnectionAdd(args []string) error {
 	}
 	if *name == "" || *backend == "" {
 		return fmt.Errorf("--name and --backend are required: a connection is identified by its name and where it lives")
+	}
+	if *rootAtBucket && *owner == "" {
+		return fmt.Errorf("--root-at-bucket puts one account's tree at the bucket root, so it needs --owner: a shared connection would put every account's tree in the same place")
+	}
+	if *rootAtBucket && *s3ContentPrefix != "" {
+		return fmt.Errorf("--root-at-bucket and --s3-content-prefix name two different roots; the tree is either the bucket or a prefix in it")
 	}
 	if err := validateConnectionName(*name); err != nil {
 		return err
@@ -167,6 +215,7 @@ func runStorageConnectionAdd(args []string) error {
 	c := connections.Connection{
 		OwnerID: ownerID, Name: *name, Backend: *backend, Role: *role, Generation: *generation, Enabled: true,
 		Config: connections.Spec{
+			RootAtBucket:      *rootAtBucket,
 			CoordinatedWrites: *coordinated,
 			TransferClass:     *transferClass,
 			COS:               connections.COSSpec{Bucket: *cosBucket, Region: *cosRegion},
@@ -214,7 +263,16 @@ func runStorageConnectionAdd(args []string) error {
 	if err := connections.NewPostgresStore(db).Insert(ctx, c); err != nil {
 		return err
 	}
-	fmt.Printf("added storage connection %q (role %s, identity %s)\n", c.Name, c.Role, c.Identity[:12])
+	fmt.Printf("added storage connection %q (role %s, scope %s, identity %s)\n", c.Name, c.Role, connectionScope(c), c.Identity[:12])
+	if c.Config.RootAtBucket {
+		fmt.Printf("  this account's tree is the bucket root; %s is reserved for the service and refused as a user name\n", reservedSystemName(c))
+	} else if root := objectPrefix(c); root != "" {
+		if c.OwnerID != "" {
+			fmt.Printf("  this account's tree is %s (no account segment)\n", root)
+		} else {
+			fmt.Printf("  each account's tree is %s<owner-uuid>/\n", root)
+		}
+	}
 	if c.Backend != "local" {
 		fmt.Printf("  admission evidence: %s\n  spool root: %s\n", c.Config.ObjectAdmissionFile, c.Config.ObjectSpoolRoot)
 		fmt.Printf("  object writes stay unproven until: eam storage-connection probe --name %s\n", c.Name)

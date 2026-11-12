@@ -10,12 +10,22 @@ import (
 	"everythingabout.me/backend/internal/storage"
 )
 
-// Storage configures one connection with deterministic per-owner roots. Connection
+// Storage configures one connection. A shared connection derives a deterministic root
+// per account; an owner-scoped one uses its prefix as that account's root. Connection
 // identity and generation must be backed up independently from credential rotation.
 type Storage struct {
-	Backend             string
-	ConnectionID        string
-	Generation          int64
+	Backend      string
+	ConnectionID string
+	Generation   int64
+	// OwnerScoped says this connection serves one account, so that account's tree is
+	// the configured prefix itself. A shared connection namespaces each owner's tree
+	// under the prefix, because several accounts use it and a prefix a client could
+	// name is a prefix a client could point at someone else.
+	OwnerScoped bool
+	// RootAtBucket says an owner-scoped connection's tree is the bucket itself rather
+	// than a prefix inside it. Only an owner-scoped row may ask for it: a shared row
+	// would put every account's tree in the same place.
+	RootAtBucket        bool
 	CoordinatedWrites   bool
 	MaxSinglePutBytes   int64
 	ObjectAdmissionFile string

@@ -232,3 +232,87 @@ func mustIdentity(t *testing.T, c Connection) string {
 }
 
 var _ = storage.TransferRelay
+
+// An owner-scoped row's tree is its prefix, so the account is not part of where the
+// tree lives: two rows that differ only by account would collide in one location, and
+// the identity has to say so instead of hiding it behind an account-shaped digest.
+func TestIdentityIgnoresTheAccountButNotTheLocation(t *testing.T) {
+	row := Connection{
+		Name: "nas", Backend: "s3", Role: RoleBackup, Generation: 1, Enabled: true,
+		Config: Spec{S3: S3Spec{Endpoint: "https://nas.invalid", Region: "us-east-1", Bucket: "backup"}},
+	}
+	mine := row
+	mine.OwnerID = "owner-a"
+	theirs := row
+	theirs.OwnerID = "owner-b"
+	if mustIdentity(t, mine) != mustIdentity(t, theirs) {
+		t.Fatal("identity still encodes the account, so two rows could claim one location")
+	}
+	moved := mine
+	moved.Config.S3.Bucket = "other"
+	if mustIdentity(t, moved) == mustIdentity(t, mine) {
+		t.Fatal("identity did not change when the location did")
+	}
+}
+
+// The account API may only name a COS bucket: a local row would be an arbitrary host
+// path and an s3 row an outbound request primitive. The operator CLI is not bound by
+// this, because it already has host access.
+func TestValidateAccountAddedStaysStricterThanValidate(t *testing.T) {
+	ownerRow := func(backend string, role string) Connection {
+		c := Connection{OwnerID: "owner-a", Name: "mine", Backend: backend, Role: role, Generation: 1, Enabled: true}
+		switch backend {
+		case "cos":
+			c.Config.COS = COSSpec{Bucket: "b-125", Region: "ap-hongkong"}
+			c.Secret.COS = COSCredential{SecretID: "id", SecretKey: "key"}
+		case "s3":
+			c.Config.S3 = S3Spec{Endpoint: "https://nas.invalid", Region: "us-east-1", Bucket: "b"}
+			c.Secret.S3 = S3Credential{AccessKeyID: "id", SecretAccessKey: "key"}
+		}
+		return c
+	}
+	if err := ownerRow("cos", RoleBackup).Validate(); err != nil {
+		t.Fatalf("operator-added owner row rejected by Validate: %v", err)
+	}
+	if err := ownerRow("s3", RoleBackup).Validate(); err != nil {
+		t.Fatalf("operator-added owner s3 row rejected by Validate: %v", err)
+	}
+	if err := ownerRow("cos", RoleBackup).ValidateAccountAdded(); err != nil {
+		t.Fatalf("account cos backup row rejected: %v", err)
+	}
+	for _, test := range []struct {
+		what string
+		row  Connection
+	}{
+		{"s3 endpoint", ownerRow("s3", RoleBackup)},
+		{"authority role", ownerRow("cos", RoleAuthority)},
+		{"shared row", func() Connection { c := ownerRow("cos", RoleBackup); c.OwnerID = ""; return c }()},
+	} {
+		if err := test.row.ValidateAccountAdded(); err == nil {
+			t.Errorf("%s accepted from the account path", test.what)
+		}
+	}
+}
+
+// rootAtBucket is for a tree only one account may use: a shared connection at the
+// bucket root would place every account's tree in the same place.
+func TestValidateRejectsRootAtBucketWhereItCannotWork(t *testing.T) {
+	cos := func(owner string) Connection {
+		c := Connection{OwnerID: owner, Name: "mine", Backend: "cos", Role: RoleBackup, Generation: 1, Enabled: true}
+		c.Config.COS = COSSpec{Bucket: "b-125", Region: "ap-hongkong"}
+		c.Secret.COS = COSCredential{SecretID: "id", SecretKey: "key"}
+		c.Config.RootAtBucket = true
+		return c
+	}
+	if err := cos("owner-a").Validate(); err != nil {
+		t.Fatalf("owner-scoped bucket-root row rejected: %v", err)
+	}
+	if err := cos("").Validate(); err == nil {
+		t.Fatal("a shared row was allowed to root at the bucket")
+	}
+	local := Connection{OwnerID: "owner-a", Name: "mine", Backend: "local", Role: RoleBackup, Generation: 1, Enabled: true,
+		Config: Spec{Local: LocalSpec{ContentRoot: "/srv/a", SystemRoot: "/srv/b"}, RootAtBucket: true}}
+	if err := local.Validate(); err == nil {
+		t.Fatal("a local row was allowed to root at the bucket")
+	}
+}

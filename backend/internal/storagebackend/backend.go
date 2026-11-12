@@ -71,7 +71,7 @@ func newBackend(cfg *config.Config, tolerateUnprovenWrites bool) (*Backend, erro
 	if b.cfg.Storage.Generation == 0 {
 		b.cfg.Storage.Generation = 1
 	}
-	if b.cfg.Storage.S3.ContentPrefix == "" {
+	if b.cfg.Storage.S3.ContentPrefix == "" && !b.cfg.Storage.RootAtBucket {
 		b.cfg.Storage.S3.ContentPrefix = "drive/"
 	}
 	if b.cfg.Storage.S3.SystemPrefix == "" {
@@ -106,7 +106,7 @@ func newBackend(cfg *config.Config, tolerateUnprovenWrites bool) (*Backend, erro
 			}
 		}
 	case "s3":
-		if err = validateObjectPrefixes(b.cfg.Storage.S3.ContentPrefix, b.cfg.Storage.S3.SystemPrefix); err != nil {
+		if err = validateObjectPrefixes(b.cfg.Storage.S3.ContentPrefix, b.cfg.Storage.S3.SystemPrefix, b.cfg.Storage.RootAtBucket); err != nil {
 			return nil, err
 		}
 		opts := cfg.Storage.S3
@@ -174,11 +174,20 @@ func (b *Backend) loadAdmission() (objectmutation.Admission, error) {
 	return admission, nil
 }
 
-func validateObjectPrefixes(content, system string) error {
-	for _, prefix := range []string{content, system} {
+func validateObjectPrefixes(content, system string, rootAtBucket bool) error {
+	prefixes := []string{system}
+	if !rootAtBucket {
+		prefixes = append([]string{content}, prefixes...)
+	}
+	for _, prefix := range prefixes {
 		if !strings.HasSuffix(prefix, "/") || storage.ValidatePath(storage.Path(strings.TrimSuffix(prefix, "/"))) != nil || prefix == "/" {
 			return storage.NewError("invalid_config", "", nil)
 		}
+	}
+	if rootAtBucket {
+		// The system prefix sits inside the tree by construction; the driver refuses the
+		// name instead of pretending the two are separate.
+		return nil
 	}
 	a, b := norm.NFC.String(content), norm.NFC.String(system)
 	if strings.HasPrefix(a, b) || strings.HasPrefix(b, a) {
@@ -194,20 +203,52 @@ func (b *Backend) Binding(ownerID string) (storage.Config, error) {
 		return storage.Config{}, storage.NewError("invalid_config", "", nil)
 	}
 	cfg := storage.Config{OwnerID: ownerID, Generation: b.cfg.Storage.Generation}
+	// A shared connection holds one tree per account, so the account segment is what
+	// keeps two accounts' trees apart in one bucket. An owner-scoped connection holds
+	// exactly one account's tree, so that segment would be a directory nobody can
+	// explain; its root is the configured prefix, or the bucket itself. The private
+	// system root keeps the segment either way: it is invisible, and keeping it
+	// preserves disjointness from user content without inventing a second naming rule.
+	if b.cfg.Storage.RootAtBucket && !b.cfg.Storage.OwnerScoped {
+		return storage.Config{}, storage.NewError("invalid_config", "", nil)
+	}
+	cfg.RootAtBucket = b.cfg.Storage.RootAtBucket
 	switch b.cfg.BackendName() {
 	case "local":
+		// localstorage.OpenOwner requires the exact <base>/<owner> child, so a local
+		// connection is always per-owner at the filesystem level.
+		if cfg.RootAtBucket {
+			return storage.Config{}, storage.NewError("invalid_config", "", nil)
+		}
 		cfg.ContentRoot = filepath.Join(b.cfg.Storage.Local.ContentRoot, ownerID)
 		cfg.SystemRoot = filepath.Join(b.cfg.Storage.Local.SystemRoot, ownerID)
 	case "cos":
-		cfg.ContentRoot = "drive/" + ownerID + "/"
+		switch {
+		case cfg.RootAtBucket:
+			// The tree is the bucket; ContentRoot stays empty and RootAtBucket says why.
+		case b.cfg.Storage.OwnerScoped:
+			cfg.ContentRoot = "drive/"
+		default:
+			cfg.ContentRoot = "drive/" + ownerID + "/"
+		}
 		cfg.SystemRoot = "__eam_system__/" + ownerID + "/"
 	case "s3":
-		for _, prefix := range []string{b.cfg.Storage.S3.ContentPrefix, b.cfg.Storage.S3.SystemPrefix} {
+		prefixes := []string{b.cfg.Storage.S3.SystemPrefix}
+		if !cfg.RootAtBucket {
+			prefixes = append(prefixes, b.cfg.Storage.S3.ContentPrefix)
+		}
+		for _, prefix := range prefixes {
 			if !strings.HasSuffix(prefix, "/") || storage.ValidatePath(storage.Path(strings.TrimSuffix(prefix, "/"))) != nil {
 				return storage.Config{}, storage.NewError("invalid_config", "", nil)
 			}
 		}
-		cfg.ContentRoot = b.cfg.Storage.S3.ContentPrefix + ownerID + "/"
+		switch {
+		case cfg.RootAtBucket:
+		case b.cfg.Storage.OwnerScoped:
+			cfg.ContentRoot = b.cfg.Storage.S3.ContentPrefix
+		default:
+			cfg.ContentRoot = b.cfg.Storage.S3.ContentPrefix + ownerID + "/"
+		}
 		cfg.SystemRoot = b.cfg.Storage.S3.SystemPrefix + ownerID + "/"
 	}
 	// Credential rotation never changes this digest. Any endpoint/region/root change does.

@@ -213,3 +213,88 @@ func TestNewReportsAdmissionEvidenceFromAnotherConnection(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// An owner-scoped connection holds exactly one account's tree, so its root is the
+// configured prefix; a shared connection holds one tree per account and must keep the
+// account segment that separates them.
+func TestBindingOmitsTheAccountForAnOwnerScopedConnection(t *testing.T) {
+	s3 := config.Storage{
+		Backend: "s3", ConnectionID: "nas", Generation: 1,
+		S3: config.S3{Endpoint: "https://nas.invalid", Region: "us-east-1", Bucket: "b",
+			AccessKeyID: "id", SecretAccessKey: "key", ContentPrefix: "eam/", SystemPrefix: "__eam_system__/"},
+	}
+	for _, test := range []struct {
+		name       string
+		ownerScope bool
+		content    string
+		system     string
+	}{
+		{"owner", true, "eam/", "__eam_system__/owner-a/"},
+		{"shared", false, "eam/owner-a/", "__eam_system__/owner-a/"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			cfg := &config.Config{Storage: s3}
+			cfg.Storage.OwnerScoped = test.ownerScope
+			backend, err := New(cfg)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer backend.Close()
+			bound, err := backend.Binding("owner-a")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if bound.ContentRoot != test.content || bound.SystemRoot != test.system {
+				t.Fatalf("binding %q/%q, want %q/%q", bound.ContentRoot, bound.SystemRoot, test.content, test.system)
+			}
+		})
+	}
+	// The COS driver hardcodes its prefix, so an owner-scoped COS row lands at drive/
+	// rather than drive/<account>/.
+	cfg := &config.Config{COS: config.COS{Bucket: "b-123456", Region: "ap-hongkong", SecretID: "id", SecretKey: "key"}, Storage: config.Storage{Backend: "cos", ConnectionID: "mine", Generation: 1, OwnerScoped: true}}
+	backend, err := New(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer backend.Close()
+	bound, err := backend.Binding("owner-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bound.ContentRoot != "drive/" || bound.SystemRoot != "__eam_system__/owner-a/" {
+		t.Fatalf("owner-scoped COS binding %q/%q", bound.ContentRoot, bound.SystemRoot)
+	}
+}
+
+// Rooting an owner-scoped tree at the bucket is expressed as an empty ContentRoot plus
+// an explicit flag, and a shared connection must not be able to ask for it.
+func TestBindingRootsAnOwnerScopedConnectionAtTheBucket(t *testing.T) {
+	cfg := &config.Config{Storage: config.Storage{
+		Backend: "s3", ConnectionID: "nas", Generation: 1, OwnerScoped: true, RootAtBucket: true,
+		S3: config.S3{Endpoint: "https://nas.invalid", Region: "us-east-1", Bucket: "b",
+			AccessKeyID: "id", SecretAccessKey: "key", ContentPrefix: "", SystemPrefix: "__eam_system__/"},
+	}}
+	backend, err := New(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer backend.Close()
+	bound, err := backend.Binding("owner-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bound.RootAtBucket || bound.ContentRoot != "" || bound.SystemRoot != "__eam_system__/owner-a/" {
+		t.Fatalf("bucket-root binding %+v", bound)
+	}
+	// A shared connection at the bucket root would put every account's tree in one place.
+	shared := *cfg
+	shared.Storage.OwnerScoped = false
+	sharedBackend, err := New(&shared)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sharedBackend.Close()
+	if _, err := sharedBackend.Binding("owner-a"); err == nil {
+		t.Fatal("a shared connection was allowed to root at the bucket")
+	}
+}
