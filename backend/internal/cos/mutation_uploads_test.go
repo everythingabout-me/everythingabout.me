@@ -3,6 +3,7 @@ package cos
 import (
 	"context"
 	"encoding/xml"
+	"errors"
 	"hash/crc64"
 	"io"
 	"net/http"
@@ -79,6 +80,29 @@ func TestMutationMultipartNativeWireAndConditionalComplete(t *testing.T) {
 	}
 	if allocations.Load() != 1 || parts.Load() != 1 || completes.Load() != 1 || aborts.Load() != 1 {
 		t.Fatal("native operation replayed")
+	}
+}
+
+func TestMutationAbortSessionAbsentIsNotSuccess(t *testing.T) {
+	var calls atomic.Int32
+	_, backend, _ := mutationFixture(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		if r.Method != http.MethodDelete || r.URL.Query().Get("uploadId") != "gone" {
+			t.Errorf("unexpected abort request: %s %s", r.Method, r.URL)
+		}
+		w.WriteHeader(http.StatusNotFound)
+		io.WriteString(w, `<Error><Code>NoSuchUpload</Code><Message>gone</Message></Error>`)
+	}))
+	err := backend.(objectmutation.MultipartBackend).AbortMultipart(context.Background(), "drive/a+%2F?#.bin", "gone")
+	// NoSuchUpload also describes an upload Complete already consumed, so it cannot be
+	// reported as a successful abort.
+	if !storage.IsCode(err, "abort_session_absent") || calls.Load() != 1 {
+		t.Fatalf("calls=%d error=%v; want one absent answer", calls.Load(), err)
+	}
+	// The provider's own facts survive the recode: 404, NoSuchUpload, request id.
+	var observed *storage.Error
+	if !errors.As(err, &observed) || observed.Provider == nil || observed.Provider.Status != http.StatusNotFound || observed.Provider.Code != "NoSuchUpload" {
+		t.Fatalf("absent answer lost its provider facts: %+v", err)
 	}
 }
 

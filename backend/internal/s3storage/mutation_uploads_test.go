@@ -3,6 +3,7 @@ package s3storage
 import (
 	"context"
 	"crypto/sha256"
+	"errors"
 	"io"
 	"net/http"
 	"sync/atomic"
@@ -10,6 +11,7 @@ import (
 	"time"
 
 	"everythingabout.me/backend/internal/objectmutation"
+	"everythingabout.me/backend/internal/storage"
 )
 
 // Once the first transport buffer is full, more bytes require the provider to
@@ -85,5 +87,28 @@ func TestMutationUploadPartStreamsNonSeekableBody(t *testing.T) {
 	}
 	if tag != `"native-part-tag"` || calls.Load() != 1 || received.Load() != size || body.read != size || body.remaining != 0 {
 		t.Fatalf("incorrect single-pass upload: tag=%q calls=%d received=%d read=%d remaining=%d", tag, calls.Load(), received.Load(), body.read, body.remaining)
+	}
+}
+
+func TestMutationAbortSessionAbsentIsNotSuccess(t *testing.T) {
+	var calls atomic.Int32
+	_, backend, _ := mutationFixture(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		if r.Method != http.MethodDelete || r.URL.Query().Get("uploadId") != "gone" {
+			t.Errorf("unexpected abort request: %s %s", r.Method, r.URL)
+		}
+		w.WriteHeader(http.StatusNotFound)
+		io.WriteString(w, `<?xml version="1.0" encoding="UTF-8"?><Error><Code>NoSuchUpload</Code><Message>gone</Message></Error>`)
+	}))
+	err := backend.(objectmutation.MultipartBackend).AbortMultipart(context.Background(), "drive/alice/x.bin", "gone")
+	// NoSuchUpload also describes an upload Complete already consumed, so it cannot be
+	// reported as a successful abort.
+	if !storage.IsCode(err, "abort_session_absent") || calls.Load() != 1 {
+		t.Fatalf("calls=%d error=%v; want one absent answer", calls.Load(), err)
+	}
+	// The provider's own facts survive the recode: 404, NoSuchUpload, request id.
+	var observed *storage.Error
+	if !errors.As(err, &observed) || observed.Provider == nil || observed.Provider.Status != http.StatusNotFound || observed.Provider.Code != "NoSuchUpload" {
+		t.Fatalf("absent answer lost its provider facts: %+v", err)
 	}
 }

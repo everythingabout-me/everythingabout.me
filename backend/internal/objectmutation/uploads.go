@@ -447,21 +447,38 @@ func (d *Driver) DiscardParts(ctx context.Context, in storage.WriteIntent, metad
 				return e
 			}
 			if !provesDiscarded(proof, session.UploadID) {
-				if e = d.backend.(MultipartBackend).AbortMultipart(ctx, d.key(in.Target, storage.File), session.UploadID); e != nil {
+				abortErr := d.backend.(MultipartBackend).AbortMultipart(ctx, d.key(in.Target, storage.File), session.UploadID)
+				switch {
+				case abortErr == nil:
+					// The provider accepted the abort: the session existed and is now
+					// destroyed, so no part of it can ever be completed, read, or
+					// replayed. That is the one answer that proves this allocation
+					// published nothing. Record it as durable evidence bound to this
+					// one UploadID; without it a single uncertain receipt (its receiver
+					// died between the part request and the answer) would retain the
+					// reservation and retry cleanup forever, even though cancelling or
+					// losing an upload mid-flight is an ordinary outcome.
+					e = record.Put(ctx, discardProofKey, encodeNative(&nativeDiscardProof{UploadID: session.UploadID, Observed: time.Now().UTC(), Via: "abort"}))
+				case sessionAbsent(abortErr):
+					// A session the provider no longer knows is not a successful abort:
+					// the provider also removes the session when Complete succeeds, so
+					// the allocation is gone but a published object may remain. Only the
+					// destination can distinguish the two, and this intent's own marker
+					// is what binds the object to this operation. Record which case it
+					// is: an object recorded as published stays visible to reconcile,
+					// while "nothing applied" would make it invisible.
+					_, published, observeErr := d.observedIntentObject(ctx, in.ID, in)
+					if observeErr != nil {
+						return observeErr
+					}
+					e = record.Put(ctx, discardProofKey, encodeNative(&nativeDiscardProof{UploadID: session.UploadID, Observed: time.Now().UTC(), Via: "abort-session-absent", Published: published}))
+				default:
 					// The abort outcome is unknown: the provider may still hold the
 					// session and its parts, so every receipt stays retained and the
 					// caller retries. Only a definite provider answer releases liability.
-					return e
+					return abortErr
 				}
-				// A definite abort consumes the whole allocation: the provider deletes
-				// the upload session and every part stored under it, so a receipt that
-				// no reply ever confirmed (its receiver died between the part request
-				// and the answer) can no longer hide bytes anything could complete,
-				// read, or replay. Record that answer as durable evidence bound to this
-				// one UploadID. Without it, a single uncertain receipt would retain the
-				// reservation and retry cleanup forever, even though cancelling or
-				// losing an upload mid-flight is an ordinary outcome.
-				if e = record.Put(ctx, discardProofKey, encodeNative(&nativeDiscardProof{UploadID: session.UploadID, Observed: time.Now().UTC(), Via: "abort"})); e != nil {
+				if e != nil {
 					return e
 				}
 			}
@@ -482,7 +499,13 @@ type nativeDiscardProof struct {
 	UploadID string
 	Observed time.Time
 	Parts    int    // parts the provider still reported, when an operator probed
-	Via      string // "abort" or "operator"; empty for proofs recorded before Via existed
+	Via      string // "abort", "abort-session-absent" or "operator"; empty for proofs recorded before Via existed
+	// Published records that the destination carries an object bound to this
+	// operation's intent marker. A session the provider no longer knows may have ended
+	// in Complete as well as in abort, so that object is the only evidence separating
+	// the two. Recording it keeps a published object visible to reconcile instead of
+	// leaving "the abort consumed an unpublished allocation" as the only record.
+	Published bool `json:",omitempty"`
 }
 
 func provesDiscarded(proof *nativeDiscardProof, uploadID string) bool {

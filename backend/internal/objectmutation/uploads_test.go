@@ -49,6 +49,18 @@ type nativeTestBackend struct {
 	dropComplete bool
 	abortErr     error
 	onPart       func()
+	// onHead runs once after the next Head answer, so a test can model a provider state
+	// change that lands between the observation and the request that follows it.
+	onHead func(key string)
+}
+
+func (b *nativeTestBackend) Head(ctx context.Context, key string) (Object, error) {
+	obj, err := b.fakeBackend.Head(ctx, key)
+	if hook := b.onHead; hook != nil {
+		b.onHead = nil
+		hook(key)
+	}
+	return obj, err
 }
 
 func (b *nativeTestBackend) BeginMultipart(context.Context, Put) (string, error) {

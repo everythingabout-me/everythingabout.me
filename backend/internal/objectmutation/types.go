@@ -63,12 +63,12 @@ type Object struct {
 	Metadata   map[string]string
 }
 type Put struct {
-	Key          string
-	Body         io.Reader
-	Size         int64
-	MediaType    string
-	Metadata     map[string]string
-	Absent       bool
+	Key       string
+	Body      io.Reader
+	Size      int64
+	MediaType string
+	Metadata  map[string]string
+	Absent    bool
 	// ForbidOverwrite asks only the provider's own refuse-to-replace switch. A form upload
 	// cannot send If-None-Match, so the connection's form-post evidence has to measure that
 	// switch by itself instead of inferring it from a conditional PUT.
@@ -111,6 +111,14 @@ type PartCopyBackend interface {
 // MultipartBackend keeps numbered payloads unpublished until one conditional
 // Complete request. Part retries may replay identical bytes only; completion and
 // allocation never use implicit SDK retries.
+//
+// AbortMultipart destroys one upload session. A nil result proves the session existed
+// and is now gone, so none of its parts can ever be completed and no publication from
+// that allocation can still land. An answer that the session does not exist is NOT
+// that proof: providers remove a session when Complete succeeds as well, so the call
+// reports abort_session_absent instead. The caller holds this operation's intent
+// marker, and only a destination observation bound to that marker may conclude that a
+// publication landed.
 type MultipartBackend interface {
 	BeginMultipart(context.Context, Put) (string, error)
 	PutPart(context.Context, string, string, int, io.Reader, int64) (string, error)
@@ -121,8 +129,11 @@ type MultipartBackend interface {
 // MultipartInspector reports whether the provider still knows an upload session. It is
 // an operator-reconciliation capability, not publication authority: a session the
 // provider no longer knows can never be completed and can never serve its parts again.
-// A backend without it cannot prove a discarded allocation terminal, so retained
-// liability stays until the provider lifecycle is inspected out of band.
+// That absence is terminal for the session only. A completed upload also removes the
+// session, so it never says whether an object was published; binding the destination to
+// this operation's intent marker is what answers that. A backend without it cannot prove
+// a discarded allocation terminal, so retained liability stays until the provider
+// lifecycle is inspected out of band.
 type MultipartInspector interface {
 	InspectMultipart(context.Context, string, string) (MultipartState, error)
 }

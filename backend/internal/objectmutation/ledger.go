@@ -745,7 +745,11 @@ func (d *Driver) copyParts(ctx context.Context, r *ledger, request Copy, parts P
 		length := min(copyPartBytes, request.Size-offset)
 		tag, err := parts.CopyPart(ctx, request.Target, uploadID, number, request.Source, request.SourceETag, offset, length)
 		if err != nil {
-			if abortErr := parts.AbortMultipart(context.WithoutCancel(ctx), request.Target, uploadID); abortErr == nil {
+			// This attempt returns before sending its one publishing completion, so parts
+			// alone covered nothing. An accepted abort and a session the provider no longer
+			// knows are both terminal for the allocation here; only a failed abort request
+			// leaves liability.
+			if abortErr := parts.AbortMultipart(context.WithoutCancel(ctx), request.Target, uploadID); abortErr == nil || sessionAbsent(abortErr) {
 				r.Native = nil
 				_ = d.save(r)
 				return Object{}, &storage.NoFinalEffect{Cause: err}
@@ -769,19 +773,23 @@ func (d *Driver) copyParts(ctx context.Context, r *ledger, request Copy, parts P
 // resolvePublication settles a multipart publication whose reply was lost from the two
 // facts the provider itself holds, so "unknown" lasts one inspection instead of forever.
 //
-//   - Nothing at the target and the session is still there: aborting it proves the
-//     completion never took effect, because a completed upload can no longer be aborted.
-//     The record settles as not_applied.
+//   - Nothing at the target and the provider accepts an abort: the completion never
+//     landed and now cannot, because the abort destroyed the session a completion would
+//     need. The record settles as not_applied.
 //   - An object at the target carrying this request's own intent marker and size: this
 //     exact request wrote it, since nothing else writes that marker. The record settles as
 //     applied, without re-sending the publication.
-//   - Anything else — an object that is not ours, or no session left to abort — decides
-//     nothing. A bare HEAD cannot attribute an object, so that half stays fenced for an
-//     operator.
+//   - The provider no longer knows the session: that answer says nothing about the
+//     publication, because the provider also removes the session when Complete succeeds.
+//     Only the destination can decide, so an object bound to this intent's marker settles
+//     applied. Anything else — an empty target, or an object this operation did not
+//     write — leaves the record unknown: a vanished session does not prove the
+//     publication never landed, and "nothing applied" would hide an object the index does
+//     not know about.
 //
-// It exists because leaving both halves unresolved was not merely cautious: a lost reply
-// pinned its path, and every folder above it, permanently. One interrupted import made a
-// whole folder undeletable that way until the record was resolved by hand.
+// It exists because leaving the unknown half unresolved was not merely cautious: a lost
+// reply pinned its path, and every folder above it, permanently. One interrupted import
+// made a whole folder undeletable that way until the record was resolved by hand.
 func (d *Driver) resolvePublication(ctx context.Context, r *ledger) error {
 	// A provider copy resolves through resolveCopied, which owns the same question with the
 	// copy's own intent marker; this path is only for a publication from this writer.
@@ -795,15 +803,7 @@ func (d *Driver) resolvePublication(ctx context.Context, r *ledger) error {
 		if obj.Metadata["eam-intent"] != r.ID || obj.Size != r.Intent.Size {
 			return nil
 		}
-		entry, err := d.objectEntry(r.Intent.Target, storage.File, obj)
-		if err != nil {
-			return err
-		}
-		r.Native = nil
-		r.Phase = "applied"
-		result := storage.MutationResult{Entry: &entry, Evidence: d.receipt(r)}
-		r.Result = &result
-		return d.save(r)
+		return d.settlePublication(r, obj)
 	case !storage.IsCode(err, "not_found"):
 		return err
 	}
@@ -811,13 +811,24 @@ func (d *Driver) resolvePublication(ctx context.Context, r *ledger) error {
 	if !ok {
 		return nil
 	}
-	if err = multipart.AbortMultipart(context.WithoutCancel(ctx), key, r.Native.UploadID); err != nil {
-		// No session left to abort: either the completion did take effect or someone
-		// abandoned it, and the provider no longer distinguishes the two.
-		if storage.IsCode(err, "not_found") {
-			return nil
+	if abortErr := multipart.AbortMultipart(context.WithoutCancel(ctx), key, r.Native.UploadID); abortErr != nil {
+		if !sessionAbsent(abortErr) {
+			return abortErr
 		}
-		return err
+		// The session vanished, so only the destination can say whether this operation
+		// published. Attribute it by the marker this operation's own request wrote.
+		observed, ours, observeErr := d.observedIntentObject(ctx, r.ID, r.Intent)
+		if observeErr != nil {
+			return observeErr
+		}
+		if ours {
+			return d.settlePublication(r, observed)
+		}
+		// No attributable object. That does not prove the publication never landed — an
+		// object this operation wrote may have been replaced since — so the record stays
+		// unknown and a later inspection keeps looking, instead of claiming "nothing
+		// applied" for a path the index does not know about.
+		return nil
 	}
 	r.Native = nil
 	r.Phase = "not_applied"
@@ -825,19 +836,75 @@ func (d *Driver) resolvePublication(ctx context.Context, r *ledger) error {
 	return d.save(r)
 }
 
+// settlePublication records an observed object as this record's applied result.
+func (d *Driver) settlePublication(r *ledger, obj Object) error {
+	entry, err := d.objectEntry(r.Intent.Target, storage.File, obj)
+	if err != nil {
+		return err
+	}
+	r.Native = nil
+	r.Phase = "applied"
+	result := storage.MutationResult{Entry: &entry, Evidence: d.receipt(r)}
+	r.Result = &result
+	return d.save(r)
+}
+
+// observedIntentObject reports the object at this intent's target when it carries the
+// operation's own intent marker and bound size. Nothing else writes that marker, so a
+// match proves this operation published the object; a missing or foreign object is not
+// an attribution.
+func (d *Driver) observedIntentObject(ctx context.Context, id string, in storage.WriteIntent) (Object, bool, error) {
+	obj, err := d.backend.Head(ctx, d.key(in.Target, storage.File))
+	if storage.IsCode(err, "not_found") {
+		return Object{}, false, nil
+	}
+	if err != nil {
+		return Object{}, false, err
+	}
+	if obj.Metadata["eam-intent"] != id || obj.Size != in.Size {
+		return Object{}, false, nil
+	}
+	return obj, true, nil
+}
+
+// sessionAbsent reports the provider's answer that this upload session does not exist.
+// The multipart drivers report it as abort_session_absent because it cannot say whether
+// the allocation published; not_found covers a caller that maps the same provider answer
+// more directly. Anything else — a transport failure, a refused request — is not this
+// observation and must not be read as a vanished session.
+func sessionAbsent(err error) bool {
+	return storage.IsCode(err, "abort_session_absent") || storage.IsCode(err, "not_found")
+}
+
 // resolveCopied attributes a provider-side copy whose reply was lost. The
 // target's intent metadata is written by this exact conditional request, so it
-// proves the publish; a missing target proves nothing was published, and an
-// uncompleted part-copy session is discarded before the copy may be retried.
+// proves the publish; a target that stays empty when the provider accepted the abort
+// proves nothing was published, and an uncompleted part-copy session is discarded
+// before the copy may be retried.
 func (d *Driver) resolveCopied(ctx context.Context, r *ledger) (*storage.MutationResult, bool, error) {
-	obj, err := d.backend.Head(ctx, d.key(r.Intent.Target, storage.File))
+	target := d.key(r.Intent.Target, storage.File)
+	obj, err := d.backend.Head(ctx, target)
 	if storage.IsCode(err, "not_found") {
 		if r.Native != nil && r.Native.UploadID != "" {
 			multipart, ok := d.backend.(MultipartBackend)
 			if !ok {
 				return nil, false, nil
 			}
-			if abortErr := multipart.AbortMultipart(context.WithoutCancel(ctx), d.key(r.Intent.Target, storage.File), r.Native.UploadID); abortErr != nil {
+			if abortErr := multipart.AbortMultipart(context.WithoutCancel(ctx), target, r.Native.UploadID); abortErr != nil {
+				if !sessionAbsent(abortErr) {
+					return nil, false, nil
+				}
+				// The session vanished without saying why. A part-copy completion may
+				// have landed after the HEAD, so only this operation's own marker can
+				// attribute it; without one the copy stays unknown rather than being
+				// recorded as never published.
+				observed, ours, observeErr := d.observedIntentObject(ctx, r.ID, r.Intent)
+				if observeErr != nil {
+					return nil, false, observeErr
+				}
+				if ours {
+					return d.settleCopied(r, observed)
+				}
 				return nil, false, nil
 			}
 		}
@@ -851,18 +918,14 @@ func (d *Driver) resolveCopied(ctx context.Context, r *ledger) (*storage.Mutatio
 	if obj.Metadata["eam-intent"] != r.ID || obj.Size != r.Intent.Size {
 		return nil, false, nil
 	}
-	e, err := d.objectEntry(r.Intent.Target, storage.File, obj)
-	if err != nil {
+	return d.settleCopied(r, obj)
+}
+
+func (d *Driver) settleCopied(r *ledger, obj Object) (*storage.MutationResult, bool, error) {
+	if err := d.settlePublication(r, obj); err != nil {
 		return nil, false, err
 	}
-	r.Native = nil
-	r.Phase = "applied"
-	result := storage.MutationResult{Entry: &e, Evidence: d.receipt(r)}
-	r.Result = &result
-	if err = d.save(r); err != nil {
-		return nil, false, err
-	}
-	return &result, true, nil
+	return r.Result, true, nil
 }
 func (d *Driver) Remove(ctx context.Context, in storage.Mutation, cp storage.Checkpoint) (storage.MutationResult, error) {
 	if in.Path == "" || storage.ValidatePath(in.Path) != nil || in.Conditions.Absent || in.Conditions.ImplicitFolder && len(in.Conditions.ExpectedRevision) > 0 {

@@ -2,6 +2,7 @@ package cos
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"time"
@@ -80,19 +81,37 @@ func (b *mutationBackend) AbortMultipart(ctx context.Context, key, id string) er
 	_, err := b.client.Object.AbortMultipartUpload(ctx, key, id)
 	if err != nil {
 		mapped := mutationReadError(ctx, key, err, false)
-		if storage.IsCode(mapped, "not_found") {
-			return nil
+		if !storage.IsCode(mapped, "not_found") {
+			return mapped
 		}
-		return mapped
+		// NoSuchUpload says only that the session is gone, and COS removes a session
+		// when Complete succeeds just as it does when an abort wins. Reporting this as
+		// a successful abort would let the caller record "nothing applied" for an
+		// upload that already published. Report the observation itself; the caller
+		// holds this operation's intent marker and must attribute the destination
+		// object before it concludes anything about publication.
+		return abortSessionAbsent(key, mapped)
 	}
 	return nil
+}
+
+// abortSessionAbsent keeps the provider's own facts — the 404, NoSuchUpload and the
+// request id — under the code that states what was actually observed.
+func abortSessionAbsent(key string, observed error) error {
+	var e *storage.Error
+	if errors.As(observed, &e) && e.Provider != nil {
+		return storage.NewProviderError("abort_session_absent", storage.Path(key), e.Provider.Status, e.Provider.Code, e.Provider.RequestID, observed)
+	}
+	return storage.NewError("abort_session_absent", storage.Path(key), observed)
 }
 
 var _ objectmutation.MultipartInspector = (*mutationBackend)(nil)
 
 // InspectMultipart asks COS whether this exact upload session still exists. A missing
 // session (NoSuchUpload) is the terminal observation that none of its parts can ever be
-// completed, read, or replayed; any other failure leaves the allocation unknown.
+// completed, read, or replayed; any other failure leaves the allocation unknown. It is
+// evidence about the session only: a completed upload also removes the session, so this
+// answer never says whether a publication landed.
 func (b *mutationBackend) InspectMultipart(ctx context.Context, key, id string) (objectmutation.MultipartState, error) {
 	ctx, cancel := metadataDeadline(ctx)
 	defer cancel()

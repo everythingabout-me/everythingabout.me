@@ -600,6 +600,9 @@ Inspect consumes the latest durable checkpoint/evidence, and must distinguish de
 non-application, ready staging and unresolved effects. Existence+size alone cannot prove which writer won or
 whether a delayed native request can still arrive. NotApplied is safe to retry/release only when prior native
 effects are proven unable to apply later (or native fencing makes them harmless). Otherwise OutcomeUnknown.
+A missing multipart upload session is likewise not definite non-application: the provider also removes a
+session when `Complete` succeeds, so the destination bound to the operation's own intent marker decides, not
+the session's absence.
 Applied also requires all outstanding final-path requests/retries to be terminal or fenced before the guard
 is released. Seeing the desired file while an older unfenced retry can still arrive is not terminal success;
 retain the guard and a nonterminal recovery state even when the visible application is already known.
@@ -633,10 +636,19 @@ Native success followed by index failure leaves real changed files. Recover/inde
 return the same recorded client outcome, and settle quota; do not delete a final file just because its database
 acknowledgement is missing. After any final effect starts, cancellation is best effort until a definite outcome.
 Discard removes temporary resources only, using known checkpoint IDs; it never blindly deletes the Target path.
-Discard must be terminal for a numbered upload once the provider definitely accepts the abort (or reports the
-session absent): the whole allocation, including parts whose replies were lost, is gone at that point, so no
-part receipt may keep the reservation or make cleanup retry forever. While the abort outcome
-is unknown, retain liability and retry; that is a transport problem, not a user-visible file.
+Discard must be terminal for a numbered upload once the provider definitely accepts the abort: that
+answer proves the session existed and is now gone, so no part of it can ever be completed and no
+publication from that allocation can still land. A provider answer that the session does not exist is
+**not** that proof. COS and S3 remove an upload session when `Complete` succeeds just as they do when an
+abort wins, so `NoSuchUpload` cannot distinguish an abort from a publication that landed; discard must
+not read it as "nothing applied". It observes the destination and binds an object to this operation's own
+intent marker: an attributable object is recorded as published — never deleted, and left for reconcile to
+adopt, because a published object with no index row is recoverable while one recorded as `not_applied` is
+invisible — and anything unattributable keeps the allocation or the publication record retained. The same
+rule governs recovery: a missing session is not definite non-application, and only a destination
+observation that attributes the object (or an abort the provider accepted) may settle the publication
+`applied` or `not_applied`; otherwise it stays `outcome_unknown`. While the abort outcome cannot be
+obtained at all, retain liability and retry; that is a transport problem, not a user-visible file.
 
 A writable connection must supply EffectRecovery (even when its only safe answer is OutcomeUnknown) and a
 bounded operational plan for discovering/expiring temporary allocations. Coordinators additionally require
