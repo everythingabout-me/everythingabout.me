@@ -112,6 +112,8 @@ func (b *mutationBackend) ListParts(ctx context.Context, key, id string, after, 
 	if after > 0 {
 		marker = strconv.Itoa(after)
 	}
+	ctx, cancel := metadataDeadline(ctx)
+	defer cancel()
 	result, response, err := b.client.Object.ListParts(ctx, key, id, &sdk.ObjectListPartsOptions{MaxParts: strconv.Itoa(limit), PartNumberMarker: marker})
 	if err != nil {
 		return nil, false, mutationReadError(ctx, key, err, false)

@@ -14,6 +14,8 @@ import (
 var _ objectmutation.MultipartBackend = (*mutationBackend)(nil)
 
 func (b *mutationBackend) BeginMultipart(ctx context.Context, in objectmutation.Put) (string, error) {
+	ctx, cancel := metadataDeadline(ctx)
+	defer cancel()
 	headers := http.Header{}
 	for k, v := range in.Metadata {
 		headers.Set("x-cos-meta-"+k, v)
@@ -40,6 +42,11 @@ func (b *mutationBackend) PutPart(ctx context.Context, key, id string, number in
 	return response.Header.Get("ETag"), nil
 }
 func (b *mutationBackend) CompleteMultipart(ctx context.Context, in objectmutation.Put, id string, parts []objectmutation.NativePart) (objectmutation.Object, error) {
+	// A completion assembles the uploaded parts provider-side, so its duration follows the
+	// object's size and not a fixed number of seconds: the 60 second client timeout this
+	// used to sit under cut exactly the large uploads that needed the most time.
+	ctx, cancel := transferBudget(ctx, in.Size)
+	defer cancel()
 	headers := http.Header{}
 	if in.Absent {
 		headers.Set("If-None-Match", "*")
@@ -66,6 +73,10 @@ func (b *mutationBackend) CompleteMultipart(ctx context.Context, in objectmutati
 	return objectmutation.Object{Key: in.Key, VersionID: response.Header.Get("x-cos-version-id"), ETag: result.ETag, Size: in.Size, MediaType: in.MediaType, ModifiedAt: modified, Metadata: cloneMutationMetadata(in.Metadata)}, nil
 }
 func (b *mutationBackend) AbortMultipart(ctx context.Context, key, id string) error {
+	// Recovery calls this with context.WithoutCancel, so without a per-request budget it
+	// would have no deadline at all once the client timeout is gone.
+	ctx, cancel := metadataDeadline(ctx)
+	defer cancel()
 	_, err := b.client.Object.AbortMultipartUpload(ctx, key, id)
 	if err != nil {
 		mapped := mutationReadError(ctx, key, err, false)
@@ -83,6 +94,8 @@ var _ objectmutation.MultipartInspector = (*mutationBackend)(nil)
 // session (NoSuchUpload) is the terminal observation that none of its parts can ever be
 // completed, read, or replayed; any other failure leaves the allocation unknown.
 func (b *mutationBackend) InspectMultipart(ctx context.Context, key, id string) (objectmutation.MultipartState, error) {
+	ctx, cancel := metadataDeadline(ctx)
+	defer cancel()
 	result, response, err := b.client.Object.ListParts(ctx, key, id, &sdk.ObjectListPartsOptions{MaxParts: "1000"})
 	if err != nil {
 		if sdk.IsNotFoundError(err) {

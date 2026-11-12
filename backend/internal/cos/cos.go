@@ -68,6 +68,13 @@ func transferBudget(ctx context.Context, size int64) (context.Context, context.C
 	return context.WithTimeout(ctx, budget)
 }
 
+// metadataDeadline bounds one request whose duration does not scale with size. The
+// clients carry no total timeout, so the request itself takes the only budget that fits
+// its kind of work; see the mutation client construction in MutationBackend.
+func metadataDeadline(ctx context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(ctx, metadataBudget)
+}
+
 func New(cfg config.COS) (*Client, error) {
 	bucketURL, err := url.Parse(fmt.Sprintf("https://%s.cos.%s.myqcloud.com", cfg.Bucket, cfg.Region))
 	if err != nil {

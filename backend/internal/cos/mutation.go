@@ -39,7 +39,20 @@ func (c *Client) MutationBackend() (objectmutation.Backend, error) {
 	if credentials := c.client.GetCredential(); credentials != nil && credentials.SecretID == c.cred.SecretID && credentials.SecretKey == c.cred.SecretKey {
 		token = credentials.SessionToken
 	}
-	client := sdk.NewClient(&base, &http.Client{Timeout: 60 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }, Transport: &sdk.AuthorizationTransport{SecretID: c.cred.SecretID, SecretKey: c.cred.SecretKey, SessionToken: token, Transport: mutationTransport{native}}})
+	// No http.Client Timeout here: a total deadline on the client is a clock on top of the
+	// request context, and it fires on exactly the requests whose work is large — a
+	// provider-side copy, a multipart completion, a relayed part — which is where an
+	// unexplained "outcome unknown" costs a reconciliation. What bounds each call instead:
+	// the methods that move bytes take transferBudget(size), the ones that only touch
+	// metadata take metadataDeadline, and Open streams its body under the caller's context.
+	// The transport's ResponseHeaderTimeout bounds the step of waiting for the provider to
+	// start answering, and the caller's context remains the only other deadline.
+	//
+	// The redirect refusal stays: a signed write must not be replayed against another host.
+	client := sdk.NewClient(&base, &http.Client{
+		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+		Transport:     &sdk.AuthorizationTransport{SecretID: c.cred.SecretID, SecretKey: c.cred.SecretKey, SessionToken: token, Transport: mutationTransport{native}},
+	})
 	client.Conf.RetryOpt.Count = 1
 	client.Conf.RetryOpt.Interval = 0
 	client.Conf.RetryOpt.AutoSwitchHost = false
@@ -55,6 +68,8 @@ func (t mutationTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 }
 
 func (b *mutationBackend) Head(ctx context.Context, key string) (objectmutation.Object, error) {
+	ctx, cancel := metadataDeadline(ctx)
+	defer cancel()
 	response, err := b.client.Object.Head(ctx, key, nil)
 	if err != nil {
 		return objectmutation.Object{}, mutationReadError(ctx, key, err, false)
@@ -68,6 +83,9 @@ func (b *mutationBackend) Open(ctx context.Context, key, etag string) (io.ReadCl
 	if etag == "" || strings.ContainsAny(etag, "\r\n\x00") {
 		return nil, storage.NewError("unsupported", storage.Path(key), nil)
 	}
+	// The body streams for as long as its bytes take, so the caller's context is the only
+	// deadline here. A fixed clock on the response is the mistake the client-wide 60 second
+	// timeout made, and it would fire on exactly the files big enough to need the time.
 	headers := make(http.Header)
 	headers.Set("If-Match", etag)
 	response, err := b.client.Object.Get(ctx, key, &sdk.ObjectGetOptions{XOptionHeader: &headers})
@@ -130,6 +148,8 @@ func (b *mutationBackend) Delete(ctx context.Context, key, expectedETag string) 
 	if key == "" || strings.ContainsAny(expectedETag, "\r\n\x00") {
 		return objectmutation.Object{}, storage.NewError("invalid_request", storage.Path(key), nil)
 	}
+	ctx, cancel := metadataDeadline(ctx)
+	defer cancel()
 	headers := make(http.Header)
 	if expectedETag != "" {
 		headers.Set("If-Match", expectedETag)
