@@ -31,7 +31,7 @@ export function memoryStorage() {
 }
 /** One same-origin Web Locks manager; share it between harnesses to model pages. */
 export function memoryLocks() {
-  const held = new Map(), pending = [];
+  const held = new Map(), pending = [], requests = [];
   const drain = () => {
     for (let i = 0; i < pending.length;) {
       const request = pending[i];
@@ -47,7 +47,9 @@ export function memoryLocks() {
     }
   };
   return {
+    requests,
     request(name, options, callback) {
+      requests.push(name);
       assert.equal(options.mode, "exclusive", "the fake supports exclusive Web Locks");
       if (options.ifAvailable && options.signal) return Promise.reject(new DOMException("signal and ifAvailable cannot be used together", "NotSupportedError"));
       return new Promise((resolve, reject) => {

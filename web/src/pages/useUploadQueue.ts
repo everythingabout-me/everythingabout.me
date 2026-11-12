@@ -171,7 +171,15 @@ export interface UploadQueue {
   tasks: UploadTask[];
   hasActiveUploads: boolean;
   enqueue(entries: UploadEntry[], dir: string, exists: (path: string) => boolean): void;
-  cancel(id: string): void;
+  /**
+   * Cancel one row, or a whole selection of rows in one gesture.
+   *
+   * A folder row is a projection: it names every descendant file, not a task of its own, so
+   * the sheet hands the whole list over. Resolving each id separately walked the queue once
+   * per id and published once per id, which is quadratic in the cancelled tree — the shape
+   * that froze the tab when a large import was stopped.
+   */
+  cancel(ids: string | string[]): void;
   retry(id: string): void;
   /**
    * Clear a wait whose deletion ended without deleting anything.
@@ -321,6 +329,7 @@ export function useUploadQueue(onUploaded: (task: UploadTask, item: Item) => voi
   const ready = useRef(false);
   const running = useRef(new Map<string, Runtime>());
   const pumpRef = useRef<() => void>(() => {});
+  const pumpQueued = useRef(false);
   const finishRef = useRef(onUploaded);
   const verified = useRef(new Map<string, { file: File; parts: Map<number, string> }>());
   const pollBusy = useRef(false);
@@ -438,6 +447,23 @@ export function useUploadQueue(onUploaded: (task: UploadTask, item: Item) => voi
     const at = pool.waiters.findIndex((other) => other.rank > rank || other.rank === rank && other.number > number);
     pool.waiters.splice(at < 0 ? pool.waiters.length : at, 0, waiter);
   }), []);
+  // Decide once per turn, on the state the bulk change left behind.
+  //
+  // A pump is not a notification: it works from the pending set, so it acts on whatever is
+  // queued at the moment it runs. A gesture that changes thousands of tasks in one loop —
+  // cancelling a selected tree — would otherwise run it once per task, and each pass would
+  // act on the part of the selection the loop had not reached yet: claim the next file's
+  // path through Web Locks and admit a session for it, only for the same loop to abort both
+  // a moment later. That is one claim per cancelled file, all discarded, competing with the
+  // aborts that are actually finishing the gesture. One pass after the loop sees the final
+  // state and does nothing. Gestures keep their own synchronous pump (enqueue, retry,
+  // cancel still call `pump` directly); everything that merely finished something asks for
+  // the next turn.
+  const requestPump = useCallback(() => {
+    if (pumpQueued.current) return;
+    pumpQueued.current = true;
+    queueMicrotask(() => { pumpQueued.current = false; pumpRef.current(); });
+  }, []);
   const publish = useCallback(() => {
     if (!mounted.current) return;
     if (flushTimer.current !== undefined) {
@@ -600,25 +626,25 @@ export function useUploadQueue(onUploaded: (task: UploadTask, item: Item) => voi
         // A file starts the moment its own session is in hand, not when its wave does: a
         // transfer slot handed to a file that is still waiting for a create page is a slot
         // that is not moving bytes.
-        pumpRef.current();
+        requestPump();
       },
       () => {
         if (admissions.current.get(task.id) === entry) admissions.current.delete(task.id);
         // The window owns a refusal — it decides between waiting on the blocker, retrying
         // and failing the row — so the look-ahead steps back and lets the queue move on.
         admissionFailed.current.add(task.id);
-        pumpRef.current();
+        requestPump();
       },
     );
     return entry;
-  }, [admitSession]);
+  }, [admitSession, requestPump]);
   // A file stops holding a transfer slot the moment its bytes are placed. The settlement
   // has its own page and its own bound, so waiting for it here would only make the next
   // file's first byte wait for this row's answer.
   const releaseWindow = useCallback((id: string) => {
     if (!transferring.current.delete(id)) return;
-    pumpRef.current();
-  }, []);
+    requestPump();
+  }, [requestPump]);
 
   const run = useCallback(async (id: string, runtime: Runtime) => {
     const signal = runtime.controller.signal;
@@ -1020,9 +1046,9 @@ export function useUploadQueue(onUploaded: (task: UploadTask, item: Item) => voi
     } finally {
       running.current.delete(id);
       transferring.current.delete(id);
-      pumpRef.current();
+      requestPump();
     }
-  }, [acquirePart, applyOperation, complete, ensureAdmission, patch, releasePart, releaseWindow, settleUpload]);
+  }, [acquirePart, applyOperation, complete, ensureAdmission, patch, releasePart, releaseWindow, requestPump, settleUpload]);
   const pump = useCallback(() => {
     if (!ready.current || !mounted.current) return;
     // Two stages, two bounds. Admission runs ADMIT_AHEAD files ahead of the window, so a
@@ -1087,9 +1113,20 @@ export function useUploadQueue(onUploaded: (task: UploadTask, item: Item) => voi
     for (const task of starts) void run(task.id, running.current.get(task.id)!);
   }, [ensureAdmission, patch, run]);
   pumpRef.current = pump;
-  const cancel = useCallback((id: string) => {
-    const root = tasks.current.get(id);
-    const targets = [...tasks.current.values()].filter((task) => task.id === id || root?.isDir && task.path.startsWith(`${root.path}/`));
+  const cancel = useCallback((selected: string | string[]) => {
+    const ids = typeof selected === "string" ? [selected] : selected;
+    // One pass for the selection: a folder row may name thousands of descendants, and
+    // resolving each one on its own would walk the queue once per file.
+    const wanted = new Set(ids);
+    const subtrees: string[] = [];
+    for (const id of ids) {
+      const root = tasks.current.get(id);
+      if (root?.isDir) subtrees.push(`${root.path}/`);
+    }
+    const targets: UploadTask[] = [];
+    for (const task of tasks.current.values()) {
+      if (wanted.has(task.id) || subtrees.some((prefix) => task.path.startsWith(prefix))) targets.push(task);
+    }
     for (const task of targets) {
       running.current.get(task.id)?.controller.abort();
       // A prepared session is this row's, so cancelling the row must discard it too: the
@@ -1136,12 +1173,12 @@ export function useUploadQueue(onUploaded: (task: UploadTask, item: Item) => voi
             remove([task.id]);
           }
         } catch (error) { patch(task.id, { status: "failed", error: message(error) }); }
-        finally { pumpRef.current(); }
+        finally { requestPump(); }
       })();
     }
     // Cancelling is a gesture: the rows must answer now, not on the next publish tick.
     publish();
-  }, [applyOperation, complete, dropAdmission, patch, publish, remove]);
+  }, [applyOperation, complete, dropAdmission, patch, publish, remove, requestPump]);
   const retry = useCallback((id: string) => {
     const task = tasks.current.get(id);
     if (task?.cancelRequested) { cancel(id); return; }
@@ -1273,7 +1310,7 @@ export function useUploadQueue(onUploaded: (task: UploadTask, item: Item) => voi
               }
             } else if (!(result instanceof Error)) { applyOperation(task, result); }
           }
-        } finally { pollBusy.current = false; pumpRef.current(); }
+        } finally { pollBusy.current = false; requestPump(); }
       })();
     }, 2000);
     return () => {

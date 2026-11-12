@@ -207,7 +207,7 @@ const UploadRow = memo(function UploadRow({
   onResume,
 }: {
   entry: UploadRowEntry;
-  onCancel: (id: string) => void;
+  onCancel: (ids: string[]) => void;
   onResume: (id: string) => void;
 }) {
   const { upload, task, item, name, path, isDir } = entry;
@@ -332,7 +332,7 @@ const UploadRow = memo(function UploadRow({
           {upload.cancelIds.length > 0 && (
             <button
               className={`${styles.ghostBtn} ${styles.cancelUpload}`}
-              onClick={() => upload.cancelIds.forEach(onCancel)}
+              onClick={() => onCancel(upload.cancelIds)}
               title={t("drive.cancelUpload")}
               aria-label={t("drive.cancelUploadNamed", { name })}
             >
@@ -365,7 +365,7 @@ const UploadFailures = memo(function UploadFailures({
 }: {
   tasks: UploadTask[];
   onRetry: (id: string) => void;
-  onCancel: (id: string) => void;
+  onCancel: (ids: string[]) => void;
 }) {
   if (tasks.length === 0) return null;
   return (
@@ -394,7 +394,7 @@ const UploadFailures = memo(function UploadFailures({
             </button>
             <button
               className={`${styles.ghostBtn} ${styles.cancelUpload}`}
-              onClick={() => onCancel(task.id)}
+              onClick={() => onCancel([task.id])}
               title={t("drive.cancelUpload")}
               aria-label={t("drive.cancelUploadNamed", { name: task.path })}
             >
@@ -1152,8 +1152,9 @@ export function FilesPage() {
       setItems((current) => current.filter((item) => target.kind === "folder"
         ? item.path !== target.path && !item.path.startsWith(`${target.path}/`)
         : item.path !== target.path));
-      uploads.filter((task) => filePath(task.path) === target.path || filePath(task.path).startsWith(`${target.path}/`))
-        .forEach((task) => cancelUpload(task.id));
+      cancelUpload(uploads
+        .filter((task) => filePath(task.path) === target.path || filePath(task.path).startsWith(`${target.path}/`))
+        .map((task) => task.id));
       if (filePath(listingRef.current.path) === target.path) {
         navigate(filesHref(target.parentPath ?? "/"), { replace: true });
       } else {
