@@ -4,7 +4,9 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"os"
 	"regexp"
+	"strings"
 	"time"
 
 	"everythingabout.me/backend/internal/config"
@@ -102,6 +104,9 @@ func runDoctor(args []string) error {
 	}
 	checkStorageRoots(ctx, cfg, rootDB, checks)
 
+	fmt.Println("\nstorage connections")
+	checkStorageConnections(ctx, rootDB, checks)
+
 	if checks.failed == 0 {
 		fmt.Print("\nAll checks passed.\n\n")
 		return nil
@@ -170,6 +175,50 @@ func checkStorageRoots(ctx context.Context, cfg *config.Config, db *store.DB, ch
 		return
 	}
 	checks.ok("owner roots match the database index", "")
+}
+
+// checkStorageConnections reports where each row's credentials come from, for
+// both kinds of connection: an environment reference (resolved now, so a missing
+// variable is named here) or an inline secret an account added for itself. It never
+// prints a credential value.
+func checkStorageConnections(ctx context.Context, db *store.DB, checks *doctor) {
+	if db == nil {
+		checks.warn("storage connections not inspected: database unavailable")
+		return
+	}
+	rows, err := connections.NewPostgresStore(db).Connections(ctx)
+	if err != nil {
+		checks.bad("read storage connections", err, "run `eam migrate` first")
+		return
+	}
+	if len(rows) == 0 {
+		checks.warn("no storage connections yet: the server seeds one from the environment on first start")
+		return
+	}
+	for _, c := range rows {
+		scope := connectionScope(c)
+		if c.OwnerID != "" {
+			scope += " " + c.OwnerID
+		}
+		label := fmt.Sprintf("connection %q (%s, %s)", c.Name, scope, c.Role)
+		if names := c.SecretReference.Names(); len(names) > 0 {
+			if _, err := c.ResolveSecret(os.LookupEnv); err != nil {
+				checks.bad(label+" environment reference", err, "set the named variable in .env and restart; the row has no inline fallback")
+				continue
+			}
+			checks.ok(label+" environment reference", " "+strings.Join(names, ", ")+" (resolves)")
+			continue
+		}
+		if c.Backend == "local" {
+			checks.ok(label+" credentials", " none (local root)")
+			continue
+		}
+		if c.Secret.Empty() {
+			checks.bad(label+" credentials", fmt.Errorf("the row has neither an inline secret nor an environment reference"), "add the connection again, or run `eam storage-connection rotate --name "+c.Name+" --from-environment` for the environment-seeded row")
+			continue
+		}
+		checks.ok(label+" inline secret", " stored in the row, not read from the environment")
+	}
 }
 
 func checkDatabase(ctx context.Context, db *store.DB, checks *doctor) {

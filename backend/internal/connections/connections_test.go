@@ -2,6 +2,7 @@ package connections
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -59,6 +60,17 @@ func (f *fakeStore) OwnerConnection(_ context.Context, owner string) (string, bo
 func (f *fakeStore) Insert(_ context.Context, c Connection) error {
 	f.rows = append(f.rows, c)
 	return nil
+}
+
+func (f *fakeStore) SetSecretReference(_ context.Context, id string, ref SecretReference) error {
+	for i := range f.rows {
+		if f.rows[i].ID == id {
+			f.rows[i].Secret = Secret{}
+			f.rows[i].SecretReference = ref
+			return nil
+		}
+	}
+	return fmt.Errorf("fake store: no connection row %q", id)
 }
 
 func localConfig(t *testing.T) config.Config {

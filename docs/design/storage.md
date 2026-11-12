@@ -118,6 +118,22 @@ renames. Those application features need separate backup. Stable-ID continuity r
 identity/root mapping; rebuilding without it yields new IDs. Owner-to-root configuration/credentials must be
 recoverable independently; never infer ownership by exposing all provider data to a new account.
 
+**Credentials are a reference, not a row copy (2026-11-12).** An environment-seeded connection stores the
+names of the environment variables that hold its credentials (`storage_connections.secret_reference`); an
+account-added connection keeps its own inline secret, because a user-supplied key has no deployment
+environment to point at. The split exists because the row is part of a disposable cache: a dump, a copy or a
+drill restore carries complete trees, so it must not carry usable signing credentials. A reference is
+resolved when a connection starts serving, and a named variable that is missing or empty fails that
+connection by name; it never falls back to the inline copy, because after a rotation that copy is exactly the
+retired key. Rotating an environment-seeded key is therefore an `.env` edit plus a restart — no row update
+exists to perform. Migration 045 adds the column and a check that a row has one credential source, not both.
+The one-time conversion of an existing row (startup, after the seed) compares the row's backend, bucket,
+region and secret id with the environment before discarding the inline copy; a disagreement is reported field
+by field and refuses the start rather than letting either value win, and
+`eam storage-connection rotate --name NAME --from-environment` adopts the environment's credentials
+explicitly. Rotation never moves a tree: a bucket, region or endpoint change is a rebind with a new
+generation, not a key rotation.
+
 Reconcile/import must index an existing readable tree without rewriting all file bytes. Native IDs can help
 recognize external moves; when identity is ambiguous, do not guess from size/name alone. External edits are
 supported through explicit scan/change feeds, not instant global linearizability. Operational guidance must

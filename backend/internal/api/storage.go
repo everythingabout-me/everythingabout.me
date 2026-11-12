@@ -359,7 +359,7 @@ func (s *Server) runBackupJob(key, ownerID string, target connections.Connection
 		// drive can be added while it is unreachable — a NAS that is off, a tunnel that is
 		// down — and must work as soon as it is back, without re-adding it. Publication is
 		// the only thing that needs this proof; a restore or a prune reads and deletes.
-		effective, err := target.Apply(*s.cfg)
+		effective, err := target.ApplyEnvironment(*s.cfg)
 		if err != nil {
 			fail(err)
 			return

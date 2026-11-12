@@ -21,6 +21,10 @@ type Store interface {
 	Visible(ctx context.Context, ownerID string) ([]Connection, error)
 	OwnerConnection(ctx context.Context, ownerID string) (string, bool, error)
 	Insert(ctx context.Context, c Connection) error
+	// SetSecretReference replaces a shared row's inline credentials with an
+	// environment reference. It is scoped to shared rows: an account-added row
+	// keeps its inline secret because its key has no deployment environment.
+	SetSecretReference(ctx context.Context, id string, ref SecretReference) error
 }
 
 type postgresStore struct{ db *store.DB }
@@ -122,19 +126,32 @@ func (p postgresStore) Insert(ctx context.Context, c Connection) error {
 	if err != nil {
 		return fmt.Errorf("storage connection %q: encode config: %w", c.Name, err)
 	}
-	secret, err := json.Marshal(c.Secret)
-	if err != nil {
-		return fmt.Errorf("storage connection %q: encode secret: %w", c.Name, err)
+	// A reference row stores no inline copy at all; writing "{}" rather than the
+	// zero struct keeps that visible in a dump instead of looking like empty fields.
+	secret := []byte("{}")
+	if !c.Secret.Empty() {
+		secret, err = json.Marshal(c.Secret)
+		if err != nil {
+			return fmt.Errorf("storage connection %q: encode secret: %w", c.Name, err)
+		}
+	}
+	var reference any
+	if !c.SecretReference.Empty() {
+		encoded, err := json.Marshal(c.SecretReference)
+		if err != nil {
+			return fmt.Errorf("storage connection %q: encode environment reference: %w", c.Name, err)
+		}
+		reference = encoded
 	}
 	var admission any
 	if len(c.Admission) > 0 {
 		admission = []byte(c.Admission)
 	}
 	tag, err := p.db.Pool().Exec(ctx, `
-		insert into storage_connections(owner_id, name, backend, role, identity, config, secret, generation, admission, enabled)
-		values(nullif($1,'')::uuid,$2,$3,$4,$5,$6,$7,$8,$9,true)
+		insert into storage_connections(owner_id, name, backend, role, identity, config, secret, secret_reference, generation, admission, enabled)
+		values(nullif($1,'')::uuid,$2,$3,$4,$5,$6,$7,$8,$9,$10,true)
 		on conflict (identity) do nothing`,
-		c.OwnerID, c.Name, c.Backend, c.Role, c.Identity, config, secret, c.Generation, admission)
+		c.OwnerID, c.Name, c.Backend, c.Role, c.Identity, config, secret, reference, c.Generation, admission)
 	if err != nil {
 		return fmt.Errorf("insert storage connection %q (identity %s): %w", c.Name, c.Identity, err)
 	}
@@ -155,16 +172,42 @@ func (p postgresStore) Insert(ctx context.Context, c Connection) error {
 	return fmt.Errorf("%w: %s already holds this location; a connection needs its own location, so remove that row first or name a different bucket/prefix", ErrLocationTaken, holder)
 }
 
-const connectionColumns = `id::text, coalesce(owner_id::text, ''), name, backend, role, identity, config, secret, generation, admission, enabled`
+// SetSecretReference is the one write that removes a credential from the cache.
+// The owner condition is not decorative: an account's own connection must never be
+// repointed at the deployment's environment variables, because its key belongs to
+// that account.
+func (p postgresStore) SetSecretReference(ctx context.Context, id string, ref SecretReference) error {
+	if ref.Empty() {
+		return fmt.Errorf("storage connection %s: an empty environment reference cannot replace a secret", id)
+	}
+	encoded, err := json.Marshal(ref)
+	if err != nil {
+		return fmt.Errorf("storage connection %s: encode environment reference: %w", id, err)
+	}
+	tag, err := p.db.Pool().Exec(ctx, `
+		update storage_connections
+		set secret='{}'::jsonb, secret_reference=$2, updated_at=now()
+		where id=$1::uuid and owner_id is null`, id, encoded)
+	if err != nil {
+		return fmt.Errorf("storage connection %s: write environment reference: %w", id, err)
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("storage connection %s: no shared row was updated; an account-added connection keeps its inline secret", id)
+	}
+	return nil
+}
+
+const connectionColumns = `id::text, coalesce(owner_id::text, ''), name, backend, role, identity, config, secret, secret_reference, generation, admission, enabled`
 
 type scanner interface{ Scan(...any) error }
 
 func scanConnection(row scanner) (Connection, error) {
 	var (
-		c                  Connection
-		config, secret, ad []byte
+		c                   Connection
+		config, secret, ref []byte
+		ad                  []byte
 	)
-	if err := row.Scan(&c.ID, &c.OwnerID, &c.Name, &c.Backend, &c.Role, &c.Identity, &config, &secret, &c.Generation, &ad, &c.Enabled); err != nil {
+	if err := row.Scan(&c.ID, &c.OwnerID, &c.Name, &c.Backend, &c.Role, &c.Identity, &config, &secret, &ref, &c.Generation, &ad, &c.Enabled); err != nil {
 		return Connection{}, err
 	}
 	if err := json.Unmarshal(config, &c.Config); err != nil {
@@ -172,6 +215,11 @@ func scanConnection(row scanner) (Connection, error) {
 	}
 	if err := json.Unmarshal(secret, &c.Secret); err != nil {
 		return Connection{}, fmt.Errorf("storage connection %q: decode secret: %w", c.Name, err)
+	}
+	if len(ref) > 0 {
+		if err := json.Unmarshal(ref, &c.SecretReference); err != nil {
+			return Connection{}, fmt.Errorf("storage connection %q: decode environment reference: %w", c.Name, err)
+		}
 	}
 	c.Admission = ad
 	return c, nil

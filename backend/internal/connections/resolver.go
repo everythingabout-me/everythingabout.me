@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"os"
 	"sync"
 
 	"everythingabout.me/backend/internal/config"
@@ -39,7 +40,8 @@ func NewResolver(base config.Config, store Store) *Resolver {
 }
 
 // Seed gives a fresh database the one authority connection the environment still
-// describes, so an existing deployment's bindings keep resolving. It is a no-op
+// describes, so an existing deployment's bindings keep resolving. The row stores a
+// reference to the environment's variable names, not their values. It is a no-op
 // once an enabled authority row exists, which is why a repeated start is harmless.
 func (r *Resolver) Seed(ctx context.Context) error {
 	if _, ok, err := r.store.Authority(ctx); err != nil {
@@ -56,6 +58,14 @@ func (r *Resolver) Seed(ctx context.Context) error {
 	}
 	slog.Info("seeded the first storage connection from configuration", "name", c.Name, "backend", c.Backend, "identity", c.Identity)
 	return nil
+}
+
+// AdoptEnvironmentSecret converts the environment-seeded row from an inline
+// credential copy to a reference, once per database. It runs before owners are
+// bound so a disagreement stops the start instead of serving a row whose
+// credentials nobody can explain.
+func (r *Resolver) AdoptEnvironmentSecret(ctx context.Context) error {
+	return AdoptEnvironmentSecret(ctx, r.store, r.base, os.LookupEnv)
 }
 
 // Open implements api.OwnerStorageFactory.
@@ -167,7 +177,11 @@ func (r *Resolver) entryNamed(ctx context.Context, ownerID, name string) (*entry
 	if !c.Enabled {
 		return nil, fmt.Errorf("storage connection %q is disabled; enable it before serving owners bound to it", name)
 	}
-	effective, err := c.Apply(r.base)
+	// A row with an environment reference is resolved here, when the connection
+	// starts serving, not when it was read: the environment is the owner of the
+	// value, so a missing variable names itself and never falls back to an inline
+	// copy.
+	effective, err := c.ApplyEnvironment(r.base)
 	if err != nil {
 		return nil, err
 	}

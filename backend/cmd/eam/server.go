@@ -86,6 +86,12 @@ func runServer(args []string) error {
 	if err := resolver.Seed(ctx); err != nil {
 		return fmt.Errorf("seed storage connections: %w", err)
 	}
+	// The seed wrote a reference; a pre-existing row still holds the copy the
+	// environment made when it was created. Convert it only after the environment
+	// still agrees with that row, and refuse to start if it does not.
+	if err := resolver.AdoptEnvironmentSecret(ctx); err != nil {
+		return fmt.Errorf("adopt environment-seeded storage credentials: %w", err)
+	}
 	// The row a binding names is authoritative: when it changed, adopt it and
 	// invalidate the derived view instead of refusing to start. This is a constant
 	// number of statements per changed owner, with no native enumeration.

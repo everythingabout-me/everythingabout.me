@@ -80,7 +80,7 @@ func runBackupSnapshot(ctx context.Context, cfg *config.Config, db *store.DB, co
 	defer source.Close()
 	// Measure the destination at the moment it is used, so recording one does not depend
 	// on it being reachable right then.
-	effective, err := target.Apply(*cfg)
+	effective, err := target.ApplyEnvironment(*cfg)
 	if err != nil {
 		return err
 	}

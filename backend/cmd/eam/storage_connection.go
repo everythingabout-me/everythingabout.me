@@ -5,6 +5,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"strings"
 	"text/tabwriter"
 
 	"everythingabout.me/backend/internal/config"
@@ -21,6 +22,7 @@ import (
 //	   --local-content-root /srv/backup/content --local-system-root /srv/backup/system
 //	eam storage-connection add --owner you@example.com --name my-cos --backend cos --role backup ...
 //	eam storage-connection probe --name nas
+//	eam storage-connection rotate --name default --from-environment
 //
 // Without --owner a connection is the deployment default that every account may
 // use. With --owner it belongs to that account alone; such a connection may only
@@ -32,6 +34,7 @@ func runStorageConnection(args []string) error {
   eam storage-connection list [--owner email-or-UUID]
   eam storage-connection add [--owner email-or-UUID] --name NAME --backend cos|s3|local --role authority|backup [flags]
   eam storage-connection probe [--owner email-or-UUID] --name NAME
+  eam storage-connection rotate --name NAME --from-environment
 
 cos flags:   --cos-bucket --cos-region --cos-secret-id --cos-secret-key
 s3 flags:    --s3-endpoint --s3-region --s3-bucket --s3-access-key-id --s3-secret-access-key [--s3-path-style] [--s3-content-prefix] [--s3-system-prefix]
@@ -46,6 +49,8 @@ common:      [--transfer-class] [--coordinated-writes=false] [--admission-file] 
 		return runStorageConnectionAdd(args[1:])
 	case "probe":
 		return runStorageConnectionProbe(args[1:])
+	case "rotate":
+		return runStorageConnectionRotate(args[1:])
 	default:
 		return fmt.Errorf("unknown storage-connection subcommand %q", args[0])
 	}
@@ -89,9 +94,9 @@ func runStorageConnectionList(args []string) error {
 		return nil
 	}
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(w, "NAME\tROLE\tBACKEND\tSCOPE\tGENERATION\tENABLED\tLOCATION\tIDENTITY")
+	fmt.Fprintln(w, "NAME\tROLE\tBACKEND\tSCOPE\tGENERATION\tENABLED\tSECRET\tLOCATION\tIDENTITY")
 	for _, c := range rows {
-		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%d\t%t\t%s\t%s\n", c.Name, c.Role, c.Backend, connectionScope(c), c.Generation, c.Enabled, connectionLocation(c), c.Identity[:12])
+		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%d\t%t\t%s\t%s\t%s\n", c.Name, c.Role, c.Backend, connectionScope(c), c.Generation, c.Enabled, connectionSecretSource(c), connectionLocation(c), c.Identity[:12])
 	}
 	return w.Flush()
 }
@@ -134,6 +139,20 @@ func objectPrefix(c connections.Connection) string {
 		return "drive/"
 	}
 	return ""
+}
+
+// connectionSecretSource says where a row's credentials live, never what they are.
+// The operator needs this because the two kinds rotate differently: an environment
+// reference is an .env edit plus a restart, while an inline secret belongs to the
+// account that added it.
+func connectionSecretSource(c connections.Connection) string {
+	if names := c.SecretReference.Names(); len(names) > 0 {
+		return "env:" + strings.Join(names, ",")
+	}
+	if c.Backend == "local" {
+		return "none"
+	}
+	return "row"
 }
 
 func connectionLocation(c connections.Connection) string {
@@ -319,7 +338,7 @@ func runStorageConnectionProbe(args []string) error {
 		}
 		return fmt.Errorf("storage connection %q does not exist for %s; add it first with `eam storage-connection add --name %s ...`", *name, scope, *name)
 	}
-	effective, err := c.Apply(*cfg)
+	effective, err := c.ApplyEnvironment(*cfg)
 	if err != nil {
 		return err
 	}
@@ -331,5 +350,50 @@ func runStorageConnectionProbe(args []string) error {
 	fmt.Printf("  evidence: %s\n  transcript: %s\n", effective.Storage.ObjectAdmissionFile, admission.ProbeReference)
 	fmt.Printf("  conditional create: %t  atomic publish: %t  multipart: %t  form post: %t\n",
 		admission.ConditionalCreate, admission.AtomicPublish, admission.MultipartUploads, admission.FormPost)
+	return nil
+}
+
+// runStorageConnectionRotate points an environment-seeded authority row at the
+// environment's credentials. It is the command the conversion-mismatch error names:
+// the operator confirms which source wins instead of the server silently discarding
+// the copy the database still holds.
+//
+// Ordinary rotation after conversion needs no command at all: the row names
+// variables, so an .env edit plus a restart is the whole path. This command exists
+// for the transition and for changing which variables back the row.
+func runStorageConnectionRotate(args []string) error {
+	fs := flag.NewFlagSet("storage-connection rotate", flag.ContinueOnError)
+	name := fs.String("name", "", "deployment-default connection name")
+	fromEnvironment := fs.Bool("from-environment", false, "adopt the environment's credentials and discard the row's inline copy")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *name == "" {
+		return fmt.Errorf("--name is required: rotation names one deployment-default connection")
+	}
+	if !*fromEnvironment {
+		return fmt.Errorf("rotation replaces whatever the row holds with the environment's credentials, so it needs --from-environment to say that the environment is the intended source")
+	}
+	ctx := context.Background()
+	cfg, err := config.Load()
+	if err != nil {
+		return err
+	}
+	db, err := store.Open(ctx, cfg.DatabaseURL)
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+	updated, already, err := connections.RotateToEnvironment(ctx, connections.NewPostgresStore(db), *cfg, *name, os.LookupEnv)
+	if err != nil {
+		return err
+	}
+	variables := strings.Join(updated.SecretReference.Names(), ", ")
+	if already {
+		fmt.Printf("storage connection %q already references %s from the environment; restart the server to use a changed value\n", updated.Name, variables)
+		return nil
+	}
+	fmt.Printf("storage connection %q now references %s from the environment; the inline copy is gone\n", updated.Name, variables)
+	fmt.Println("restart the server so the connection is built with the current value")
 	return nil
 }

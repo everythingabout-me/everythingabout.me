@@ -32,16 +32,22 @@ type Connection struct {
 	ID string
 	// OwnerID is empty for the deployment default every account may use, and set
 	// for a connection one account added for itself.
-	OwnerID    string
-	Name       string
-	Backend    string
-	Role       string
-	Identity   string
-	Config     Spec
-	Secret     Secret
-	Generation int64
-	Admission  json.RawMessage
-	Enabled    bool
+	OwnerID  string
+	Name     string
+	Backend  string
+	Role     string
+	Identity string
+	Config   Spec
+	Secret   Secret
+	// SecretReference names the environment variables that hold this row's
+	// credentials. Exactly one of Secret and SecretReference is populated: an
+	// environment-seeded connection references the environment, an account-added
+	// connection carries its own value because a user-supplied key has no
+	// deployment environment to point at.
+	SecretReference SecretReference
+	Generation      int64
+	Admission       json.RawMessage
+	Enabled         bool
 }
 
 // Spec is everything about a connection except its credentials and role. It
@@ -96,6 +102,32 @@ type COSCredential struct {
 }
 
 type S3Credential struct {
+	AccessKeyID     string `json:"accessKeyId,omitempty"`
+	SecretAccessKey string `json:"secretAccessKey,omitempty"`
+	SessionToken    string `json:"sessionToken,omitempty"`
+}
+
+// SecretReference names the environment variables that hold a connection's
+// credentials; it never contains a value. A row stores either an inline Secret or
+// a SecretReference, never both.
+//
+// The reference exists because storage_connections is a disposable cache: it gets
+// dumped, copied off the host, restored into a drill and hand-edited, so a usable
+// signing credential must not live in it. The environment (or a 0600 file it is
+// loaded from) owns the value; the row owns the variable name. Naming one variable
+// per credential field, instead of one opaque bundle, is what lets a missing value
+// be reported by name.
+type SecretReference struct {
+	COS COSSecretReference `json:"cos,omitempty"`
+	S3  S3SecretReference  `json:"s3,omitempty"`
+}
+
+type COSSecretReference struct {
+	SecretID  string `json:"secretId,omitempty"`
+	SecretKey string `json:"secretKey,omitempty"`
+}
+
+type S3SecretReference struct {
 	AccessKeyID     string `json:"accessKeyId,omitempty"`
 	SecretAccessKey string `json:"secretAccessKey,omitempty"`
 	SessionToken    string `json:"sessionToken,omitempty"`
@@ -176,6 +208,12 @@ func (c Connection) Validate() error {
 			return fmt.Errorf("storage connection %q: rootAtBucket needs a connection owned by one account, because a shared connection would put every account's tree at the bucket root", c.Name)
 		}
 	}
+	// A row has exactly one credential source. Keeping both would make a rotation
+	// ambiguous: the reference could name a new value while an operator or an old
+	// process still used the inline copy.
+	if !c.SecretReference.Empty() && !c.Secret.Empty() {
+		return fmt.Errorf("storage connection %q: both an inline secret and an environment reference are present; a row stores exactly one credential source", c.Name)
+	}
 	missing := func(what string) error { return fmt.Errorf("storage connection %q: %s is empty", c.Name, what) }
 	switch c.Backend {
 	case "cos":
@@ -185,22 +223,35 @@ func (c Connection) Validate() error {
 		if c.Config.COS.Region == "" {
 			return missing("cos.region")
 		}
-		if c.Secret.COS.SecretID == "" {
-			return missing("secret.cos.secretId")
-		}
-		if c.Secret.COS.SecretKey == "" {
-			return missing("secret.cos.secretKey")
+		if c.SecretReference.Empty() {
+			if c.Secret.COS.SecretID == "" {
+				return missing("secret.cos.secretId")
+			}
+			if c.Secret.COS.SecretKey == "" {
+				return missing("secret.cos.secretKey")
+			}
 		}
 	case "s3":
 		for field, value := range map[string]string{
 			"s3.endpoint": c.Config.S3.Endpoint, "s3.region": c.Config.S3.Region, "s3.bucket": c.Config.S3.Bucket,
-			"secret.s3.accessKeyId": c.Secret.S3.AccessKeyID, "secret.s3.secretAccessKey": c.Secret.S3.SecretAccessKey,
 		} {
 			if value == "" {
 				return missing(field)
 			}
 		}
+		if c.SecretReference.Empty() {
+			for field, value := range map[string]string{
+				"secret.s3.accessKeyId": c.Secret.S3.AccessKeyID, "secret.s3.secretAccessKey": c.Secret.S3.SecretAccessKey,
+			} {
+				if value == "" {
+					return missing(field)
+				}
+			}
+		}
 	case "local":
+		if !c.SecretReference.Empty() {
+			return fmt.Errorf("storage connection %q: a local connection has no credentials, so it cannot reference environment variables", c.Name)
+		}
 		if !filepath.IsAbs(c.Config.Local.ContentRoot) || !filepath.IsAbs(c.Config.Local.SystemRoot) {
 			return fmt.Errorf("storage connection %q: local content and system roots must be absolute, got %q and %q", c.Name, c.Config.Local.ContentRoot, c.Config.Local.SystemRoot)
 		}
@@ -209,6 +260,38 @@ func (c Connection) Validate() error {
 		}
 	default:
 		return fmt.Errorf("storage connection %q: unsupported backend %q", c.Name, c.Backend)
+	}
+	if !c.SecretReference.Empty() {
+		return c.validateSecretReference()
+	}
+	return nil
+}
+
+// validateSecretReference checks the names a row stores, not their values: the
+// environment belongs to the process, and a row read without one must still be
+// structurally valid. A named variable is required; an S3 session token is the one
+// optional field, because long-term credentials legitimately have none.
+func (c Connection) validateSecretReference() error {
+	missing := func(what string) error {
+		return fmt.Errorf("storage connection %q: the environment reference does not name a variable for %s, so it cannot replace the inline secret", c.Name, what)
+	}
+	switch c.Backend {
+	case "cos":
+		if c.SecretReference.COS.SecretID == "" {
+			return missing("secret.cos.secretId")
+		}
+		if c.SecretReference.COS.SecretKey == "" {
+			return missing("secret.cos.secretKey")
+		}
+	case "s3":
+		if c.SecretReference.S3.AccessKeyID == "" {
+			return missing("secret.s3.accessKeyId")
+		}
+		if c.SecretReference.S3.SecretAccessKey == "" {
+			return missing("secret.s3.secretAccessKey")
+		}
+	case "local":
+		return fmt.Errorf("storage connection %q: a local connection has no credentials, so it cannot reference environment variables", c.Name)
 	}
 	return nil
 }
@@ -260,6 +343,9 @@ func S3EndpointHost(endpoint string) (string, error) {
 // factory can be reused unchanged. Everything connection-specific comes from the
 // row; everything deployment-specific (database, HTTP, mail) stays with the process.
 func (c Connection) Apply(base config.Config) (config.Config, error) {
+	if !c.SecretReference.Empty() {
+		return base, fmt.Errorf("storage connection %q: credentials must be resolved before they reach the driver; call ApplyEnvironment (the row references %s)", c.Name, strings.Join(c.SecretReference.Names(), ", "))
+	}
 	if err := c.Validate(); err != nil {
 		return base, err
 	}
@@ -303,6 +389,9 @@ func (c Connection) Apply(base config.Config) (config.Config, error) {
 
 // FromConfig is how a fresh database gets its first row: the current environment
 // becomes one authority connection so an existing deployment keeps its binding.
+//
+// The row stores a reference to those variables, not their values: the database is
+// a disposable cache, so a dump or a drill restore must not carry a usable key.
 func FromConfig(cfg config.Config) (Connection, error) {
 	c := Connection{
 		Name:       cfg.Storage.ConnectionID,
@@ -332,14 +421,7 @@ func FromConfig(cfg config.Config) (Connection, error) {
 				CaseSensitive: cfg.Storage.Local.CaseSensitive,
 			},
 		},
-		Secret: Secret{
-			COS: COSCredential{SecretID: cfg.COS.SecretID, SecretKey: cfg.COS.SecretKey},
-			S3: S3Credential{
-				AccessKeyID:     cfg.Storage.S3.AccessKeyID,
-				SecretAccessKey: cfg.Storage.S3.SecretAccessKey,
-				SessionToken:    cfg.Storage.S3.SessionToken,
-			},
-		},
+		SecretReference: EnvironmentReference(cfg),
 	}
 	if c.Generation == 0 {
 		c.Generation = 1
