@@ -47,10 +47,10 @@ func TestActionsLocalPostgres(t *testing.T) {
 			Commit:    commit,
 			// The index is modelled by the native tree here: every object under the prefix is
 			// a row holding its size, so the refund is what the purge is about to remove.
-			PrefixCommit: func(ctx context.Context, _ pgx.Tx, op fileops.Operation) (int64, json.RawMessage, error) {
+			PrefixCommit: func(ctx context.Context, _ pgx.Tx, op fileops.Operation) (int64, error) {
 				var req fileops.ActionRequest
 				if err := json.Unmarshal(op.Intent, &req); err != nil {
-					return 0, nil, err
+					return 0, err
 				}
 				var removed int64
 				stack := []storage.Path{req.From}
@@ -62,7 +62,7 @@ func TestActionsLocalPostgres(t *testing.T) {
 						if storage.IsCode(err, "not_found") {
 							continue
 						}
-						return 0, nil, err
+						return 0, err
 					}
 					for _, entry := range page.Entries {
 						removed += entry.Size
@@ -71,7 +71,7 @@ func TestActionsLocalPostgres(t *testing.T) {
 						}
 					}
 				}
-				return removed, json.RawMessage(`{"deleted":true}`), nil
+				return removed, nil
 			},
 			LivePaths: func(_ context.Context, _ fileops.Root, paths []storage.Path) ([]bool, error) {
 				return make([]bool, len(paths)), nil

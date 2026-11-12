@@ -39,10 +39,11 @@ type actionNative struct {
 	lists       int
 	purges      int
 	purgeMu     sync.Mutex
+	purgeFail   map[storage.Path]error
 }
 
 func newActionNative(root Root) *actionNative {
-	n := &actionNative{root: root, entries: map[storage.Path]storage.Entry{}, data: map[storage.Path]string{}, receipts: map[string]storage.Inspection{}, pageSize: 2}
+	n := &actionNative{root: root, entries: map[storage.Path]storage.Entry{}, data: map[storage.Path]string{}, receipts: map[string]storage.Inspection{}, pageSize: 2, purgeFail: map[storage.Path]error{}}
 	n.put("", storage.Folder, "")
 	// A deletion settles the index before it purges bytes. This package does not model the
 	// index, so the newest fake tree answers the settlement's size question: the bytes a
@@ -119,6 +120,11 @@ func (n *actionNative) Purge(_ context.Context, p storage.Path, kind storage.Kin
 	}
 	if len(revision) > 0 && !bytes.Equal(entry.Revision, revision) {
 		return storage.NewError("changed", p, nil)
+	}
+	if err := n.purgeFail[p]; err != nil {
+		// One object refuses its deletion, so a test can stop an attempt between two
+		// objects and watch what the retry reports.
+		return err
 	}
 	if kind == storage.Folder {
 		for other := range n.entries {
@@ -243,10 +249,10 @@ func actionCoordinator(t *testing.T, p *Postgres, commit IndexCommit) *Actions {
 		// The index is out of scope for this package, so the fake settlement reports the
 		// bytes the index holds for the subtree (the fake tree's sizes) and leaves the tree
 		// alone: the purge is what removes the objects, exactly as in production.
-		PrefixCommit: func(_ context.Context, _ pgx.Tx, op Operation) (int64, json.RawMessage, error) {
+		PrefixCommit: func(_ context.Context, _ pgx.Tx, op Operation) (int64, error) {
 			var req ActionRequest
 			if err := json.Unmarshal(op.Intent, &req); err != nil {
-				return 0, nil, err
+				return 0, err
 			}
 			if prefixHost != nil {
 				var removed int64
@@ -255,9 +261,9 @@ func actionCoordinator(t *testing.T, p *Postgres, commit IndexCommit) *Actions {
 						removed += entry.Size
 					}
 				}
-				return removed, json.RawMessage(`{"deleted":true}`), nil
+				return removed, nil
 			}
-			return 0, json.RawMessage(`{"deleted":true}`), nil
+			return 0, nil
 		},
 		LivePaths: func(_ context.Context, _ Root, paths []storage.Path) ([]bool, error) {
 			live := make([]bool, len(paths))
@@ -839,6 +845,15 @@ func TestDeleteAcceptsWithoutWalkingThenPurges(t *testing.T) {
 	if op.Terminal() || op.Purge == nil || op.Purge.Path != "victims" {
 		t.Fatalf("acceptance did not settle a prefix purge: %+v", op)
 	}
+	// Acceptance answers "the subtree left the index"; it does not answer "the bytes are
+	// gone". A result published here would sit next to a running state and be read as the
+	// operation's verdict.
+	if len(op.Result) != 0 {
+		t.Fatalf("acceptance published a result: %s", op.Result)
+	}
+	if op.Purge.Total != 0 {
+		t.Fatalf("acceptance walked the prefix: total=%d", op.Purge.Total)
+	}
 	if _, err = a.journal.ActionBinding(context.Background(), op); !IsCode(err, "manifest_not_frozen") {
 		t.Fatalf("acceptance froze a manifest: %v", err)
 	}
@@ -855,6 +870,14 @@ func TestDeleteAcceptsWithoutWalkingThenPurges(t *testing.T) {
 	if out.Purge.Deleted == 0 {
 		t.Fatal("purge did not report what it deleted")
 	}
+	// A finished purge reports a complete document: every object its extent counted was
+	// settled, and the result names what happened to the bytes.
+	if out.Purge.Total != out.Purge.Deleted+out.Purge.Adopted {
+		t.Fatalf("finished purge reports %d of %d", out.Purge.Deleted+out.Purge.Adopted, out.Purge.Total)
+	}
+	if !strings.Contains(string(out.Result), `"purged"`) {
+		t.Fatalf("finished purge result lost its counts: %s", out.Result)
+	}
 	// A second pass is recovery: it re-walks and finds nothing, which is success rather
 	// than a failure to rebind a manifest that no longer exists.
 	again := runAction(t, a, out, actor, n)
@@ -863,6 +886,60 @@ func TestDeleteAcceptsWithoutWalkingThenPurges(t *testing.T) {
 	}
 	if _, ok := n.data["victims/a"]; ok {
 		t.Fatal("recovery resurrected data")
+	}
+}
+
+// An attempt that loses one object must not restart its counters. The retry re-walks a
+// smaller tree, and reporting "0 of 3" again after a throttled attempt is the one shape a
+// client cannot tell apart from an operation that never moved — which is what it reported
+// for the whole purge before the counters were persisted per page.
+func TestPurgeResumesItsCountersAcrossAttempts(t *testing.T) {
+	pool := isolatedPostgres(t)
+	ctx := context.Background()
+	p, r, actor := seedOwner(t, pool, provenBaseline(3, 3, 100, 100))
+	n := newActionNative(r)
+	n.put("victims", storage.Folder, "")
+	n.put("victims/a", storage.File, "a")
+	n.put("victims/b", storage.File, "b")
+	n.put("victims/c", storage.File, "c")
+	prefixHost = n
+	defer func() { prefixHost = nil }()
+	a := actionCoordinator(t, p, nil)
+	op := prepareAction(t, a, ActionRequest{Root: r, Actor: actor, Kind: "delete", From: "victims", Recursive: true, IdempotencyKey: "delete-resume"}, n)
+
+	n.purgeFail["victims/b"] = storage.NewError("throttled", "victims/b", nil)
+	stalled, err := a.Run(ctx, r, actor, op.ID, n)
+	if err == nil {
+		t.Fatal("a refused deletion settled the operation")
+	}
+	if stalled.Terminal() {
+		t.Fatalf("state=%s after a provider refusal", stalled.State)
+	}
+	// The siblings were deleted before the refusal, so the attempt reports a real fraction
+	// of the entries its walk saw (three files and the folder marker), not the 0 of 0 the
+	// empty manifest used to produce.
+	if stalled.Purge.Deleted < 2 || stalled.Purge.Total < 2 {
+		t.Fatalf("after the refusal: %d of %d", stalled.Purge.Deleted, stalled.Purge.Total)
+	}
+
+	delete(n.purgeFail, "victims/b")
+	resumed, err := a.Run(ctx, r, actor, op.ID, n)
+	if err != nil || resumed.State != Succeeded {
+		t.Fatalf("resume state=%s err=%v", resumed.State, err)
+	}
+	// The retry walked what was left and settled the rest: the counters carried over
+	// instead of starting again at zero, and the finished document is self-consistent.
+	if resumed.Purge.Deleted < stalled.Purge.Deleted || resumed.Purge.Adopted != 0 {
+		t.Fatalf("finished purge lost settled work: %d after %d", resumed.Purge.Deleted, stalled.Purge.Deleted)
+	}
+	if resumed.Purge.Total != resumed.Purge.Deleted+resumed.Purge.Adopted {
+		t.Fatalf("finished purge: purged=%d adopted=%d total=%d", resumed.Purge.Deleted, resumed.Purge.Adopted, resumed.Purge.Total)
+	}
+	for path := range n.entries {
+		t.Logf("remaining entry %q", path)
+	}
+	if n.data["victims/b"] != "" {
+		t.Fatal("resume left the refused object behind")
 	}
 }
 

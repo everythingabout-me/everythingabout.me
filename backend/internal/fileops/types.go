@@ -154,15 +154,31 @@ type Operation struct {
 type PurgeState struct {
 	Path       storage.Path
 	AcceptedAt time.Time
-	Deleted    int64
-	Adopted    int64
+	// Deleted and Adopted are cumulative over the whole purge, not over one attempt: a
+	// retry resumes from them instead of restarting at zero, because a counter that
+	// starts over is the one shape a client cannot tell apart from a stall.
+	Deleted int64
+	Adopted int64
+	// Total is the denominator the purge is working against: what was settled when the
+	// current walk began plus the objects that walk found. It is persisted for the same
+	// reason the counters are, so a client and a restarted worker divide by the same
+	// number. It shrinks between walks (one that dies after deleting objects leaves a
+	// smaller tree to count) but never falls below what is already settled. Zero means no
+	// walk has looked at the prefix yet, which is the only moment the extent is unknown.
+	Total int64
 }
 
 // PrefixDeleteCommit settles one accepted prefix deletion inside the accepting
 // transaction: it removes the subtree's index rows, records the change facts and
 // returns the bytes it removed so the journal can refund them in the same commit.
 // Returning without error means the user's deletion is final.
-type PrefixDeleteCommit func(context.Context, pgx.Tx, Operation) (int64, json.RawMessage, error)
+//
+// It returns no result document on purpose. The operation's `result` is its answer, and
+// for a deletion the answer is only true once the bytes are gone; publishing a settled
+// `{deleted:true}` at acceptance made a running operation look finished, which is exactly
+// the confusion a client has to be able to rule out. The purge writes the result when it
+// settles.
+type PrefixDeleteCommit func(context.Context, pgx.Tx, Operation) (int64, error)
 
 // LivePaths reports which of these paths the index still holds as live entries. The
 // purge uses it to leave alone anything a user re-created after accepting the

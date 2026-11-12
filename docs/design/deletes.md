@@ -152,10 +152,13 @@ when it stopped between allocating and committing, and the folder holding them a
 
 - `202` now means: the subtree is gone from every read, permanently. There is no longer a window where a
   folder is deleted but still listed.
-- The operation no longer fails because the native purge failed. It reports `deleting` with a remaining count
-  while the walk runs, then `succeeded`; a purge that cannot make progress stays `deleting` with its retry
-  state and is visible as such. There is no "partially deleted" outcome on the index side, because the index
-  was settled atomically.
+- The operation no longer fails because the native purge failed. It stays `running` with `completed/total` in
+  provider objects while the walk runs, then `succeeded`; a purge that cannot make progress stays `running`
+  with its retry state and is visible as such. There is no "partially deleted" outcome on the index side,
+  because the index was settled atomically.
+- `result` appears when the operation is terminal, not at acceptance. A delete's answer is
+  `{deleted,purged,adopted}`; while it runs, `result` is null. `total` is null only until the first walk has
+  counted the prefix, and a `succeeded` purge ends on `completed == total`.
 - `409 operation_in_progress` no longer appears for a path that was just deleted: the name is free as soon as
   the acceptance commits.
 
@@ -179,8 +182,10 @@ when it stopped between allocating and committing, and the folder holding them a
       the receipt and the two re-observations `Remove` makes. Folders go after their children, and a folder is
       kept when anything under it survived the pass, which the walk already knows without another request.
       Measured on 80 objects: 94s → 2.5s.
-- [ ] Operation resource: expose `purged`/`adopted` while the purge runs. Today the result appears when the
-      purge finishes; a client sees `running` in between.
+- [x] Operation resource: `purged`/`adopted` move while the purge runs, per page of 200 objects, and the
+      total is published from the walk instead of staying null. The result moved to the terminal state in the
+      same change: it used to be written by the acceptance transaction, so a running operation already
+      answered "deleted" — the inverse of the gap this item described.
 - [ ] Tombstone object (`__eam_system__/<owner>/tombstones/<operation>`) so a rebuild after index loss does not
       resurrect a half-purged delete. Same predicate as the worker; the tombstone is the durable copy.
 - [ ] `move`/`copy` keep the frozen manifest: their effects are conditional on both endpoints and a re-walk

@@ -269,7 +269,10 @@ export interface FileOperation {
   kind: "mkdir" | "move" | "copy" | "delete" | "upload_commit" | "thumbnail";
   state: "queued" | "running" | "outcome_unknown" | "succeeded" | "failed" | "cancelled";
   progress: { completed: number; total: number | null; unit: string };
-  result: FileResource | { deleted: boolean } | { effects: FileEffect[]; remaining: FileEffect[] } | null;
+  // A deletion answers with what happened to the bytes, and only once the purge has
+  // settled: `purged` counts objects removed, `adopted` those left because a newer intent
+  // claimed them. While the operation runs this is null.
+  result: FileResource | { deleted: boolean; purged?: number; adopted?: number } | { effects: FileEffect[]; remaining: FileEffect[] } | null;
   error: FileProblem | null;
   cancelRequested: boolean;
   // Present while a worker keeps failing on a nonterminal operation: the attempts

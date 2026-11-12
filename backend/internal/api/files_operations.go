@@ -48,15 +48,27 @@ func writeFilesOperationWithRetry(w http.ResponseWriter, op fileops.Operation, s
 		}
 	case op.Purge != nil:
 		// A recursive deletion has no manifest to count: the index settled at acceptance,
-		// and what remains is a byte purge that walks the prefix. Reporting the empty
-		// manifest showed 0/0 entries for the whole purge — next to state "running" and
-		// result "deleted: true" that is indistinguishable from an operation that never
-		// started, and it once took a live import down for 45 minutes of staring. The
-		// counters that move are the purge's own, and the total is unknown until the last
-		// walk, so it stays null rather than pretending zero.
+		// and what remains is a byte purge that walks the prefix. The counters are the
+		// purge's own, and `total` is the extent of the walk it is currently on — null
+		// only before the first walk has looked, never as a stand-in for zero. Reporting
+		// 0/0 for the whole purge once took a live import down for 45 minutes of staring,
+		// because next to `running` it is the same document as an operation that never
+		// started.
 		completed = int(op.Purge.Deleted + op.Purge.Adopted)
-		total = nil
 		unit = "objects"
+		switch {
+		case op.State == fileops.Succeeded:
+			// A purge that stopped has settled everything it was going to settle, and what
+			// it may not touch — a path the user re-created, a write newer than the
+			// acceptance — is not work the operation still owes. Reporting the last walk's
+			// extent here would end a finished deletion on "480 of 520", which its reader
+			// cannot tell apart from a bug.
+			total = completed
+		case op.Purge.Total > 0:
+			total = op.Purge.Total
+		default:
+			total = nil
+		}
 	}
 	var result any
 	if len(op.Result) > 0 {

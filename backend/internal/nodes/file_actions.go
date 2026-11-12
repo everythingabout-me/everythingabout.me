@@ -439,30 +439,30 @@ func settledMetadata(ctx context.Context, tx pgx.Tx, root fileops.Root, entry st
 // `202`: every read resolves through these rows, so once they commit the subtree is
 // gone for the user even while the purge is still running. It is also what frees the
 // namespace: there is no concealed-but-live row for a re-creation to collide with.
-func CommitPrefixDelete(ctx context.Context, tx pgx.Tx, op fileops.Operation) (int64, json.RawMessage, error) {
+func CommitPrefixDelete(ctx context.Context, tx pgx.Tx, op fileops.Operation) (int64, error) {
 	var request fileops.ActionRequest
 	if json.Unmarshal(op.Intent, &request) != nil || request.Kind != "delete" || request.From == "" {
-		return 0, nil, fileops.E("invalid_intent", nil)
+		return 0, fileops.E("invalid_intent", nil)
 	}
 	namespace := fileRootNamespace(op.Root)
 	if _, err := filechanges.BindRoot(ctx, tx, op.Root.OwnerID, namespace); err != nil {
-		return 0, nil, err
+		return 0, err
 	}
 	if _, err := tx.Exec(ctx, configureNameComparisonSQL, op.Root.OwnerID, nameComparisonVersion(op.Root.CaseSensitive)); err != nil {
-		return 0, nil, fmt.Errorf("configure root name comparison: %w", err)
+		return 0, fmt.Errorf("configure root name comparison: %w", err)
 	}
 	path := string(request.From)
 	before, err := captureFileState(ctx, tx, op.Root.OwnerID, namespace, path)
 	if err != nil {
-		return 0, nil, err
+		return 0, err
 	}
 	if before.metadata == nil {
-		return 0, nil, storage.NewError("not_found", request.From, nil)
+		return 0, storage.NewError("not_found", request.From, nil)
 	}
 	pattern := EscapeLike(path) + "/%"
 	rows, err := tx.Query(ctx, `select id::text, size from file_entries where owner_id=$1::uuid and path=$2`, op.Root.OwnerID, path)
 	if err != nil {
-		return 0, nil, err
+		return 0, err
 	}
 	ids := make([]string, 0, 64)
 	var removed int64
@@ -471,49 +471,51 @@ func CommitPrefixDelete(ctx context.Context, tx pgx.Tx, op fileops.Operation) (i
 		var size int64
 		if err = rows.Scan(&id, &size); err != nil {
 			rows.Close()
-			return 0, nil, err
+			return 0, err
 		}
 		ids = append(ids, id)
 		removed += size
 	}
 	rows.Close()
 	if err = rows.Err(); err != nil {
-		return 0, nil, err
+		return 0, err
 	}
 	descendants, err := tx.Query(ctx, `select id::text, size from file_entries where owner_id=$1::uuid and path like $2`, op.Root.OwnerID, pattern)
 	if err != nil {
-		return 0, nil, err
+		return 0, err
 	}
 	for descendants.Next() {
 		var id string
 		var size int64
 		if err = descendants.Scan(&id, &size); err != nil {
 			descendants.Close()
-			return 0, nil, err
+			return 0, err
 		}
 		ids = append(ids, id)
 		removed += size
 	}
 	descendants.Close()
 	if err = descendants.Err(); err != nil {
-		return 0, nil, err
+		return 0, err
 	}
 	if len(ids) > 0 {
 		if _, err = tx.Exec(ctx, `delete from nodes where owner_id=$1::uuid and id=any($2::uuid[])`, op.Root.OwnerID, ids); err != nil {
-			return 0, nil, fmt.Errorf("settle prefix deletion: %w", err)
+			return 0, fmt.Errorf("settle prefix deletion: %w", err)
 		}
 	}
 	if _, err = tx.Exec(ctx, `delete from file_content_generations where owner_id=$1::uuid and root_namespace=$2 and (path=$3 or path like $4)`, op.Root.OwnerID, namespace, path, pattern); err != nil {
-		return 0, nil, err
+		return 0, err
 	}
 	// One subtree fact, not one per object: the feed's contract already lets a single
 	// change retire a whole folder, and a deletion does not need to page the feed for
 	// every file inside it.
 	if err = settleFileChanges(ctx, tx, op, []fileEffectCapture{{key: op.ID + ":subtree", source: path, subtree: true, before: before}}); err != nil {
-		return 0, nil, err
+		return 0, err
 	}
-	result, err := json.Marshal(fc.DeleteResult{Deleted: true})
-	return removed, result, err
+	// No result document: the operation's `result` belongs to the purge, which writes it
+	// when the bytes are actually gone. A `{deleted:true}` from here would be published
+	// next to `state: "running"` and would read as the operation's answer.
+	return removed, nil
 }
 
 // LiveFilePaths answers which of these paths the index still holds. The purge must not

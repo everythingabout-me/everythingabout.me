@@ -31,7 +31,7 @@ func (p *Postgres) AcceptPrefixDelete(ctx context.Context, l Lease, path storage
 		if json.Unmarshal(op.Intent, &request) != nil || request.From != path {
 			return E("invalid_intent", nil)
 		}
-		removed, result, err := commit(ctx, tx, *op)
+		removed, err := commit(ctx, tx, *op)
 		if err != nil {
 			return err
 		}
@@ -54,7 +54,10 @@ func (p *Postgres) AcceptPrefixDelete(ctx context.Context, l Lease, path storage
 		op.Purge = &PurgeState{Path: path, AcceptedAt: now}
 		op.Phase = NativeApplied
 		op.State = Running
-		op.Result = result
+		// No Result here: the accepted deletion is final for every read, but the operation
+		// has not answered yet — the purge has. Publishing `{deleted:true}` at acceptance
+		// put a finished-looking payload next to `state:"running"` for the whole purge.
+		//
 		// The subtree is gone from the index, so the guard has nothing left to protect and
 		// would only keep the namespace closed while the purge runs. A created-under path
 		// is an ordinary create again; the purge's live-row test keeps it.
@@ -68,17 +71,20 @@ func (p *Postgres) AcceptPrefixDelete(ctx context.Context, l Lease, path storage
 }
 
 // SavePurgeProgress records how far the byte purge got, so a restarted worker and a
-// waiting client both see progress instead of a counter that starts over.
-func (p *Postgres) SavePurgeProgress(ctx context.Context, l Lease, deleted, adopted int64) (Operation, error) {
+// waiting client both see progress instead of a counter that starts over. The counters
+// are cumulative and only move forward. `total` is the extent of the walk that is running
+// now, so it may shrink between walks — an attempt that dies after deleting objects
+// leaves the next one a smaller tree to count — but never below what is already settled.
+func (p *Postgres) SavePurgeProgress(ctx context.Context, l Lease, deleted, adopted, total int64) (Operation, error) {
 	var out Operation
-	if deleted < 0 || adopted < 0 {
+	if deleted < 0 || adopted < 0 || total < 0 || total < deleted+adopted {
 		return out, E("invalid_request", nil)
 	}
 	err := p.leased(ctx, l, func(_ pgx.Tx, op *Operation, _ time.Time) error {
 		if op.Terminal() || op.Purge == nil {
 			return E("invalid_transition", nil)
 		}
-		op.Purge.Deleted, op.Purge.Adopted = deleted, adopted
+		op.Purge.Deleted, op.Purge.Adopted, op.Purge.Total = deleted, adopted, total
 		out = *op
 		return nil
 	})

@@ -71,13 +71,18 @@ func (a *Actions) acceptDelete(ctx context.Context, req ActionRequest, op Operat
 // no newer intent claims, and records how far it got. Re-running it is how recovery
 // works, and every step tolerates finding the object already gone.
 func (a *Actions) purgePrefix(ctx context.Context, root Root, actor Actor, op Operation, native NativeActions) (Operation, error) {
-	purge := op.Purge
-	if purge == nil || purge.Path == "" {
+	if op.Purge == nil || op.Purge.Path == "" {
 		return op, E("invalid_intent", nil)
 	}
 	op, err := a.journal.Claim(ctx, root, actor, op.ID, a.options.LeaseTTL)
 	if err != nil {
 		return op, err
+	}
+	// Read the intent after claiming: the journal hands back a fresh snapshot, and a
+	// pointer taken before the claim would be updated by nobody.
+	purge := op.Purge
+	if purge == nil || purge.Path == "" {
+		return op, E("invalid_intent", nil)
 	}
 	work, stop := a.service.keepLease(ctx, op.Lease)
 	defer stop()
@@ -93,8 +98,12 @@ func (a *Actions) purgePrefix(ctx context.Context, root Root, actor Actor, op Op
 	// Up to three passes: a folder that gained a child while this pass was running cannot
 	// be removed before that child, and the child was written into a folder that had
 	// already stopped existing for every read. The bound exists so a folder that keeps
-	// growing cannot hold the operation open forever.
-	var deleted, adopted int64
+	// growing cannot hold this attempt open forever.
+	//
+	// The counters resume from the journal rather than from zero: a retry re-walks the
+	// same prefix and has already deleted part of it, and reporting "0 of N" again after
+	// a throttled attempt is indistinguishable from an operation that never moved.
+	deleted, adopted := purge.Deleted, purge.Adopted
 	for pass := 0; pass < purgePasses; pass++ {
 		entries, err := snapshotActionTree(work, native, purge.Path, request.Recursive)
 		if err != nil {
@@ -104,20 +113,29 @@ func (a *Actions) purgePrefix(ctx context.Context, root Root, actor Actor, op Op
 			}
 			return a.retryPurge(work, op, err)
 		}
-		waited, err := a.purgeLevels(work, root, op, purge, native, entries, &deleted, &adopted)
-		if err != nil {
-			if saveErr := a.savePurgeProgress(work, op, deleted, adopted); saveErr != nil {
-				slog.Warn("file purge progress not saved", "operation", op.ID, "error", saveErr)
-			}
+		// Publish the denominator before the first deletion of the pass, not after the
+		// last one: the walk has just counted the objects it is about to settle, and a
+		// total that only becomes known once the work is done can never be used to render
+		// it. From here on `completed/total` is a real fraction for the whole pass.
+		if err = a.savePurgeProgress(work, op, deleted, adopted, deleted+adopted+int64(len(entries))); err != nil {
 			return a.retryPurge(work, op, err)
 		}
-		if err = a.savePurgeProgress(work, op, deleted, adopted); err != nil {
+		waited, err := a.purgeLevels(work, root, op, native, entries, &deleted, &adopted)
+		if err != nil {
+			if saveErr := a.savePurgeProgress(work, op, deleted, adopted, op.Purge.Total); saveErr != nil {
+				slog.Warn("file purge progress not saved", "operation", op.ID, "error", saveErr)
+			}
 			return a.retryPurge(work, op, err)
 		}
 		if waited == 0 {
 			break
 		}
 	}
+	// Folders can survive all three passes when what is under them belongs to a newer
+	// intent — a path the user re-created, or a write that arrived after the acceptance —
+	// and those objects are never this purge's to delete. Re-walking cannot help, so the
+	// purge ends here either way; what it may not touch is reported as adopted, not as
+	// work still owed.
 	return a.finishPurge(work, root, actor, op, Succeeded, nil)
 }
 
@@ -125,7 +143,7 @@ func (a *Actions) purgePrefix(ctx context.Context, root Root, actor Actor, op Op
 // the order and never the parallelism: a folder's marker may only be removed after its
 // children, and every entry at one depth is independent of the others — which is what
 // makes a purge of a thousand files a batch of requests instead of a queue of them.
-func (a *Actions) purgeLevels(ctx context.Context, root Root, op Operation, purge *PurgeState, native NativeActions, entries []storage.Entry, deleted, adopted *int64) (int, error) {
+func (a *Actions) purgeLevels(ctx context.Context, root Root, op Operation, native NativeActions, entries []storage.Entry, deleted, adopted *int64) (int, error) {
 	byDepth := map[int][]storage.Entry{}
 	deepest := 0
 	for _, entry := range entries {
@@ -162,7 +180,7 @@ func (a *Actions) purgeLevels(ctx context.Context, root Root, op Operation, purg
 					*adopted++
 					continue
 				}
-				if !entry.ModifiedAt.IsZero() && entry.ModifiedAt.After(purge.AcceptedAt) {
+				if !entry.ModifiedAt.IsZero() && entry.ModifiedAt.After(op.Purge.AcceptedAt) {
 					// Written after the user's decision: an in-flight publish or an outside
 					// writer. Neither was ever visible under the deleted path.
 					*adopted++
@@ -171,10 +189,17 @@ func (a *Actions) purgeLevels(ctx context.Context, root Root, op Operation, purg
 				candidates = append(candidates, entry)
 			}
 			results := a.purgeBatch(ctx, op, native, candidates)
+			// Count the whole page even when one object refuses: the batch already deleted
+			// the others, and a counter that skips them makes the retry look like it lost
+			// ground it never lost.
+			var refused error
 			for i, result := range results {
 				entry := candidates[i]
 				if result.err != nil {
-					return waited, result.err
+					if refused == nil {
+						refused = result.err
+					}
+					continue
 				}
 				if entry.Kind == storage.Folder && result.deleted && survivors[entry.Path] > 0 {
 					// Children of this folder were left behind, so the folder stays with them
@@ -194,6 +219,16 @@ func (a *Actions) purgeLevels(ctx context.Context, root Root, op Operation, purg
 					survivors[parentPath(entry.Path)]++
 					*adopted++
 				}
+			}
+			if refused != nil {
+				return waited, refused
+			}
+			// One durable step per page, so the counters move while a large tree is being
+			// deleted instead of jumping once when the whole walk ends. The cost is one
+			// journal write per purgePageSize provider deletions — an owner-head lock held
+			// for the write, not for the deletes.
+			if err = a.savePurgeProgress(ctx, op, *deleted, *adopted, op.Purge.Total); err != nil {
+				return waited, err
 			}
 		}
 	}
@@ -302,14 +337,14 @@ func (a *Actions) purgeEntry(ctx context.Context, op Operation, entry storage.En
 	return purgeResult{err: err}
 }
 
-func (a *Actions) savePurgeProgress(ctx context.Context, op Operation, deleted, adopted int64) error {
+func (a *Actions) savePurgeProgress(ctx context.Context, op Operation, deleted, adopted, total int64) error {
 	if op.Purge == nil {
 		return nil
 	}
-	if deleted == op.Purge.Deleted && adopted == op.Purge.Adopted {
+	if deleted == op.Purge.Deleted && adopted == op.Purge.Adopted && total == op.Purge.Total {
 		return nil
 	}
-	updated, err := a.journal.SavePurgeProgress(ctx, op.Lease, deleted, adopted)
+	updated, err := a.journal.SavePurgeProgress(ctx, op.Lease, deleted, adopted, total)
 	if err != nil {
 		return err
 	}

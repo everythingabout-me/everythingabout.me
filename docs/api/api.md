@@ -869,16 +869,21 @@ Operation JSON has `{id,kind,state,progress,result,error,cancelRequested,retryin
 `queued/running/outcome_unknown/succeeded/failed/cancelled`; progress is `{completed,total,unit}` with nullable
 total. Also record per-entry effects, conflicts and remaining work for partial tree operations.
 `unit` names what is being counted: `entries` for a manifest operation, `bytes` for `upload_commit`, and
-`objects` for a recursive deletion. A recursive deletion is the one kind with no manifest — it is accepted
-immediately, so `result` already carries `{deleted:true}` while `state` stays `running` until the native byte
-purge settles. Its progress therefore counts the objects purged or adopted, with `total: null`, because the
-purge only learns its extent by walking the prefix; reading the empty manifest instead reported 0 of 0 for the
-whole purge and made a working deletion look like one that never started.
+`objects` for a recursive deletion. A recursive deletion is the one kind with no manifest — the acceptance
+settles the index and answers `202`, so `state` stays `running` until the native byte purge settles. Its
+`progress` counts the provider objects the purge settled (deleted or adopted), and `total` is the extent of the
+walk it is on: null only until the first walk has seen the prefix, and a number from then on, because a client
+polling a deletion needs a fraction it can render. A succeeded purge reports `completed == total`: what it may
+not touch — a path the user re-created, a write newer than the acceptance — is not work it still owes, and a
+finished document ending on "480 of 520" is indistinguishable from a bug.
+`result` is the operation's answer, so it is written once, when the operation is terminal: a running deletion
+carries `result: null`. The index settlement is final at `202`, but the bytes are not, and publishing
+`{deleted:true}` at acceptance put a final-looking payload next to `state: "running"` for the whole purge.
 `retrying` is null while the worker is making progress and otherwise `{attempts,code,lastAttemptAt,nextAttemptAt}`,
 so a nonterminal operation that keeps failing is distinguishable from one that is merely slow; the attempts back off
 from 30 seconds to 30 minutes instead of repeating once per lease. The cause chain itself stays in the server log.
 Kinds are bounded file actions (`mkdir/move/copy/delete/upload_commit/thumbnail`), not user-submitted arbitrary tasks.
-Result is the file/folder metadata for mkdir/move/copy/upload_commit, `{deleted:true}` for delete, or
+Result is the file/folder metadata for mkdir/move/copy/upload_commit, `{deleted,purged,adopted}` for delete, or
 `{contentUrl,mediaType,size,contentRevision}` for thumbnail; contentUrl is a same-origin representation endpoint.
 The committed upload also stores its file metadata result in session status. Errors use the same Problem structure.
 
