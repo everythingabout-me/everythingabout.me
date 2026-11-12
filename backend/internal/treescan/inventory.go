@@ -111,13 +111,13 @@ func Inventory(ctx context.Context, input io.Reader, prefix string, opts Options
 		if strings.HasSuffix(relative, "/") {
 			relative = strings.TrimSuffix(relative, "/")
 			kind = storage.Folder
+			// The marker body is not content: a reasserted marker carries a service token,
+			// and the index still records an empty folder.
+			size = 0
 		}
 		if relative == "" {
 			if key != prefix {
 				return nil, issue("invalid_name", storage.Path(key), "", "only the exact prefix can be a root marker")
-			}
-			if size != 0 {
-				return nil, issue("invalid_size", "", "", "root marker must be empty")
 			}
 			continue
 		}

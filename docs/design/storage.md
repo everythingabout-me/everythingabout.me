@@ -53,8 +53,11 @@ Given a configured per-user content root, API `/Photos/2026/trip.jpg` is stored 
 ```
 
 Local disk, WebDAV and NAS contain ordinary files/directories. S3/COS use the same relative key segments;
-folder markers preserve empty folders when supported by standard tools. Cloud drives contain native folders
-and original filenames, even when their API locates those files through opaque IDs. An owner-specific bucket
+folder markers preserve empty folders when supported by standard tools. A folder marker that must be
+reasserted during a purge holds a short service token instead of empty bytes, because an empty object's ETag
+is the same for every marker; the key still ends in `/` and the folder stays an ordinary folder marker. Cloud
+drives contain native folders and original filenames, even when their API locates those files through opaque
+IDs. An owner-specific bucket
 prefix/root is acceptable; the entire relative tree below it must match the user-visible tree.
 
 Committed files are individually usable without application decoding. Do not store authoritative content

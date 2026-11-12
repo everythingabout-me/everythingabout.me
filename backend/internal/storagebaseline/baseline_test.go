@@ -86,13 +86,16 @@ func TestBaselineRefusesUnresolvedEvidence(t *testing.T) {
 
 func TestNativeDirectoryMarkerAndOverflow(t *testing.T) {
 	s := cleanSnapshot()
+	// A non-root folder marker with a body is a reasserted marker (a service token); it is
+	// still a folder. Only the root marker must stay empty, and the file overflow must
+	// still refuse the baseline.
 	s.Native = append(s.Native, NativeEntry{Key: "drive/owner/", Size: 0}, NativeEntry{Key: "drive/owner/bad/", Size: 1}, NativeEntry{Key: "drive/owner/huge", Size: 9007199254740991})
 	r := Compare(s, 0)
 	codes := map[string]bool{}
 	for _, i := range r.Issues {
 		codes[i.Code] = true
 	}
-	if !codes["nonempty_folder_marker"] || !codes["usage_overflow"] || r.ReservationBaselineReady {
+	if codes["nonempty_folder_marker"] || !codes["usage_overflow"] || r.ReservationBaselineReady {
 		t.Fatalf("unexpected %+v", r)
 	}
 }

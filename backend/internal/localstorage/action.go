@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"sort"
+	"sync"
 
 	"everythingabout.me/backend/internal/storage"
 )
@@ -20,6 +21,19 @@ type MutationDriver struct {
 	rename   func(*os.Root, string, *os.Root, string, bool) error
 	remove   func(*os.Root, string) error
 	listScan func(context.Context, *os.Root, storage.Path) ([]nativeEntry, error)
+
+	// pathMu/paths serializes the revision check and the effect for one path between a
+	// purge removal and a marker reassert. The local driver's folder revision is the
+	// directory inode, and rmdir has no conditional form: without a shared lock, a reassert
+	// could rename over the marker between the purge's revision check and its rmdir, and
+	// the purge would remove the new marker anyway.
+	pathMu sync.Mutex
+	paths  map[string]*pathLock
+}
+
+type pathLock struct {
+	mu   sync.Mutex
+	refs int
 }
 
 var (
@@ -42,7 +56,13 @@ func NewMutationDriver(driver storage.Driver, options WriteOptions) (*MutationDr
 	}
 	w.replacement = true
 	w.replace = actionRename
-	return &MutationDriver{StagedWriter: w, rename: actionRename, listScan: w.driver.scan, remove: func(root *os.Root, name string) error { return root.Remove(name) }}, nil
+	return &MutationDriver{
+		StagedWriter: w,
+		rename:       actionRename,
+		listScan:     w.driver.scan,
+		remove:       func(root *os.Root, name string) error { return root.Remove(name) },
+		paths:        map[string]*pathLock{},
+	}, nil
 }
 func (w *MutationDriver) Describe() storage.Descriptor {
 	d := w.driver.Describe()

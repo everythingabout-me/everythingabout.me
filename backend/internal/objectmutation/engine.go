@@ -176,7 +176,11 @@ func parseRevision(value []byte) (string, error) {
 	return s, nil
 }
 func (d *Driver) objectEntry(p storage.Path, kind storage.Kind, obj Object) (storage.Entry, error) {
-	if obj.Key != d.key(p, kind) || obj.Size < 0 || len(nativeRevision(obj.ETag)) == 0 || kind == storage.Folder && obj.Size != 0 {
+	// A folder is its key (the trailing-slash marker). Its body is not user content:
+	// legacy markers are empty, while a marker reasserted during a purge carries a small
+	// token so its ETag moves — a zero-byte rewrite would leave the empty-content MD5
+	// unchanged and a stale conditional delete would still match it.
+	if obj.Key != d.key(p, kind) || obj.Size < 0 || len(nativeRevision(obj.ETag)) == 0 {
 		return storage.Entry{}, fail("unsupported", p)
 	}
 	modified := obj.ModifiedAt

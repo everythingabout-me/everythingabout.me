@@ -195,7 +195,9 @@ func (t *Tree) children(ctx context.Context, path storage.Path) ([]storage.Entry
 			return fail("invalid_backend_response", path)
 		}
 		relative := strings.TrimPrefix(key, prefix)
-		if relative == "" && folder && obj.Size == 0 {
+		// The entry's own marker is not a child, whatever body it carries: a folder
+		// reasserted during a purge holds a small token so its ETag moves.
+		if relative == "" && folder {
 			return nil
 		}
 		if folder {
@@ -265,10 +267,9 @@ func (t *Tree) children(ctx context.Context, path storage.Path) ([]storage.Entry
 			return nil, err
 		}
 		for _, obj := range page.Objects {
+			// A key ending in "/" is a folder marker; its body is not content, and a
+			// reasserted marker carries a service token.
 			folder := strings.HasSuffix(obj.Key, "/")
-			if folder && obj.Size != 0 {
-				return nil, fail("ambiguous_path", path)
-			}
 			if err := add(obj.Key, folder, obj); err != nil {
 				return nil, err
 			}

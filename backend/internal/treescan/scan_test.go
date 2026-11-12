@@ -106,7 +106,6 @@ func TestScanRejectsFaultyTrees(t *testing.T) {
 		{"root child", "outside_root", []storage.Entry{folder("")}},
 		{"absolute", "invalid_name", []storage.Entry{file("/escaped")}},
 		{"negative size", "invalid_size", []storage.Entry{{Path: "a", Kind: storage.File, Size: -1}}},
-		{"nonempty marker", "invalid_size", []storage.Entry{{Path: "a", Kind: storage.Folder, Size: 1}}},
 		{"unknown kind", "invalid_kind", []storage.Entry{{Path: "a", Kind: "symlink"}}},
 		{"dot", "invalid_name", []storage.Entry{file("..")}},
 		{"backslash", "invalid_name", []storage.Entry{file("a\\b")}},
@@ -284,8 +283,6 @@ func TestInventoryRejectsInvalidData(t *testing.T) {
 		{"foreign owner", "outside_root", "key,size\ndrive/other/a,0\n"},
 		{"ambiguous slashes", "invalid_name", "key,size\ndrive/owner/a//,0\n"},
 		{"ambiguous root slashes", "invalid_name", "key,size\ndrive/owner//,0\n"},
-		{"nonempty marker", "invalid_size", "key,size\ndrive/owner/a/,1\n"},
-		{"nonempty root marker", "invalid_size", "key,size\ndrive/owner/,1\n"},
 		{"duplicate key", "duplicate_path", "key,size\ndrive/owner/a,0\ndrive/owner/a,0\n"},
 		{"type conflict", "type_conflict", "key,size\ndrive/owner/a/b,0\ndrive/owner/a,0\n"},
 		{"NFC parent collision", "normalization_conflict", "key,size\ndrive/owner/e\u0301/a,0\ndrive/owner/é/b,0\n"},
@@ -356,5 +353,21 @@ func TestRetainedIndexConflicts(t *testing.T) {
 	}
 	if err := r.CheckIndex([]storage.Entry{file("a"), file("retained")}); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// A reasserted folder marker carries a service token, so an inventory row for it has a
+// nonzero size. It is still a folder with no content of its own.
+func TestInventoryAcceptsReassertedFolderMarker(t *testing.T) {
+	r, err := Inventory(context.Background(), strings.NewReader("key,size\ndrive/owner/a/,7\ndrive/owner/a/b,3\n"), "drive/owner/", Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	records, err := r.Records()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(records) != 2 || records[0].Entry.Path != "a" || records[0].Entry.Kind != storage.Folder || records[0].Entry.Size != 0 || records[1].Entry.Size != 3 {
+		t.Fatalf("reasserted marker records: %#v", records)
 	}
 }

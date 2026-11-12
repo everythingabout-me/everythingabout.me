@@ -145,6 +145,13 @@ type FolderWriter interface {
     Mkdir(context.Context, Mutation, Checkpoint) (MutationResult, error)
 }
 
+type MarkerReassertor interface {
+    // Reassert moves an existing folder marker's native revision past the one the
+    // caller observed, without removing content. Used only to fence a create against
+    // a delete that is still purging the same path.
+    Reassert(context.Context, Mutation, Checkpoint) (MutationResult, error)
+}
+
 type Remover interface {
     Remove(context.Context, Mutation, Checkpoint) (MutationResult, error)
     // Removes a file or an empty folder only. The service must explicitly enumerate
@@ -167,6 +174,38 @@ type NativeCopier interface {
     Copy(context.Context, MoveRequest, Checkpoint) (MutationResult, error)
 }
 ```
+
+`Reassert` exists for one ordering, not as a general rewrite: a mkdir can adopt a folder
+marker that a delete has already listed but not yet removed. The index row is live again,
+yet the purge's snapshot and its one conditional delete still name the old marker. Moving
+the marker's native revision makes that delete fail with `changed`, which the purge adopts
+as the user's newer intent instead of removing the folder.
+
+The contract is narrow and testable:
+
+- It must change the revision a conditional delete compares. On an object store the
+  revision is the marker's ETag, and the ETag of a zero-byte object is the empty-content
+  MD5 — the same for every marker and every rewrite. A reasserted marker therefore carries
+  a short unique token in its body; the key still ends in `/`, `Stat` reports the folder's
+  `Size` as zero, and listings treat it as an ordinary folder marker. On a local filesystem
+  the revision is the directory identity, so the directory inode is replaced by renaming a
+  freshly prepared empty directory over the target.
+- It refuses with `not_empty` rather than remove or replace a folder that now holds
+  children. User content is never deleted to move a marker; a folder with children is
+  already kept by the purge's survivor rule.
+- It refuses with `changed` when the marker no longer matches
+  `Conditions.ExpectedRevision`. An empty expected revision means the caller created the
+  marker in this operation and only needs its revision to move.
+- When the marker is already gone, it leaves a native marker behind (a conditional create
+  on an object store, a fresh directory locally) instead of reporting success with none:
+  the purge won that race and the create must still end with a native folder.
+- It is safe to repeat. It is a fence, not an authoritative content mutation, so a lost
+  reply is answered by the caller retrying the create; the effect only rewrites an empty
+  marker or replaces it with another empty one.
+
+A driver with a conditional marker write (object store) implements it with that write; a
+driver whose folder revision is its inode replaces the directory and shares a per-path lock
+with removal, because an unconditional unlink would otherwise race the check.
 
 `Copy` must not stream source bytes through the gateway when the driver can copy
 inside the provider. A provider-side copy binds the exact source revision with a
@@ -337,7 +376,11 @@ goes through `Remove`.
 
 The object mutation driver derives `Revision` from the current object's ETag and sends every conditional
 effect with native `If-Match` / `If-None-Match` where the provider enforces them (COS ignores `If-Match`
-on PUT, so replacement re-checks the ETag under the gateway lock just before publishing). It advertises
+on PUT, so replacement re-checks the ETag under the gateway lock just before publishing). Folder markers are
+normally zero-byte; a marker reasserted during a purge carries a small token instead, because the empty-content
+MD5 is identical for every zero-byte marker and a rewrite of identical bytes would not move the revision that a
+stale conditional delete compares. Its key still ends in `/`, and `Stat`/listings report the folder with
+`Size` zero. It advertises
 `AtomicCreate=true` and `AtomicReplace=true` without requiring bucket versioning. It sets `PinnedRead=false` and
 `RetainsVersions=false`. Prefix folders without a marker object have nil `Revision`; they may be parents
 but cannot be conditionally removed. Baseline/accounting uses the initial matched native/index observation
@@ -621,7 +664,7 @@ liability until that discard is confirmed.
 | Backend | Native readable representation | Main effects/constraints |
 |---|---|---|
 | Local filesystem | Ordinary relative folders/files | Stage in same filesystem; atomic rename/no-replace where supported; fsync file and containing directories; root/symlink isolation; cross-volume moves need fallback |
-| S3/COS | Original path keys below owner prefix; standard empty-folder markers | Single-object publish can be atomic; provider-side copy (one conditional request, or conditional part copies above 5 GiB) keeps bytes inside the provider; folder move is still per-entry copy/verify/delete, not metadata-only |
+| S3/COS | Original path keys below owner prefix; standard empty-folder markers (a reasserted marker carries a small service token so its ETag moves) | Single-object publish can be atomic; provider-side copy (one conditional request, or conditional part copies above 5 GiB) keeps bytes inside the provider; folder move is still per-entry copy/verify/delete, not metadata-only |
 | WebDAV | Native folders and original names | Stream to temp then native MOVE if its semantics suffice; plain final PUT can expose partial data; ETags/atomic conditions vary |
 | Cloud drive | Real folders/names, native IDs used internally | Duplicate names and unsupported characters require checks; native move/replace/version guarantees vary; upload sessions/credentials expire independently |
 | NAS/Synology | Native filesystem, WebDAV, or vendor API tree | Prefer native rename and LAN byte path; connector cannot invent remote atomicity |

@@ -72,7 +72,9 @@ Consequences:
 
 - **A re-created path is never deleted.** The user re-creates `/X`, uploads `/X/a.txt`, then the purge reaches
   them: both have live rows, both are skipped. The old children of `/X` have no rows and are removed, so the
-  re-created folder ends up containing exactly what the user put there.
+  re-created folder ends up containing exactly what the user put there. A folder re-created over a marker the
+  purge had already listed is protected twice: its live row, and the mkdir's reassert, which moves the marker
+  revision so the purge's conditional delete refuses it (`storage.FolderWriter.Reassert`).
 - **A publish that has not settled yet is never deleted.** An upload writes the object before its index row,
   so "no live row" alone would race it. A commit holds its guard from the freeze to its settlement, so a
   delete over it is not accepted until the row exists; a commit that starts after the acceptance can only
@@ -127,7 +129,7 @@ when it stopped between allocating and committing, and the folder holding them a
 
 | moment of a create | result |
 |---|---|
-| after `202`, folder re-created | ordinary `mkdir`; the purge skips it (`X/` has a live row); old children are still purged |
+| after `202`, folder re-created | ordinary `mkdir`; the mkdir reasserts the marker revision, and the purge adopts it (or skips its live row); old children are still purged |
 | after `202`, file re-uploaded at an old path | ordinary create; the purge skips it; the old object is overwritten or deleted-then-rewritten by the upload itself |
 | during the purge, same path | first writer wins natively; the loser gets `412`/`409` and is retried by its own client; the purge treats `412` as `adopted`, never as an error |
 | upload session opened inside the folder before the delete, committed after `202` | the commit is refused before any native effect (`409 parent_missing`; `412 target_changed` if the folder was created again) and the session ends `failed`; nothing is published under the deleted prefix |
@@ -185,19 +187,26 @@ when it stopped between allocating and committing, and the folder holding them a
       total is published from the walk instead of staying null. The result moved to the terminal state in the
       same change: it used to be written by the acceptance transaction, so a running operation already
       answered "deleted" — the inverse of the gap this item described.
-- [ ] Fence re-created folders against the folder-marker delete. The live-row test runs before the conditional
-      delete, and a folder re-created over a marker the purge has not reached yet adopts that marker without a
-      native write. A create whose row commits between the check and the delete therefore has a live row and
-      an unchanged native revision, so the purge deletes the folder the user just re-created. This is not a
-      timing accident: gating the purge's `LivePaths` check, settling the mkdir, then releasing the delete
-      deterministically leaves the row live with the marker gone, and the next upload answers
-      `409 parent_missing`. The obvious fence — reassert the marker so the delete's `If-Match` refuses — has no
-      driver support today: `storage.FolderWriter` exposes only `Mkdir`, object mutation rejects
-      `Conditions.ExpectedRevision` there as `unsupported`, and local mutation requires absence while its
-      folder revision is the directory inode (`dev:ino`), so a single marker write cannot change it. Closing
-      it needs a new driver capability (a conditional marker reassert, with local remove-and-recreate or
-      rename-over-empty-directory semantics) or a purge fence. Until then the write path is not concealed, but
-      this ordering is not fenced.
+- [x] Fence re-created folders against the folder-marker delete. The live-row test runs before the
+      conditional delete, and a folder re-created over a marker the purge has not reached yet adopts that
+      marker without a native write. Before the fence, a create whose row committed between the check and the
+      delete had a live row and an unchanged native revision, so the purge deleted the folder the user had just
+      re-created (deterministically: gate `LivePaths`, settle the mkdir, release the delete; the row stayed
+      live with the marker gone). The mkdir now asks whether an accepted, non-terminal delete covers its
+      destination and, if so, reasserts the marker after the settlement observation and before the index
+      commit. `storage.FolderWriter.Reassert` moves the native revision the purge's conditional delete
+      compares: an object marker is rewritten with a unique token because a zero-byte marker's ETag is the
+      empty-content MD5, and a local folder's directory inode is replaced by renaming a fresh empty directory
+      over it. A non-empty folder is refused (`not_empty`) and kept by its children; a marker the purge already
+      removed is re-created. The deterministic ordering is now green: the purge adopts the re-created marker.
+
+      Residual window: a local folder re-created while the old children are still native is non-empty, so the
+      reassert refuses (it may not delete those children) and the marker keeps its identity; that folder still
+      relies on the purge's live-row check, which is a check before the unlink, not an atomic fence. Object
+      stores do not have this window, because rewriting the marker body does not touch its children. A mkdir
+      with `parents:true` fences its destination but not every missing ancestor it creates under the purge
+      root; upload parents fence each level they create. These orderings need a separate decision if they
+      matter.
 - [ ] Tombstone object (`__eam_system__/<owner>/tombstones/<operation>`) so a rebuild after index loss does not
       resurrect a half-purged delete. Same predicate as the worker; the tombstone is the durable copy.
 - [ ] `move`/`copy` keep the frozen manifest: their effects are conditional on both endpoints and a re-walk
@@ -205,5 +214,5 @@ when it stopped between allocating and committing, and the folder holding them a
 
 Acceptance and the prefix purge are implemented, so the delete no longer outlives acceptance with a guard: the
 name is free at once, a re-created path is an ordinary create, and only reads still conceal the subtree until
-the purge is terminal. [api.md](../api/api.md) states that rule in the mutation section; the unchecked item
-above names the one ordering the purge does not yet fence.
+the purge is terminal. [api.md](../api/api.md) states that rule in the mutation section; the residual local
+non-empty ordering is named in the checked item above.

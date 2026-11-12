@@ -127,9 +127,10 @@ func Compare(s Snapshot, quota int64) Report {
 		if e.Size < 0 {
 			issue("invalid_size", "/"+path, e.Key, "Native size cannot be negative.")
 		}
-		if folder && e.Size != 0 {
-			issue("nonempty_folder_marker", "/"+path, e.Key, "A nonempty folder marker needs explicit operator resolution.")
-		}
+		// A folder marker's body is not content: the service reasserts a marker during a
+		// purge with a short token so its ETag moves. The key ending in "/" is what makes
+		// it a folder; only the root marker below still requires an empty body, because the
+		// service never reasserts the account root.
 		if !folder && e.Size >= 0 {
 			r.NativeFiles++
 			if e.Size > 9007199254740991-r.NativeBytes {

@@ -239,8 +239,16 @@ func (s *Server) filesEnsureParents(ctx context.Context, r *http.Request, f *fil
 	if err != nil {
 		return err
 	}
+	p, err := fc.FromRelative(string(target))
+	if err != nil {
+		return err
+	}
+	reassert, err := s.filesPendingDeleteCovers(ctx, f, p)
+	if err != nil {
+		return err
+	}
 	request := fileops.ActionRequest{
-		Root: root, Actor: actor, Kind: "mkdir", To: target,
+		Root: root, Actor: actor, Kind: "mkdir", To: target, Reassert: reassert,
 		Selection: "path:path:" + string(target), IdempotencyKey: randomFilesKey(),
 	}
 	// A concurrent upload may be creating this same level. How long that takes is its

@@ -28,8 +28,12 @@ type fakeBackend struct {
 	putError, errorAfterPut error
 	deleteError             error
 	zeroPutMetadata         bool
-	failRefreshOnce         bool
-	block, entered          chan struct{}
+	// emptyETag, when set, is the ETag every zero-byte object gets. It models COS/S3,
+	// whose ETag is the content MD5: every empty folder marker spells the same ETag, so
+	// rewriting identical empty bytes cannot move a revision.
+	emptyETag       string
+	failRefreshOnce bool
+	block, entered  chan struct{}
 }
 
 func newFake() *fakeBackend {
@@ -96,7 +100,11 @@ func (b *fakeBackend) Put(ctx context.Context, p Put) (Object, error) {
 		return Object{}, fail("precondition_failed", "")
 	}
 	version := fmt.Sprintf("v%d", b.puts)
-	obj := Object{Key: p.Key, VersionID: version, ETag: "etag-" + version, Size: p.Size, ModifiedAt: time.Date(2026, 11, 2, 0, 0, b.puts, 0, time.UTC), MediaType: p.MediaType, Metadata: p.Metadata}
+	etag := "etag-" + version
+	if p.Size == 0 && b.emptyETag != "" {
+		etag = b.emptyETag
+	}
+	obj := Object{Key: p.Key, VersionID: version, ETag: etag, Size: p.Size, ModifiedAt: time.Date(2026, 11, 2, 0, 0, b.puts, 0, time.UTC), MediaType: p.MediaType, Metadata: p.Metadata}
 	if b.versions[p.Key] == nil {
 		b.versions[p.Key] = map[string][]byte{}
 	}

@@ -112,18 +112,20 @@ func TestObjectBaselineChecksCurrentObjectAndEmptySpool(t *testing.T) {
 		name   string
 		entry  storage.Entry
 		object objectmutation.Object
+		accept bool
 	}{
-		{"file", storage.Entry{Path: "file", Kind: storage.File, Size: 7}, objectmutation.Object{Key: "drive/owner/file", ETag: "e", Size: 7}},
-		{"wrong owner", storage.Entry{Path: "file", Kind: storage.File, Size: 7}, objectmutation.Object{Key: "drive/other/file", ETag: "e", Size: 7}},
-		{"changed size", storage.Entry{Path: "file", Kind: storage.File, Size: 7}, objectmutation.Object{Key: "drive/owner/file", ETag: "e", Size: 8}},
-		{"nonempty marker", storage.Entry{Path: "Empty", Kind: storage.Folder}, objectmutation.Object{Key: "drive/owner/Empty/", ETag: "e", Size: 1}},
+		{"file", storage.Entry{Path: "file", Kind: storage.File, Size: 7}, objectmutation.Object{Key: "drive/owner/file", ETag: "e", Size: 7}, true},
+		{"wrong owner", storage.Entry{Path: "file", Kind: storage.File, Size: 7}, objectmutation.Object{Key: "drive/other/file", ETag: "e", Size: 7}, false},
+		{"changed size", storage.Entry{Path: "file", Kind: storage.File, Size: 7}, objectmutation.Object{Key: "drive/owner/file", ETag: "e", Size: 8}, false},
+		// A reasserted marker carries a service token; the folder itself has no content.
+		{"nonempty marker", storage.Entry{Path: "Empty", Kind: storage.Folder}, objectmutation.Object{Key: "drive/owner/Empty/", ETag: "e", Size: 1}, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			b := objectBaselineBackend(t, func(string) (objectmutation.Object, error) { return tc.object, nil })
 			err := b.ValidateObjectBaseline(context.Background(), "owner", []storage.Entry{tc.entry})
-			if tc.name == "file" {
+			if tc.accept {
 				if err != nil {
-					t.Fatalf("current file rejected: %v", err)
+					t.Fatalf("current object rejected: %v", err)
 				}
 			} else if !storage.IsCode(err, "unsupported") {
 				t.Fatalf("invalid current object accepted: %v", err)

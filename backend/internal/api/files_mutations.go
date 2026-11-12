@@ -874,7 +874,14 @@ func (s *Server) handleFilesMkdir(w http.ResponseWriter, r *http.Request, f *fil
 	if err != nil {
 		return err
 	}
-	return s.filesAction(w, r, f, fileops.ActionRequest{Kind: "mkdir", To: storage.Path(p.Relative()), Parents: request.Parents, ParentID: parentID, Selection: "path:" + mode})
+	// A create over a path whose accepted delete is still purging must move the native
+	// marker revision, or that purge's conditional delete still matches and removes the
+	// folder the client just re-created. A normal mkdir only pays the bounded lookup.
+	reassert, err := s.filesPendingDeleteCovers(r.Context(), f, p)
+	if err != nil {
+		return err
+	}
+	return s.filesAction(w, r, f, fileops.ActionRequest{Kind: "mkdir", To: storage.Path(p.Relative()), Parents: request.Parents, ParentID: parentID, Reassert: reassert, Selection: "path:" + mode})
 }
 
 type filesMoveCopyRequest struct {

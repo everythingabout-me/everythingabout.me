@@ -107,6 +107,30 @@ type BoundEffectRecovery interface {
 type FolderWriter interface {
 	Mkdir(context.Context, Mutation, Checkpoint) (MutationResult, error)
 }
+
+// MarkerReassertor moves an existing folder marker's native revision past the one the
+// caller observed, without removing content. It exists for one case: a create that
+// re-created a folder while a delete of the same path was being purged. The row is already
+// back in the index, but the purge listed the marker before that row committed; an ordinary
+// conditional delete would still match the unchanged marker and remove the folder the user
+// just re-created. A marker whose revision moved makes that delete refuse (`changed`) and
+// the purge adopt the newer intent (docs/design/deletes.md).
+//
+// The caller passes the revision it observed in Mutation.Conditions.ExpectedRevision; an
+// empty value means the caller created the marker in this operation and only needs its
+// revision to move. An implementation must:
+//   - change the native revision a conditional delete compares (object ETag, or the local
+//     directory identity), never merely rewrite identical bytes;
+//   - refuse (`changed`) when the native state no longer matches the expected revision;
+//   - refuse (`not_empty`) rather than remove or replace a folder that now holds children —
+//     user content is never deleted to reassert a marker;
+//   - when the marker is already gone, leave a marker behind rather than report success
+//     with none (the purge won the race; the create must still end native);
+//   - be safe to repeat: a lost reply is resolved by the caller retrying the fence.
+type MarkerReassertor interface {
+	Reassert(context.Context, Mutation, Checkpoint) (MutationResult, error)
+}
+
 type Remover interface {
 	Remove(context.Context, Mutation, Checkpoint) (MutationResult, error)
 }

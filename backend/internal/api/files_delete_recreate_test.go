@@ -2,12 +2,18 @@ package api
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
+	"everythingabout.me/backend/internal/auth"
+	fc "everythingabout.me/backend/internal/filecontract"
 	"everythingabout.me/backend/internal/fileops"
 	"everythingabout.me/backend/internal/nodes"
+	"everythingabout.me/backend/internal/storage"
 )
 
 // An accepted deletion is final for every read at once, but it is not a fence on the name:
@@ -75,5 +81,106 @@ func TestFilesCreateDuringAcceptedDeletePurge(t *testing.T) {
 	operation := uploadsHTTPJSON(t, h.request("GET", "/api/files/operations/"+accepted.ID, "cookie", nil, nil), 200)
 	if operation["state"] != "running" || operation["result"] != nil {
 		t.Fatalf("re-creation settled the pending purge: %v", operation)
+	}
+}
+
+// An empty folder that a pending purge has not reached yet is the ordering the reassert
+// exists for: mkdir adopts the old directory without a native write, so the only way the
+// purge's conditional marker delete can be made to refuse is to move the marker's native
+// identity. The accepted delete is held at running without a purge worker, so the marker
+// is certainly still present when the create runs.
+func TestFilesCreateReassertsEmptyFolderDuringPurge(t *testing.T) {
+	f := newFileWorkerFixture(t)
+	h := newUploadsHTTPFixture(t, f)
+	uploadsHTTPJSON(t, h.request("POST", "/api/files", h.bearer, []byte(`{"kind":"folder","path":"/Empty"}`), http.Header{"Content-Type": {"application/json"}}), 201)
+	before, err := os.Stat(filepath.Join(f.cfg.Storage.Local.ContentRoot, h.root.OwnerID, "Empty"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	intent, err := json.Marshal(fileops.ActionRequest{Kind: "delete", From: "Empty", Recursive: true, Root: h.root, Actor: workerActor(h.root)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	begun, _, err := f.journal.Begin(f.ctx, fileops.BeginRequest{Root: h.root, Actor: workerActor(h.root), Kind: "delete", Intent: intent, Guards: []fileops.Guard{{Path: "Empty", Subtree: true}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	claimed, err := f.journal.Claim(f.ctx, h.root, workerActor(h.root), begun.ID, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	accepted, err := f.journal.AcceptPrefixDelete(f.ctx, claimed.Lease, "Empty", nodes.CommitPrefixDelete)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if accepted.State != fileops.Running || accepted.Purge == nil {
+		t.Fatalf("delete is not an accepted pending purge: %+v", accepted)
+	}
+	uploadsHTTPJSON(t, h.request("POST", "/api/files", h.bearer, []byte(`{"kind":"folder","path":"/Empty"}`), http.Header{"Content-Type": {"application/json"}, "Idempotency-Key": {"reassert-empty"}}), 200)
+	after, err := os.Stat(filepath.Join(f.cfg.Storage.Local.ContentRoot, h.root.OwnerID, "Empty"))
+	if err != nil {
+		t.Fatalf("re-created empty folder is not native: %v", err)
+	}
+	if os.SameFile(before, after) {
+		t.Fatal("mkdir during an accepted delete did not reassert the folder marker")
+	}
+	operation := uploadsHTTPJSON(t, h.request("GET", "/api/files/operations/"+accepted.ID, "cookie", nil, nil), 200)
+	if operation["state"] != "running" {
+		t.Fatalf("reassert settled the pending purge: %v", operation)
+	}
+}
+
+// The reassert trigger is one bounded existence query: owner- and namespace-scoped, true
+// only while the delete is accepted (Purge set) and non-terminal, and covering descendants
+// but not similarly named siblings.
+func TestPendingDeleteCoversIsScoped(t *testing.T) {
+	f := newFileWorkerFixture(t)
+	h := newUploadsHTTPFixture(t, f)
+	uploadsHTTPJSON(t, h.request("POST", "/api/files", h.bearer, []byte(`{"kind":"folder","path":"/Scope/Empty","parents":true}`), http.Header{"Content-Type": {"application/json"}}), 201)
+	intent, err := json.Marshal(fileops.ActionRequest{Kind: "delete", From: "Scope/Empty", Recursive: true, Root: h.root, Actor: workerActor(h.root)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	begun, _, err := f.journal.Begin(f.ctx, fileops.BeginRequest{Root: h.root, Actor: workerActor(h.root), Kind: "delete", Intent: intent, Guards: []fileops.Guard{{Path: "Scope/Empty", Subtree: true}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	claimed, err := f.journal.Claim(f.ctx, h.root, workerActor(h.root), begun.ID, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = f.journal.AcceptPrefixDelete(f.ctx, claimed.Lease, "Scope/Empty", nodes.CommitPrefixDelete); err != nil {
+		t.Fatal(err)
+	}
+	namespace := fmt.Sprintf("%s:%s:%d:%s:%s", h.root.OwnerID, h.root.ConnectionID, h.root.Generation, h.root.ContentRoot, h.root.SystemRoot)
+	request := &fileRequest{
+		Principal:        &auth.Principal{User: &auth.User{ID: h.root.OwnerID}},
+		Driver:           &filesReadTestDriver{descriptor: storage.Descriptor{Names: storage.NameRules{CaseSensitive: true}}},
+		ContentNamespace: namespace,
+	}
+	for path, want := range map[fc.Path]bool{
+		"/Scope/Empty":       true,
+		"/Scope/Empty/child": true,
+		"/Scope/Emptyish":    false,
+		"/Scope":             false,
+		"/":                  false,
+	} {
+		got, err := h.server.filesPendingDeleteCovers(f.ctx, request, path)
+		if err != nil || got != want {
+			t.Fatalf("covers %q = %v (%v), want %v", path, got, err, want)
+		}
+	}
+	// A different owner sees nothing, even on the same path and namespace spelling.
+	other := *request
+	other.Principal = &auth.Principal{User: &auth.User{ID: "10000000-0000-4000-8000-999999999999"}}
+	if got, err := h.server.filesPendingDeleteCovers(f.ctx, &other, "/Scope/Empty"); err != nil || got {
+		t.Fatalf("another owner saw the purge: %v %v", got, err)
+	}
+	// A terminal delete stops covering the path.
+	if _, err = f.journal.FinishPurge(f.ctx, claimed.Lease, fileops.Succeeded, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := h.server.filesPendingDeleteCovers(f.ctx, request, "/Scope/Empty"); err != nil || got {
+		t.Fatalf("terminal delete still covered the path: %v %v", got, err)
 	}
 }

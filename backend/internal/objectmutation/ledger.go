@@ -1073,3 +1073,85 @@ func (d *Driver) removeImplicitFolder(ctx context.Context, in storage.Mutation) 
 	}
 	return storage.MutationResult{Evidence: evidence}, nil
 }
+
+// Reassert rewrites a folder marker so it no longer matches the revision a concurrent
+// purge observed, without touching anything under it. It exists for the fence described
+// on storage.FolderWriter: when a create re-creates a folder whose delete is still being
+// purged, the index row is live but the purge's listing predates it; moving the marker's
+// revision makes the purge's one conditional delete fail with `changed`, which it adopts.
+//
+// A folder marker is a zero-byte object in the legacy format, and the ETag of an
+// empty object is the empty-content MD5 on COS/S3 — the same for every marker and every
+// rewrite. Rewriting the same empty bytes would therefore move nothing, so a reasserted
+// marker carries a short unique token instead. The key still ends in "/" and remains an
+// ordinary empty-folder marker for standard tools; Stat reports its Size as zero.
+//
+// The write is conditional on the revision observed immediately before it (or on absence
+// when the purge already removed the marker). Providers that ignore PUT If-Match (COS)
+// are covered by the single-gateway writer model, exactly like the other replacements.
+// A lost reply is safe to repeat: the effect only rewrites an empty marker.
+func (d *Driver) Reassert(ctx context.Context, in storage.Mutation, _ storage.Checkpoint) (storage.MutationResult, error) {
+	if in.Path == "" || storage.ValidatePath(in.Path) != nil || in.Conditions.Absent || len(in.Conditions.ExpectedRevision) > 4096 {
+		return storage.MutationResult{}, fail("invalid_request", in.Path)
+	}
+	ctx, done, err := d.operation(ctx)
+	if err != nil {
+		return storage.MutationResult{}, err
+	}
+	defer done()
+	expected := ""
+	if len(in.Conditions.ExpectedRevision) > 0 {
+		if expected, err = parseRevision(in.Conditions.ExpectedRevision); err != nil {
+			return storage.MutationResult{}, err
+		}
+	}
+	current, err := d.backend.Head(ctx, d.key(in.Path, storage.Folder))
+	if err != nil && !storage.IsCode(err, "not_found") {
+		return storage.MutationResult{}, err
+	}
+	if err == nil {
+		if expected != "" && current.ETag != expected {
+			return storage.MutationResult{}, fail("changed", in.Path)
+		}
+		return d.putFolderMarker(ctx, in.Path, current.ETag, false, in.ID)
+	}
+	// The purge reached the marker first. The create must still end with a native marker,
+	// so create one; only a concurrent writer that won that create is retried once.
+	result, putErr := d.putFolderMarker(ctx, in.Path, "", true, in.ID)
+	if putErr == nil {
+		return result, nil
+	}
+	if !storage.IsCode(putErr, "precondition_failed") && !storage.IsCode(putErr, "name_conflict") {
+		return storage.MutationResult{}, putErr
+	}
+	again, headErr := d.backend.Head(ctx, d.key(in.Path, storage.Folder))
+	if headErr != nil {
+		return storage.MutationResult{}, putErr
+	}
+	return d.putFolderMarker(ctx, in.Path, again.ETag, false, in.ID)
+}
+
+func (d *Driver) putFolderMarker(ctx context.Context, p storage.Path, expected string, absent bool, id string) (storage.MutationResult, error) {
+	token, err := randomAttempt()
+	if err != nil {
+		return storage.MutationResult{}, fail("invalid_request", p)
+	}
+	body := "eam-folder-marker:" + token
+	obj, err := d.backend.Put(ctx, Put{
+		Key:          d.key(p, storage.Folder),
+		Body:         strings.NewReader(body),
+		Size:         int64(len(body)),
+		MediaType:    "application/x-eam-folder-marker",
+		Metadata:     map[string]string{"eam-intent": id},
+		Absent:       absent,
+		ExpectedETag: expected,
+	})
+	if err != nil {
+		return storage.MutationResult{}, err
+	}
+	entry, err := d.objectEntry(p, storage.Folder, obj)
+	if err != nil {
+		return storage.MutationResult{}, err
+	}
+	return storage.MutationResult{Entry: &entry}, nil
+}

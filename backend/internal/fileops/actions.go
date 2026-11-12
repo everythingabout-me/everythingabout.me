@@ -807,6 +807,31 @@ func (a *Actions) Run(ctx context.Context, root Root, actor Actor, id string, na
 	return a.settle(ctx, root, actor, op, binding, native, cause)
 }
 
+// reassertMarker moves a mkdir destination's native marker revision after the settlement
+// observation and immediately before the index commit. A delete of this path that is still
+// purging listed the marker before this create's row commits; without moving the revision
+// its one conditional delete would still match and remove the folder the user just
+// re-created. The marker is rewritten, never removed: a non-empty folder is already
+// protected by its children and reports not_empty, which is success here, not a failure.
+//
+// Running after the observation keeps the observation honest: the index records the entry
+// it just observed, while the native revision moves past the purge's snapshot. Every
+// attempt that reaches settlement repeats it, so a crash before the commit cannot lose the
+// fence, and the effect is idempotent.
+func (a *Actions) reassertMarker(ctx context.Context, op Operation, req ActionRequest, current storage.Entry, native NativeActions) error {
+	_, err := native.Reassert(ctx, storage.Mutation{
+		ID:         op.ID + ":reassert",
+		Path:       req.To,
+		Conditions: storage.Conditions{ExpectedRevision: current.Revision},
+	}, func(context.Context, []byte) error { return nil })
+	if err != nil && storage.IsCode(err, "not_empty") {
+		// A folder that gained a child is already protected by it; the purge keeps a folder
+		// whose children survived. Never remove content to move a marker.
+		return nil
+	}
+	return err
+}
+
 // captureDeferred freezes the manifest an accepted deletion did not collect. It runs
 // the same capture and consistency re-read Prepare used to run inline, so the frozen
 // set is identical; only its position moved, from the request that returns 202 to the
@@ -1203,6 +1228,17 @@ func (a *Actions) settle(ctx context.Context, root Root, actor Actor, op Operati
 	if anyApplied(&op) || b.Existing != nil {
 		if err = a.journal.SaveActionApplied(persist, op.Lease, observation); err != nil {
 			return op, err
+		}
+	}
+	if observation != nil && op.Kind == "mkdir" {
+		req, reqErr := actionRequest(op)
+		if reqErr != nil {
+			return op, reqErr
+		}
+		if req.Reassert {
+			if err = a.reassertMarker(persist, op, req, observation.Entry, native); err != nil {
+				return op, err
+			}
 		}
 	}
 	out, err := a.journal.Settle(persist, op.Lease, Settlement{State: state, LogicalDelta: logical, PhysicalDelta: physical, Result: result, Problem: p}, a.options.Commit)

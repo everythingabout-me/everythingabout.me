@@ -199,6 +199,10 @@ func (w *MutationDriver) Mkdir(ctx context.Context, in storage.Mutation, cp stor
 	return w.runAction(ctx, storage.EffectIntent{ID: in.ID, Action: "mkdir", Target: in.Path, Conditions: in.Conditions}, cp)
 }
 func (w *MutationDriver) Remove(ctx context.Context, in storage.Mutation, cp storage.Checkpoint) (storage.MutationResult, error) {
+	// A purge removal and a marker reassert must not interleave their revision check and
+	// effect: rmdir cannot be conditional, so the shared path lock is the fence.
+	release := w.lockPath(in.Path)
+	defer release()
 	return w.runAction(ctx, storage.EffectIntent{ID: in.ID, Action: "remove", Target: in.Path, Conditions: in.Conditions}, cp)
 }
 

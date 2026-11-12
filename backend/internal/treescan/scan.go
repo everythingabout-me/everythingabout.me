@@ -165,8 +165,10 @@ func (c *collector) validate(e storage.Entry) error {
 	if e.Kind != storage.File && e.Kind != storage.Folder {
 		return issue("invalid_kind", e.Path, "", "expected file or folder")
 	}
-	if e.Size < 0 || (e.Kind == storage.Folder && e.Size != 0) {
-		return issue("invalid_size", e.Path, "", "files require nonnegative sizes and folders require zero size")
+	// Folder markers may carry a service token (see storage.FolderWriter.Reassert);
+	// the driver reports their Size as zero, so only the sign is meaningful here.
+	if e.Size < 0 {
+		return issue("invalid_size", e.Path, "", "sizes must be nonnegative")
 	}
 	parts := strings.Split(string(e.Path), "/")
 	if len(parts) > c.opts.MaxDepth || len(e.Path) > c.opts.Names.MaxPathBytes {
@@ -186,6 +188,14 @@ func (c *collector) validate(e storage.Entry) error {
 }
 func (c *collector) add(r Record) error {
 	e := r.Entry
+	if e.Kind == storage.Folder {
+		// A folder marker's body is not user content. Reasserted markers carry a service
+		// token; the index and every record still describe the entry as an empty folder.
+		if e.Size < 0 {
+			return issue("invalid_size", e.Path, "", "sizes must be nonnegative")
+		}
+		e.Size = 0
+	}
 	if err := c.validate(e); err != nil {
 		return err
 	}

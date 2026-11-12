@@ -45,7 +45,9 @@ func (b *Backend) ValidateObjectBaseline(ctx context.Context, ownerID string, en
 			return err
 		}
 		invalidETag := obj.ETag == "" || strings.ContainsAny(obj.ETag, "\r\n\x00")
-		if obj.Key != key || invalidETag || obj.Size != e.Size || e.Kind == storage.Folder && obj.Size != 0 {
+		// A folder's marker body is not content: a reasserted marker carries a service
+		// token, while the index records the folder with Size zero.
+		if obj.Key != key || invalidETag || (e.Kind == storage.File && obj.Size != e.Size) {
 			return storage.NewError("unsupported", e.Path, nil)
 		}
 	}

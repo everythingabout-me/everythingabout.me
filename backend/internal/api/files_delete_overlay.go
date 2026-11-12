@@ -4,6 +4,7 @@ import (
 	"context"
 	"strings"
 
+	fc "everythingabout.me/backend/internal/filecontract"
 	"everythingabout.me/backend/internal/storage"
 	"golang.org/x/text/unicode/norm"
 )
@@ -206,4 +207,66 @@ func (d *pendingDeleteReferenceDriver) OpenReference(ctx context.Context, p stor
 		return storage.Read{}, storage.NewError("not_found", p, nil)
 	}
 	return read, err
+}
+
+// filesPendingDeleteCovers reports whether p lies inside a delete whose acceptance has
+// committed and whose purge is not terminal. It is the write-path trigger for the folder
+// marker reassert, not a read view: the guard rows that carry the overlay's roots are
+// released by the same acceptance transaction that removed the index rows, so after
+// acceptance the only durable record of the still-running purge is the operation's Purge
+// path. A normal mkdir pays one bounded, owner-and-namespace-scoped query and no native
+// request.
+//
+// The path comparison happens in Go with the driver's own name rules, like every other
+// selection, because the database's lower() is not the comparison the storage layer uses.
+// The query is bounded; if an owner somehow has more pending purges than the bound, a mkdir
+// is conservatively treated as covered (it then pays one marker reassert), so the bound can
+// never turn into a missed fence.
+const maxPendingPurgeRoots = 256
+
+func (s *Server) filesPendingDeleteCovers(ctx context.Context, f *fileRequest, p fc.Path) (bool, error) {
+	if s.db == nil || p == "/" {
+		return false, nil
+	}
+	rows, err := s.db.Pool().Query(ctx, `select distinct o.snapshot->'Purge'->>'Path'
+		from file_operations o
+		where o.owner_id=$1::uuid and o.action='delete'
+		  and o.snapshot->'Purge' is not null
+		  and o.snapshot->>'State' in ('queued','running','outcome_unknown')
+		  and concat_ws(':', o.snapshot->'Root'->>'OwnerID', o.snapshot->'Root'->>'ConnectionID',
+		      o.snapshot->'Root'->>'Generation', o.snapshot->'Root'->>'ContentRoot',
+		      o.snapshot->'Root'->>'SystemRoot')=$2
+		limit $3`, f.Principal.User.ID, f.ContentNamespace, maxPendingPurgeRoots+1)
+	if err != nil {
+		return false, err
+	}
+	defer rows.Close()
+	roots := make([]string, 0, maxPendingPurgeRoots)
+	for rows.Next() {
+		var root string
+		if err := rows.Scan(&root); err != nil {
+			return false, err
+		}
+		roots = append(roots, root)
+	}
+	if err := rows.Err(); err != nil {
+		return false, err
+	}
+	if len(roots) > maxPendingPurgeRoots {
+		return true, nil
+	}
+	for _, root := range roots {
+		root = norm.NFC.String(root)
+		if root == "" || root == "/" {
+			continue
+		}
+		prefix, err := fc.FromRelative(root)
+		if err != nil {
+			continue
+		}
+		if fc.WithinScope(prefix, p, filesPathKey(f)) {
+			return true, nil
+		}
+	}
+	return false, nil
 }
