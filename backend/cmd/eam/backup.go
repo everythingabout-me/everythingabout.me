@@ -11,6 +11,7 @@ import (
 	"everythingabout.me/backend/internal/connections"
 	"everythingabout.me/backend/internal/snapshot"
 	"everythingabout.me/backend/internal/storage"
+	"everythingabout.me/backend/internal/storagebackend"
 	"everythingabout.me/backend/internal/store"
 	"github.com/jackc/pgx/v5/pgtype"
 )
@@ -77,6 +78,15 @@ func runBackupSnapshot(ctx context.Context, cfg *config.Config, db *store.DB, co
 		return fmt.Errorf("open the owner's tree: %w", err)
 	}
 	defer source.Close()
+	// Measure the destination at the moment it is used, so recording one does not depend
+	// on it being reachable right then.
+	effective, err := target.Apply(*cfg)
+	if err != nil {
+		return err
+	}
+	if err := storagebackend.EnsureAdmission(ctx, &effective); err != nil {
+		return fmt.Errorf("measure backup destination %q: %w", target.Name, err)
+	}
 	dst, err := resolver.OpenConnection(ctx, ownerID, target.Name)
 	if err != nil {
 		return fmt.Errorf("open backup connection %q: %w", target.Name, err)

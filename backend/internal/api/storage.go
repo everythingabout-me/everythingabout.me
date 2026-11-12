@@ -180,17 +180,6 @@ func (s *Server) handleStorageConnectionAdd(w http.ResponseWriter, r *http.Reque
 	if err := c.ValidateAccountAdded(); err != nil {
 		return httpx.BadRequest(err.Error())
 	}
-	// Measure before recording: a bucket that cannot answer, or that ignores the
-	// conditional headers publication depends on, is refused here instead of becoming a
-	// row whose first snapshot fails. This is the same probe the operator CLI runs.
-	effective, err := c.Apply(*s.cfg)
-	if err != nil {
-		return httpx.BadRequest(err.Error())
-	}
-	if _, err := storagebackend.ProbeConnection(r.Context(), &effective); err != nil {
-		slog.Warn("storage connection probe failed", "connection", c.Name, "owner", user.ID, "err", err)
-		return httpx.NewError(http.StatusBadGateway, err.Error())
-	}
 	if err := s.conns.Insert(r.Context(), c); err != nil {
 		if errors.Is(err, connections.ErrLocationTaken) {
 			return httpx.BadRequest(err.Error())
@@ -314,6 +303,21 @@ func (s *Server) runBackupJob(key, ownerID string, target connections.Connection
 	if !ok {
 		fail(fmt.Errorf("this deployment cannot open a named storage connection"))
 		return
+	}
+	if action == "snapshot" {
+		// Measure the destination at the moment it is used, not when it is recorded. A
+		// drive can be added while it is unreachable — a NAS that is off, a tunnel that is
+		// down — and must work as soon as it is back, without re-adding it. Publication is
+		// the only thing that needs this proof; a restore or a prune reads and deletes.
+		effective, err := target.Apply(*s.cfg)
+		if err != nil {
+			fail(err)
+			return
+		}
+		if err := storagebackend.EnsureAdmission(ctx, &effective); err != nil {
+			fail(err)
+			return
+		}
 	}
 	dst, err := named.OpenConnection(ctx, ownerID, target.Name)
 	if err != nil {

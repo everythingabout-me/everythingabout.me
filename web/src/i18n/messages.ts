@@ -24,7 +24,7 @@ const en = {
   "drives.addHint":
     "The key is stored with this drive so the server can read and write it. Prefer a key that only reaches this bucket.",
   "drives.addHintS3":
-    "Use the endpoint of the storage service itself, without a path, and a key that only reaches this bucket. The server verifies it can write there before saving.",
+    "Use the endpoint of the storage service itself, without a path, and a key that only reaches this bucket. The first backup verifies it can write there.",
   "drives.fieldBackend": "Type",
   "drives.backendCos": "COS bucket",
   "drives.backendS3": "S3-compatible",
@@ -449,7 +449,7 @@ const zh: Record<MessageKey, string> = {
   "drives.lead": "你的文件放在哪里。默认位置由服务提供，也可以接入自己的 COS 桶或 S3 兼容存储。",
   "drives.add": "添加存储",
   "drives.addHint": "密钥会随这个存储位置一起保存，服务端才能读写它。建议使用只能访问这个桶的密钥。",
-  "drives.addHintS3": "填存储服务本身的地址，不要带路径；密钥只用能访问这个桶的。保存前服务端会先实测能否写入。",
+  "drives.addHintS3": "填存储服务本身的地址，不要带路径；密钥只用能访问这个桶的。第一次备份时服务端会实测能否写入。",
   "drives.fieldBackend": "类型",
   "drives.backendCos": "COS 桶",
   "drives.backendS3": "S3 兼容",

@@ -191,15 +191,16 @@ Rules, each answering a specific failure:
   account's call: a host allowlist would make the deployment's owner a gatekeeper for their own drive and
   answer the wrong question (which hosts exist, not whether this one can hold a tree). What bounds it is
   that the row is a *backup destination* — never an authority — and that the probe must prove publication
-  before the row is saved. That reasoning rests on accounts being people the deployment trusts; if signup
+  before it is used. That reasoning rests on accounts being people the deployment trusts; if signup
   is open to strangers, the control belongs at registration (`ALLOW_REGISTRATION`), because an open
   signup is a far larger grant than any single endpoint. The operator CLI is not bound by any of this: it
   already has host access.
-- **A destination is measured before it is recorded.** The account API runs the same probe the operator
-  CLI does, so a bucket that cannot answer or ignores the conditional headers publication depends on is
-  refused instead of becoming a row whose first snapshot fails. Both paths derive that connection's own
-  evidence and spool (the name is the leaf), because inheriting the deployment's would make the new bucket
-  refuse evidence recorded for another one — and measuring it would overwrite the authority's proof.
+- **A destination is measured when it is used, not when it is recorded.** Both paths derive that
+  connection's own evidence and spool (the name is the leaf), because inheriting the deployment's would
+  make the new bucket refuse evidence recorded for another one — and measuring it would overwrite the
+  authority's proof. The measurement itself happens before the first snapshot: a drive may be recorded
+  while it is unreachable (a NAS that is off, a tunnel that is down), and a person adding one should not
+  have to wait for it to come back before saying where it is.
 
 ## 8. Runtime
 
@@ -219,9 +220,10 @@ Rules, each answering a specific failure:
 
 - Adding a target is three commands: `eam storage-connection add ... --role backup`, then
   `eam storage-connection probe --name X` (which proves conditional create, atomic publication and part
-  persistence on that exact endpoint), then the first `eam backup snapshot`. The account API folds the
-  probe into the add, because a person adding a bucket cannot be asked to run an operator command
-  afterwards. A provider that fails the probe is read-only to this service by measurement, not by policy.
+  persistence on that exact endpoint), then the first `eam backup snapshot`. The account API does the
+  first measurement itself, before the first snapshot, because a person adding a bucket cannot be asked to
+  run an operator command afterwards. A provider that fails the probe is read-only to this service by
+  measurement, not by policy.
 - The job is a CLI command (`eam backup run|verify|prune`), scheduled by the deployment's timer, the same
   pattern as the existing database dump. There is no scheduler in the process today, and a long job does
   not belong inside the server's request lifecycle.
