@@ -188,11 +188,16 @@ when it stopped between allocating and committing, and the folder holding them a
 - [ ] Fence re-created folders against the folder-marker delete. The live-row test runs before the conditional
       delete, and a folder re-created over a marker the purge has not reached yet adopts that marker without a
       native write. A create whose row commits between the check and the delete therefore has a live row and
-      an unchanged native revision, so the purge deletes the folder the user just re-created (observed as a
-      `200` mkdir followed by `409 parent_missing` on the next upload). Closing it needs one of: the
-      re-creation reasserting the marker so `If-Match` refuses the delete, or the purge restoring a folder it
-      deleted after a live row appears. Until then the write path is not concealed, but this ordering is not
-      fenced.
+      an unchanged native revision, so the purge deletes the folder the user just re-created. This is not a
+      timing accident: gating the purge's `LivePaths` check, settling the mkdir, then releasing the delete
+      deterministically leaves the row live with the marker gone, and the next upload answers
+      `409 parent_missing`. The obvious fence — reassert the marker so the delete's `If-Match` refuses — has no
+      driver support today: `storage.FolderWriter` exposes only `Mkdir`, object mutation rejects
+      `Conditions.ExpectedRevision` there as `unsupported`, and local mutation requires absence while its
+      folder revision is the directory inode (`dev:ino`), so a single marker write cannot change it. Closing
+      it needs a new driver capability (a conditional marker reassert, with local remove-and-recreate or
+      rename-over-empty-directory semantics) or a purge fence. Until then the write path is not concealed, but
+      this ordering is not fenced.
 - [ ] Tombstone object (`__eam_system__/<owner>/tombstones/<operation>`) so a rebuild after index loss does not
       resurrect a half-purged delete. Same predicate as the worker; the tombstone is the durable copy.
 - [ ] `move`/`copy` keep the frozen manifest: their effects are conditional on both endpoints and a re-walk
