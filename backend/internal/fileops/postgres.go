@@ -39,6 +39,29 @@ func dbNow(ctx context.Context, tx pgx.Tx) (time.Time, error) {
 	err := tx.QueryRow(ctx, `select clock_timestamp()`).Scan(&t)
 	return t, err
 }
+
+// readOperationSnapshot reads one operation without locking its row. A read-only transaction
+// cannot take `for update`, and a report of what the journal holds does not need to: the row it
+// reads is the answer it returns.
+func readOperationSnapshot(ctx context.Context, q pgx.Tx, id string) (Operation, error) {
+	var op Operation
+	var b []byte
+	err := q.QueryRow(ctx, `select snapshot from file_operations where id=$1`, id).Scan(&b)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return op, E("not_found", nil)
+	}
+	if err != nil {
+		return op, err
+	}
+	if err = json.Unmarshal(b, &op); err != nil {
+		return op, err
+	}
+	if err = canonicalOperation(&op); err != nil {
+		return op, err
+	}
+	return op, nil
+}
+
 func readOperation(ctx context.Context, tx pgx.Tx, id string) (Operation, error) {
 	var op Operation
 	var b []byte
@@ -63,6 +86,27 @@ func saveOperation(ctx context.Context, tx pgx.Tx, op Operation) error {
 	_, err = tx.Exec(ctx, `update file_operations set snapshot=$2 where id=$1`, op.ID, b)
 	return err
 }
+
+// readOnly runs fn in a read-only transaction that does not take the owner lock. `transaction`
+// also orders one owner's writes, and a status read has nothing to order: it used to queue
+// behind that owner's settlements, which is exactly the traffic a settling import produces —
+// the queue's poller and the commit response both read an operation right after settling one,
+// and every such read waited for the next settlement to finish.
+//
+// The access mode is ReadOnly rather than a comment, so a future edit that tries to write here
+// fails at query time instead of quietly widening what a read may do.
+func (p *Postgres) readOnly(ctx context.Context, fn func(pgx.Tx) error) error {
+	tx, err := p.pool.BeginTx(ctx, pgx.TxOptions{AccessMode: pgx.ReadOnly})
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	if err := fn(tx); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
 func (p *Postgres) transaction(ctx context.Context, owner string, fn func(pgx.Tx) error) error {
 	tx, err := p.pool.Begin(ctx)
 	if err != nil {
@@ -406,9 +450,9 @@ func (p *Postgres) Get(ctx context.Context, root Root, a Actor, id string) (Oper
 	if !validID(id) {
 		return op, E("not_found", nil)
 	}
-	err := p.transaction(ctx, root.OwnerID, func(tx pgx.Tx) error {
+	err := p.readOnly(ctx, func(tx pgx.Tx) error {
 		var err error
-		op, err = readOperation(ctx, tx, id)
+		op, err = readOperationSnapshot(ctx, tx, id)
 		if err != nil {
 			return err
 		}

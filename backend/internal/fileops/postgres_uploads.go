@@ -315,7 +315,9 @@ func (p *Postgres) ListUploads(ctx context.Context, root Root, actor Actor, limi
 		return nil, E("forbidden", nil)
 	}
 	var out []Upload
-	err := p.transaction(ctx, root.OwnerID, func(tx pgx.Tx) error {
+	// A listing writes nothing, so it takes no owner lock: the pages of a session are read while
+	// the session settles, and both used to wait for each other.
+	err := p.readOnly(ctx, func(tx pgx.Tx) error {
 		rootJSON, err := json.Marshal(root)
 		if err != nil {
 			return err
@@ -446,7 +448,7 @@ func (p *Postgres) ListUploadParts(ctx context.Context, root Root, actor Actor, 
 		return nil, 0, E("invalid_request", nil)
 	}
 	var out []PartReceipt
-	err := p.transaction(ctx, root.OwnerID, func(tx pgx.Tx) error {
+	err := p.readOnly(ctx, func(tx pgx.Tx) error {
 		if _, err := readUpload(ctx, tx, root, actor, id, false); err != nil {
 			return err
 		}
