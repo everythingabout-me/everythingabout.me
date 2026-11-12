@@ -6,8 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net/http"
-	"net/http/httptest"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -16,7 +14,6 @@ import (
 	"testing"
 	"time"
 
-	"everythingabout.me/backend/internal/auth"
 	"everythingabout.me/backend/internal/browserupload"
 	"everythingabout.me/backend/internal/config"
 	"everythingabout.me/backend/internal/httpx"
@@ -194,19 +191,9 @@ func TestBrowserUploadIndexPostgresRecovery(t *testing.T) {
 	if err = db.Pool().QueryRow(ctx, `insert into users(email,password_hash) values('browser-recovery@example.test','') returning id::text`).Scan(&owner); err != nil {
 		t.Fatal(err)
 	}
-	cookie, _, err := server.auth.CreateSession(ctx, owner, "test", "")
-	if err != nil {
-		t.Fatal(err)
-	}
 	if err = server.nodes.EnsureParents(ctx, "Health/apple-health/steps.json", owner); err != nil {
 		t.Fatal(err)
 	}
-	request := func(endpoint string, body io.Reader) *http.Request {
-		r := httptest.NewRequest("POST", "http://files.example"+endpoint, body)
-		r.AddCookie(&http.Cookie{Name: auth.SessionCookie, Value: cookie})
-		return r
-	}
-	jsonRequest := func(endpoint, body string) *http.Request { return request(endpoint, strings.NewReader(body)) }
 	state := func(id string) string {
 		t.Helper()
 		var current string
@@ -225,24 +212,13 @@ func TestBrowserUploadIndexPostgresRecovery(t *testing.T) {
 	}
 	sign := func(path string, size int) string {
 		t.Helper()
-		w := httptest.NewRecorder()
-		body := fmt.Sprintf(`{"path":%q,"size":%d,"mime":"application/json","modifiedAt":1443268800000}`, path, size)
-		if err := server.handleUploadSign(w, jsonRequest("/api/fs/upload/sign", body)); err != nil {
+		session, err := server.browserUploads.Begin(ctx, owner, path, int64(size), "application/json", 1443268800000)
+		if err != nil {
 			t.Fatal(err)
 		}
-		var reply struct {
-			OK   bool                       `json:"ok"`
-			Data map[string]json.RawMessage `json:"data"`
-		}
-		if err := json.Unmarshal(w.Body.Bytes(), &reply); err != nil {
-			t.Fatal(err)
-		}
-		if !reply.OK || len(reply.Data) != 1 {
-			t.Fatalf("unexpected sign response: %s", w.Body.String())
-		}
-		var id string
-		if err := json.Unmarshal(reply.Data["uploadId"], &id); err != nil || id == "" {
-			t.Fatal("missing application upload ID", err)
+		id := session.ID
+		if id == "" {
+			t.Fatal("missing application upload ID")
 		}
 		if state(id) != "open" {
 			t.Fatal("sign did not persist an unstarted upload")
@@ -261,13 +237,13 @@ func TestBrowserUploadIndexPostgresRecovery(t *testing.T) {
 		}
 		return id
 	}
-	binary := func(id, body string) *httptest.ResponseRecorder {
+	binary := func(id, body string) json.RawMessage {
 		t.Helper()
-		w := httptest.NewRecorder()
-		if err := server.handleUploadConfirm(w, request("/api/fs/upload/confirm?uploadId="+url.QueryEscape(id), strings.NewReader(body))); err != nil {
+		raw, err := server.browserUploads.Receive(ctx, owner, id, strings.NewReader(body), int64(len(body)))
+		if err != nil {
 			t.Fatal(err)
 		}
-		return w
+		return raw
 	}
 	assertStatus := func(err error, status int) {
 		t.Helper()
@@ -276,21 +252,23 @@ func TestBrowserUploadIndexPostgresRecovery(t *testing.T) {
 			t.Fatalf("wanted %d, got %v", status, err)
 		}
 	}
+	assertUploadStatus := func(err error, status int) {
+		t.Helper()
+		var typed *browserupload.Error
+		if !errors.As(err, &typed) || typed.Status != status {
+			t.Fatalf("wanted upload status %d, got %v", status, err)
+		}
+	}
 
 	t.Run("immediate publish and receipt replay", func(t *testing.T) {
 		path := "Health/apple-health/steps.json"
 		id := sign(path, 3)
-		w := binary(id, "abc")
-		var reply struct {
-			OK   bool `json:"ok"`
-			Data struct {
-				Node struct {
-					Path string `json:"path"`
-					Size int64  `json:"size"`
-				} `json:"node"`
-			} `json:"data"`
+		raw := binary(id, "abc")
+		var node struct {
+			Path string `json:"path"`
+			Size int64  `json:"size"`
 		}
-		if err = json.Unmarshal(w.Body.Bytes(), &reply); err != nil || !reply.OK || reply.Data.Node.Path != path || reply.Data.Node.Size != 3 {
+		if err = json.Unmarshal(raw, &node); err != nil || node.Path != path || node.Size != 3 {
 			t.Fatal("binary confirm did not return indexed node", err)
 		}
 		if state(id) != "completed" {
@@ -301,8 +279,7 @@ func TestBrowserUploadIndexPostgresRecovery(t *testing.T) {
 			t.Fatal("original client timestamp was not indexed", err)
 		}
 		heads, publishes := native.counters()
-		replay := httptest.NewRecorder()
-		if err = server.handleUploadConfirm(replay, jsonRequest("/api/fs/upload/confirm", `{"uploadId":"`+id+`"}`)); err != nil {
+		if _, err = server.browserUploads.Confirm(ctx, owner, id); err != nil {
 			t.Fatal(err)
 		}
 		if err = server.browserUploads.RunOnce(ctx); err != nil {
@@ -326,10 +303,8 @@ func TestBrowserUploadIndexPostgresRecovery(t *testing.T) {
 		id := sign(path, 3)
 		requestCtx, stop := context.WithCancel(ctx)
 		defer stop()
-		r := request("/api/fs/upload/confirm?uploadId="+id, &interruptedUploadReader{cancel: stop}).WithContext(requestCtx)
-		r.ContentLength = 3
-		err := server.handleUploadConfirm(httptest.NewRecorder(), r)
-		assertStatus(err, 410)
+		_, err := server.browserUploads.Receive(requestCtx, owner, id, &interruptedUploadReader{cancel: stop}, 3)
+		assertUploadStatus(err, 410)
 		if state(id) != "aborted" {
 			t.Fatal("interrupted receive retained an active intent")
 		}
@@ -342,7 +317,8 @@ func TestBrowserUploadIndexPostgresRecovery(t *testing.T) {
 		if exists {
 			t.Fatal("interrupted body published native bytes")
 		}
-		assertStatus(server.handleUploadConfirm(httptest.NewRecorder(), jsonRequest("/api/fs/upload/confirm", `{"uploadId":"`+id+`"}`)), 410)
+		_, err = server.browserUploads.Confirm(ctx, owner, id)
+		assertUploadStatus(err, 410)
 	})
 	t.Run("native success then index failure and restart", func(t *testing.T) {
 		path := "Health/fail-index.json"
@@ -351,7 +327,7 @@ func TestBrowserUploadIndexPostgresRecovery(t *testing.T) {
 			t.Fatal(err)
 		}
 		_, beforePublish := native.counters()
-		err = server.handleUploadConfirm(httptest.NewRecorder(), request("/api/fs/upload/confirm?uploadId="+id, strings.NewReader("abc")))
+		_, err = server.browserUploads.Receive(ctx, owner, id, strings.NewReader("abc"), 3)
 		if err == nil {
 			t.Fatal("forced index failure hidden")
 		}
@@ -397,13 +373,21 @@ func TestBrowserUploadIndexPostgresRecovery(t *testing.T) {
 	})
 	t.Run("canceled directory request recovers and retires", func(t *testing.T) {
 		path := "Health/empty"
-		r := jsonRequest("/api/fs/mkdir", `{"path":"`+path+`"}`)
 		requestCtx, stopRequest := context.WithCancel(ctx)
 		defer stopRequest()
 		native.mu.Lock()
 		native.afterFolder = stopRequest
 		native.mu.Unlock()
-		if err = server.handleMkdir(httptest.NewRecorder(), r.WithContext(requestCtx)); err == nil {
+		if err = server.nodes.EnsureParents(requestCtx, path, owner); err != nil {
+			t.Fatal(err)
+		}
+		if err = server.uploadIndex.Register(requestCtx, owner, path, true, time.Now().Add(time.Hour)); err != nil {
+			t.Fatal(err)
+		}
+		if err = native.PutEmpty(requestCtx, paths.DirKeyFor(path, owner)); err != nil {
+			t.Fatal(err)
+		}
+		if _, err = server.nodes.CreateDirectory(requestCtx, path, owner); err == nil {
 			t.Fatal("canceled directory request unexpectedly finished")
 		}
 		native.mu.Lock()
@@ -453,19 +437,11 @@ func TestBrowserUploadIndexPostgresRecovery(t *testing.T) {
 			values($1,$2::uuid,'move',$3,$4,'pending')`, jobID, owner, source, destination); err != nil {
 			t.Fatal(err)
 		}
-		attempt := func(path string) error {
-			body, err := json.Marshal(map[string]any{"path": path, "size": 3})
-			if err != nil {
-				t.Fatal(err)
-			}
-			return server.handleUploadSign(httptest.NewRecorder(), jsonRequest("/api/fs/upload/sign", string(body)))
-		}
 		for _, status := range []string{"pending", "running"} {
 			if _, err := db.Pool().Exec(ctx, `update fs_jobs set status=$2,op=case when $2='running' then 'copy' else 'move' end where id=$1`, jobID, status); err != nil {
 				t.Fatal(err)
 			}
 			for _, target := range []string{source, destination, source + "/nested/file.json", destination + "/nested/file.json", "Health/job", "Health"} {
-				assertStatus(attempt(target), 409)
 				assertStatus(server.checkBrowserUploadConflict(ctx, owner, target, false), 409)
 			}
 		}
@@ -496,11 +472,11 @@ func TestBrowserUploadIndexPostgresRecovery(t *testing.T) {
 		if _, err = db.Pool().Exec(ctx, `drop table browser_uploads`); err != nil {
 			t.Fatal(err)
 		}
-		w := httptest.NewRecorder()
-		if err = server.handleUploadSign(w, jsonRequest("/api/fs/upload/sign", `{"path":"Health/blocked.json","size":0}`)); err == nil {
+		session, err := server.browserUploads.Begin(ctx, owner, "Health/blocked.json", 0, "application/octet-stream", 0)
+		if err == nil {
 			t.Fatal("sign succeeded without durable upload registration")
 		}
-		if w.Body.Len() != 0 {
+		if session.ID != "" {
 			t.Fatal("upload ID or credentials exposed despite failed registration")
 		}
 	})

@@ -440,7 +440,8 @@ GET /me and the live instructions report current grants. The payload and the pag
 
 File requests use `/api/files` with plain resources and Problem Details. Cookie mutations require the
 session CSRF token and configured Origin. The account/event APIs below retain their envelopes.
-Legacy `/api/fs/*` routes return 410.
+Legacy `/api/fs/*` routes and the old root file routes (`/capabilities`, `/list`, `/search`, `/mkdir`,
+`/move`, `/copy`, `/delete`, `/upload`) return 410 and have no handlers behind them.
 
 | Method | Path | Description |
 |---|---|---|
@@ -491,7 +492,6 @@ password sign-in: 30 per 15 minutes per IP, 10 per 15 minutes per email).
 | `ADDR` / `PORT` | Listen address; `:8080` by default (`ADDR` wins) |
 | `WEB_DIR` | Frontend build output directory; when empty it finds the repo's `web/dist` |
 | `USER_QUOTA_BYTES` | Storage limit per account in bytes; 0 or empty means unlimited |
-| `UPLOAD_MULTIPART_THRESHOLD` / `UPLOAD_PART_SIZE` | Retired legacy transfer settings; not session geometry or publication limits |
 | `SES_REGION` | Tencent Cloud SES region, `ap-guangzhou` by default |
 | `SES_FROM_EMAIL_ADDRESS` | A sender address already verified in SES; may include a display name, as in `Everything About Me <noreply@yourdomain.com>` |
 | `SES_TEMPLATE_ID` | Verification code template ID (default / English) |

@@ -11,7 +11,6 @@ import (
 
 	"everythingabout.me/backend/internal/events"
 	fc "everythingabout.me/backend/internal/filecontract"
-	"everythingabout.me/backend/internal/jobs"
 	"everythingabout.me/backend/internal/nodes"
 	"everythingabout.me/backend/internal/paths"
 	"everythingabout.me/backend/internal/store"
@@ -67,8 +66,8 @@ func canonicalConsumersDB(t *testing.T) (*store.DB, context.Context) {
 
 // A native atomic rename settles only the ancestor linkage. Consumers must retain
 // the leaf identity while deriving its current location, even after cache eviction
-// and recreation of the old path. Delete admission must persist those locations
-// before detaching the ancestor, without touching another owner or old-path reuse.
+// and recreation of the old path. Settlement must not touch another owner or
+// old-path reuse, and removed media must degrade cleanly.
 func TestCanonicalConsumersAfterAncestorRename(t *testing.T) {
 	db, ctx := canonicalConsumersDB(t)
 	pool := db.Pool()
@@ -160,30 +159,10 @@ func TestCanonicalConsumersAfterAncestorRename(t *testing.T) {
 	assertReads()
 	foreign := insert(other, "After%_/photo.jpg", false)
 	neighbor := insert(user, "AfterXX/keep.jpg", false)
-	cleanup := jobs.New(db, nil, index)
-	cleanup.SetDeleteBinding("canonical-test")
-	job, err := cleanup.StartDelete(ctx, user, "After%_")
-	if err != nil || job == nil || job.Total != 2 {
-		t.Fatalf("canonical delete admission: %+v, %v", job, err)
-	}
-	rows, err := pool.Query(ctx, `select path,key from fs_delete_entries where job_id=$1 order by path`, job.ID)
-	if err != nil {
+	// Index settlement deletes the entry rows; consumers must then drop media whose
+	// node is gone instead of resolving it through a stale path cache.
+	if _, err := pool.Exec(ctx, `delete from nodes where owner_id=$1::uuid and id=any($2::uuid[])`, user, []string{folder, leaf}); err != nil {
 		t.Fatal(err)
-	}
-	manifest := map[string]string{}
-	for rows.Next() {
-		var p, key string
-		if err := rows.Scan(&p, &key); err != nil {
-			t.Fatal(err)
-		}
-		manifest[p] = key
-	}
-	rows.Close()
-	if err := rows.Err(); err != nil {
-		t.Fatal(err)
-	}
-	if len(manifest) != 2 || manifest["After%_"] != paths.DirKeyFor("After%_", user) || manifest["After%_/photo.jpg"] != paths.KeyFor("After%_/photo.jpg", user) {
-		t.Fatalf("delete manifest used stale cache: %+v", manifest)
 	}
 	var retained int
 	if err := pool.QueryRow(ctx, `select count(*) from nodes where id=any($1::uuid[])`, []string{recreated, foreign, neighbor}).Scan(&retained); err != nil || retained != 3 {

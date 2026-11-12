@@ -20,7 +20,6 @@ import (
 	fc "everythingabout.me/backend/internal/filecontract"
 	"everythingabout.me/backend/internal/fileops"
 	"everythingabout.me/backend/internal/httpx"
-	"everythingabout.me/backend/internal/jobs"
 	"everythingabout.me/backend/internal/mail"
 	"everythingabout.me/backend/internal/mediameta"
 	"everythingabout.me/backend/internal/nodes"
@@ -61,7 +60,6 @@ type Server struct {
 	mail       *mail.Sender
 	storage    storage.Storage
 	nodes      *nodes.Service
-	jobs       *jobs.Service
 	eventsSvc  *events.Service
 	timeline   *timeline.Service
 	limiter    *ratelimit.Limiter
@@ -72,11 +70,6 @@ type Server struct {
 func New(cfg *config.Config, db *store.DB, objectStorage storage.Storage, web http.Handler) *Server {
 	nodeService := nodes.New(db, objectStorage)
 	eventService := events.New(db, nodeService)
-	var jobService *jobs.Service
-	if cfg.BackendName() == "cos" && !cfg.Storage.CoordinatedWrites {
-		jobService = jobs.New(db, objectStorage, nodeService)
-		jobService.SetDeleteBinding(uploadIndexBinding(cfg))
-	}
 	server := &Server{
 		cfg:        cfg,
 		db:         db,
@@ -86,7 +79,6 @@ func New(cfg *config.Config, db *store.DB, objectStorage storage.Storage, web ht
 		storage:    objectStorage,
 		nodes:      nodeService,
 		filesIndex: nodeService,
-		jobs:       jobService,
 		eventsSvc:  eventService,
 		timeline:   timeline.New(db, objectStorage, cfg.Timeline, eventService),
 		limiter:    ratelimit.New(),

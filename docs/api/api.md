@@ -15,7 +15,8 @@
 >
 > This file API replaces all earlier route, envelope, identity and upload decisions; no legacy client or
 > compatibility adapter is supported. Account login, Connect and event authoring remain separate APIs.
-> `/api/fs/*` and root legacy file routes return 410 and issue no new native authority, but removing a route
+> `/api/fs/*` and root legacy file routes return 410 and issue no new native authority; their handlers and
+> the `fs_jobs` move/copy/delete job machinery are deleted, so only the 410 stubs remain. Removing a route
 > does not revoke authority already issued to a client.
 >
 > Architecture: [storage.md](../design/storage.md). Driver contract: [storage-driver.md](../design/storage-driver.md).

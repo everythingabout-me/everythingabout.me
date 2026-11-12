@@ -138,14 +138,15 @@ while its tests were skipping. CI (`.github/workflows/test.yml`) runs `make migr
 | Path | Contents |
 |---|---|
 | `backend/cmd/eam/` | Single entrypoint: `server` / `migrate` / `doctor` / `reconcile` / `claim` / `token` |
-| `backend/internal/api/` | Routes and handlers: web `/api/*`, the public API, `/events` |
+| `backend/internal/api/` | Routes and handlers: web `/api/*`, the unified file API, `/events`; retired `/api/fs/*` and root file routes answer 410 |
 | `backend/internal/nodes/` | Canonical parent/name index, dynamic current paths and transactional identity/change settlement; never bytes |
 | `backend/internal/filechanges/` | Commit-safe owner change facts, recursive markers, projection and durable file audit |
 | `backend/internal/storage/` | Object storage interface; implementation in `internal/cos/` (Tencent Cloud) |
 | `backend/internal/mediameta/` | Capture facts (time, GPS, device, size) read from a photo or video by ranged reads, on demand; results are a disposable cache |
 | `backend/internal/timeline/` + `events/` | The stream: analyze → group → score → narrate, stored as `events` |
 | `backend/internal/auth/` `emailcode/` `mail/` | Verification codes, passwords, sessions, API tokens, SES |
-| `backend/internal/jobs/` | Async jobs for directory move / copy |
+| `backend/internal/browserupload/` | Legacy server-owned upload journal/recovery; constructed and run only for COS without coordinated writes |
+| `backend/internal/uploadindex/` | Legacy direct-upload/folder-marker watch recovery; same COS non-coordinated configuration |
 | `sql/` | Forward-only migrations, run in filename order |
 | `web/src/` | React 19 + Vite + React Router 8; styling is CSS Modules |
 | `docs/` | API and design docs; read these before changing semantics |

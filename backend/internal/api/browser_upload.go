@@ -14,6 +14,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
+// browserUploadError maps a browser-upload refusal to the API's status-bearing error.
 func browserUploadError(err error) error {
 	var uploadErr *browserupload.Error
 	if errors.As(err, &uploadErr) {
@@ -44,13 +45,6 @@ func (s *Server) indexBrowserUpload(ctx context.Context, session browserupload.S
 	}
 	s.timeline.Notify(session.OwnerID)
 	return json.Marshal(node)
-}
-
-func (s *Server) requireBrowserUploads() error {
-	if s.browserUploads == nil {
-		return httpx.NewError(http.StatusServiceUnavailable, "server-owned uploads are unavailable")
-	}
-	return nil
 }
 
 // lockBrowserNamespace coordinates admission with legacy browser namespace actions.
@@ -119,22 +113,6 @@ func (s *Server) checkBrowserUploadConflict(ctx context.Context, owner, path str
 		return httpx.Conflict("a file operation affecting this path is unfinished")
 	}
 	return nil
-}
-
-// lockBrowserMutation admits legacy public actions into the browser namespace.
-// Internal job helpers run under their caller's lock and must not acquire it again.
-func (s *Server) lockBrowserMutation(ctx context.Context, owner string, targets ...string) (func(), error) {
-	unlock, err := s.lockBrowserNamespace(ctx, owner)
-	if err != nil {
-		return nil, err
-	}
-	for _, path := range targets {
-		if err := s.checkBrowserUploadConflict(ctx, owner, path, true); err != nil {
-			unlock()
-			return nil, err
-		}
-	}
-	return unlock, nil
 }
 
 // Presigned requests can outlive expiry, completion, or cancellation. Legacy

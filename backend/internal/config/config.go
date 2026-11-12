@@ -31,13 +31,9 @@ type Config struct {
 	RegistrationOpen  bool
 	// QuotaBytes is the storage cap per account; 0 means unlimited.
 	QuotaBytes int64
-	// MultipartThreshold is the size above which uploads go multipart; defaults to 5 GiB.
-	MultipartThreshold int64
-	// UploadPartSize is the part size; defaults to 64 MiB.
-	UploadPartSize int64
-	COS            COS
-	SES            SES
-	Timeline       Timeline
+	COS        COS
+	SES        SES
+	Timeline   Timeline
 }
 
 // Timeline is the configuration for the stream's background organizer.
@@ -108,18 +104,16 @@ func Load() (*Config, error) {
 	}
 
 	c := &Config{
-		Addr:               addr(),
-		AppEnv:             envOr("APP_ENV", "development"),
-		WebDir:             webDir(),
-		DatabaseURL:        os.Getenv("DATABASE_URL"),
-		AppSecret:          os.Getenv("APP_SECRET"),
-		FileUploadIngress:  envOr("FILE_UPLOAD_INGRESS", "embedded"),
-		Storage:            storageConfig,
-		SessionTTLDays:     positiveInt("SESSION_TTL_DAYS", 30),
-		RegistrationOpen:   os.Getenv("ALLOW_REGISTRATION") != "false",
-		QuotaBytes:         int64(positiveInt("USER_QUOTA_BYTES", 0)),
-		MultipartThreshold: int64(positiveInt("UPLOAD_MULTIPART_THRESHOLD", 5<<30)),
-		UploadPartSize:     int64(positiveInt("UPLOAD_PART_SIZE", 64<<20)),
+		Addr:              addr(),
+		AppEnv:            envOr("APP_ENV", "development"),
+		WebDir:            webDir(),
+		DatabaseURL:       os.Getenv("DATABASE_URL"),
+		AppSecret:         os.Getenv("APP_SECRET"),
+		FileUploadIngress: envOr("FILE_UPLOAD_INGRESS", "embedded"),
+		Storage:           storageConfig,
+		SessionTTLDays:    positiveInt("SESSION_TTL_DAYS", 30),
+		RegistrationOpen:  os.Getenv("ALLOW_REGISTRATION") != "false",
+		QuotaBytes:        int64(positiveInt("USER_QUOTA_BYTES", 0)),
 		COS: COS{
 			SecretID:  os.Getenv("COS_SECRET_ID"),
 			SecretKey: os.Getenv("COS_SECRET_KEY"),

@@ -41,7 +41,7 @@ func TestReadOnlyBackendRejectsLegacyEffectsBeforeServices(t *testing.T) {
 }
 func TestCOSCoordinatedWritesDisableLegacyNativeAuthorities(t *testing.T) {
 	s := New(&config.Config{Storage: config.Storage{Backend: "cos", CoordinatedWrites: true}}, nil, nil, nil)
-	if s.jobs != nil || s.browserUploads != nil || s.uploadIndex != nil {
+	if s.browserUploads != nil || s.uploadIndex != nil {
 		t.Fatal("coordinated COS retained legacy native writers")
 	}
 	s.StartTimeline(context.Background())

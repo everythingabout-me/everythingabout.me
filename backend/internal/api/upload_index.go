@@ -5,8 +5,6 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
-	"log/slog"
-	"net/http"
 	"time"
 
 	"everythingabout.me/backend/internal/config"
@@ -77,36 +75,12 @@ func (s *Server) observeUploadedObject(ctx context.Context, ownerID, path string
 	return "observed", nil
 }
 
-func (s *Server) watchUpload(ctx context.Context, ownerID, path string, isDir bool, until time.Time) error {
-	if s.uploadIndex == nil {
-		return httpx.NewError(http.StatusServiceUnavailable, "upload index recovery unavailable")
-	}
-	return s.uploadIndex.Register(ctx, ownerID, path, isDir, until)
-}
-
-func (s *Server) settleUpload(ctx context.Context, ownerID, path string, isDir bool) {
-	if s.uploadIndex != nil {
-		if err := s.uploadIndex.Settle(ctx, ownerID, path, isDir); err != nil {
-			// The index already committed. A failed retirement is retried by
-			// recovery; it must not undo the successful native/index result.
-			slog.Warn("upload index: could not retire observation", "error", err)
-		}
-	}
-}
-
 // StartUploadIndex runs independently of the optional timeline organizer. Each Run
 // drains its own in-flight calls before returning; the goroutines are tracked so
 // WaitBackground can keep the pool open until they have.
 func (s *Server) StartUploadIndex(ctx context.Context) {
 	if s.cfg.Storage.CoordinatedWrites {
 		return
-	}
-	if s.jobs != nil {
-		s.background.Add(1)
-		go func() {
-			defer s.background.Done()
-			s.jobs.RunDeletes(ctx)
-		}()
 	}
 	if s.browserUploads != nil {
 		s.background.Add(1)
