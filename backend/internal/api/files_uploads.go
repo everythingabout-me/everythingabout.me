@@ -139,7 +139,7 @@ func filesUploadClientTarget(req filesCreateUploadRequest) (storage.WriteIntent,
 		if destination.Parent != nil {
 			selector = *destination.Parent
 		}
-		return storage.WriteIntent{Target: target, ParentID: parentID, Selection: filesDestinationSelection(destination)}, []filesReplaySelection{{selector: selector, write: true}}, nil
+		return storage.WriteIntent{Target: target, ParentID: parentID, Selection: filesDestinationSelection(destination)}, []filesReplaySelection{{selector: selector, write: true, destination: true}}, nil
 	case "replace", "overwrite":
 		// An overwrite selects its destination the way a replacement does, because the same
 		// path may hold a file whose identity this write has to keep, but it does not
@@ -157,7 +157,9 @@ func filesUploadClientTarget(req filesCreateUploadRequest) (storage.WriteIntent,
 		if err := target.Validate(); err != nil {
 			return storage.WriteIntent{}, nil, err
 		}
-		return storage.WriteIntent{Target: storage.Path(target.Path.Relative()), EntryID: target.ID, Selection: filesSelectorSelection(target)}, []filesReplaySelection{{selector: target, write: true}}, nil
+		// A replacement names the entry whose identity it keeps, so it keeps the read view;
+		// an overwrite creates the file when nothing is there, so it is a destination.
+		return storage.WriteIntent{Target: storage.Path(target.Path.Relative()), EntryID: target.ID, Selection: filesSelectorSelection(target)}, []filesReplaySelection{{selector: target, write: true, destination: req.Condition.Mode == "overwrite"}}, nil
 	default:
 		return storage.WriteIntent{}, nil, fc.NewProblem(400, "invalid_request", "The upload condition is invalid.")
 	}
@@ -189,7 +191,13 @@ func (s *Server) filesResolveUploadTarget(ctx context.Context, f *fileRequest, r
 		} else {
 			target.Path = fc.Path(*req.Path)
 		}
-		p, err := s.filesResolveSelector(ctx, f, target)
+		var p fc.Path
+		var err error
+		if req.Condition.Mode == "overwrite" {
+			p, err = s.filesResolveWriteDestination(ctx, f, target)
+		} else {
+			p, err = s.filesResolveSelector(ctx, f, target)
+		}
 		return p, filesSelectorSelection(target), target.ID, err
 	default:
 		return "", "", "", fc.NewProblem(400, "invalid_request", "The upload condition is invalid.")

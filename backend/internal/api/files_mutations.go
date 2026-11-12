@@ -396,7 +396,7 @@ func filesPutClientTarget(r *http.Request) (storage.WriteIntent, []filesReplaySe
 			return storage.WriteIntent{}, nil, err
 		}
 		target, parentID := filesClientDestination(destination)
-		return storage.WriteIntent{Target: target, ParentID: parentID, Selection: filesDestinationSelection(destination)}, []filesReplaySelection{{selector: parent, write: true}}, nil
+		return storage.WriteIntent{Target: target, ParentID: parentID, Selection: filesDestinationSelection(destination)}, []filesReplaySelection{{selector: parent, write: true, destination: true}}, nil
 	}
 	selector, err := fc.ParseSelectorQuery(r.URL.RawQuery, false)
 	if err != nil {
@@ -408,7 +408,10 @@ func filesPutClientTarget(r *http.Request) (storage.WriteIntent, []filesReplaySe
 	if selector.Path == "/" {
 		return storage.WriteIntent{}, nil, fc.NewProblem(400, "invalid_path", "The root cannot contain file content.")
 	}
-	return storage.WriteIntent{Target: storage.Path(selector.Path.Relative()), EntryID: selector.ID, Selection: filesSelectorSelection(selector)}, []filesReplaySelection{{selector: selector, write: true}}, nil
+	// An If-Match PUT is a replacement of an entry the client can still read, so its
+	// selection keeps the read view; without it the target is a create destination.
+	destination := r.Header.Get("If-Match") == ""
+	return storage.WriteIntent{Target: storage.Path(selector.Path.Relative()), EntryID: selector.ID, Selection: filesSelectorSelection(selector)}, []filesReplaySelection{{selector: selector, write: true, destination: destination}}, nil
 }
 
 func (s *Server) handleFilesPut(w http.ResponseWriter, r *http.Request, f *fileRequest) error {
@@ -739,6 +742,10 @@ func filesClientDestination(d fc.Destination) (storage.Path, string) {
 type filesReplaySelection struct {
 	selector    fc.EntrySelector
 	read, write bool
+	// destination distinguishes a write destination from a selected entry. A destination
+	// resolves against the index (a freed name is free); a selected entry, and a delete
+	// target, keeps the pending-delete read concealment.
+	destination bool
 }
 
 func (s *Server) filesAuthorizeReplaySelection(ctx context.Context, f *fileRequest, selected []filesReplaySelection) error {
@@ -758,7 +765,13 @@ func (s *Server) filesAuthorizeReplaySelection(ctx context.Context, f *fileReque
 				continue
 			}
 		}
-		p, err := s.filesResolveSelector(ctx, f, selection.selector)
+		var p fc.Path
+		var err error
+		if selection.destination {
+			p, err = s.filesResolveWriteDestination(ctx, f, selection.selector)
+		} else {
+			p, err = s.filesResolveSelector(ctx, f, selection.selector)
+		}
 		if err != nil {
 			return err
 		}
@@ -842,7 +855,7 @@ func (s *Server) handleFilesMkdir(w http.ResponseWriter, r *http.Request, f *fil
 	if destination.Parent != nil {
 		parentSelector = *destination.Parent
 	}
-	if replayed, e := s.filesReplayActionRequest(w, r, f, fileops.ActionRequest{Kind: "mkdir", To: clientTo, ParentID: clientParent, Parents: request.Parents, Selection: "path:" + filesDestinationSelection(destination)}, filesReplaySelection{selector: parentSelector, write: true}); replayed {
+	if replayed, e := s.filesReplayActionRequest(w, r, f, fileops.ActionRequest{Kind: "mkdir", To: clientTo, ParentID: clientParent, Parents: request.Parents, Selection: "path:" + filesDestinationSelection(destination)}, filesReplaySelection{selector: parentSelector, write: true, destination: true}); replayed {
 		return e
 	}
 	p, err := s.filesResolveDestination(r.Context(), f, destination)
@@ -897,7 +910,7 @@ func (s *Server) filesMoveCopy(w http.ResponseWriter, r *http.Request, f *fileRe
 	if request.To.Parent != nil {
 		destinationSelector = *request.To.Parent
 	}
-	if replayed, e := s.filesReplayActionRequest(w, r, f, fileops.ActionRequest{Kind: kind, From: storage.Path(request.From.Path.Relative()), To: clientTo, EntryID: request.From.ID, ParentID: clientParent, IfRevision: revision, Selection: filesSelectorSelection(request.From) + ":" + filesDestinationSelection(request.To)}, filesReplaySelection{selector: request.From, read: true, write: kind == "move"}, filesReplaySelection{selector: destinationSelector, write: true}); replayed {
+	if replayed, e := s.filesReplayActionRequest(w, r, f, fileops.ActionRequest{Kind: kind, From: storage.Path(request.From.Path.Relative()), To: clientTo, EntryID: request.From.ID, ParentID: clientParent, IfRevision: revision, Selection: filesSelectorSelection(request.From) + ":" + filesDestinationSelection(request.To)}, filesReplaySelection{selector: request.From, read: true, write: kind == "move"}, filesReplaySelection{selector: destinationSelector, write: true, destination: true}); replayed {
 		return e
 	}
 	from, err := s.filesResolveSelector(r.Context(), f, request.From)

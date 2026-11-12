@@ -8,11 +8,19 @@ import (
 	"golang.org/x/text/unicode/norm"
 )
 
-// filesDeleteOverlay hides every path whose deletion has been accepted until its
+// filesDeleteOverlay hides every path whose deletion is pending from reads until its
 // native purge finishes. The native tree stays authoritative — deletion is complete
 // only once the objects are gone and the index settled — but the user's confirmation
 // is final: reads must treat the path as deleted at once instead of exposing the
 // internal cleanup that remains.
+//
+// This is deliberately a read view only. A create or upload destination must resolve
+// against the index and the journal's guards, not against concealment: once acceptance
+// has committed, the rows are gone and the delete's guard is released, so the name is
+// free even while the purge still runs. Resolving such a destination through these
+// roots turned that free name into 404 not_found (and hid the real 409 while the delete
+// was still being admitted). Reads, ID/path selection, change feeds and the delete
+// target keep the concealment.
 func (s *Server) filesDeleteOverlay(ctx context.Context, owner, namespace string, driver storage.Driver) (storage.Driver, error) {
 	roots, err := s.pendingDeleteRoots(ctx, owner, namespace)
 	if err != nil {

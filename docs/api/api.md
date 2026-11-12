@@ -117,10 +117,13 @@ Path-scoped authorization remains bound to configured native-aware path boundari
 selector to current ancestry before authorization; knowing an ID never preserves access after a move outside
 scope. New content at the authorized path falls under that scope. Moving a scope root does not retarget the
 grant. Check both source and destination for move/copy, and recheck queued effects. Do not follow symlinks
-outside the bound root. Missing, deleted, foreign-owner and concealed IDs/paths return 404 without disclosing
-current location. Root cannot be moved/deleted. Metadata returns parentId and parentPath only for an
-accessible parent; both are null for the account root or a concealed parent of a scoped root. The entry's
-own absolute path remains visible; redaction never creates a handle into an unauthorized parent.
+outside the bound root. Missing, deleted, foreign-owner and concealed IDs/paths return 404 as selections —
+reads, deletes, and move/copy sources — without disclosing current location; a create or upload destination is
+resolved against the index and is never concealed (see
+[mutation resolution](#4-lookup-folders-search-and-namespace-operations)). Root cannot be moved/deleted.
+Metadata returns parentId and parentPath only for an accessible parent; both are null for the account root or
+a concealed parent of a scoped root. The entry's own absolute path remains visible; redaction never creates a
+handle into an unauthorized parent.
 
 The canonical index is a parent/name tree with stable IDs. Current paths resolve through ancestry in the
 file_entries view; legacy path/key columns are nullable derived caches. Eligible Local native folder moves
@@ -338,13 +341,16 @@ serializes against subtree mutations. Without it deletion explicitly applies to 
 No trash or restore API. Success requires actual native deletion plus index settlement; removing only index
 rows is not deletion. An accepted deletion is final for the user at once: every listing, metadata read and
 ID lookup conceals the path and its captured subtree while the native purge runs, and only a terminal
-operation that deleted nothing makes it visible again. Reusing that path before the operation is terminal is
-`409 operation_in_progress`, not a silent overwrite. Recursive deletion can partially succeed and must
-journal each captured entry; never
-remove external additions at all — the deletion set is the subtree that was accepted, minus anything the index
-holds as live again. Acceptance is `O(1)` in the size of the subtree: it resolves the target and then settles
-the deletion in one database transaction — the rows leave the index, one subtree change fact is recorded, the
-quota is refunded — and the `202` is that commit. The bytes leave the provider afterwards, by a purge that
+operation that deleted nothing makes it visible again. That concealment is a read rule, not a write fence:
+create, upload and rename/copy destinations resolve against the index, so once acceptance has committed — the
+rows are gone and the delete guard is released — the name is free and the destination is an ordinary create,
+never `404 not_found` and never `409 operation_in_progress`. Until acceptance commits the delete still owns the
+path and an overlapping write is refused with `409 operation_in_progress` naming that operation. Recursive
+deletion settles one subtree change fact in the acceptance transaction and journals how far the byte purge got;
+never remove external additions at all — the deletion set is the subtree that was accepted, minus anything the
+index holds as live again. Acceptance is `O(1)` in the size of the subtree: it resolves the target and then
+settles the deletion in one database transaction — the rows leave the index, one subtree change fact is
+recorded, the quota is refunded — and the `202` is that commit. The bytes leave the provider afterwards, by a purge that
 walks the prefix and deletes every object whose path has no live index row and which was not observed after the
 acceptance; a path the user re-created in the meantime is their new content and is left alone. Because the rows
 are gone when the response arrives, the name is free at once: a folder deleted and re-created in the same second
@@ -370,10 +376,12 @@ upload above missing ancestors settles a marker object and then its index entry,
 creation refuses this destination for milliseconds after the folder already exists natively. The create waits
 that holder out inside the same request, bounded by the request context, and logs the wait once it stops being
 momentary; the alternative — a 409 the browser could only answer by retrying — spent a round trip, a status
-probe and a poll interval to learn what the server already knew. Every other holder (upload, delete, move,
-copy) keeps its `409 operation_in_progress` with the blocking `operationId` and `operationKind`, so a refusal
-stays actionable without a log lookup, and the kind is machine-readable because those cases need opposite
-behaviour: an upload of the same target can be adopted, while a deletion is the user's decision.
+probe and a poll interval to learn what the server already knew. Every other holder (upload, move, copy), and
+a delete whose admission has not yet committed its acceptance, keeps its `409 operation_in_progress` with the
+blocking `operationId` and `operationKind`, so a refusal stays actionable without a log lookup, and the kind is
+machine-readable because those cases need opposite behaviour: an upload of the same target can be adopted,
+while a deletion is the user's decision. A delete stops being a holder the moment its acceptance commits;
+from then on its path is free for a create even while the byte purge runs.
 
 A recursive delete may extend that resolution to an `open` upload session anywhere inside the deleted
 subtree: the delete would discard the same bytes anyway, and refusing a single Delete click merely because an

@@ -167,9 +167,8 @@ when it stopped between allocating and committing, and the folder holding them a
 - [x] Listing/resolve cost fixes that made a pass cost one request per folder instead of one per entry and per
       path segment (already on `main`).
 - [x] Acceptance stops walking: it resolves the target and answers `202`, and the worker collects the manifest
-      before the first native deletion. The confirmation is now `O(1)` in the subtree; the guard, the frozen
-      manifest and the per-entry settlement are unchanged, so a path deleted and re-created before the purge
-      finishes is still `409` until step 2 lands.
+      before the first native deletion. The confirmation is now `O(1)` in the subtree; at that step the guard,
+      the frozen manifest and the per-entry settlement were unchanged, which step 2 then replaced.
 - [x] Acceptance transaction (step 2) and prefix purge (step 3) for `delete`: the acceptance removes the
       rows, records one subtree change fact and refunds the quota in its own transaction; the purge walks the
       prefix and deletes what no live row and no later write claims, re-walking on resume.
@@ -186,12 +185,20 @@ when it stopped between allocating and committing, and the folder holding them a
       total is published from the walk instead of staying null. The result moved to the terminal state in the
       same change: it used to be written by the acceptance transaction, so a running operation already
       answered "deleted" — the inverse of the gap this item described.
+- [ ] Fence re-created folders against the folder-marker delete. The live-row test runs before the conditional
+      delete, and a folder re-created over a marker the purge has not reached yet adopts that marker without a
+      native write. A create whose row commits between the check and the delete therefore has a live row and
+      an unchanged native revision, so the purge deletes the folder the user just re-created (observed as a
+      `200` mkdir followed by `409 parent_missing` on the next upload). Closing it needs one of: the
+      re-creation reasserting the marker so `If-Match` refuses the delete, or the purge restoring a folder it
+      deleted after a live row appears. Until then the write path is not concealed, but this ordering is not
+      fenced.
 - [ ] Tombstone object (`__eam_system__/<owner>/tombstones/<operation>`) so a rebuild after index loss does not
       resurrect a half-purged delete. Same predicate as the worker; the tombstone is the durable copy.
 - [ ] `move`/`copy` keep the frozen manifest: their effects are conditional on both endpoints and a re-walk
       cannot reconstruct "what the user meant" the way a prefix can.
 
-Until the acceptance transaction lands, the delete path keeps the frozen manifest and the guard: the manifest is
-collected by the worker, so the confirmation is fast, but the subtree stays fenced (`409 operation_in_progress`)
-until the purge finishes. The paragraph in [api.md](../api/api.md) describes what the server does today, and is
-updated by the same change that lands step 2.
+Acceptance and the prefix purge are implemented, so the delete no longer outlives acceptance with a guard: the
+name is free at once, a re-created path is an ordinary create, and only reads still conceal the subtree until
+the purge is terminal. [api.md](../api/api.md) states that rule in the mutation section; the unchecked item
+above names the one ordering the purge does not yet fence.

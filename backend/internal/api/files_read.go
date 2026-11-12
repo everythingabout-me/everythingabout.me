@@ -119,8 +119,10 @@ func filesHiddenRoots(f *fileRequest) []string {
 // would make one unfinished delete reject every write in the whole drive — the
 // owner cannot create a folder in an unrelated directory, and the capability
 // endpoint (which already unwraps) contradicts the mutation it advertises support
-// for. Mutations stay safe because every destination and selection is resolved
-// through the index with filesHiddenRoots, so a concealed path cannot be named.
+// for. Selection still goes through the index with filesHiddenRoots, so a concealed
+// entry cannot be read, moved or deleted by name; only a create/upload destination is
+// resolved without them (filesResolveWriteDestination), because acceptance frees the
+// name before the byte purge finishes.
 func filesNativeDriver(f *fileRequest) (fileops.NativeActions, bool) {
 	native, ok := filesUnderlyingDriver(f.Driver).(fileops.NativeActions)
 	return native, ok

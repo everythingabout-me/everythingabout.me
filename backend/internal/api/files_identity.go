@@ -22,7 +22,30 @@ type FileIdentityIndex interface {
 func filesSelectorError() error {
 	return fc.NewProblem(400, "invalid_selector", "Provide exactly one nonempty ID or path, or one valid destination.")
 }
+
+// filesResolveSelector resolves a selected entry for a read, or for a delete, which is
+// not a destination: a pending deletion has to stay unnameable, so the read-concealment
+// roots apply.
 func (s *Server) filesResolveSelector(ctx context.Context, f *fileRequest, selector fc.EntrySelector) (fc.Path, error) {
+	return s.filesResolveSelection(ctx, f, selector, true)
+}
+
+// filesResolveWriteDestination resolves the destination of a create, upload, replacement,
+// move or copy against the index instead of the read view.
+//
+// A pending delete must not make its path unavailable as a destination. Acceptance commits
+// the rows away and releases the guard, so the name is free the moment the client sees the
+// `202`, even while the byte purge still runs (docs/design/deletes.md: "the name is free as
+// soon as the deletion is accepted"). Resolving that destination through filesHiddenRoots
+// answered 404 not_found for a path that was, by contract, free — and the same 404 masked
+// the real answer while the delete was still being admitted (the durable delete guard, which
+// refuses an overlapping write with 409 operation_in_progress naming the operation). Reads
+// and deletes keep the concealment: a deleted path that is read is still gone.
+func (s *Server) filesResolveWriteDestination(ctx context.Context, f *fileRequest, selector fc.EntrySelector) (fc.Path, error) {
+	return s.filesResolveSelection(ctx, f, selector, false)
+}
+
+func (s *Server) filesResolveSelection(ctx context.Context, f *fileRequest, selector fc.EntrySelector, conceal bool) (fc.Path, error) {
 	if err := selector.Validate(); err != nil {
 		return "", err
 	}
@@ -46,6 +69,9 @@ func (s *Server) filesResolveSelector(ctx context.Context, f *fileRequest, selec
 	}
 	if !fc.WithinScope(f.Scope, p, filesPathKey(f)) {
 		return "", fc.NewProblem(404, "not_found", "The file was not found.")
+	}
+	if !conceal {
+		return p, nil
 	}
 	for _, hidden := range filesHiddenRoots(f) {
 		hp, err := fc.FromRelative(hidden)
@@ -73,9 +99,9 @@ func (s *Server) filesResolveDestination(ctx context.Context, f *fileRequest, d 
 		return "", err
 	}
 	if d.Path != "" {
-		return s.filesResolveSelector(ctx, f, fc.EntrySelector{Path: d.Path})
+		return s.filesResolveWriteDestination(ctx, f, fc.EntrySelector{Path: d.Path})
 	}
-	parent, err := s.filesResolveSelector(ctx, f, *d.Parent)
+	parent, err := s.filesResolveWriteDestination(ctx, f, *d.Parent)
 	if err != nil {
 		return "", err
 	}
@@ -84,7 +110,12 @@ func (s *Server) filesResolveDestination(ctx context.Context, f *fileRequest, d 
 	if s.filesIndex == nil {
 		return "", fc.NewProblem(503, "temporarily_unavailable", "The file index is unavailable.")
 	}
-	record, err := s.filesIndex.FileBrowseMetadata(ctx, f.Principal.User.ID, f.ContentNamespace, parent.Relative(), filesHiddenRoots(f)...)
+	// The destination parent is judged by the index alone: a delete that has been accepted
+	// already removed its rows, and one that is still being admitted still has them (its
+	// guard refuses the write). Passing the read-concealment roots here reported a parent
+	// that exists as parent_missing, so a create into a path a delete had just freed could
+	// never reach the guard or the native tree to be answered truthfully.
+	record, err := s.filesIndex.FileBrowseMetadata(ctx, f.Principal.User.ID, f.ContentNamespace, parent.Relative())
 	if err != nil {
 		return "", err
 	}
@@ -127,7 +158,13 @@ func (s *Server) filesResolvePutQuery(ctx context.Context, f *fileRequest, r *ht
 	if selector.IsID() && r.Header.Get("If-Match") == "" {
 		return "", fc.NewProblem(428, "precondition_required", "Replacing a file by ID requires If-Match.")
 	}
-	return s.filesResolveSelector(ctx, f, selector)
+	if r.Header.Get("If-Match") != "" {
+		// A replacement names an entry the client must still be able to read; a path a
+		// delete already concealed is not one, so it stays not_found rather than becoming
+		// a create that silently reuses the old native object.
+		return s.filesResolveSelector(ctx, f, selector)
+	}
+	return s.filesResolveWriteDestination(ctx, f, selector)
 }
 
 // An optional identity index keeps existing injected read-only fixtures useful;
