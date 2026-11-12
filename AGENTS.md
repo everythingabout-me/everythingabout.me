@@ -235,8 +235,15 @@ while its tests were skipping. CI (`.github/workflows/test.yml`) runs `make migr
 - Rate limiting is in-process memory (`internal/ratelimit`), so multiple instances each keep their own count;
   know that before changing it. It is a token bucket (continuous refill, no minute-turnover cliff), the file
   API's budget is keyed by owner (an address is not a user), and the account/legacy budget by token or address.
-- The timeline organizer is started separately with `StartTimeline(ctx)` after the server starts; the sweeper
-  scans for increments roughly every 20 minutes, and `POST /api/timeline/rebuild` is the manual full rebuild.
+- The timeline organizer is started separately with `StartTimeline(ctx)` after the server starts, for a COS
+  backend including coordinated writes. It is driven by the durable file change feed (`internal/filechanges`),
+  not by a periodic tree scan: a poll of the per-owner feed head schedules one coalescing `changes` job, which
+  analyzes at most one bounded batch of facts, queues the affected months, and only then advances the owner's
+  checkpoint (`timeline_change_positions`). Analysis is idempotent per entry revision, and the checkpoint plus
+  job rows make a restart or a crash mid-batch a replay rather than lost work. The feed is retained 90 days; a
+  checkpoint below the retained floor (pruning, restore, `file-changes-reset`) queues one full backfill instead
+  of silently skipping. `POST /api/timeline/rebuild` is the explicit full rebuild: it drops the owner's
+  analysis, moves the checkpoint to the feed head and scans the whole tree once.
 
 ## Database / migrations
 
@@ -476,8 +483,11 @@ Variants: `Committed locally main@abc1234, not pushed` / `Not committed (tests f
   prune old rows.
 - Changing the email address requires two verification codes, for **both the current and the new address**;
   a session alone cannot do it.
-- The timeline does not refresh immediately after a move / copy: wait for the sweeper or call
-  `POST /api/timeline/rebuild` manually.
+- The timeline follows the change feed within one poll interval (about five seconds), so an upload through
+  `/api/files` appears without waiting for a sweep. A **subtree** move is one folder change fact and does not
+  re-analyze every descendant; their stored path still resolves through the current index, but path-derived
+  facts (a screenshot marker, a date in the path) can lag until that file changes again. A file move or rename
+  is re-analyzed.
 - Upgrading from an older version: `sql/013_events.sql` clears the snapshot watermark and queues a recompute
   (it only runs while there are no events yet, so it is harmless if the file is ever re-executed);
   events only appear after the background pass finishes.

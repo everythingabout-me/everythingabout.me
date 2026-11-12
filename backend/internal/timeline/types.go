@@ -6,8 +6,13 @@
 // object that density is computed over.
 //
 // The pipeline deliberately has two steps:
-//  1. scan / backfill: turn files in nodes into timeline_assets (time, type, narrative or not);
+//  1. intake: a settled change fact from the durable feed (or a startup/rebuild
+//     backfill) turns a file into a timeline_assets row (time, type, narrative or not);
 //  2. month: group one month's assets into moments, select by budget, write timeline_snapshots.
+//
+// The change-feed intake is the normal path (changes.go); scan and backfill remain
+// for history that predates the feed and for explicit recovery. All three land in
+// the same timeline_assets table, so step 2 does not know which one produced a row.
 //
 // Analysis, grouping, scoring and naming all go through interfaces
 // (Analyzer / Grouper / Scorer / Narrator). Only heuristics exist today; plugging in

@@ -266,6 +266,17 @@ Pruning does not delete audit history, reset identity or remove unexpired feed r
 retains history indefinitely; no 365-day retention/deletion guarantee is implemented. Feed resumes below the
 retained floor or with an expired epoch return 410 cursor_expired. Snapshot expiry is 410 snapshot_expired.
 
+### The timeline is an internal consumer
+
+The timeline organizer reads this feed as a trusted owner-wide consumer (`filechanges.Read`, not the public
+scoped projection) with one checkpoint per owner in `timeline_change_positions`. The checkpoint is derived
+state, not a client continuation: a poll of the feed head schedules a coalescing `changes` job, the job
+analyzes one bounded batch and queues the affected months, and only then advances the checkpoint. A checkpoint
+inside the retained window is replayed idempotently; a checkpoint below the retained floor (pruning, restore,
+`file-changes-reset`) cannot reconstruct the skipped transitions, so it queues one full backfill and moves to
+the current head instead of silently skipping. This is why the internal consumer does not take a snapshot or a
+subscription lease: the tree, not the feed, is the authority, and the backfill is the recovery path.
+
 ### Durable root binding and restore/rebind procedure
 
 Migration 032 persists the change head's root namespace, derived from owner, connection ID, configuration

@@ -28,10 +28,12 @@ func New(db *store.DB, objectStorage storage.Storage, cfg config.Timeline, event
 	}
 }
 
-// Notify is called after files change. It queues only a scan, which handles files
-// modified in the last three days. Missing history is queued as backfill at startup
-// and by the 20-minute sweeper, so an upload never triggers a whole-library
-// "did we miss a file" query.
+// Notify is called after a legacy write path changes files. It queues only a scan,
+// which handles files modified in the last three days. The organizer's real trigger
+// is the durable change feed (see changes.go): the replacement file API settles a
+// change fact in the index transaction and never calls this. Missing history is
+// queued as backfill at startup and after a feed gap, so an upload never triggers a
+// whole-library "did we miss a file" query.
 func (s *Service) Notify(userID string) {
 	if !s.cfg.Enabled {
 		return
@@ -159,8 +161,12 @@ func (s *Service) hydrateMonth(month *Month) {
 	}
 }
 
-// Rebuild is the forced recompute for users and developers: drop this user's analysis
-// results and start over. The normal path never needs it; it costs O(file count).
+// Rebuild is the explicit full rebuild for users and developers: drop this user's
+// analysis results, jump the change checkpoint to the feed head (the backfill below
+// covers everything up to it by scanning the tree) and start over. Without the jump
+// the retained feed would be replayed on top of the full scan. The normal path never
+// needs this; it costs O(file count), and it is also the recovery path when the feed
+// no longer retains the checkpoint.
 func (s *Service) Rebuild(ctx context.Context, userID string) error {
 	tx, err := s.db.Pool().Begin(ctx)
 	if err != nil {
@@ -178,6 +184,16 @@ func (s *Service) Rebuild(ctx context.Context, userID string) error {
 	}
 	if _, err := tx.Exec(ctx,
 		`delete from timeline_assets where user_id = $1::uuid`, userID); err != nil {
+		return err
+	}
+	// The scan below owns history up to this position. A concurrent changes job may
+	// still save an older position, so the checkpoint only ever moves forward.
+	if _, err := tx.Exec(ctx,
+		`insert into timeline_change_positions (owner_id, position, updated_at)
+		 select owner_id, head_position, now() from file_change_heads where owner_id = $1::uuid
+		 on conflict (owner_id) do update
+		    set position = greatest(timeline_change_positions.position, excluded.position),
+		        updated_at = now()`, userID); err != nil {
 		return err
 	}
 	if _, err := tx.Exec(ctx,

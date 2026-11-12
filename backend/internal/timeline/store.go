@@ -118,14 +118,22 @@ func scanFileInputs(rows pgx.Rows) ([]FileInput, error) {
 	return files, rows.Err()
 }
 
-// upsertFacts writes one file fact. It returns false when the content signature is
-// unchanged, which avoids pointless month rebuilds.
+// upsertFacts writes one file fact. It returns false when the content signature and
+// the per-entry revision are both unchanged, which avoids pointless month rebuilds
+// and makes a replayed change fact (restart, retry, duplicate delivery) a no-op.
+//
+// revision is the change fact's Entry.Revision when the caller has one. An empty
+// revision means the caller only observed the current index state (scan/backfill):
+// its facts replace the stored ones and clear the revision, because the row no
+// longer describes exactly one recorded fact and the next feed fact must be
+// allowed to re-analyze it.
 func (s *Service) upsertFacts(
 	ctx context.Context,
 	file FileInput,
 	facts Facts,
 	localDate time.Time,
 	ambient bool,
+	revision string,
 ) (bool, error) {
 	signature := sourceSignature(file)
 	isNarrative := facts.Narrative && !ambient
@@ -133,8 +141,8 @@ func (s *Service) upsertFacts(
 		`insert into timeline_assets
 		   (user_id, node_id, event_time, local_date, time_source, time_confidence,
 		    media_type, is_narrative, is_ambient, is_screenshot, quality, source_sig,
-		    pipeline_version, analyzed_at)
-		 values ($1::uuid, $2::uuid, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, now())
+		    source_revision, pipeline_version, analyzed_at)
+		 values ($1::uuid, $2::uuid, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, now())
 		 on conflict (user_id, node_id) do update set
 		   event_time = excluded.event_time,
 		   local_date = excluded.local_date,
@@ -146,13 +154,15 @@ func (s *Service) upsertFacts(
 		   is_screenshot = excluded.is_screenshot,
 		   quality = excluded.quality,
 		   source_sig = excluded.source_sig,
+		   source_revision = excluded.source_revision,
 		   pipeline_version = excluded.pipeline_version,
 		   analyzed_at = now()
 		 where timeline_assets.source_sig <> excluded.source_sig
-		    or timeline_assets.pipeline_version < excluded.pipeline_version`,
+		    or timeline_assets.pipeline_version < excluded.pipeline_version
+		    or (excluded.source_revision <> '' and timeline_assets.source_revision is distinct from excluded.source_revision)`,
 		file.UserID, file.NodeID, facts.EventTime, localDate, facts.TimeSource,
 		facts.TimeConfidence, facts.MediaType, isNarrative, ambient, facts.Screenshot,
-		facts.Quality, signature, pipelineVersion)
+		facts.Quality, signature, revision, pipelineVersion)
 	if err != nil {
 		return false, err
 	}

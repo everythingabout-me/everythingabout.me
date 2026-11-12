@@ -191,6 +191,19 @@ func TestMigrateBootstrapsAPreVersioningDatabase(t *testing.T) {
 	if _, err := pool.Exec(ctx, `create table nodes (id int primary key)`); err != nil {
 		t.Fatal(err)
 	}
+	// Files after 044 still execute here (the rule cannot tell a history-less full
+	// schema from a history-less partial one), so the stub must carry the relations
+	// those files extend. 045 needs only these three; add more when a later file
+	// references another pre-044 table.
+	for _, statement := range []string{
+		`create table users (id uuid primary key)`,
+		`create table timeline_assets (user_id uuid not null, node_id uuid not null)`,
+		`create table timeline_jobs (id bigserial primary key, user_id uuid not null, kind text not null, status text not null default 'pending')`,
+	} {
+		if _, err := pool.Exec(ctx, statement); err != nil {
+			t.Fatal(err)
+		}
+	}
 	dir := t.TempDir()
 	copyMigrations(t, dir)
 	files, err := migrationFiles(dir)

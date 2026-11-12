@@ -117,8 +117,14 @@ func New(cfg *config.Config, db *store.DB, objectStorage storage.Storage, web ht
 func (s *Server) SetStorageFactory(factory OwnerStorageFactory) { s.trees = factory }
 
 // StartTimeline starts the background organizer. Run it after listen, so startup is not delayed.
+//
+// Coordinated-writes deployments used to skip this entirely, because the organizer
+// only knew about legacy upload notifications and would have scanned a tree it never
+// observed. It now consumes the durable change feed that the /api/files settlement
+// writes, so the production configuration runs it too. A server without a database
+// has no queue to organize (route-only construction in tests).
 func (s *Server) StartTimeline(ctx context.Context) {
-	if s.cfg.BackendName() != "cos" || s.cfg.Storage.CoordinatedWrites {
+	if s.cfg.BackendName() != "cos" || s.timeline == nil || s.db == nil {
 		return
 	}
 	s.timeline.Start(ctx)

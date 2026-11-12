@@ -457,7 +457,7 @@ Legacy `/api/fs/*` routes return 410.
 | GET | `/api/timeline?cursor=&limit=` | Read the event stream with authorized same-origin media references |
 | DELETE | `/api/events/{id}` | Delete one event (a tombstone, so it cannot come back) |
 | GET | `/api/timeline/status` | Organizing progress (unfinished tasks, files organized, earliest/latest month) |
-| POST | `/api/timeline/rebuild` | Force a full re-organize of the current account (drops the analysis results and backfills from scratch) |
+| POST | `/api/timeline/rebuild` | Force a full re-organize of the current account (drops the analysis results, moves the change checkpoint to the feed head and backfills the whole tree) |
 | GET | `/api/health` | Liveness probe |
 
 The auth write endpoints validate `Origin`/`Host` and rate limit in in-process memory (code sends: 30 per hour per
@@ -556,6 +556,6 @@ must bootstrap again; even same-namespace restores need reset to invalidate rest
 - **The event structure is in [`docs/design/events.md`](docs/design/events.md)**: one event = a time + one card (`photo` / `note` / `metric` / `html`) + an optional detail link; third-party apps submit through `POST /events` with a token that has `can_events`.
 - **Old databases need file times backfilled**: `nodes.source_modified_at` is new in this change, and legacy rows only get it after one `reconcile` run; until then the stream falls back to the index update time.
 - **"Daily video" detection is heuristic**: videos in the same directory spanning ≥7 days with ≥7 videos get folded into one series card; when the guess is wrong, a manual override could come later, or a model could replace it.
-- **Moving or copying a directory does not refresh the stream immediately**: the background sweeper scans recent changes every 20 minutes; if you want it now, use `POST /api/timeline/rebuild`.
+- **The stream follows the change feed, not a 20-minute sweep**: a settled change fact schedules analysis within seconds, so an upload through `/api/files` appears in the timeline without a manual rebuild. A **subtree** move is one folder fact and does not re-analyze every descendant (their current path still resolves; path-derived facts can lag until that file changes again); a file move or rename is re-analyzed.
 - **Events have no in-site editor yet**: right now the only sources are automatic (photo sessions) and third-party submissions; hand-written events, health-change cards, and merging are all still missing.
-- **Upgrading to the event model takes one migration run**: `sql/013_events.sql` creates `events` / `event_media` and marks the existing monthly snapshots stale; the next sweeper pass (or `POST /api/timeline/rebuild`) recomputes each month's pieces into events. Before the migration the stream is empty.
+- **Upgrading to the event model takes one migration run**: `sql/013_events.sql` creates `events` / `event_media` and marks the existing monthly snapshots stale; the organizer then recomputes each month's pieces into events from the change feed (or from its startup backfill). `POST /api/timeline/rebuild` forces the same recompute. Before the migration the stream is empty.

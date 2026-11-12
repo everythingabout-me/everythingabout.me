@@ -51,7 +51,7 @@ func (s *Service) Start(ctx context.Context) {
 	}()
 	go func() {
 		defer running.Done()
-		s.sweeper(ctx)
+		s.changeFeeder(ctx)
 	}()
 	go func() {
 		running.Wait()
@@ -61,8 +61,7 @@ func (s *Service) Start(ctx context.Context) {
 }
 
 // Wait blocks until every goroutine Start launched has returned, or ctx ends
-// first. It returns immediately when the organizer is disabled or never started
-// (a coordinated-writes deployment starts none at all).
+// first. It returns immediately when the organizer is disabled or never started.
 //
 // Waiting is not the same as draining a job. A worker that is asked to stop
 // abandons its job with status 'running', which recoverJobs resets at the next
@@ -134,40 +133,6 @@ func (s *Service) bootstrap(ctx context.Context) {
 	}
 }
 
-// sweeper is the safety net: changes that never pass through Notify (CLI reconcile,
-// writes from the public API) get picked up via users with recently updated rows.
-func (s *Service) sweeper(ctx context.Context) {
-	ticker := time.NewTicker(20 * time.Minute)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			if _, err := s.db.Pool().Exec(ctx,
-				`insert into timeline_jobs (user_id, kind)
-				 select distinct owner_id, 'scan'
-				   from nodes
-				  where owner_id is not null
-				    and is_dir = false
-				    and updated_at > now() - interval '25 minutes'
-				 on conflict do nothing`); err != nil {
-				slog.Warn("timeline: failed to enqueue periodic scan", "error", err)
-			}
-			if _, err := s.db.Pool().Exec(ctx,
-				`insert into timeline_jobs (user_id, kind)
-				 select n.owner_id, 'backfill'
-				   from nodes n
-				   left join timeline_assets a on a.user_id = n.owner_id and a.node_id = n.id
-				  where n.owner_id is not null and n.is_dir = false and a.node_id is null
-				  group by n.owner_id
-				 on conflict do nothing`); err != nil {
-				slog.Warn("timeline: failed to enqueue periodic backfill", "error", err)
-			}
-		}
-	}
-}
-
 func (s *Service) worker(ctx context.Context) {
 	for {
 		if ctx.Err() != nil {
@@ -200,6 +165,8 @@ func (s *Service) runJob(parent context.Context, item *job) {
 		err = s.runScan(ctx, item)
 	case "backfill":
 		err = s.runBackfill(ctx, item)
+	case "changes":
+		err = s.runChanges(ctx, item)
 	case "month":
 		err = s.runMonth(ctx, item)
 	default:
@@ -230,7 +197,7 @@ func (s *Service) runScan(ctx context.Context, item *job) error {
 			break
 		}
 		for _, file := range files {
-			if err := s.processFile(ctx, file); err != nil {
+			if err := s.processFile(ctx, file, ""); err != nil {
 				return err
 			}
 		}
@@ -256,7 +223,7 @@ func (s *Service) runBackfill(ctx context.Context, item *job) error {
 			break
 		}
 		for _, file := range files {
-			if err := s.processFile(ctx, file); err != nil {
+			if err := s.processFile(ctx, file, ""); err != nil {
 				return err
 			}
 			processed++
@@ -283,8 +250,9 @@ func (s *Service) runMonth(ctx context.Context, item *job) error {
 
 // processFile turns one file into a row in timeline_assets.
 // It is the only place that touches object bytes (and only for small files such as
-// health CSVs).
-func (s *Service) processFile(ctx context.Context, file FileInput) error {
+// health CSVs). revision is the change fact's per-entry revision when the caller has
+// one; an empty value means the caller only knows the current index state.
+func (s *Service) processFile(ctx context.Context, file FileInput, revision string) error {
 	facts, err := s.engine.Analyzer.Analyze(ctx, file)
 	if err != nil {
 		return err
@@ -313,7 +281,7 @@ func (s *Service) processFile(ctx context.Context, file FileInput) error {
 		}
 	}
 
-	_, err = s.upsertFacts(ctx, file, facts, localDate, ambient)
+	_, err = s.upsertFacts(ctx, file, facts, localDate, ambient, revision)
 	return err
 }
 

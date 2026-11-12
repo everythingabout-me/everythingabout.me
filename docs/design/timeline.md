@@ -695,7 +695,7 @@ Shipped:
 - Pluggable interfaces: `Analyzer`, `Grouper`, `Scorer`, `Narrator`, `AmbientExtractor`. When wiring in multimodal/LLM, swap the fields on `Engine`; nothing above changes;
 - API: `GET /api/timeline`, `GET /api/timeline/status`, `POST /api/timeline/rebuild`;
 - Frontend: `web/src/pages/StreamPage.tsx` (monthly stream, hero/mosaic/series/ambient/gap, infinite scroll, organizing progress, mobile);
-- Automatic `Notify` after upload/delete/rename; automatic backfill at startup; a sweeper as a safety net every 20 minutes.
+- Automatic backfill at startup; the durable change feed drives incremental analysis (`timeline_change_positions` + a coalescing `changes` job) instead of a periodic tree sweep; `POST /api/timeline/rebuild` is the explicit full rebuild.
 
 Not done yet (P1/P2):
 
