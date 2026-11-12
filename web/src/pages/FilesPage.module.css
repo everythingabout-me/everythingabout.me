@@ -355,6 +355,58 @@ a.crumb:hover {
   cursor: default;
 }
 
+/* Two rows of two: the standing answers first, because re-importing a folder is what asks
+   this question, and the per-file pair underneath for the drop of a single file. */
+.conflictActions {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  margin-top: 20px;
+}
+
+.conflictPrimary,
+.conflictSecondary {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 36px;
+  border-radius: 10px;
+  font-size: 14px;
+  font-weight: 500;
+  transition: filter 0.14s ease, background 0.14s ease;
+}
+
+.conflictPrimary {
+  background: var(--blue);
+  color: var(--btn-fg);
+}
+
+.conflictPrimary:hover {
+  filter: brightness(0.94);
+}
+
+.conflictSecondary {
+  background: var(--hover);
+  color: var(--text);
+}
+
+.conflictSecondary:hover {
+  filter: brightness(0.96);
+}
+
+/* The per-file answers keep the quieter text style, but fill their cell: the dialog's
+   background is the surface the shared hover uses, so these get the raised one. */
+.conflictActions .textBtn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 36px;
+}
+
+.conflictActions .textBtn:hover {
+  background: var(--hover);
+}
+
 /* ---------- Upload ---------- */
 
 .uploadMenu {
@@ -1050,6 +1102,20 @@ a.crumb:hover {
   color: var(--text-2);
   font-size: 13px;
   font-variant-numeric: tabular-nums;
+}
+
+/* A standing answer replaces files for the rest of the import, so it stays on screen with
+   the way out of it beside it. */
+.conflictNote {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 4px 8px 4px 14px;
+  border-bottom: 1px solid var(--border);
+  background: color-mix(in srgb, var(--hover) 55%, var(--surface));
+  color: var(--text-2);
+  font-size: 13px;
 }
 
 .readingDot {

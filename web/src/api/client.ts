@@ -944,8 +944,8 @@ async function uploadPresignedPart(grant: FileUploadPartGrant, blob: Blob, signa
  * trip per small file and two.
  *
  * A refusal to replace an existing object arrives as 409 FileAlreadyExists; it is reported
- * as the same name conflict the create endpoint answers, so the queue offers the overwrite
- * it already knows how to confirm.
+ * as the same name conflict the create endpoint answers, so the queue asks the same question
+ * — replace the file, keep it, or apply that answer to the rest of the import.
  */
 function sendFormPost(target: { url: string; fields: { name: string; value: string }[]; fileField: string }, blob: Blob,
   signal?: AbortSignal, onProgress?: (progress: UploadProgress) => void): Promise<void> {

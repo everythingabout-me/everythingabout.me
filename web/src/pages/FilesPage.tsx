@@ -34,7 +34,7 @@ import { TransferDialog, type TransferMode } from "../components/TransferDialog"
 import { filesHref, filesRoutePath } from "../filesPath";
 import { formatNumber, intlLocale, resultsText, t } from "../i18n";
 import { formatRelativeTime } from "../i18n/format";
-import { useUploadQueue, type UploadStatus, type UploadTask } from "./useUploadQueue";
+import { useUploadQueue, type ConflictChoice, type UploadStatus, type UploadTask } from "./useUploadQueue";
 import { resolveDeleteBlocker } from "./deleteBlocker";
 import { droppedUploadEntries, filesToUploadEntries, foldersWithoutFiles } from "./uploadSelection";
 import { buildUploadRows, failedTasks, isUploadDirectory, isUploadRowActive, type UploadRowEntry } from "./uploadRows";
@@ -464,6 +464,89 @@ function DeleteConfirmation({
         </button>
       </div>
     </dialog>
+  );
+}
+
+/**
+ * One question about a name that is already taken, and the answer for everything after it.
+ *
+ * It replaces the browser's own confirm, which this flow used per file. That dialog is
+ * modal, so a folder dropped over an existing tree stopped the tab once per existing file —
+ * and it can only answer about the file in front of it, when the question a re-import
+ * really asks is "which one do you mean for all of them". The standing answers are the
+ * point: they settle the questions already queued behind this one, and they let every later
+ * upload say which file it may replace before its create is sent, instead of being refused
+ * first. Escape answers "skip", because writing nothing is the answer that can be undone.
+ */
+function ConflictConfirmation({
+  path,
+  onAnswer,
+}: {
+  path: string;
+  onAnswer: (choice: ConflictChoice) => void;
+}) {
+  const dialog = useRef<HTMLDialogElement>(null);
+
+  useEffect(() => {
+    const element = dialog.current;
+    element?.showModal();
+    return () => element?.close();
+  }, []);
+
+  return (
+    <dialog
+      ref={dialog}
+      className={styles.deleteDialog}
+      aria-labelledby="conflict-title"
+      aria-describedby="conflict-description"
+      onCancel={(event) => {
+        event.preventDefault();
+        onAnswer("skip");
+      }}
+    >
+      <h2 id="conflict-title" className={styles.deleteTitle}>
+        {t("drive.conflictTitle")}
+      </h2>
+      <p id="conflict-description" className={styles.deleteDescription}>
+        {t("drive.conflictBody")}
+      </p>
+      <p className={styles.deletePath}>{path}</p>
+      <div className={styles.conflictActions}>
+        <button className={styles.conflictPrimary} onClick={() => onAnswer("replace-all")}>
+          {t("drive.conflictReplaceAll")}
+        </button>
+        <button className={styles.conflictSecondary} onClick={() => onAnswer("skip-all")}>
+          {t("drive.conflictKeepAll")}
+        </button>
+        <button className={styles.textBtn} onClick={() => onAnswer("replace")}>
+          {t("drive.conflictReplace")}
+        </button>
+        {/* Focus starts here, like the delete dialog's Cancel: Enter must not be the
+            key that overwrites a thousand files. */}
+        <button className={styles.textBtn} autoFocus onClick={() => onAnswer("skip")}>
+          {t("drive.conflictKeep")}
+        </button>
+      </div>
+    </dialog>
+  );
+}
+
+/**
+ * What the sheet says about a standing answer.
+ *
+ * A decision that outlives the dialog that made it has to be visible: it replaces files for
+ * as long as this import runs, and overwriting is permanent. The button beside it is the
+ * way back, and the only one that changes anything — the answer already given to a file
+ * stays given.
+ */
+function ConflictPolicyNote({ policy, onAskAgain }: { policy: "replace" | "skip"; onAskAgain: () => void }) {
+  return (
+    <div className={styles.conflictNote} role="status">
+      <span>{t(policy === "replace" ? "drive.conflictReplacing" : "drive.conflictKeeping")}</span>
+      <button className={styles.textBtn} onClick={onAskAgain}>
+        {t("drive.conflictAskAgain")}
+      </button>
+    </div>
   );
 }
 
@@ -907,6 +990,11 @@ export function FilesPage() {
     cancel: cancelUpload,
     retry: retryUpload,
     resume: resumeUpload,
+    conflict,
+    conflictPolicy,
+    answerConflict,
+    askForConflicts,
+    beginImport,
   } = useUploadQueue(handleUploaded);
 
   // The queue's latest published state, for a gesture that is a prop of every row: reading it
@@ -1351,6 +1439,9 @@ export function FilesPage() {
     const walk = { controller: new AbortController(), ids: new Set<string>() };
     uploadWalk.current = walk;
     setReadingUploads(0);
+    // A new drop is a new import: the previous one's standing answer to "already exists"
+    // was a decision about that selection, and this one will be asked separately.
+    beginImport();
     void droppedUploadEntries(event.dataTransfer, {
       signal: walk.controller.signal,
       onProgress: setReadingUploads,
@@ -1378,6 +1469,7 @@ export function FilesPage() {
     const files = Array.from(event.target.files ?? []);
     event.target.value = "";
     try {
+      beginImport();
       enqueue(filesToUploadEntries(files), path, itemExists);
     } catch (error) {
       showToast(error instanceof Error ? error.message : t("drive.readUploadFailed"), "error");
@@ -1759,6 +1851,10 @@ export function FilesPage() {
                 </div>
               )}
 
+              {conflictPolicy !== "ask" && hasActiveUploads && (
+                <ConflictPolicyNote policy={conflictPolicy} onAskAgain={askForConflicts} />
+              )}
+
               <UploadFailures tasks={failed} onRetry={retryUpload} onCancel={cancelUploadRow} />
 
               {creating && (
@@ -1870,6 +1966,12 @@ export function FilesPage() {
           onCancelOperation={() => void cancelTransfer()}
           onConfirm={(destination) => applyTransfer(transfer.mode, transfer.item, destination)}
         />
+      )}
+
+      {conflict !== null && (
+        // Keyed by path so a second question mounts a fresh dialog: the first one's modal
+        // state belongs to the file that was answered.
+        <ConflictConfirmation key={conflict} path={conflict} onAnswer={answerConflict} />
       )}
 
       {deleteTarget && (

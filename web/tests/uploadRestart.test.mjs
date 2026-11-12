@@ -6,7 +6,7 @@ const entry = () => ({ path: "file", file: new File(["ab"], "file", { type: "app
 const callsOf = (server, type) => server.calls.filter(([kind]) => kind === type);
 const complete = (queue) => queue.tasks[0]?.status === "completed";
 async function mount(t, api, options) {
-  const harness = await setup(api, { confirm: (message) => assert.fail(`unexpected upload prompt: ${message}`), ...options });
+  const harness = await setup(api, options);
   t.after(harness.unmount);
   return harness;
 }

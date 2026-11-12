@@ -412,18 +412,103 @@ test("pending ancestor delete blocks a folder tree while prefix siblings continu
   assert.deepEqual(callsOf(server, "mkdir").map(([, path]) => path), ["root", "root/nested"]);
 });
 
-test("existing folder merges and a conflicting file uses its content revision for confirmed overwrite", async (t) => {
+test("existing folder merges and a conflicting file uses its content revision for a confirmed overwrite", async (t) => {
   const server = uploadServer();
   const create = server.api.createUpload;
   server.api.mkdir = async () => { throw new TestApiError("exists", 409, { code: "name_conflict" }); };
-  server.api.metadata = async (path) => item(path, path === "folder" ? "folder" : "file");
+  server.api.metadata = async (path) => { server.calls.push(["metadata", path]); return item(path, path === "folder" ? "folder" : "file"); };
   server.api.createUpload = async (...args) => { if (args[0].condition.mode === "create") throw new TestApiError("exists", 409, { code: "name_conflict" }); return create(...args); };
-  let prompts = 0;
-  const harness = await mount(t, server.api, { confirm: () => { prompts++; return true; } });
+  const harness = await mount(t, server.api);
   enqueue(harness, [{ path: "folder", file: null }, entry("folder/file")]);
+  const asking = await harness.until((queue) => queue.conflict === "folder/file", "the existing file is asked about in the page");
+  assert.equal(asking.conflictPolicy, "ask", "one file's conflict decides nothing on its own");
+  asking.answerConflict("replace");
   await harness.until(allComplete, "existing folders must merge before children upload");
-  assert.equal(prompts, 1);
   assert.deepEqual(callsOf(server, "create")[0][1].condition, { mode: "replace", contentRevision: "content-v1" });
+  // The refused create already read the destination: the replacement reuses that revision
+  // instead of asking again, which is one request per conflicting file off a re-import.
+  assert.equal(callsOf(server, "metadata").filter(([, path]) => path === "folder/file").length, 1);
+});
+
+test("one standing answer settles every later conflict and later creates carry it", async (t) => {
+  const server = uploadServer();
+  const create = server.api.createUpload;
+  const creates = [];
+  server.api.metadata = async (path) => item(path);
+  server.api.createUpload = async (input, key) => {
+    creates.push([input.condition.mode, input.path]);
+    if (input.condition.mode === "create") throw new TestApiError("exists", 409, { code: "name_conflict" });
+    return create(input, key);
+  };
+  const harness = await mount(t, server.api);
+  enqueue(harness, [entry("a", "ab"), entry("b", "cd")]);
+  let queue = await harness.until((queue) => queue.conflict !== null);
+  queue.answerConflict("replace-all");
+  queue = await harness.until(allComplete);
+  assert.equal(queue.conflict, null, "a standing answer leaves nothing to ask about");
+  assert.equal(queue.conflictPolicy, "replace");
+  assert.deepEqual(creates.filter(([mode]) => mode === "replace").map(([, path]) => path), ["a", "b"]);
+  // A selection made under the standing answer, whose destination the page already lists,
+  // asks for the replacement before its first create: no refusal, no question, one request.
+  harness.render().enqueue([entry("c", "ef")], "", () => true);
+  await harness.until((queue) => queue.tasks.every((task) => task.status === "completed"));
+  assert.deepEqual(creates.at(-1), ["replace", "c"]);
+  assert.equal(creates.filter(([mode, path]) => path === "c" && mode === "create").length, 0);
+});
+
+test("keeping an existing file leaves it out of the import instead of failing the row", async (t) => {
+  const server = uploadServer();
+  let attempts = 0;
+  server.api.metadata = async (path) => item(path);
+  server.api.createUpload = async () => { attempts++; throw new TestApiError("exists", 409, { code: "name_conflict" }); };
+  const harness = await mount(t, server.api);
+  enqueue(harness, [entry("file", "ab")]);
+  let queue = await harness.until((queue) => queue.conflict === "file");
+  queue.answerConflict("skip");
+  queue = await harness.until((queue) => queue.tasks.length === 0, "a kept file is not an import failure");
+  assert.equal(queue.conflict, null);
+  assert.equal(attempts, 1, "keeping the file sends no second create");
+});
+
+test("a standing replace creates the file when the destination disappeared before its turn", async (t) => {
+  const server = uploadServer();
+  const create = server.api.createUpload;
+  let refused = false, vanished = false;
+  server.api.metadata = async (path) => item(path);
+  server.api.createUpload = async (input, key) => {
+    if (input.condition.mode === "create" && !refused) { refused = true; throw new TestApiError("exists", 409, { code: "name_conflict" }); }
+    // The tree was edited between the question and this file's turn: the revision the
+    // replacement named no longer exists.
+    if (input.condition.mode === "replace" && vanished) throw new TestApiError("the destination no longer exists", 412, { code: "target_changed" });
+    return create(input, key);
+  };
+  const harness = await mount(t, server.api);
+  enqueue(harness, [entry("file", "ab")]);
+  const queue = await harness.until((queue) => queue.conflict === "file");
+  vanished = true;
+  queue.answerConflict("replace-all");
+  await harness.until(allComplete, "a vanished destination must not fail the row");
+  assert.equal(callsOf(server, "create").at(-1)[1].condition.mode, "create");
+});
+
+test("a new import does not inherit the previous import's standing answer", async (t) => {
+  const server = uploadServer();
+  const create = server.api.createUpload;
+  server.api.metadata = async (path) => item(path);
+  server.api.createUpload = async (...args) => {
+    if (args[0].condition.mode === "create") throw new TestApiError("exists", 409, { code: "name_conflict" });
+    return create(...args);
+  };
+  const harness = await mount(t, server.api);
+  enqueue(harness, [entry("file", "ab")]);
+  const asking = await harness.until((queue) => queue.conflict === "file");
+  asking.answerConflict("replace-all");
+  await harness.until(allComplete);
+  assert.equal(harness.render().conflictPolicy, "replace");
+  // Replacing a file is permanent: the next drop is asked about, not answered by a decision
+  // that belonged to the previous one.
+  harness.render().beginImport();
+  assert.equal(harness.render().conflictPolicy, "ask");
 });
 
 test("async mkdir completion is polled by its original Operation and never reallocates mkdir", async (t) => {
@@ -837,7 +922,7 @@ test("an unavailable original session never authorizes a fresh allocation", asyn
 test("name conflict after a lost pre-allocation request still offers revision-bound overwrite", async (t) => {
   const server = uploadServer();
   const create = server.api.createUpload;
-  let first = true, prompts = 0;
+  let first = true;
   const attempts = [];
   server.api.createUpload = async (...args) => {
     attempts.push(structuredClone(args.slice(0, 2)));
@@ -845,12 +930,14 @@ test("name conflict after a lost pre-allocation request still offers revision-bo
     if (args[0].condition.mode === "create") throw new TestApiError("exists", 409, { code: "name_conflict" });
     return create(...args);
   };
-  const harness = await mount(t, server.api, { confirm: () => { prompts++; return true; } });
+  const harness = await mount(t, server.api);
   enqueue(harness, [entry("file", "ab")]);
-  const queue = await harness.until((queue) => queue.tasks[0]?.status === "failed");
+  let queue = await harness.until((queue) => queue.tasks[0]?.status === "failed");
   queue.retry(queue.tasks[0].id);
-  await harness.until(allComplete);
-  assert.equal(prompts, 1);
+  queue = await harness.until((queue) => queue.conflict === "file", "the refused create is asked about in the page");
+  queue.answerConflict("replace");
+  queue = await harness.until(allComplete);
+  assert.equal(queue.conflict, null, "an answered conflict leaves nothing on screen");
   assert.equal(attempts[0][1], attempts[1][1], "first recover the uncertain allocation key");
   assert.notEqual(attempts[1][1], attempts[2][1], "accepted overwrite binds a new intent and key");
   assert.deepEqual(attempts[2][0].condition, { mode: "replace", contentRevision: "content-v1" });

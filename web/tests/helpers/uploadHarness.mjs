@@ -178,7 +178,7 @@ export function uploadServer(partSize = 2, options = {}) {
 }
 
 export async function setup(overrides = {}, options = {}) {
-  const { storage = memoryStorage(), owner = "owner-a", confirm = () => true } = options;
+  const { storage = memoryStorage(), owner = "owner-a" } = options;
   const locks = Object.hasOwn(options, "locks") ? options.locks : memoryLocks();
   const navigator = { locks };
   const slots = [], effects = [], timers = new Map(), completed = [], listeners = new Map();
@@ -187,7 +187,10 @@ export async function setup(overrides = {}, options = {}) {
   // "selecting a folder must not publish once per file" an assertion instead of a hope.
   let stateUpdates = 0;
   const window = {
-    confirm,
+    // The queue asks in the page, not with a native dialog: one refusal is a decision about
+    // a whole import, and `window.confirm` cannot carry that answer. Reaching this is a
+    // regression, so it fails the test instead of silently answering.
+    confirm: () => assert.fail("the upload queue must ask in the page, not with window.confirm"),
     addEventListener(type, listener) {
       if (!listeners.has(type)) listeners.set(type, new Set());
       listeners.get(type).add(listener);

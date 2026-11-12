@@ -137,6 +137,16 @@ export interface UploadTask {
   path: string;
   size: number;
   overwrite: boolean;
+  /**
+   * The content revision a conflict probe saw at the destination.
+   *
+   * A replace condition names the exact bytes it may overwrite, so building one normally
+   * costs a metadata read per file. The refused create that discovered the conflict has
+   * just paid for that read, and carrying it here is what makes the second attempt of a
+   * file one request instead of two. The server still checks it at the write: a file that
+   * changed in between is refused, never silently replaced.
+   */
+  observedRevision?: string;
   /** The upload creates missing ancestor folders instead of waiting for their tasks. */
   parents: boolean;
   status: UploadStatus;
@@ -182,6 +192,20 @@ export interface UploadCancelSummary {
   items: number;
   completedItems: number;
 }
+/**
+ * What a person decided about a destination that already exists.
+ *
+ * The "all" answers exist because one conflict is never the whole story. A folder being
+ * re-uploaded meets an existing file at almost every path, and asking per file is how an
+ * Apple Health export turned into thousands of dialogs that blocked the tab: the browser's
+ * own confirm is modal, cannot say "for the rest", and every refusal cost a create the
+ * server had to answer before it could ask. The standing answer also makes the later
+ * uploads cheaper — their create carries the replace condition from the first attempt
+ * instead of being refused first — and it lasts exactly as long as the import that made it.
+ */
+export type ConflictChoice = "replace" | "replace-all" | "skip" | "skip-all";
+/** The standing answer, or `ask` when every conflict is its own question. */
+export type ConflictPolicy = "ask" | "replace" | "skip";
 export interface UploadQueue {
   tasks: UploadTask[];
   hasActiveUploads: boolean;
@@ -214,6 +238,28 @@ export interface UploadQueue {
    * same record, so the row could only be cancelled.
    */
   resume(id: string): void;
+  /**
+   * The destination this queue is asking about, or null when nobody is being asked.
+   *
+   * The question is in the page, not in the browser's confirm: that dialog blocks the tab,
+   * cannot offer the standing answer, and is raised from inside the queue's own loop, so
+   * one folder of existing files stopped everything until every dialog was dismissed.
+   */
+  conflict: string | null;
+  /** This import's standing answer, so the sheet can show it and take it back. */
+  conflictPolicy: ConflictPolicy;
+  /** Answer the question on screen; the "all" answers also settle the ones behind it. */
+  answerConflict(choice: ConflictChoice): void;
+  /** Stop applying the standing answer: the next conflict asks again. */
+  askForConflicts(): void;
+  /**
+   * A new gesture.
+   *
+   * The standing answer belongs to the import that made it. A drop made an hour later
+   * inherits nothing: replacing a file is permanent, and a decision nobody was asked about
+   * this time is exactly the silent overwrite the create condition exists to prevent.
+   */
+  beginImport(): void;
 }
 interface Runtime { controller: AbortController; }
 interface PartWaiter { rank: number; number: number; resolve: () => void; }
@@ -262,6 +308,19 @@ function message(error: unknown): string {
   return error instanceof Error ? error.message : t("error.unknown");
 }
 function isOperation(value: Item | FileOperation): value is FileOperation { return "state" in value && "progress" in value; }
+/**
+ * What is at this path now, or null when nothing is.
+ *
+ * A destination that was taken can be gone by the time the queue asks about it — a re-import
+ * runs while someone else edits the same tree. A 404 is an answer (the name is free again);
+ * every other failure is a read that failed and still belongs to the row's error.
+ */
+async function observedEntry(path: string): Promise<Item | null> {
+  return api.metadata(path).catch((error: unknown) => {
+    if (error instanceof ApiError && error.status === 404) return null;
+    throw error;
+  });
+}
 /**
  * What the row says while it waits for a deletion.
  *
@@ -344,6 +403,14 @@ export function useUploadQueue(onUploaded: (task: UploadTask, item: Item) => voi
   // make each start O(tasks).
   const openDirs = useRef(new Set<string>());
   const [published, setPublished] = useState<UploadTask[]>([]);
+  // The standing answer and the questions waiting behind it. The ref is what the queue
+  // reads (a conflict is answered from inside an async attempt, never from a render), the
+  // state is only what the sheet shows.
+  const policyRef = useRef<ConflictPolicy>("ask");
+  const [policy, setPolicy] = useState<ConflictPolicy>("ask");
+  const conflicts = useRef<{ path: string; resolve: (choice: "replace" | "skip") => void }[]>([]);
+  const [conflict, setConflict] = useState<string | null>(null);
+  const conflictOpen = useRef(false);
   const flushTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const owner = useRef("");
   const pathClaims = useRef(new Map<string, () => void>());
@@ -495,6 +562,47 @@ export function useUploadQueue(onUploaded: (task: UploadTask, item: Item) => voi
     pumpQueued.current = true;
     queueMicrotask(() => { pumpQueued.current = false; pumpRef.current(); });
   }, []);
+  /**
+   * Ask about one existing destination, or answer from the standing decision.
+   *
+   * One question at a time: the pump stops starting new files while it is on screen, so a
+   * person answers the file in front of them instead of a stack of identical dialogs, and
+   * the questions already queued behind it are settled by an "all" answer. Each waiter is
+   * one file, not one gesture: answering "replace" for the file that was asked about must
+   * not decide the next one, which is the difference between the two answers.
+   */
+  const askConflict = useCallback((path: string) => new Promise<"replace" | "skip">((resolve) => {
+    if (policyRef.current !== "ask") { resolve(policyRef.current); return; }
+    conflicts.current.push({ path, resolve });
+    if (conflicts.current.length === 1) {
+      conflictOpen.current = true;
+      setConflict(path);
+    }
+  }), []);
+  const answerConflict = useCallback((choice: ConflictChoice) => {
+    const decision = choice === "replace" || choice === "replace-all" ? "replace" : "skip";
+    const standing = choice === "replace-all" || choice === "skip-all";
+    if (standing) {
+      policyRef.current = decision;
+      setPolicy(decision);
+    }
+    conflicts.current.shift()?.resolve(decision);
+    if (standing) for (const waiter of conflicts.current.splice(0)) waiter.resolve(decision);
+    conflictOpen.current = conflicts.current.length > 0;
+    setConflict(conflicts.current[0]?.path ?? null);
+    requestPump();
+  }, [requestPump]);
+  const askForConflicts = useCallback(() => {
+    policyRef.current = "ask";
+    setPolicy("ask");
+  }, []);
+  const beginImport = useCallback(() => {
+    // A question already on screen belongs to the import that raised it; a new gesture
+    // must not answer it from underneath the person reading it.
+    if (conflictOpen.current) return;
+    policyRef.current = "ask";
+    setPolicy("ask");
+  }, []);
   const publish = useCallback(() => {
     if (!mounted.current) return;
     if (flushTimer.current !== undefined) {
@@ -567,6 +675,20 @@ export function useUploadQueue(onUploaded: (task: UploadTask, item: Item) => voi
     }
     schedulePublish();
   }, [dropAdmission, releaseClaim, schedulePublish]);
+  /**
+   * Leave an existing destination alone.
+   *
+   * A skip is the person's answer, not a failure, so the row leaves the sheet the way a
+   * cancelled one does instead of ending the import with a wall of red for files that are
+   * already exactly where they should be. A session this file had already opened goes with
+   * it: an open session holds a reservation against the owner's quota until it expires,
+   * and nothing will ever use this one.
+   */
+  const skip = useCallback((id: string) => {
+    const task = tasks.current.get(id);
+    if (task?.uploadId) void api.abortUpload(task.uploadId).catch(() => {});
+    remove([id]);
+  }, [remove]);
   const complete = useCallback((task: UploadTask, item: Item) => {
     if (!mounted.current || !tasks.current.has(task.id)) return;
     if (task.uploadId) verified.current.delete(task.uploadId);
@@ -590,7 +712,7 @@ export function useUploadQueue(onUploaded: (task: UploadTask, item: Item) => voi
         remove([task.id]);
       }
       else if (task.retryRequested) {
-        patch(task.id, { status: "queued", uploadId: undefined, operationId: undefined, intent: undefined, createKey: taskId(), terminalState: undefined, retryRequested: false, uploaded: false, loaded: 0 });
+        patch(task.id, { status: "queued", uploadId: undefined, operationId: undefined, intent: undefined, observedRevision: undefined, createKey: taskId(), terminalState: undefined, retryRequested: false, uploaded: false, loaded: 0 });
       } else patch(task.id, { status: "failed", speed: 0, terminalState: task.isDir ? undefined : op.state === "failed" ? "failed" : "aborted", error: op.error ? problemText(op.error) : t("drive.uploadFailed") });
     } else { patch(task.id, { status: "finalizing", speed: 0 }); }
   }, [complete, patch, remove]);
@@ -619,10 +741,20 @@ export function useUploadQueue(onUploaded: (task: UploadTask, item: Item) => voi
     if (!intent) {
       if (!task.file) throw new Error(t("drive.uploadFileUnavailable"));
       let condition: FileUploadInput["condition"] = { mode: "create" };
-      if (task.overwrite) {
-        const old = await api.metadata(task.path);
-        if (old.kind !== "file" || !old.contentRevision) throw new Error("The destination cannot be replaced safely.");
-        condition = { mode: "replace", contentRevision: old.contentRevision };
+      if (task.overwrite && task.observedRevision) {
+        condition = { mode: "replace", contentRevision: task.observedRevision };
+      } else if (task.overwrite) {
+        // A replace condition names the bytes it is allowed to overwrite, and a standing
+        // "replace" is a decision about a destination that can be gone by the time this
+        // file's turn comes — a re-imported tree edited between the drop and this row. An
+        // absent destination cannot be named (412 target_changed), so the row creates
+        // instead: the same thing the person would do by hand, and not a failure that has
+        // to be answered again for every file behind it.
+        const old = await observedEntry(task.path);
+        if (old) {
+          if (old.kind !== "file" || !old.contentRevision) throw new Error("The destination cannot be replaced safely.");
+          condition = { mode: "replace", contentRevision: old.contentRevision };
+        }
       }
       const sourceModifiedAt = await supportsSourceModifiedAt();
       if (signal.aborted) throw new DOMException("Upload canceled", "AbortError");
@@ -798,10 +930,22 @@ export function useUploadQueue(onUploaded: (task: UploadTask, item: Item) => voi
               return;
             }
           }
+          if (error instanceof ApiError && error.status === 412 && error.code === "target_changed" && task.overwrite && task.observedRevision) {
+            // The destination the replace condition named is gone — the tree was edited
+            // between the conflict probe and this attempt. Nothing is left to replace, so
+            // the row creates; leaving it failed would turn a deleted file into an import
+            // that has to be answered again.
+            patch(id, { overwrite: false, observedRevision: undefined, intent: undefined, createKey: taskId(), status: "queued" });
+            return;
+          }
           if (error instanceof ApiError && error.status === 409 && error.code === "name_conflict" && !task.overwrite) {
-            const old = await api.metadata(task.path);
-            if (old.kind === "file" && window.confirm(t("drive.overwriteConfirm", { name: task.name }))) {
-              patch(id, { overwrite: true, intent: undefined, createKey: taskId(), status: "queued" }); return;
+            const old = await observedEntry(task.path);
+            if (!old) { patch(id, { status: "queued", intent: undefined, createKey: taskId() }); return; }
+            if (old.kind === "file") {
+              if (await askConflict(task.path) === "replace") {
+                patch(id, { overwrite: true, observedRevision: old.contentRevision ?? undefined, intent: undefined, createKey: taskId(), status: "queued" }); return;
+              }
+              skip(id); return;
             }
           }
           throw error;
@@ -819,7 +963,7 @@ export function useUploadQueue(onUploaded: (task: UploadTask, item: Item) => voi
       if (session.state !== "open") {
         if (session.state === "failed" || session.state === "aborted" || session.state === "expired") {
           if (task.retryRequested && task.file) {
-            patch(id, { status: "queued", uploadId: undefined, operationId: undefined, intent: undefined, createKey: taskId(), terminalState: undefined, retryRequested: false, uploaded: false, loaded: 0 }); return;
+            patch(id, { status: "queued", uploadId: undefined, operationId: undefined, intent: undefined, observedRevision: undefined, createKey: taskId(), terminalState: undefined, retryRequested: false, uploaded: false, loaded: 0 }); return;
           }
           patch(id, { terminalState: session.state });
         }
@@ -1068,12 +1212,18 @@ export function useUploadQueue(onUploaded: (task: UploadTask, item: Item) => voi
         patch(id, { status: "waiting", waitingFor, waitMessage: waitMessage(waitingFor), speed: 0 });
       } else if (error instanceof ApiError && error.status === 409 && error.code === "name_conflict" && !(tasks.current.get(id)?.overwrite)) {
         // A direct publication that lost the race for the destination is the same decision
-        // the create endpoint reports: replace the file, or leave it. The abandoned session
-        // needs nothing from here — the next admission for this path ends it.
+        // the create endpoint reports: replace the file, or leave it. The session is over
+        // either way — the provider refused the write — so a skip ends it rather than
+        // leaving an open session nobody will ever commit.
         const current = tasks.current.get(id);
-        const old = current ? await api.metadata(current.path) : null;
-        if (current && old?.kind === "file" && window.confirm(t("drive.overwriteConfirm", { name: current.name }))) {
-          patch(id, { overwrite: true, intent: undefined, uploadId: undefined, createKey: taskId(), status: "queued", error: undefined, speed: 0 });
+        const old = current ? await observedEntry(current.path) : null;
+        if (current && !old) {
+          // The name is free again: the publication lost to a file that is no longer there.
+          patch(id, { uploadId: undefined, intent: undefined, createKey: taskId(), status: "queued", error: undefined, speed: 0 });
+        } else if (current && old && old.kind === "file") {
+          if (await askConflict(current.path) === "replace") {
+            patch(id, { overwrite: true, observedRevision: old.contentRevision ?? undefined, intent: undefined, uploadId: undefined, createKey: taskId(), status: "queued", error: undefined, speed: 0 });
+          } else { skip(id); }
         } else {
           patch(id, { status: "failed", error: message(error), speed: 0 });
         }
@@ -1083,9 +1233,14 @@ export function useUploadQueue(onUploaded: (task: UploadTask, item: Item) => voi
       transferring.current.delete(id);
       requestPump();
     }
-  }, [acquirePart, applyOperation, complete, ensureAdmission, patch, releasePart, releaseWindow, requestPump, settleUpload]);
+  }, [acquirePart, applyOperation, askConflict, complete, ensureAdmission, patch, releasePart, releaseWindow, requestPump, settleUpload, skip]);
   const pump = useCallback(() => {
     if (!ready.current || !mounted.current) return;
+    // A question on screen is the queue's turn to wait. Files already moving keep moving —
+    // the question is about a destination, not about stopping bytes — but nothing new is
+    // started, so the person answers the conflict they can see instead of one from a stack
+    // of dialogs they did not ask for.
+    if (conflictOpen.current) return;
     // Two stages, two bounds. Admission runs ADMIT_AHEAD files ahead of the window, so a
     // file that starts moving already holds its session and its first byte never waits for
     // a create page; the window then only bounds files whose bytes are moving, which is
@@ -1229,7 +1384,7 @@ export function useUploadQueue(onUploaded: (task: UploadTask, item: Item) => voi
     // its key must still get a fresh look (the prepare may have been refused before).
     if (task?.terminalState) dropAdmission(id);
     patch(id, { status: "queued", error: undefined, speed: 0, retryRequested: true,
-      ...(task?.terminalState ? { uploadId: undefined, operationId: undefined, intent: undefined, createKey: taskId(), terminalState: undefined, uploaded: false, loaded: 0 } : {}) });
+      ...(task?.terminalState ? { uploadId: undefined, operationId: undefined, intent: undefined, observedRevision: undefined, createKey: taskId(), terminalState: undefined, uploaded: false, loaded: 0 } : {}) });
     publish();
     pumpRef.current();
   }, [cancel, dropAdmission, patch, publish]);
@@ -1268,12 +1423,18 @@ export function useUploadQueue(onUploaded: (task: UploadTask, item: Item) => voi
           // above is the only guarantee that its geometry would have matched.
           dropAdmission(old.id);
           patch(old.id, { file: entry.file, status: "queued", error: undefined, retryRequested: true,
-            ...(old.terminalState ? { uploadId: undefined, operationId: undefined, intent: undefined, createKey: taskId(), terminalState: undefined, uploaded: false, loaded: 0 } : {}) });
+            ...(old.terminalState ? { uploadId: undefined, operationId: undefined, intent: undefined, observedRevision: undefined, createKey: taskId(), terminalState: undefined, uploaded: false, loaded: 0 } : {}) });
         }
         continue;
       }
-      const overwrite = !!entry.file && exists(path);
-      if (overwrite && !window.confirm(t("drive.overwriteConfirm", { name: entry.path }))) continue;
+      // The listing knows this folder's own children and nothing deeper, so what it can save
+      // is one refused create — and only once this import has already answered the question.
+      // It is allowed to add work, never to remove it: a stale hit under a standing
+      // "replace" costs a read the server was about to do anyway (an absent destination is
+      // created instead), while a stale hit under "keep" would drop a file the person
+      // dropped because the name it thought was taken may be gone. What is already there is
+      // the server's answer to give, so a kept file is decided there.
+      const overwrite = !!entry.file && exists(path) && policyRef.current === "replace";
       const id = taskId();
       const task: UploadTask = { id, file: entry.file, isDir: !entry.file, name: entry.path, dir: relative(dir), path, size: entry.file?.size ?? 0, modifiedAt: entry.file?.lastModified,
         overwrite, parents: !!entry.file && path.includes("/"), status: "queued", loaded: 0, speed: 0, activeParts: 0, uploaded: false, createKey: id };
@@ -1377,6 +1538,11 @@ export function useUploadQueue(onUploaded: (task: UploadTask, item: Item) => voi
       admissionFailed.current.clear();
       for (const release of pathClaims.current.values()) release();
       pathClaims.current.clear();
+      // A question nobody is left to answer must not leave its file awaiting a promise that
+      // can no longer settle: leaving the page answers every one of them with the answer
+      // that writes nothing.
+      for (const waiter of conflicts.current.splice(0)) waiter.resolve("skip");
+      conflictOpen.current = false;
     };
   }, [applyOperation, patch, publish, remove]);
   const hasActiveUploads = published.some((task) => ["queued", "waiting", "uploading", "finalizing"].includes(task.status));
@@ -1389,5 +1555,6 @@ export function useUploadQueue(onUploaded: (task: UploadTask, item: Item) => voi
     window.addEventListener("beforeunload", beforeUnload);
     return () => window.removeEventListener("beforeunload", beforeUnload);
   }, [hasActiveUploads]);
-  return { tasks: published, hasActiveUploads, enqueue, cancel, retry, resume };
+  return { tasks: published, hasActiveUploads, enqueue, cancel, retry, resume,
+    conflict, conflictPolicy: policy, answerConflict, askForConflicts, beginImport };
 }
