@@ -320,6 +320,7 @@ func TestCOSNativeCapabilities(t *testing.T) {
 			t.Run(operation+"/"+condition, func(t *testing.T) { p.probeMutation(t, operation, condition) })
 		}
 	}
+	t.Run("conditional_put_is_enforced", func(t *testing.T) { p.probeConditionalPut(t) })
 	t.Run("copy_source_condition_is_distinct_from_target", func(t *testing.T) {
 		source, target := p.key(t, "source-condition-source"), p.key(t, "source-condition-target")
 		version := p.put(t, source, "captured", nil).Header.Get("ETag")
@@ -329,6 +330,35 @@ func TestCOSNativeCapabilities(t *testing.T) {
 		p.classifyMutation(t, target, "destination", "changed", response, err, true, false)
 	})
 	t.Log("live conditions are per-operation observations only; atomic visibility, delayed provider effects, ABA and recovery quiescence remain unverified")
+}
+
+// probeConditionalPut measures the one guard a direct class A replacement has: a PUT
+// carrying a stale If-Match must be refused with 412 instead of replacing the object.
+//
+// The matrix below observes this generically among many conditions; this named check is
+// what the admission evidence mirrors as `conditionalPut`, so the capability and the live
+// measurement are visibly the same fact. An ignored header is reported, not failed: the
+// admission probe records it and the service routes replacement through multipart, where
+// the client's parts stay unpublished until the server completes them. It is a failure
+// only if the request itself is broken (a 5xx or a transport error), because neither
+// answer would measure the condition.
+func (p *liveCOSProbe) probeConditionalPut(t *testing.T) {
+	t.Helper()
+	key := p.key(t, "conditional-put-if-match")
+	first := p.put(t, key, "old", nil)
+	p.put(t, key, "current", nil)
+	headers := http.Header{"If-Match": {first.Header.Get("ETag")}}
+	response, err := p.client.Object.Put(p.ctx, key, strings.NewReader("stale"), &cos.ObjectPutOptions{ObjectPutHeaderOptions: &cos.ObjectPutHeaderOptions{XOptionHeader: &headers}})
+	if err == nil {
+		p.bytes(t, key, "stale")
+		t.Logf("conditional PUT If-Match IGNORED HTTP %d: a direct class A replacement must not use the conditional PUT on this connection", response.StatusCode)
+		return
+	}
+	if response == nil || response.StatusCode != 412 {
+		t.Fatalf("stale conditional PUT neither refused with 412 nor applied: response=%v err=%v", response, err)
+	}
+	p.bytes(t, key, "current")
+	t.Logf("conditional PUT If-Match ENFORCED HTTP 412, bytes unchanged; a direct class A replacement may use the conditional PUT")
 }
 
 func (p *liveCOSProbe) probeReads(t *testing.T) {

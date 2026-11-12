@@ -2,6 +2,8 @@ package objectmutation
 
 import (
 	"context"
+	"io"
+	"strings"
 	"testing"
 	"time"
 
@@ -223,4 +225,103 @@ func TestBeginDirectPutRefusesWhatOnePutCannotPublish(t *testing.T) {
 			t.Fatalf("%s: expected the direct path to refuse", name)
 		}
 	}
+}
+
+// A replacement's signed If-Match is the grant's only guard: nothing else compares a native
+// revision before the client's write, and the grant outlives the session that signed it (up
+// to an hour), so a superseded session can replace a newer file with old bytes. That makes
+// it a measured capability rather than the object-driver default: a create is covered by
+// the connection's conditional-create evidence (the overwrite switch refuses an occupied
+// key), a replacement needs the connection to have refused a stale If-Match itself.
+func TestDirectReplacementRequiresMeasuredConditionalPut(t *testing.T) {
+	driver, _, metadata := signedFixture(t)
+	defer driver.Close()
+	ctx := context.Background()
+	replacement := storage.WriteIntent{
+		ID: "replace-1", Target: "folder/file.txt", Size: 4, MediaType: "text/plain",
+		Conditions: storage.Conditions{ExpectedRevision: []byte(`native-etag:"abc"`)},
+	}
+	if driver.SupportsDirectPut(replacement.Conditions) {
+		t.Fatal("a replacement was offered without conditional-PUT evidence")
+	}
+	if _, err := driver.BeginDirectPut(ctx, replacement, metadata, time.Now().Add(time.Minute)); !storage.IsCode(err, "unsupported") {
+		t.Fatalf("signing a replacement without measured evidence = %v, want unsupported", err)
+	}
+	// The create condition is another measurement and another promise; it keeps direct
+	// publication, because its request also carries the provider's overwrite switch.
+	if !driver.SupportsDirectPut(storage.Conditions{Absent: true}) {
+		t.Fatal("a create lost direct publication because replacement evidence is missing")
+	}
+	// The alternative route has to exist for the driver to choose it: the same replacement
+	// plans and seals as an ordinary multipart session.
+	if _, err := driver.BeginPlannedUpload(ctx, replacement, metadata, time.Now().Add(10*time.Minute)); err != nil {
+		t.Fatalf("class A cannot express the replacement as a multipart session: %v", err)
+	}
+	driver.options.Admission.ConditionalPut = true
+	if !driver.SupportsDirectPut(replacement.Conditions) {
+		t.Fatal("measured conditional PUT did not admit direct replacement")
+	}
+	if _, err := driver.BeginDirectPut(ctx, replacement, metadata, time.Now().Add(time.Minute)); err != nil {
+		t.Fatalf("measured conditional PUT did not sign the replacement: %v", err)
+	}
+}
+
+// Routing a replacement through multipart is what buys the safety: the parts stay
+// unpublished, and the commit re-observes the destination and refuses a revision that moved
+// before sending the one request that publishes. A provider that ignores PUT If-Match can
+// therefore still not be published over a newer file by an older session.
+func TestMultipartReplacementRefusesAChangedDestinationBeforePublishing(t *testing.T) {
+	driver, backend, metadata := signedFixture(t)
+	defer driver.Close()
+	ctx := context.Background()
+	publish := func(id, data string, cond storage.Conditions) storage.Entry {
+		t.Helper()
+		intent := storage.WriteIntent{ID: id, Target: "target", Size: int64(len(data)), MediaType: "application/octet-stream", Conditions: cond}
+		stage, err := driver.Stage(ctx, intent, strings.NewReader(data), cpOK)
+		if err != nil {
+			t.Fatal(err)
+		}
+		result, err := driver.Publish(ctx, stage, cpOK)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return *result.Entry
+	}
+	original := publish("original", "old!", storage.Conditions{Absent: true})
+	replacement := storage.WriteIntent{ID: "replacement", Target: "target", Size: int64(len("newer")), MediaType: "application/octet-stream", Conditions: storage.Conditions{ExpectedRevision: original.Revision}}
+	if _, err := driver.BeginPlannedUpload(ctx, replacement, metadata, time.Now().Add(10*time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	backend.parts = map[int][]byte{1: []byte("newer")}
+	sealed, err := driver.SealPlannedUpload(ctx, replacement, metadata, cpOK)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Somebody else replaces the destination after this session bound its revision: the
+	// bytes a client would have uploaded are already at the provider, still unpublished.
+	publish("interloper", "hijack", storage.Conditions{ExpectedRevision: original.Revision})
+	completes := backend.completeCalls
+	if _, err = driver.Publish(ctx, sealed, cpOK); !storage.IsCode(err, "changed") {
+		t.Fatalf("stale multipart replacement = %v, want changed", err)
+	}
+	if backend.completeCalls != completes {
+		t.Fatal("a stale multipart replacement sent its publishing request")
+	}
+	if data := mustOpen(t, driver, "target"); string(data) != "hijack" {
+		t.Fatalf("newer destination bytes were overwritten: %q", data)
+	}
+}
+
+func mustOpen(t *testing.T, driver *Driver, path storage.Path) []byte {
+	t.Helper()
+	read, err := driver.Open(context.Background(), path, storage.ReadOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer read.Body.Close()
+	data, err := io.ReadAll(read.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return data
 }

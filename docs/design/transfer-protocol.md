@@ -162,7 +162,7 @@ The grant has two shapes, chosen by the connection, never by the client:
 
 | Shape | Request | How the condition travels |
 |---|---|---|
-| conditional PUT | `PUT` at the destination with `If-None-Match: *` (create) or `If-Match` (replace), plus the provider's overwrite switch | the condition is in the **signed headers**, so the signature covers it |
+| conditional PUT | `PUT` at the destination: `If-None-Match: *` plus the provider's overwrite switch (create), or `If-Match` alone (replace) | the condition is in the **signed headers**, so the signature covers it |
 | form upload | `POST` `multipart/form-data` to the bucket root, every value in the body | the condition is in the **signed policy**: exact key, exact length, media type, `x-cos-forbid-overwrite: true` |
 
 The form upload exists for one reason: a browser sends `multipart/form-data` as a CORS-simple
@@ -173,13 +173,30 @@ another length gets a policy refusal, and the commit still verifies the object i
 
 What a form upload cannot express is a **replacement**: there is no "only if the current revision
 is X" in a form, and the provider ignores `If-None-Match` on it. Replacement therefore keeps the
-conditional PUT. A form upload is also unusable through the edge upload ingress, which rewrites
-provider URLs to a same-origin path that serves `PUT` only.
+conditional PUT — but only on a connection that measured it is enforced. A form upload is also
+unusable through the edge upload ingress, which rewrites provider URLs to a same-origin path that
+serves `PUT` only.
 
-The capability is evidence, not configuration: the connection probe measures a `PUT` carrying only
-the provider's overwrite switch on an occupied key, records `formPost` in the admission evidence,
-and a probe version that predates that measurement invalidates the file and is re-measured on the
-next start. A connection that cannot prove it keeps the conditional PUT.
+A *create* and a *replacement* are different promises, so the probe measures them separately. A
+create's condition is the provider's overwrite switch, which a form upload relies on exclusively and
+the conditional PUT sends alongside `If-None-Match: *`; `conditionalCreate` and `formPost` cover it.
+A replacement's condition is a single `If-Match` in the signed headers and nothing else: no server
+request compares a revision before the client writes, and the grant remains usable for up to an
+hour after its session is superseded. A provider may enforce conditional GET and DELETE while
+ignoring `If-Match` on PUT — COS does exactly that, and a wrong-`If-Match` PUT succeeds. The
+`conditionalPut` probe therefore writes a key, replaces it unconditionally, then asks the old
+revision to publish again; only a refusal (412, bytes unchanged) admits the direct replacement.
+Where it is not measured, the replacement is not refused: it is the ordinary multipart session
+whose parts stay unpublished until the server completes them, so a superseded grant cannot write
+the destination at all. The cost is the staging round trips this section exists to avoid, paid only
+for replacements on connections that cannot enforce the header.
+
+The capabilities are evidence, not configuration: the connection probe measures a `PUT` carrying
+only the provider's overwrite switch on an occupied key (`formPost`) and a `PUT` carrying a stale
+`If-Match` (`conditionalPut`), and a probe version that predates either measurement invalidates the
+file so it is re-measured on the next start. A connection that cannot prove `formPost` keeps the
+conditional PUT for creates; one that cannot prove `conditionalPut` routes replacements through
+multipart.
 
 ## 5. Class B — cloud-drive sessions
 

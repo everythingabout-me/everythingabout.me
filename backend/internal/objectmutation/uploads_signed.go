@@ -81,11 +81,28 @@ func (d *Driver) BeginPlannedUpload(ctx context.Context, in storage.WriteIntent,
 	return storage.PlannedUpload{Handle: []byte(session.UploadID), PartSize: nativePartSize, Parts: parts, ExpiresAt: expires.UTC()}, nil
 }
 
-// SupportsDirectPut reports whether the backend can sign a conditional PUT at the
-// destination. A backend without that capability keeps the multipart path.
-func (d *Driver) SupportsDirectPut() bool {
-	_, ok := d.backend.(DirectPutBackend)
-	return ok && d.SignedUploadSupported()
+// SupportsDirectPut reports whether the backend can sign the single destination PUT that
+// carries this condition. A backend without the capability keeps the multipart path.
+//
+// A create is already covered by the connection's conditional-create evidence: the signed
+// PUT sends both If-None-Match: * and the provider's overwrite switch, and the probe measured
+// that an occupied key is refused. A replacement has only the If-Match in its signed
+// headers, so it needs its own measurement — a provider may enforce conditional GET and
+// DELETE while ignoring If-Match on PUT, which is exactly what COS does. Without that
+// evidence the replacement is not refused; it is routed through multipart, where the parts
+// stay unpublished until the server completes them and a superseded grant cannot write the
+// destination at all.
+func (d *Driver) SupportsDirectPut(cond storage.Conditions) bool {
+	if _, ok := d.backend.(DirectPutBackend); !ok || !d.SignedUploadSupported() {
+		return false
+	}
+	if cond.Absent {
+		return true
+	}
+	if len(cond.ExpectedRevision) == 0 {
+		return false
+	}
+	return d.options.Admission.ConditionalPut
 }
 
 // BeginDirectPut signs one conditional PUT at the destination itself. Nothing is staged
@@ -97,15 +114,15 @@ func (d *Driver) BeginDirectPut(ctx context.Context, in storage.WriteIntent, met
 	if err := d.validateUploadIntent(in); err != nil {
 		return grant, err
 	}
+	if !in.Conditions.Absent && len(in.Conditions.ExpectedRevision) == 0 {
+		return grant, fail("precondition_required", in.Target)
+	}
 	backend, ok := d.backend.(DirectPutBackend)
-	if !ok || !d.SupportsDirectPut() {
+	if !ok || !d.SupportsDirectPut(in.Conditions) {
 		return grant, fail("unsupported", in.Target)
 	}
 	if in.Size <= 0 || in.Size > nativePartSize {
 		return grant, fail("unsupported", in.Target)
-	}
-	if !in.Conditions.Absent && len(in.Conditions.ExpectedRevision) == 0 {
-		return grant, fail("precondition_required", in.Target)
 	}
 	if !expires.After(time.Now()) {
 		return grant, fail("invalid_request", in.Target)

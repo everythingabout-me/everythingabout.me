@@ -454,8 +454,11 @@ Variants: `Committed locally main@abc1234, not pushed` / `Not committed (tests f
   for conditional writes): its grant writes the destination itself — a conditional PUT, or a form upload whose
   signed policy carries the same condition (`x-cos-forbid-overwrite`, exact key and length) because a browser
   sends `multipart/form-data` without a CORS preflight — so the client's write is the publication and the
-  commit only verifies the object and settles the index. A replacement always keeps the conditional PUT: a
-  form upload cannot say "only this revision". That swap costs one window in
+  commit only verifies the object and settles the index. A replacement keeps the conditional PUT only on a
+  connection whose probe measured that a stale `If-Match` is refused (412), because that signed header is the
+  grant's only guard and the grant outlives its superseded session; elsewhere the replacement is a multipart
+  session whose parts stay unpublished until the server completes them (a form upload can never express
+  "only this revision"). That swap costs one window in
   which the native tree holds a file the index has not recorded (reconcile adopts it, and a purge must not
   treat it as an orphan), in exchange for one provider write instead of five per small file. A provider
   credential is never issued to a principal whose scope is narrower than its reach. See

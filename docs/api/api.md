@@ -200,7 +200,10 @@ because an ancestor moved. Metadata revision preconditions compare the indexed v
 Mutations separately enforce their admitted native conditions before applying finite effects. Object roots
 capture the current ETag as native revision evidence and use operation-specific native conditions where
 enforced. COS ignores PUT If-Match, so admitted replacement rechecks ETag under gateway coordination; this
-does not fence arbitrary external writers. Stable IDs add no native conditional or version-pinning guarantee.
+does not fence arbitrary external writers. A direct class A replacement is offered only on a connection whose
+probe measured that a stale If-Match is refused (412); otherwise the same replacement is a multipart session
+whose parts stay unpublished until the server completes them. Stable IDs add no native conditional or
+version-pinning guarantee.
 `contentRevision` is the saved, native-evidence-backed content generation and is null when none is recorded or
 on folders; it is not synthesized from index timestamps. Content GET/HEAD and conditional replacements verify
 current native evidence before using it. `size/mediaType/checksum` are null on folders. A verified checksum
@@ -791,6 +794,16 @@ grant signs a PUT at the destination itself, carrying the create/replace conditi
 signed headers. `PUT` returning `2xx` means the object exists; the commit then verifies it
 (`HEAD`) and settles identity, quota, change facts and audit.
 
+**A replacement is only signed this way when the connection's probe measured that a PUT with a
+stale `If-Match` is refused (412).** The header is the grant's only guard — the client's PUT is the
+publication, no server request compares a revision first, and the grant stays usable for up to an
+hour after its session is superseded — so a provider that ignores `If-Match` on PUT would let an
+old session overwrite a newer file with old bytes. COS does. On such a connection the replacement
+is not refused: the same create returns an ordinary multipart transport whose parts stay unpublished
+until the server completes them, paying the staging round trips a small file otherwise avoids.
+Creates are unaffected; their request also carries the provider's overwrite switch, which
+`conditionalCreate`/`formPost` measure separately.
+
 A client sends a grant's headers verbatim and adds none of its own. The condition is part of
 the signature, so dropping a bound header sends no bytes at all (a client that refuses the
 grant fails the file before the request leaves), and a header the grant did not bind — an
@@ -814,7 +827,10 @@ direct path costs one PUT and one `HEAD`. In exchange, the object exists before 
 does — reconcile adopts such a file if the process dies between the PUT and the commit, and
 a purge must not treat a just-published object as an orphan. A provider without conditional
 writes keeps the multipart path; nothing falls back at runtime, the session's mode is fixed
-at creation.
+at creation. A connection that has stopped admitting the condition (its evidence was
+re-measured after the session was admitted) refuses to re-sign the grant with
+`409 direct_put_unavailable` rather than handing back the unguarded PUT; the client aborts and
+creates the upload again, which routes the replacement through multipart.
 
 ### Commit
 
@@ -825,7 +841,7 @@ visible and a replace has already overwritten the old content before the server 
 | Class | Commit behaviour |
 |---|---|
 | A (multipart) | Lists native parts, verifies every number with its exact bound length, performs `CompleteMultipartUpload` once at the final key, then settles index/quota |
-| A (direct) | The client PUT a single conditional object at the destination, so the commit only observes it: it takes the path guard, proves the destination binding, verifies length and revision, then settles index/quota. A create signed this way is refused as `name_conflict` (`412` from the provider) when the name exists |
+| A (direct) | The client PUT a single conditional object at the destination, so the commit only observes it: it takes the path guard, requires the destination to be a file of the session's exact length, records the revision it actually finds as the content generation and settles index/quota. It does **not** compare that revision with the one the session bound — the client's own write already happened — so the commit prevents index divergence, not overwriting. A create signed this way is refused as `name_conflict` (`412` from the provider) when the name exists |
 | B | Verifies the provider holds the full length, then completes the provider session itself (OneDrive deferred commit, Box session commit, Dropbox `upload_session/finish`; Google Drive completes on the final chunk), then settles |
 | C | Verifies coverage from durable receipts and publishes |
 
@@ -1016,7 +1032,9 @@ Object roots use current ETags as native revisions: `pinnedRead`, `strongContent
 `sourceModifiedAt` are false, while upload, replacement, folder creation, move, copy and deletion are
 available whenever `write` is true and the requested action is admitted. Native condition enforcement is
 operation-specific; COS PUT ignores If-Match, so replacement uses gateway coordination and an immediate
-ETag recheck. Outside writers are not globally fenced; object reads are validated but not version-pinned.
+ETag recheck, and a one-part *direct* replacement is offered only where the connection's probe measured that
+a stale If-Match is refused — otherwise the session publishes through multipart. Outside writers are not
+globally fenced; object reads are validated but not version-pinned.
 Scans synchronize observed index metadata; budget counters retain the initial compared baseline plus
 application journal changes/reservations, not exact quota state across unsynchronized outside writers.
 

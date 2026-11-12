@@ -482,7 +482,7 @@ func (s *Server) handleFilesCreateUpload(w http.ResponseWriter, r *http.Request,
 		case fc.PutCreate:
 			// Adoption needs the bytes to be provably this owner's own failed publication
 			// and a transfer class that can publish without the client uploading again.
-			if writer, ok := native.(storage.DirectPutWriter); ok && writer.SupportsDirectPut() && s.filesTransferClass() == storage.TransferPresignedParts {
+			if writer, ok := native.(storage.DirectPutWriter); ok && writer.SupportsDirectPut(storage.Conditions{Absent: true}) && s.filesTransferClass() == storage.TransferPresignedParts {
 				published = s.filesReclaimsPublication(r.Context(), root.OwnerID, string(intent.Target), existing, *req.Size)
 			}
 			if !published {
@@ -536,13 +536,15 @@ func (s *Server) handleFilesCreateUpload(w http.ResponseWriter, r *http.Request,
 	encoded, _ := json.Marshal(intent)
 	// One conditional PUT publishes a file that fits in a single part: the client writes the
 	// destination itself, so nothing is staged and the commit only verifies the object. A
-	// driver that cannot sign that condition keeps the multipart path.
+	// driver that cannot sign that condition keeps the multipart path — and a replacement is
+	// one of those cases when the connection did not measure that it refuses a stale
+	// If-Match, because the signed header would then be the grant's only guard.
 	mode := fileops.UploadModeMultipart
 	if published {
 		// Nothing is staged: the writer observes the object the client already wrote.
 		mode = fileops.UploadModeDirect
 	} else if *req.Size > 0 && *req.Size <= filesUploadPartSize && s.filesTransferClass() == storage.TransferPresignedParts {
-		if writer, ok := native.(storage.DirectPutWriter); ok && writer.SupportsDirectPut() {
+		if writer, ok := native.(storage.DirectPutWriter); ok && writer.SupportsDirectPut(intent.Conditions) {
 			mode = fileops.UploadModeDirect
 		}
 	}
@@ -660,6 +662,14 @@ func (s *Server) filesDirectPutTransport(ctx context.Context, native fileops.Nat
 	writer, ok := native.(storage.DirectPutWriter)
 	if !ok {
 		return nil, fc.NewProblem(503, "temporarily_unavailable", "This connection cannot sign a conditional destination PUT.")
+	}
+	if !writer.SupportsDirectPut(intent.Conditions) {
+		// The session's stored mode is direct, but this connection no longer admits the
+		// condition it would sign — a replacement whose grant had no guard but the If-Match
+		// the provider may ignore. Re-signing it would be the finding again, so the session
+		// stops here instead; a new create for the same path routes through multipart.
+		return nil, fc.NewProblem(409, "direct_put_unavailable",
+			"This storage connection does not enforce the condition a direct replacement PUT carries, so this session cannot continue; abort it and create the upload again to use multipart publication.")
 	}
 	grant, err := writer.BeginDirectPut(ctx, intent, nil, s.filesPartGrantExpiry(u))
 	if err != nil {

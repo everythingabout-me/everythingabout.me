@@ -61,10 +61,16 @@ func LoadAdmission(path string) (Admission, error) {
 	}
 	return a, nil
 }
+
 // AdmissionVersion names the probe whose evidence this build requires. It advances when a
 // probe learns a property an older file cannot answer, because a capability measured by an
 // older probe is not evidence about today's connection.
-const AdmissionVersion = 2
+//
+// 3 adds conditionalPut: whether a PUT carrying a stale If-Match is refused. Evidence written
+// by probe 2 has no field for it, so keeping those files would leave direct class A
+// replacement (whose only guard is that header) admitted on the strength of an assumption
+// nobody measured. Re-measuring is the point of the version, not a side effect.
+const AdmissionVersion = 3
 
 func ValidateAdmission(a Admission) error {
 	var problems []string

@@ -348,8 +348,11 @@ func runStorageConnectionProbe(args []string) error {
 	}
 	fmt.Printf("probed storage connection %q: %s bucket %q region %q\n", c.Name, admission.Endpoint, admission.Bucket, admission.Region)
 	fmt.Printf("  evidence: %s\n  transcript: %s\n", effective.Storage.ObjectAdmissionFile, admission.ProbeReference)
-	fmt.Printf("  conditional create: %t  atomic publish: %t  multipart: %t  form post: %t\n",
-		admission.ConditionalCreate, admission.AtomicPublish, admission.MultipartUploads, admission.FormPost)
+	fmt.Printf("  conditional create: %t  conditional put: %t  atomic publish: %t  multipart: %t  form post: %t\n",
+		admission.ConditionalCreate, admission.ConditionalPut, admission.AtomicPublish, admission.MultipartUploads, admission.FormPost)
+	if !admission.ConditionalPut {
+		fmt.Println("  replacement: multipart (a direct replacement PUT would carry an If-Match this connection was not measured to enforce)")
+	}
 	return nil
 }
 

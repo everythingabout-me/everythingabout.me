@@ -144,11 +144,18 @@ coordinate external writes with active application mutations according to the ad
 lock does not lock rclone, Finder or another cloud client.
 
 **Object writes:** object connections use one mutation strategy whose revision tokens are current-object
-ETags with operation-specific native `If-Match` / `If-None-Match` where enforced. COS ignores PUT If-Match;
-admitted replacement uses gateway coordination and an immediate ETag recheck, without fencing arbitrary
-external writers. Bucket versioning is neither required nor consulted. Upload, replacement, mkdir, move, copy
-and delete are available; implicit prefix folders are valid parents without fabricated native version evidence,
-and reads are validated but not version-pinned. Indexed folders still have real service IDs. Durable publication evidence
+ETags with operation-specific native `If-Match` / `If-None-Match` where enforced. Enforcement is measured per
+connection rather than assumed from S3 compatibility: `conditionalCreate` probes the overwrite switch on an
+occupied key, and `conditionalPut` probes a PUT carrying a stale `If-Match` — COS ignores that header on PUT
+while it enforces conditional GET and DELETE. A replacement through the gateway uses coordination and an
+immediate ETag recheck regardless, without fencing arbitrary external writers. A **direct** class A
+replacement — the client's PUT is the publication and its grant lives up to an hour — is offered only where
+`conditionalPut` was measured, because that signed header is its only guard; elsewhere the same session
+becomes a multipart upload whose parts stay unpublished until the server completes them, paying the staging
+round trips a small file otherwise avoids. Bucket versioning is neither required nor consulted. Upload,
+replacement, mkdir, move, copy and delete are available; implicit prefix folders are valid parents without
+fabricated native version evidence, and reads are validated but not version-pinned. Indexed folders still
+have real service IDs. Durable publication evidence
 and unknown-outcome guards apply to every effect. Initial native/index comparison is a matched observation;
 budget counters retain that baseline plus application journal changes and reservations. Synchronization updates
 external metadata in the index but does not update budgets. A separate reviewed budget resynchronization is

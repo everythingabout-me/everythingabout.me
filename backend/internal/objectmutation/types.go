@@ -35,6 +35,18 @@ type Admission struct {
 	// an occupied key: the provider's overwrite switch alone, which is the whole guarantee
 	// a form post has.
 	FormPost bool `json:"formPost,omitempty"`
+	// ConditionalPut attests that a plain PUT carrying a stale If-Match is refused (412)
+	// instead of replacing the object. COS enforces conditional GET and DELETE but ignores
+	// If-Match on PUT, and a provider may change that per endpoint, so the only evidence
+	// this service accepts is a refusal it measured on this exact connection.
+	//
+	// False is not an admission failure: the connection still publishes through multipart,
+	// where the client's parts stay unpublished until the server completes them. What it
+	// forbids is a direct class A replacement, because that grant's *only* guard is the
+	// If-Match the client sends — the client's PUT is the publication, so an unenforced
+	// header leaves a superseded session able to overwrite a newer file with old bytes for
+	// as long as its grant lives (up to an hour).
+	ConditionalPut bool `json:"conditionalPut,omitempty"`
 	// SignedMultipartParts attests COS Content-MD5 rejection and no-SSE part ETag=MD5.
 	SignedMultipartParts bool `json:"signedMultipartParts,omitempty"`
 	// ListingETag additionally attests, for this exact endpoint, that a delimiter

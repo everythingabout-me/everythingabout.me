@@ -89,10 +89,14 @@ type PlannedUploadWriter interface {
 // the destination simply does not implement this interface, and the service keeps the
 // multipart path for it.
 type DirectPutWriter interface {
-	// SupportsDirectPut reports whether this driver's provider can honour the condition on
-	// a single PUT. The interface is implemented by every object driver, but only an
-	// admitted conditional-write backend answers true.
-	SupportsDirectPut() bool
+	// SupportsDirectPut reports whether this driver's provider can honour the condition the
+	// single destination PUT would carry. It takes the condition because a create and a
+	// replacement are different promises: a create's overwrite switch can be enforced where
+	// PUT If-Match is ignored, and a replacement's *only* guard is that If-Match. A connection
+	// that did not measure a refused stale If-Match answers false for a replacement, and the
+	// service keeps the multipart path — the client's parts stay unpublished until the server
+	// completes them, so a superseded grant cannot overwrite a newer file.
+	SupportsDirectPut(Conditions) bool
 	// BeginDirectPut signs one exact-length conditional PUT at the destination and returns
 	// it as a one-part grant. No provider request is made here.
 	BeginDirectPut(context.Context, WriteIntent, UploadMetadata, time.Time) (SignedPartGrant, error)

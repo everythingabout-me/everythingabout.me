@@ -5,9 +5,11 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -67,6 +69,7 @@ func EnsureAdmission(ctx context.Context, cfg *config.Config) error {
 	slog.Info("refreshed object admission evidence for the configured connection",
 		"path", path, "bucket", bucket, "region", region,
 		"conditional_create", admission.ConditionalCreate,
+		"conditional_put", admission.ConditionalPut,
 		"atomic_publish", admission.AtomicPublish,
 		"multipart_uploads", admission.MultipartUploads)
 	return nil
@@ -285,6 +288,12 @@ func ProbeAdmission(ctx context.Context, backend objectmutation.Backend) (object
 		return admission, observations, fmt.Errorf("object admission probe: overwrite switch on %s: %w", createKey, err)
 	}
 
+	// A direct class A replacement is published by the client's PUT, so the If-Match in its
+	// signed headers is the only thing standing between a superseded session's still-valid
+	// grant and a newer file. Measure it on a key of its own: a provider that ignores the
+	// header replaces the object here, which must not spoil the checks above.
+	admission.ConditionalPut = probeConditionalPut(ctx, backend, root+"conditional-put", &observations)
+
 	if multipart != nil {
 		admission.MultipartUploads = probeMultipart(ctx, backend, multipart, multipartKey, &observations)
 	}
@@ -337,6 +346,65 @@ func probeMultipart(ctx context.Context, whole objectmutation.Backend, backend o
 		*observations = append(*observations, probeObservation{Property: "multipartUploads", Request: "Complete absent=true on an occupied key", Result: "error: " + err.Error()})
 		return false
 	}
+}
+
+// probeConditionalPut measures the one guard a direct class A replacement has: a PUT whose
+// If-Match names a revision the key no longer holds must be refused (412), not applied.
+//
+// The sequence makes the condition stale on purpose — write, replace unconditionally, then
+// PUT the old revision — because a provider that only enforces the header on an absent key
+// would pass a weaker check. When the request is refused the bytes are read back under the
+// current ETag, so "rejected" is a measurement of the object too, not just of a status code.
+func probeConditionalPut(ctx context.Context, backend objectmutation.Backend, key string, observations *[]probeObservation) bool {
+	const oldBytes, currentBytes, staleBytes = "probe-old", "probe-current", "probe-stale"
+	old, err := backend.Put(ctx, objectmutation.Put{Key: key, Body: strings.NewReader(oldBytes), Size: int64(len(oldBytes)), MediaType: "application/octet-stream", Absent: true})
+	if err != nil {
+		*observations = append(*observations, probeObservation{Property: "conditionalPut", Request: "create fixture for a stale If-Match", Result: "failed: " + err.Error()})
+		return false
+	}
+	defer func() { cleanupProbe(context.Background(), backend, key) }()
+	current, err := backend.Put(ctx, objectmutation.Put{Key: key, Body: strings.NewReader(currentBytes), Size: int64(len(currentBytes)), MediaType: "application/octet-stream"})
+	if err != nil {
+		*observations = append(*observations, probeObservation{Property: "conditionalPut", Request: "advance the fixture past its first revision", Result: "failed: " + err.Error()})
+		return false
+	}
+	_, err = backend.Put(ctx, objectmutation.Put{Key: key, Body: strings.NewReader(staleBytes), Size: int64(len(staleBytes)), MediaType: "application/octet-stream", ExpectedETag: old.ETag})
+	switch {
+	case storage.IsCode(err, "precondition_failed"):
+		// Only 412 is the condition this grant relies on. A different refusal (the provider's
+		// own overwrite switch, say) says nothing about If-Match and must not be read as
+		// evidence for it; a missing status means the adapter did not report one, and its
+		// typed code already comes only from a 412.
+		if status := providerStatus(err); status != 0 && status != http.StatusPreconditionFailed {
+			*observations = append(*observations, probeObservation{Property: "conditionalPut", Request: "PUT If-Match <stale ETag>", Result: fmt.Sprintf("refused with HTTP %d, not the 412 a replacement grant relies on", status)})
+			return false
+		}
+		if drift := probeBytesIntact(ctx, backend, key, current.ETag, currentBytes); drift != nil {
+			*observations = append(*observations, probeObservation{Property: "conditionalPut", Request: "PUT If-Match <stale ETag>", Result: "drifted: " + drift.Error()})
+			return false
+		}
+		*observations = append(*observations, probeObservation{Property: "conditionalPut", Request: "PUT If-Match <stale ETag>", Result: "rejected (412)", Bytes: currentBytes})
+		return true
+	case err == nil:
+		*observations = append(*observations, probeObservation{Property: "conditionalPut", Request: "PUT If-Match <stale ETag>", Result: "accepted (provider replaced the object)", Bytes: staleBytes})
+		return false
+	case storage.IsCode(err, "unsupported"):
+		*observations = append(*observations, probeObservation{Property: "conditionalPut", Request: "PUT If-Match <stale ETag>", Result: "unsupported"})
+		return false
+	default:
+		*observations = append(*observations, probeObservation{Property: "conditionalPut", Request: "PUT If-Match <stale ETag>", Result: "error: " + err.Error()})
+		return false
+	}
+}
+
+// providerStatus reports the HTTP status of a refused provider request, or 0 when the
+// adapter did not attach one.
+func providerStatus(err error) int {
+	var typed *storage.Error
+	if !errors.As(err, &typed) || typed.Provider == nil {
+		return 0
+	}
+	return typed.Provider.Status
 }
 
 func probeBytesIntact(ctx context.Context, backend objectmutation.Backend, key, etag, want string) error {

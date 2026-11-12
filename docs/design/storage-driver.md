@@ -389,8 +389,12 @@ performs and issues one conditional delete. It exists for purges only; a mutatio
 goes through `Remove`.
 
 The object mutation driver derives `Revision` from the current object's ETag and sends every conditional
-effect with native `If-Match` / `If-None-Match` where the provider enforces them (COS ignores `If-Match`
-on PUT, so replacement re-checks the ETag under the gateway lock just before publishing). Folder markers are
+effect with native `If-Match` / `If-None-Match` where the provider enforces them. Enforcement is a per-connection
+measurement, never an assumption: a PUT carrying a stale `If-Match` must be refused (412) before a **direct**
+class A replacement may sign that PUT at the destination, because the client's own write is the publication and
+the grant outlives the session. COS ignores `If-Match` on PUT, so such a connection routes replacement through
+multipart, where the parts stay unpublished until the server completes them and the commit re-checks the ETag
+under the gateway lock just before publishing. Folder markers are
 normally zero-byte; a marker reasserted during a purge carries a small token instead, because the empty-content
 MD5 is identical for every zero-byte marker and a rewrite of identical bytes would not move the revision that a
 stale conditional delete compares. Its key still ends in `/`, and `Stat`/listings report the folder with
