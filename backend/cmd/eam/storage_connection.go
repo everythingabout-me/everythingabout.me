@@ -5,8 +5,6 @@ import (
 	"flag"
 	"fmt"
 	"os"
-	"path/filepath"
-	"strings"
 	"text/tabwriter"
 
 	"everythingabout.me/backend/internal/config"
@@ -190,7 +188,7 @@ func runStorageConnectionAdd(args []string) error {
 	if *rootAtBucket && *s3ContentPrefix != "" {
 		return fmt.Errorf("--root-at-bucket and --s3-content-prefix name two different roots; the tree is either the bucket or a prefix in it")
 	}
-	if err := validateConnectionName(*name); err != nil {
+	if err := connections.ValidateName(*name); err != nil {
 		return err
 	}
 	ctx := context.Background()
@@ -234,7 +232,7 @@ func runStorageConnectionAdd(args []string) error {
 		c.Config.TransferClass = cfg.Storage.TransferClass
 	}
 	if *backend != "local" {
-		c.Config.ObjectAdmissionFile, c.Config.ObjectSpoolRoot, err = objectConnectionPaths(cfg.Storage, *name, *backend, *admissionFile, *spoolRoot)
+		c.Config.ObjectAdmissionFile, c.Config.ObjectSpoolRoot, err = connections.ObjectPaths(cfg.Storage, *name, *backend, *admissionFile, *spoolRoot)
 		if err != nil {
 			return err
 		}
@@ -333,55 +331,5 @@ func runStorageConnectionProbe(args []string) error {
 	fmt.Printf("  evidence: %s\n  transcript: %s\n", effective.Storage.ObjectAdmissionFile, admission.ProbeReference)
 	fmt.Printf("  conditional create: %t  atomic publish: %t  multipart: %t  form post: %t\n",
 		admission.ConditionalCreate, admission.AtomicPublish, admission.MultipartUploads, admission.FormPost)
-	return nil
-}
-
-// objectConnectionPaths derives where one object connection keeps the two things a
-// connection must own: its admission evidence and its spool.
-//
-// Both are per connection. Evidence describes one endpoint, so a second connection
-// that inherited the first file would be refused when it loaded that evidence, and a
-// probe run against the inherited path would overwrite the other connection's proof;
-// a shared spool would let one target's temporary material be published to another.
-// The deployment's paths therefore act as directories, and the connection name is
-// the leaf that separates them.
-func objectConnectionPaths(deployment config.Storage, name, backend, admissionFlag, spoolFlag string) (string, string, error) {
-	if backend == "local" {
-		// A local connection stages inside its own system root; it has no object
-		// admission evidence and no spool.
-		return admissionFlag, spoolFlag, nil
-	}
-	admission, spool := admissionFlag, spoolFlag
-	if admission == "" {
-		if !filepath.IsAbs(deployment.ObjectAdmissionFile) {
-			return "", "", fmt.Errorf("--admission-file is required for connection %q: this deployment has no object admission file to derive a per-connection path from", name)
-		}
-		admission = filepath.Join(filepath.Dir(deployment.ObjectAdmissionFile), "admission-"+name+".json")
-	}
-	if spool == "" {
-		if !filepath.IsAbs(deployment.ObjectSpoolRoot) {
-			return "", "", fmt.Errorf("--spool-root is required for connection %q: this deployment has no object spool root to derive a per-connection path from", name)
-		}
-		spool = filepath.Join(deployment.ObjectSpoolRoot, name)
-	}
-	for _, owned := range []struct{ what, path, deployment string }{
-		{"admission evidence", admission, deployment.ObjectAdmissionFile},
-		{"spool", spool, deployment.ObjectSpoolRoot},
-	} {
-		if owned.deployment != "" && filepath.Clean(owned.path) == filepath.Clean(owned.deployment) {
-			return "", "", fmt.Errorf("connection %q would share the deployment's %s %s; each connection owns its own, because evidence describes one endpoint and a shared spool would let one target's temporary bytes be published to another",
-				name, owned.what, owned.path)
-		}
-	}
-	return admission, spool, nil
-}
-
-// validateConnectionName keeps a name usable as one path component: object
-// connections derive their evidence and spool paths from it, so a separator or a
-// parent reference would put those files somewhere the operator did not name.
-func validateConnectionName(name string) error {
-	if name == "" || name == "." || name == ".." || strings.ContainsAny(name, "/\\") || strings.ContainsRune(name, 0) {
-		return fmt.Errorf("connection name %q must be a single path-safe label without '/', '\\', NUL, \".\" or \"..\"", name)
-	}
 	return nil
 }

@@ -156,8 +156,8 @@ func (c Connection) Validate() error {
 	if strings.TrimSpace(c.Name) == "" {
 		return fmt.Errorf("storage connection row has no name")
 	}
-	if strings.Contains(c.Name, ":") {
-		return fmt.Errorf("storage connection %q: a name cannot contain ':' because owner bindings are written as name:digest", c.Name)
+	if err := ValidateName(c.Name); err != nil {
+		return err
 	}
 	switch c.Role {
 	case RoleAuthority, RoleBackup:

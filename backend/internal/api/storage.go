@@ -3,15 +3,18 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
+	"os"
 	"time"
 
 	"everythingabout.me/backend/internal/connections"
 	"everythingabout.me/backend/internal/httpx"
 	"everythingabout.me/backend/internal/snapshot"
 	"everythingabout.me/backend/internal/storage"
+	"everythingabout.me/backend/internal/storagebackend"
 )
 
 // The storage settings surface. It is owner-only on purpose: a credential-bearing
@@ -97,6 +100,8 @@ type connectionInput struct {
 // handleStorageConnectionAdd lets an account attach its own COS bucket as a backup
 // destination. It cannot pick a backend: the row is forced to cos, because a local
 // root would be a host path and an arbitrary endpoint would be an outbound request.
+// The operator CLI can bind s3 or local to an account; that is the path for anything
+// the deployment already trusts.
 func (s *Server) handleStorageConnectionAdd(w http.ResponseWriter, r *http.Request) error {
 	if s.db == nil || s.conns == nil {
 		return httpx.ServiceUnavailable("Storage settings are unavailable on this instance.")
@@ -112,29 +117,58 @@ func (s *Server) handleStorageConnectionAdd(w http.ResponseWriter, r *http.Reque
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 8<<10)).Decode(&in); err != nil {
 		return httpx.BadRequest("The request body is not valid JSON.")
 	}
+	// A destination is only useful if this process can publish into it, and publication
+	// needs the coordinated object protocol.
+	if !s.cfg.Storage.CoordinatedWrites {
+		return httpx.BadRequest("Object writes are disabled on this deployment, so a backup destination could not publish into it.")
+	}
 	c := connections.Connection{
 		OwnerID: user.ID, Name: in.Name, Backend: "cos", Role: connections.RoleBackup,
 		Generation: 1, Enabled: true,
 		Config: connections.Spec{
-			COS: connections.COSSpec{Bucket: in.Bucket, Region: in.Region},
-			// A destination buckets the operator already admitted are the only ones
-			// this process can publish into safely; anything else is unproven.
-			CoordinatedWrites:   s.cfg.Storage.CoordinatedWrites,
-			ObjectAdmissionFile: s.cfg.Storage.ObjectAdmissionFile,
-			ObjectSpoolRoot:     s.cfg.Storage.ObjectSpoolRoot,
-			TransferClass:       s.cfg.Storage.TransferClass,
+			COS:               connections.COSSpec{Bucket: in.Bucket, Region: in.Region},
+			CoordinatedWrites: true,
+			TransferClass:     s.cfg.Storage.TransferClass,
 		},
 		Secret: connections.Secret{COS: connections.COSCredential{SecretID: in.SecretID, SecretKey: in.SecretKey}},
+	}
+	if err := connections.ValidateName(c.Name); err != nil {
+		return httpx.BadRequest(err.Error())
+	}
+	// Each connection owns its evidence and its spool. Inheriting the deployment's would
+	// make this bucket refuse evidence recorded for another one, and measuring this bucket
+	// would overwrite the authority's proof at that path.
+	admissionFile, spoolRoot, err := connections.ObjectPaths(s.cfg.Storage, c.Name, c.Backend, "", "")
+	if err != nil {
+		return httpx.BadRequest(err.Error())
+	}
+	c.Config.ObjectAdmissionFile, c.Config.ObjectSpoolRoot = admissionFile, spoolRoot
+	if err := os.MkdirAll(spoolRoot, 0o700); err != nil {
+		return fmt.Errorf("create spool root for storage connection %q: %w", c.Name, err)
 	}
 	identity, err := c.ComputeIdentity()
 	if err != nil {
 		return err
 	}
 	c.Identity = identity
-	if err := c.Validate(); err != nil {
+	if err := c.ValidateAccountAdded(); err != nil {
 		return httpx.BadRequest(err.Error())
 	}
+	// Measure before recording: a bucket that cannot answer, or that ignores the
+	// conditional headers publication depends on, is refused here instead of becoming a
+	// row whose first snapshot fails. This is the same probe the operator CLI runs.
+	effective, err := c.Apply(*s.cfg)
+	if err != nil {
+		return httpx.BadRequest(err.Error())
+	}
+	if _, err := storagebackend.ProbeConnection(r.Context(), &effective); err != nil {
+		slog.Warn("storage connection probe failed", "connection", c.Name, "owner", user.ID, "err", err)
+		return httpx.NewError(http.StatusBadGateway, err.Error())
+	}
 	if err := s.conns.Insert(r.Context(), c); err != nil {
+		if errors.Is(err, connections.ErrLocationTaken) {
+			return httpx.BadRequest(err.Error())
+		}
 		return err
 	}
 	return s.ok(w, map[string]any{"name": c.Name})

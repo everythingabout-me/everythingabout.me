@@ -192,6 +192,11 @@ Rules, each answering a specific failure:
   from bucket and region), which is why it is the one backend an account may name. The operator CLI may
   bind any backend to one account, because it already has host access and refusing it would leave "move
   this account's tree onto another provider" impossible.
+- **A destination is measured before it is recorded.** The account API runs the same probe the operator
+  CLI does, so a bucket that cannot answer or ignores the conditional headers publication depends on is
+  refused instead of becoming a row whose first snapshot fails. Both paths derive that connection's own
+  evidence and spool (the name is the leaf), because inheriting the deployment's would make the new bucket
+  refuse evidence recorded for another one — and measuring it would overwrite the authority's proof.
 
 ## 8. Runtime
 
@@ -211,8 +216,9 @@ Rules, each answering a specific failure:
 
 - Adding a target is three commands: `eam storage-connection add ... --role backup`, then
   `eam storage-connection probe --name X` (which proves conditional create, atomic publication and part
-  persistence on that exact endpoint), then the first `eam backup snapshot`. A provider that fails the probe
-  is read-only to this service by measurement, not by policy.
+  persistence on that exact endpoint), then the first `eam backup snapshot`. The account API folds the
+  probe into the add, because a person adding a bucket cannot be asked to run an operator command
+  afterwards. A provider that fails the probe is read-only to this service by measurement, not by policy.
 - The job is a CLI command (`eam backup run|verify|prune`), scheduled by the deployment's timer, the same
   pattern as the existing database dump. There is no scheduler in the process today, and a long job does
   not belong inside the server's request lifecycle.

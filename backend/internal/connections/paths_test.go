@@ -1,4 +1,4 @@
-package main
+package connections
 
 import (
 	"path/filepath"
@@ -18,7 +18,7 @@ func deploymentStorage() config.Storage {
 // inheriting the file makes the driver refuse its own evidence, and a probe run
 // against it would overwrite the connection that file describes.
 func TestObjectConnectionPathsDerivePerConnectionPaths(t *testing.T) {
-	admission, spool, err := objectConnectionPaths(deploymentStorage(), "nas", "s3", "", "")
+	admission, spool, err := ObjectPaths(deploymentStorage(), "nas", "s3", "", "")
 	if err != nil {
 		t.Fatalf("derive paths: %v", err)
 	}
@@ -35,7 +35,7 @@ func TestObjectConnectionPathsDerivePerConnectionPaths(t *testing.T) {
 }
 
 func TestObjectConnectionPathsKeepExplicitPaths(t *testing.T) {
-	admission, spool, err := objectConnectionPaths(deploymentStorage(), "nas", "s3", "/srv/eam/state/nas.json", "/var/spool/nas")
+	admission, spool, err := ObjectPaths(deploymentStorage(), "nas", "s3", "/srv/eam/state/nas.json", "/var/spool/nas")
 	if err != nil {
 		t.Fatalf("derive paths: %v", err)
 	}
@@ -55,7 +55,7 @@ func TestObjectConnectionPathsRejectSharedDeploymentPaths(t *testing.T) {
 		{"spool", "", deployment.ObjectSpoolRoot},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			if _, _, err := objectConnectionPaths(deployment, "nas", "s3", test.admission, test.spool); err == nil {
+			if _, _, err := ObjectPaths(deployment, "nas", "s3", test.admission, test.spool); err == nil {
 				t.Fatal("sharing the deployment's path was accepted")
 			}
 		})
@@ -65,7 +65,7 @@ func TestObjectConnectionPathsRejectSharedDeploymentPaths(t *testing.T) {
 // Without a deployment path to derive from, guessing would place evidence somewhere
 // the driver does not read, so the operator has to name it.
 func TestObjectConnectionPathsRequireSomethingToDeriveFrom(t *testing.T) {
-	if _, _, err := objectConnectionPaths(config.Storage{}, "nas", "s3", "", ""); err == nil {
+	if _, _, err := ObjectPaths(config.Storage{}, "nas", "s3", "", ""); err == nil {
 		t.Fatal("deriving from an empty deployment configuration was accepted")
 	}
 }
@@ -73,7 +73,7 @@ func TestObjectConnectionPathsRequireSomethingToDeriveFrom(t *testing.T) {
 // A local connection stages inside its own system root, so it owns no object
 // evidence or spool and the derivation must not invent one.
 func TestObjectConnectionPathsLeaveLocalConnectionsAlone(t *testing.T) {
-	admission, spool, err := objectConnectionPaths(deploymentStorage(), "local-nas", "local", "", "")
+	admission, spool, err := ObjectPaths(deploymentStorage(), "local-nas", "local", "", "")
 	if err != nil {
 		t.Fatalf("derive paths: %v", err)
 	}
@@ -84,12 +84,12 @@ func TestObjectConnectionPathsLeaveLocalConnectionsAlone(t *testing.T) {
 
 func TestValidateConnectionName(t *testing.T) {
 	for _, name := range []string{"nas", "backup-nas", "nas_2", "NAS"} {
-		if err := validateConnectionName(name); err != nil {
+		if err := ValidateName(name); err != nil {
 			t.Errorf("validate %q: %v", name, err)
 		}
 	}
 	for _, name := range []string{"", ".", "..", "a/b", `a\b`, "a\x00b"} {
-		if err := validateConnectionName(name); err == nil {
+		if err := ValidateName(name); err == nil {
 			t.Errorf("validate %q: accepted", name)
 		}
 	}
