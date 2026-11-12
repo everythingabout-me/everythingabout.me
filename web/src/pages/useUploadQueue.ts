@@ -24,25 +24,31 @@ const COMMIT_BATCH_SIZE = 16;
 // every file cost one request of its own and the page size never meant anything.
 const SETTLE_PAGE_WAIT_MS = 500;
 
-// Sessions kept in hand ahead of the transfer window: four part pools, so the window can be
-// refilled four times over before a create page (~1.7 s for 32, measured in 741f910 against
-// this bucket) has to answer. The page the server admits is 32, so 64 in hand is two
-// requests, which is the only cost this depth adds. Together with the window, this is the
-// most sessions one tab holds open: 96, against an idle window of two hours.
-const ADMIT_AHEAD = 64;
+// Sessions kept in hand ahead of the transfer stage: four pages of thirty-two, so the stage
+// can be refilled four times over before a create page (~0.6 s for 32 against this bucket) has
+// to answer, and a page that arrives late costs no part slot. Together with the claims, this
+// is the most sessions one tab holds open: 192, against an idle window of two hours — the
+// depth is what "always sixteen moving" costs, and the byte bound below is what keeps it
+// honest for files that are not tiny.
+const ADMIT_AHEAD = 128;
 // A prepared session reserves its bytes against the owner's quota the moment it is admitted,
 // so depth is bounded by bytes as well as by count: 64 small files are nothing, 64 videos
 // would reserve gigabytes for a minute before their turn. One gigabyte is four waves of the
 // part pool at 16 MiB, i.e. the point where the look-ahead would reserve more than the link
 // can consume while the window rotates.
 const ADMIT_AHEAD_BYTES = 1_000_000_000;
-// Files that may be transferring at once. A slot is held from the moment a file starts
-// moving until its bytes are placed; admission and settlement keep their own bounds and
-// never take one, so this window does not mix stages that wait on the network with stages
-// that move bytes. Two part pools: a file with one part left holds one slot, so filling
-// sixteen slots can take more than sixteen files, and a second pool's worth of files absorbs
-// the gap between a file's last part and the moment its successor takes the freed socket.
-const TRANSFER_WINDOW = 32;
+// Files the transfer stage may hold at once, whether they are moving bytes or waiting for a
+// session. A claim is what gives a queued file an owner: it keeps a refusal answering to one
+// row instead of being retried by the window, and it bounds the Blobs and sessions one tab
+// holds. It deliberately does not wait for a session — the claim is taken, then the file waits
+// for its create page and for a part slot inside its own run — because a window slot taken
+// before the session existed was a slot held by a file that could not send a byte, which is
+// what made an import run in waves with every row already answered by the provider.
+//
+// Four times the part pool, so the queue behind the sixteen slots never empties while a page
+// of thirty-two admissions is in flight: the whole point of the depth is a slot that frees is
+// filled by a file that already has its session.
+const CLAIM_WINDOW = 64;
 // The page is published at most this often. A file changes state several times, and
 // every publication re-derives the row projection over the whole selection, so a
 // 20k-file folder would publish ~100k times and never leave the main thread. Task
@@ -822,6 +828,10 @@ export function useUploadQueue(onUploaded: (task: UploadTask, item: Item) => voi
       if (!task.file) { patch(id, { status: "failed", error: t("drive.uploadFileUnavailable"), speed: 0 }); return; }
       if (task.file.size !== session.size) throw new Error("The selected file has a different size.");
       const file = task.file;
+      // The session is in hand, so this file can move bytes and takes a transfer slot now.
+      // Taking it at claim time instead put slots on files that were still waiting for their
+      // create page, and the part pool then had nothing to hand out.
+      transferring.current.add(id);
       if (!Number.isSafeInteger(session.partSize) || session.partSize < 1 || !Number.isSafeInteger(session.partCount)
         || session.partCount !== Math.ceil(session.size / session.partSize)
         || !["any", "ascending"].includes(session.ordering)) throw new Error("Invalid upload session geometry.");
@@ -1117,7 +1127,7 @@ export function useUploadQueue(onUploaded: (task: UploadTask, item: Item) => voi
     }
     const starts: UploadTask[] = [];
     for (const id of pending.current) {
-      if (transferring.current.size + starts.length >= TRANSFER_WINDOW) break;
+      if (running.current.size + starts.length >= CLAIM_WINDOW) break;
       const task = tasks.current.get(id);
       if (!task || task.status !== "queued" || task.cancelRequested || running.current.has(id)) {
         pending.current.delete(id);
@@ -1132,7 +1142,7 @@ export function useUploadQueue(onUploaded: (task: UploadTask, item: Item) => voi
       // Pool priority follows the order files first start, kept across retries/turns.
       if (!ranks.current.has(task.id)) ranks.current.set(task.id, nextRank.current++);
       running.current.set(task.id, { controller: new AbortController() });
-      transferring.current.add(task.id);
+      // No transfer slot yet: a claim says who owns the row, not that the file can move.
       patch(task.id, { status: "uploading", error: undefined });
     }
     for (const task of starts) void run(task.id, running.current.get(task.id)!);

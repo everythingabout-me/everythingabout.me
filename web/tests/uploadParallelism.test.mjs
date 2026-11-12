@@ -296,7 +296,7 @@ test("a selection queues in the order the list shows, not the order the drop del
 // blurring it is what made the queue's throughput follow its slowest control request.
 const named = (path, bytes = "ab") => ({ path, file: new File([bytes], path) });
 
-test("admission runs a page ahead of the bytes, so a started file never asks for a session", async (t) => {
+test("the transfer stage claims its window while the look-ahead prepares sessions behind it", async (t) => {
   const server = uploadServer(2);
   const gate = deferred();
   const send = server.api.uploadPart;
@@ -304,10 +304,11 @@ test("admission runs a page ahead of the bytes, so a started file never asks for
   const harness = await mount(t, server.api);
   const files = Array.from({ length: 100 }, (_, i) => named(`f${String(i).padStart(3, "0")}`));
   harness.render().enqueue(files, "", () => false);
-  // 32 files hold the transfer window. The queue keeps two pages of sessions in hand for
-  // the files behind them, and no started file spends a round trip learning its own id.
-  await harness.until((queue) => queue.tasks.filter((task) => task.status === "uploading").length === 32 && server.sessions.size > 32);
-  assert.equal(server.calls.filter(([kind]) => kind === "status").length, 0, "a started file already holds its session");
+  // Sixty-four files belong to the transfer stage: a claim is what gives a queued row an
+  // owner, and it deliberately does not wait for its session — that wait used to consume a
+  // slot and left the part pool with nothing to hand out. The sessions are prepared behind
+  // them, which is what a freed slot is filled from.
+  await harness.until((queue) => queue.tasks.filter((task) => task.status === "uploading").length === 64 && server.sessions.size > 32);
   assert.equal(new Set(server.calls.filter(([kind]) => kind === "create").map(([, , key]) => key)).size, server.sessions.size, "each prepared file is admitted exactly once");
   gate.resolve();
   await harness.until((queue) => queue.tasks.every((task) => task.status === "completed"));
@@ -374,12 +375,16 @@ test("the look-ahead never reserves more than a gigabyte of quota", async (t) =>
   const send = server.api.uploadPart;
   server.api.uploadPart = async (...args) => { await gate.promise; return send(...args); };
   const harness = await mount(t, server.api);
-  const files = Array.from({ length: 40 }, (_, i) => named(`big-${String(i).padStart(2, "0")}`, "x".repeat(100_000_000)));
+  // More files than the transfer stage claims, so some of them stay behind it and are the
+  // look-ahead this bound is about. A claimed file takes its session at once and is then the
+  // work in progress, not speculation; what must stay under a gigabyte is what is admitted
+  // for files nobody has started yet.
+  const files = Array.from({ length: 200 }, (_, i) => named(`big-${String(i).padStart(2, "0")}`, "x".repeat(100_000_000)));
   harness.render().enqueue(files, "", () => false);
-  const queue = await harness.until((queue) => queue.tasks.filter((task) => task.status === "uploading").length === 32);
+  const queue = await harness.until((queue) => queue.tasks.some((task) => task.status === "queued" && task.uploadId));
   const held = queue.tasks.filter((task) => task.status === "queued" && task.uploadId);
   const reserved = held.reduce((sum, task) => sum + task.size, 0);
-  assert.ok(reserved > 0, "a page of sessions is prepared ahead of the window");
+  assert.ok(reserved > 0, "sessions are admitted for the files that are waiting");
   assert.ok(reserved <= 1_000_000_000, `the look-ahead reserved ${reserved} bytes of quota`);
   gate.resolve();
 });

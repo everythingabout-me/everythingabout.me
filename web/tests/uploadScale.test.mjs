@@ -79,9 +79,9 @@ test("a large selection holds a bounded page of upload sessions at once", async 
   t.after(harness.unmount);
   harness.render().enqueue(directory(200), "", () => false);
   await harness.until(allComplete, "every queued file eventually starts");
-  // Admission runs two pages ahead of the transfer window: 64 sessions may be open, while
+  // Admission runs four pages ahead of the transfer stage: 128 sessions may be open, while
   // bytes stay bounded by the part pool. A selection of 200 must never open 200.
-  assert.ok(peak <= 64, `${peak} upload sessions were open at once`);
+  assert.ok(peak <= 128, `${peak} upload sessions were open at once`);
   assert.ok(peak > 1, "a queue that serializes everything would be useless");
   assert.equal(first.length, 1);
   assert.equal(server.calls.filter(([kind]) => kind === "create").length, 200, "each file allocates exactly once");
