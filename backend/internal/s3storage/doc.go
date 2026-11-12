@@ -1,7 +1,14 @@
-// Package s3storage provides P1 read-only native trees through the official AWS
-// SDK v2, using explicit endpoint, region, bucket, addressing style and static
-// credentials with an optional session token. It does not read environment
-// credentials or configuration, publish transfer URLs, or implement mutations.
+// Package s3storage provides native trees through the official AWS SDK v2, using
+// explicit endpoint, region, bucket, addressing style and static credentials with an
+// optional session token. It does not read environment credentials or configuration,
+// and it publishes no transfer URLs.
+//
+// Reads are a bound driver. Writes are a separate mutation backend (MutationBackend)
+// that the process uses only after this exact connection has been admitted: the
+// coordinated object protocol needs conditional create, atomic publication and part
+// persistence, and an S3-compatible server may implement all three, some, or none of
+// them. Evidence is measured per endpoint, so a second bucket does not inherit the
+// first one's answer.
 //
 // Bound drivers are cheap views over a bounded, process-shared HTTP transport.
 // Closing a view cancels its active requests and rejects new calls, while other

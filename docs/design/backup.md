@@ -155,6 +155,11 @@ Rules, each answering a specific failure:
   row's "atomic publish" would reintroduce the exact failure that once cost hours: evidence for one bucket
   applied to another. A mismatch means *unproven*, and unproven disables writes on that connection while
   reads continue.
+- **Only the environment connection is measured automatically, so every added row needs one explicit probe.**
+  `eam storage-connection probe --name X` measures that row and writes the evidence its driver reads; until
+  it has run, `add` produces a connection that reads but cannot publish, and `backup snapshot` refuses it as
+  a target. Startup cannot do this for rows: it would make every restart depend on a provider the process
+  may never otherwise touch, and a backup target that is down at boot is not a startup failure.
 - **The row carries its own credentials.** Adding a connection is one `INSERT`; a reference into a host file
   would split the definition across two places and need shell access, which is the thing this table exists to
   remove. The accepted cost is that the database holds usable credentials, so a dump is secret material.
@@ -179,10 +184,17 @@ Rules, each answering a specific failure:
   a driver. `storagebackend` stays database-free, so maintenance commands and dozens of tests keep
   constructing it from environment only.
 - Each connection owns its spool root, admission evidence and transfer class. A shared spool across
-  connections would let one target's temporary material be published to another.
+  connections would let one target's temporary material be published to another; a shared evidence file
+  would let one connection's probe overwrite another's proof. `add` therefore derives
+  `<admission dir>/admission-<name>.json` and `<spool dir>/<name>` for object connections, and refuses a
+  connection that names the deployment's own paths.
 
 ## 9. Scheduling and operation
 
+- Adding a target is three commands: `eam storage-connection add ... --role backup`, then
+  `eam storage-connection probe --name X` (which proves conditional create, atomic publication and part
+  persistence on that exact endpoint), then the first `eam backup snapshot`. A provider that fails the probe
+  is read-only to this service by measurement, not by policy.
 - The job is a CLI command (`eam backup run|verify|prune`), scheduled by the deployment's timer, the same
   pattern as the existing database dump. There is no scheduler in the process today, and a long job does
   not belong inside the server's request lifecycle.

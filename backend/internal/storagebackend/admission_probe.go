@@ -16,6 +16,7 @@ import (
 	"everythingabout.me/backend/internal/config"
 	"everythingabout.me/backend/internal/cos"
 	"everythingabout.me/backend/internal/objectmutation"
+	"everythingabout.me/backend/internal/s3storage"
 	"everythingabout.me/backend/internal/storage"
 )
 
@@ -30,6 +31,9 @@ const probePartBytes = 1 << 20
 // connectionIdentity is the endpoint a configuration selects. Evidence describes
 // exactly one of these; there is no "close enough".
 func connectionIdentity(cfg *config.Config) (endpoint, bucket, region string) {
+	if cfg.BackendName() == "s3" {
+		return cfg.Storage.S3.Endpoint, cfg.Storage.S3.Bucket, cfg.Storage.S3.Region
+	}
 	bucket, region = cfg.COS.Bucket, cfg.COS.Region
 	return fmt.Sprintf("https://%s.cos.%s.myqcloud.com", bucket, region), bucket, region
 }
@@ -42,7 +46,12 @@ func connectionIdentity(cfg *config.Config) (endpoint, bucket, region string) {
 // record the result. Configuration decides which tree to use; the probe only
 // establishes that the write protocol is safe on it.
 func EnsureAdmission(ctx context.Context, cfg *config.Config) error {
-	if cfg == nil || !cfg.Storage.CoordinatedWrites || cfg.BackendName() != "cos" {
+	if cfg == nil || !cfg.Storage.CoordinatedWrites {
+		return nil
+	}
+	switch cfg.BackendName() {
+	case "cos", "s3":
+	default:
 		return nil
 	}
 	path := cfg.Storage.ObjectAdmissionFile
@@ -51,18 +60,68 @@ func EnsureAdmission(ctx context.Context, cfg *config.Config) error {
 	if loadErr == nil && previous.Matches(cfg.Storage.ConnectionID, endpoint, bucket, region) {
 		return nil
 	}
-	client, err := cos.New(cfg.COS)
+	admission, err := probeConnectionEvidence(ctx, cfg)
 	if err != nil {
 		return err
 	}
-	defer client.Close()
-	backend, err := client.MutationBackend()
+	slog.Info("refreshed object admission evidence for the configured connection",
+		"path", path, "bucket", bucket, "region", region,
+		"conditional_create", admission.ConditionalCreate,
+		"atomic_publish", admission.AtomicPublish,
+		"multipart_uploads", admission.MultipartUploads)
+	return nil
+}
+
+// ProbeConnection measures one storage connection on demand and writes the evidence
+// its driver requires before it may publish.
+//
+// It exists because the server can only probe the connection its own environment
+// describes: a row added later (a second bucket, another endpoint) has no startup
+// path that would measure it, so without this command that connection stays
+// permanently "unproven" and every write to it is refused. `add` therefore inserts
+// a row that can read but not publish until this command has run once.
+func ProbeConnection(ctx context.Context, cfg *config.Config) (objectmutation.Admission, error) {
+	if cfg == nil {
+		return objectmutation.Admission{}, fmt.Errorf("storage configuration is required")
+	}
+	name := cfg.Storage.ConnectionID
+	switch cfg.BackendName() {
+	case "cos", "s3":
+	default:
+		return objectmutation.Admission{}, fmt.Errorf("storage connection %q uses backend %q: only cos and s3 publish through the coordinated object protocol",
+			name, cfg.BackendName())
+	}
+	if !cfg.Storage.CoordinatedWrites {
+		return objectmutation.Admission{}, fmt.Errorf("storage connection %q has coordinated writes disabled, so it has no publication path to probe: add it with --coordinated-writes=true",
+			name)
+	}
+	if !filepath.IsAbs(cfg.Storage.ObjectAdmissionFile) {
+		return objectmutation.Admission{}, fmt.Errorf("storage connection %q has no absolute admission evidence path, so the probe result could not be recorded where its driver reads it",
+			name)
+	}
+	return probeConnectionEvidence(ctx, cfg)
+}
+
+// probeConnectionEvidence measures one object connection and records the answer.
+//
+// The measurement is written before it is judged: a provider that fails a property
+// still leaves the transcript naming what was tried, which is the difference between
+// "this endpoint cannot publish" and an unexplained refusal.
+func probeConnectionEvidence(ctx context.Context, cfg *config.Config) (objectmutation.Admission, error) {
+	path := cfg.Storage.ObjectAdmissionFile
+	endpoint, bucket, region := connectionIdentity(cfg)
+	previous, loadErr := objectmutation.LoadAdmission(path)
+	backend, closer, err := objectMutationBackend(cfg)
 	if err != nil {
-		return err
+		return objectmutation.Admission{}, fmt.Errorf("storage connection %q: open the provider for probing: %w", cfg.Storage.ConnectionID, err)
+	}
+	if closer != nil {
+		defer closer.Close()
 	}
 	admission, observations, err := ProbeAdmission(ctx, backend)
 	if err != nil {
-		return err
+		return admission, fmt.Errorf("storage connection %q: probe %s bucket %q region %q: %w",
+			cfg.Storage.ConnectionID, endpoint, bucket, region, err)
 	}
 	admission.ConnectionID = cfg.Storage.ConnectionID
 	admission.Endpoint = endpoint
@@ -82,21 +141,51 @@ func EnsureAdmission(ctx context.Context, cfg *config.Config) error {
 	}
 	record := filepath.Join(filepath.Dir(path), filepath.Base(path)+".probe.json")
 	if err := writeJSONFile(record, observations); err != nil {
-		return err
+		return admission, fmt.Errorf("storage connection %q: record the probe transcript: %w", cfg.Storage.ConnectionID, err)
 	}
 	admission.ProbeReference = record
 	if err := objectmutation.ValidateAdmission(admission); err != nil {
-		return err
+		return admission, fmt.Errorf("storage connection %q at %s bucket %q cannot be admitted for object writes (transcript: %s): %w",
+			cfg.Storage.ConnectionID, endpoint, bucket, record, err)
 	}
 	if err := writeJSONFile(path, admission); err != nil {
-		return err
+		return admission, fmt.Errorf("storage connection %q: write admission evidence %s: %w", cfg.Storage.ConnectionID, path, err)
 	}
-	slog.Info("refreshed object admission evidence for the configured connection",
-		"path", path, "bucket", bucket, "region", region,
-		"conditional_create", admission.ConditionalCreate,
-		"atomic_publish", admission.AtomicPublish,
-		"multipart_uploads", admission.MultipartUploads)
-	return nil
+	return admission, nil
+}
+
+// objectMutationBackend builds the write backend of one object connection without
+// consulting admission evidence. Only the probe may call this: a backend built this
+// way has no verified write protocol and must never serve a request.
+func objectMutationBackend(cfg *config.Config) (objectmutation.Backend, io.Closer, error) {
+	switch cfg.BackendName() {
+	case "cos":
+		client, err := cos.New(cfg.COS)
+		if err != nil {
+			return nil, nil, err
+		}
+		backend, err := client.MutationBackend()
+		if err != nil {
+			client.Close()
+			return nil, nil, err
+		}
+		return backend, client, nil
+	case "s3":
+		factory, err := s3storage.NewFactory(s3storage.Options{
+			Endpoint: cfg.Storage.S3.Endpoint, Region: cfg.Storage.S3.Region, Bucket: cfg.Storage.S3.Bucket,
+			PathStyle: cfg.Storage.S3.PathStyle, AccessKeyID: cfg.Storage.S3.AccessKeyID,
+			SecretAccessKey: cfg.Storage.S3.SecretAccessKey, SessionToken: cfg.Storage.S3.SessionToken,
+		})
+		if err != nil {
+			return nil, nil, err
+		}
+		backend, err := factory.MutationBackend()
+		if err != nil {
+			return nil, nil, err
+		}
+		return backend, nil, nil
+	}
+	return nil, nil, fmt.Errorf("backend %q has no object mutation backend", cfg.BackendName())
 }
 
 // writeJSONFile replaces a file atomically so a crash never leaves half evidence.

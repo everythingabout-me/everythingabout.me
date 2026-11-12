@@ -157,17 +157,16 @@ func newBackend(cfg *config.Config, tolerateUnprovenWrites bool) (*Backend, erro
 func (b *Backend) loadAdmission() (objectmutation.Admission, error) {
 	admission, err := objectmutation.LoadAdmission(b.cfg.Storage.ObjectAdmissionFile)
 	if err != nil {
-		return admission, err
+		return admission, fmt.Errorf("storage connection %q has no usable object admission evidence at %s, so it may read but not publish; measure it with `eam storage-connection probe --name %s`: %w",
+			b.cfg.Storage.ConnectionID, b.cfg.Storage.ObjectAdmissionFile, b.cfg.Storage.ConnectionID, err)
 	}
-	endpoint, bucket, region := b.cfg.Storage.S3.Endpoint, b.cfg.Storage.S3.Bucket, b.cfg.Storage.S3.Region
-	if b.cfg.BackendName() == "cos" {
-		bucket = b.cfg.COS.Bucket
-		region = b.cfg.COS.Region
-		endpoint = fmt.Sprintf("https://%s.cos.%s.myqcloud.com", bucket, region)
-	}
+	endpoint, bucket, region := connectionIdentity(&b.cfg)
 	if !admission.Matches(b.cfg.Storage.ConnectionID, endpoint, bucket, region) {
-		return admission, fmt.Errorf("object admission evidence %s was recorded for bucket %q in %q, but this connection is bucket %q in %q: %w",
-			b.cfg.Storage.ObjectAdmissionFile, admission.Bucket, admission.Region, bucket, region, storage.NewError("invalid_config", "", nil))
+		return admission, fmt.Errorf("object admission evidence %s was recorded for connection %q at %s bucket %q region %q, but this connection is %q at %s bucket %q region %q; re-measure it with `eam storage-connection probe --name %s`: %w",
+			b.cfg.Storage.ObjectAdmissionFile,
+			admission.ConnectionID, admission.Endpoint, admission.Bucket, admission.Region,
+			b.cfg.Storage.ConnectionID, endpoint, bucket, region,
+			b.cfg.Storage.ConnectionID, storage.NewError("invalid_config", "", nil))
 	}
 	if b.cfg.Storage.TransferClass == storage.TransferPresignedParts && !admission.MultipartUploads {
 		return admission, fmt.Errorf("class A presigned-parts requires admitted multipartUploads evidence for this exact connection")
