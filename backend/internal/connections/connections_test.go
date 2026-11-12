@@ -255,9 +255,10 @@ func TestIdentityIgnoresTheAccountButNotTheLocation(t *testing.T) {
 	}
 }
 
-// The account API may only name a COS bucket: a local row would be an arbitrary host
-// path and an s3 row an outbound request primitive. The operator CLI is not bound by
-// this, because it already has host access.
+// The account API may name a COS bucket, or an S3 endpoint whose host the operator
+// listed: a local row would be an arbitrary host path and an unlisted s3 endpoint an
+// outbound request primitive. The operator CLI is not bound by this, because it
+// already has host access.
 func TestValidateAccountAddedStaysStricterThanValidate(t *testing.T) {
 	ownerRow := func(backend string, role string) Connection {
 		c := Connection{OwnerID: "owner-a", Name: "mine", Backend: backend, Role: role, Generation: 1, Enabled: true}
@@ -277,19 +278,58 @@ func TestValidateAccountAddedStaysStricterThanValidate(t *testing.T) {
 	if err := ownerRow("s3", RoleBackup).Validate(); err != nil {
 		t.Fatalf("operator-added owner s3 row rejected by Validate: %v", err)
 	}
-	if err := ownerRow("cos", RoleBackup).ValidateAccountAdded(); err != nil {
+	if err := ownerRow("cos", RoleBackup).ValidateAccountAdded(nil); err != nil {
 		t.Fatalf("account cos backup row rejected: %v", err)
+	}
+	// An S3 endpoint is an outbound request the process makes for the account, so the
+	// operator's list decides which hosts exist at all.
+	if err := ownerRow("s3", RoleBackup).ValidateAccountAdded(nil); err == nil {
+		t.Error("an s3 endpoint was accepted with no host listed")
+	}
+	if err := ownerRow("s3", RoleBackup).ValidateAccountAdded([]string{"nas.invalid"}); err != nil {
+		t.Fatalf("listed s3 host rejected: %v", err)
 	}
 	for _, test := range []struct {
 		what string
 		row  Connection
 	}{
-		{"s3 endpoint", ownerRow("s3", RoleBackup)},
 		{"authority role", ownerRow("cos", RoleAuthority)},
 		{"shared row", func() Connection { c := ownerRow("cos", RoleBackup); c.OwnerID = ""; return c }()},
 	} {
-		if err := test.row.ValidateAccountAdded(); err == nil {
+		if err := test.row.ValidateAccountAdded(nil); err == nil {
 			t.Errorf("%s accepted from the account path", test.what)
+		}
+	}
+}
+
+func TestHostAllowedIsNeverWiderThanWhatWasWritten(t *testing.T) {
+	allowed := []string{"nas.invalid", "*.example.com"}
+	for _, host := range []string{"nas.invalid", "a.example.com", "a.b.example.com"} {
+		if !HostAllowed(host, allowed) {
+			t.Errorf("%q was not allowed", host)
+		}
+	}
+	for _, host := range []string{"", "na.invalid", "nas.invalid.evil", "evil-example.com", "example.com"} {
+		if HostAllowed(host, allowed) {
+			t.Errorf("%q was allowed by the list", host)
+		}
+	}
+}
+
+func TestS3EndpointHostRejectsAnythingButABareServiceURL(t *testing.T) {
+	host, err := S3EndpointHost("https://NAS.example.com:9000")
+	if err != nil || host != "nas.example.com" {
+		t.Fatalf("host %q err %v", host, err)
+	}
+	if _, err := S3EndpointHost("http://127.0.0.1:9000"); err != nil {
+		t.Fatalf("loopback endpoint is the operator's call when listed: %v", err)
+	}
+	for _, endpoint := range []string{
+		"nas.example.com:9000", "ftp://nas.example.com", "https://user:pass@nas.example.com",
+		"https://nas.example.com/bucket", "https://nas.example.com?x=1", "https://nas.example.com#f",
+	} {
+		if _, err := S3EndpointHost(endpoint); err == nil {
+			t.Errorf("%q was accepted", endpoint)
 		}
 	}
 }

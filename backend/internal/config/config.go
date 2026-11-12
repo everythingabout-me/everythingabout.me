@@ -24,6 +24,11 @@ type Config struct {
 	// AppSecret is a stable deployment secret, independent of database/storage credentials.
 	AppSecret         string
 	FileCookieOrigins []string
+	// AccountS3Hosts lists the endpoint hosts an account may attach as its own
+	// S3-compatible destination. An account-named endpoint is an outbound request this
+	// process would make, so the set is the operator's decision, not the account's; an
+	// empty list keeps the account surface to COS buckets, whose host is derived.
+	AccountS3Hosts    []string
 	FileUploadIngress string
 	Storage           Storage
 	SessionTTLDays    int
@@ -144,6 +149,14 @@ func Load() (*Config, error) {
 			MonthBudget: positiveInt("TIMELINE_MONTH_BUDGET", 24),
 			Timezone:    envOr("TIMELINE_TZ", "Asia/Shanghai"),
 		},
+	}
+
+	if raw := os.Getenv("FILE_ACCOUNT_S3_HOSTS"); raw != "" {
+		for _, host := range strings.Split(raw, ",") {
+			if host = strings.ToLower(strings.TrimSpace(host)); host != "" {
+				c.AccountS3Hosts = append(c.AccountS3Hosts, host)
+			}
+		}
 	}
 
 	if raw := os.Getenv("FILE_COOKIE_ORIGINS"); raw != "" {

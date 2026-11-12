@@ -73,11 +73,14 @@ export function DrivesPanel({ data }: { data: StorageData }) {
 
 function AddDrive({ onAdded, onCancel }: { onAdded: () => void; onCancel: () => void }) {
   const [error, setError] = useState("");
-  const [form, setForm] = useState({ name: "", bucket: "", region: "", secretId: "", secretKey: "" });
+  const [backend, setBackend] = useState<"cos" | "s3">("cos");
+  const [pathStyle, setPathStyle] = useState(true);
+  const [form, setForm] = useState({ name: "", bucket: "", region: "", endpoint: "", prefix: "drive/", secretId: "", secretKey: "" });
   const field = (key: keyof typeof form) => ({
     value: form[key],
     onChange: (event: React.ChangeEvent<HTMLInputElement>) => setForm({ ...form, [key]: event.target.value }),
   });
+  const s3 = backend === "s3";
 
   return (
     <form
@@ -86,34 +89,70 @@ function AddDrive({ onAdded, onCancel }: { onAdded: () => void; onCancel: () => 
         event.preventDefault();
         setError("");
         try {
-          await api.addStorageConnection(form);
+          await api.addStorageConnection({
+            name: form.name,
+            backend,
+            bucket: form.bucket,
+            region: form.region,
+            endpoint: s3 ? form.endpoint : undefined,
+            pathStyle: s3 ? pathStyle : undefined,
+            prefix: s3 ? form.prefix : undefined,
+            secretId: form.secretId,
+            secretKey: form.secretKey,
+          });
           onAdded();
         } catch (e) {
           setError(e instanceof Error ? e.message : String(e));
         }
       }}
     >
-      <p className={styles.hint}>{t("drives.addHint")}</p>
+      <p className={styles.hint}>{s3 ? t("drives.addHintS3") : t("drives.addHint")}</p>
+      <label className={styles.field}>
+        {t("drives.fieldBackend")}
+        <select value={backend} onChange={(event) => setBackend(event.target.value as "cos" | "s3")}>
+          <option value="cos">{t("drives.backendCos")}</option>
+          <option value="s3">{t("drives.backendS3")}</option>
+        </select>
+      </label>
       <label className={styles.field}>
         {t("drives.fieldName")}
         <input required {...field("name")} />
       </label>
+      {s3 ? (
+        <label className={styles.field}>
+          {t("drives.fieldEndpoint")}
+          <input required placeholder="https://nas.example.com:9000" {...field("endpoint")} />
+        </label>
+      ) : null}
       <label className={styles.field}>
         {t("drives.fieldBucket")}
-        <input required placeholder="example-1250000000" {...field("bucket")} />
+        <input required placeholder={s3 ? "eam-backup" : "example-1250000000"} {...field("bucket")} />
       </label>
       <label className={styles.field}>
         {t("drives.fieldRegion")}
-        <input required placeholder="ap-hongkong" {...field("region")} />
+        <input required placeholder={s3 ? "us-east-1" : "ap-hongkong"} {...field("region")} />
       </label>
+      {s3 ? (
+        <label className={styles.field}>
+          {t("drives.fieldPrefix")}
+          <input placeholder="drive/" {...field("prefix")} />
+          <span className={styles.muted}>{t("drives.fieldPrefixHint")}</span>
+        </label>
+      ) : null}
       <label className={styles.field}>
-        {t("drives.fieldSecretId")}
+        {s3 ? t("drives.fieldAccessKey") : t("drives.fieldSecretId")}
         <input required autoComplete="off" {...field("secretId")} />
       </label>
       <label className={styles.field}>
         {t("drives.fieldSecretKey")}
         <input required type="password" autoComplete="off" {...field("secretKey")} />
       </label>
+      {s3 ? (
+        <label className={styles.check}>
+          <input type="checkbox" checked={pathStyle} onChange={(event) => setPathStyle(event.target.checked)} />
+          {t("drives.fieldPathStyle")}
+        </label>
+      ) : null}
       {error ? <p className={styles.error}>{error}</p> : null}
       <div className={styles.actions}>
         <button className={styles.button} type="submit">

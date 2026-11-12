@@ -94,3 +94,29 @@ func TestValidateConnectionName(t *testing.T) {
 		}
 	}
 }
+
+// A missing choice and an explicit "the bucket itself" are different requests: one
+// keeps the deployment default, the other says the tree is the bucket.
+func TestS3ContentPrefixDistinguishesDefaultFromRoot(t *testing.T) {
+	empty := ""
+	root, atBucket, err := S3ContentPrefix(&empty)
+	if err != nil || root != "" || !atBucket {
+		t.Fatalf("explicit empty prefix gave %q atBucket=%t err=%v", root, atBucket, err)
+	}
+	if prefix, atBucket, err := S3ContentPrefix(nil); err != nil || prefix != "drive/" || atBucket {
+		t.Fatalf("no choice gave %q atBucket=%t err=%v", prefix, atBucket, err)
+	}
+	slash := "/"
+	if prefix, atBucket, err := S3ContentPrefix(&slash); err != nil || prefix != "" || !atBucket {
+		t.Fatalf("a bare slash gave %q atBucket=%t err=%v", prefix, atBucket, err)
+	}
+	named := " /eam "
+	if prefix, atBucket, err := S3ContentPrefix(&named); err != nil || prefix != "eam/" || atBucket {
+		t.Fatalf("named prefix gave %q atBucket=%t err=%v", prefix, atBucket, err)
+	}
+	for _, bad := range []string{"__eam_system__", "__eam_system__/x", "../x", "a//b"} {
+		if _, _, err := S3ContentPrefix(&bad); err == nil {
+			t.Errorf("prefix %q was accepted", bad)
+		}
+	}
+}

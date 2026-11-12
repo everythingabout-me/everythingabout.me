@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 
 	"everythingabout.me/backend/internal/connections"
@@ -91,17 +92,22 @@ func (s *Server) handleStorageGet(w http.ResponseWriter, r *http.Request) error 
 
 type connectionInput struct {
 	Name      string `json:"name"`
+	Backend   string `json:"backend"`
 	Bucket    string `json:"bucket"`
 	Region    string `json:"region"`
-	SecretID  string `json:"secretId"`
-	SecretKey string `json:"secretKey"`
+	Endpoint  string `json:"endpoint"`
+	PathStyle bool   `json:"pathStyle"`
+	// Prefix is the tree's prefix inside an S3 bucket: nil keeps the deployment default,
+	// an explicit empty string means the bucket itself.
+	Prefix    *string `json:"prefix"`
+	SecretID  string  `json:"secretId"`
+	SecretKey string  `json:"secretKey"`
 }
 
-// handleStorageConnectionAdd lets an account attach its own COS bucket as a backup
-// destination. It cannot pick a backend: the row is forced to cos, because a local
-// root would be a host path and an arbitrary endpoint would be an outbound request.
-// The operator CLI can bind s3 or local to an account; that is the path for anything
-// the deployment already trusts.
+// handleStorageConnectionAdd lets an account attach its own drive as a backup
+// destination: a COS bucket, or an S3-compatible endpoint whose host the operator has
+// listed. A local root stays operator-only — it is a host path, not a drive an account
+// can name.
 func (s *Server) handleStorageConnectionAdd(w http.ResponseWriter, r *http.Request) error {
 	if s.db == nil || s.conns == nil {
 		return httpx.ServiceUnavailable("Storage settings are unavailable on this instance.")
@@ -122,15 +128,35 @@ func (s *Server) handleStorageConnectionAdd(w http.ResponseWriter, r *http.Reque
 	if !s.cfg.Storage.CoordinatedWrites {
 		return httpx.BadRequest("Object writes are disabled on this deployment, so a backup destination could not publish into it.")
 	}
+	backend := strings.ToLower(strings.TrimSpace(in.Backend))
+	if backend == "" {
+		backend = "cos"
+	}
 	c := connections.Connection{
-		OwnerID: user.ID, Name: in.Name, Backend: "cos", Role: connections.RoleBackup,
+		OwnerID: user.ID, Name: in.Name, Backend: backend, Role: connections.RoleBackup,
 		Generation: 1, Enabled: true,
-		Config: connections.Spec{
-			COS:               connections.COSSpec{Bucket: in.Bucket, Region: in.Region},
-			CoordinatedWrites: true,
-			TransferClass:     s.cfg.Storage.TransferClass,
-		},
-		Secret: connections.Secret{COS: connections.COSCredential{SecretID: in.SecretID, SecretKey: in.SecretKey}},
+		Config: connections.Spec{CoordinatedWrites: true},
+	}
+	switch backend {
+	case "cos":
+		c.Config.COS = connections.COSSpec{Bucket: in.Bucket, Region: in.Region}
+		c.Config.TransferClass = s.cfg.Storage.TransferClass
+		c.Secret = connections.Secret{COS: connections.COSCredential{SecretID: in.SecretID, SecretKey: in.SecretKey}}
+	case "s3":
+		prefix, rootAtBucket, err := connections.S3ContentPrefix(in.Prefix)
+		if err != nil {
+			return httpx.BadRequest(err.Error())
+		}
+		c.Config.S3 = connections.S3Spec{Endpoint: in.Endpoint, Region: in.Region, Bucket: in.Bucket,
+			PathStyle: in.PathStyle, ContentPrefix: prefix, SystemPrefix: "__eam_system__/"}
+		c.Config.RootAtBucket = rootAtBucket
+		// An S3-compatible server speaks the relay class only; a presigned part URL would
+		// have to be signed for its host, which this connection's credentials may not be
+		// allowed to do.
+		c.Config.TransferClass = storage.TransferRelay
+		c.Secret = connections.Secret{S3: connections.S3Credential{AccessKeyID: in.SecretID, SecretAccessKey: in.SecretKey}}
+	default:
+		return httpx.BadRequest("A drive is either a COS bucket or an S3-compatible endpoint.")
 	}
 	if err := connections.ValidateName(c.Name); err != nil {
 		return httpx.BadRequest(err.Error())
@@ -151,7 +177,7 @@ func (s *Server) handleStorageConnectionAdd(w http.ResponseWriter, r *http.Reque
 		return err
 	}
 	c.Identity = identity
-	if err := c.ValidateAccountAdded(); err != nil {
+	if err := c.ValidateAccountAdded(s.cfg.AccountS3Hosts); err != nil {
 		return httpx.BadRequest(err.Error())
 	}
 	// Measure before recording: a bucket that cannot answer, or that ignores the
@@ -368,7 +394,12 @@ func connectionLocation(c connections.Connection) string {
 	case "cos":
 		return c.Config.COS.Bucket + " · " + c.Config.COS.Region
 	case "s3":
-		return c.Config.S3.Bucket + " · " + c.Config.S3.Region
+		// The region of an S3-compatible server is usually a formality; the host is what
+		// a person recognises.
+		if host, err := connections.S3EndpointHost(c.Config.S3.Endpoint); err == nil {
+			return host + " · " + c.Config.S3.Bucket
+		}
+		return c.Config.S3.Endpoint + " · " + c.Config.S3.Bucket
 	case "local":
 		return c.Config.Local.ContentRoot
 	}

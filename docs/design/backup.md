@@ -186,12 +186,12 @@ Rules, each answering a specific failure:
   name as reserved: creating, renaming or scanning an entry with that name fails, and a snapshot refuses to
   copy it. Containment is therefore bounded by a refusal, not hidden by a skip — nothing under a content
   root is skipped today, and a silent skip is how system material would become user-visible.
-- **Only the account API is limited to `cos`.** A `local` row would let an account read and write
-  arbitrary host paths, and an `s3` row would let it point this process at any endpoint — an outbound
-  request primitive rather than a storage choice. A COS row cannot choose a host (its endpoint is derived
-  from bucket and region), which is why it is the one backend an account may name. The operator CLI may
-  bind any backend to one account, because it already has host access and refusing it would leave "move
-  this account's tree onto another provider" impossible.
+- **The account API may name a `cos` bucket, or an `s3` endpoint host the operator listed.** A `local`
+  row would let an account read and write arbitrary host paths; an `s3` endpoint is an outbound request
+  this process makes on the account's behalf, so it is bounded by `FILE_ACCOUNT_S3_HOSTS` rather than by
+  the account's choice of host. A COS row needs no such list because its endpoint is derived from bucket
+  and region. The operator CLI may bind any backend to one account, because it already has host access
+  and refusing it would leave "move this account's tree onto another provider" impossible.
 - **A destination is measured before it is recorded.** The account API runs the same probe the operator
   CLI does, so a bucket that cannot answer or ignores the conditional headers publication depends on is
   refused instead of becoming a row whose first snapshot fails. Both paths derive that connection's own

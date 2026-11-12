@@ -1256,8 +1256,13 @@ export const api = {
 
   addStorageConnection(input: {
     name: string;
+    backend?: "cos" | "s3";
     bucket: string;
     region: string;
+    endpoint?: string;
+    pathStyle?: boolean;
+    /** Prefix inside an S3 bucket; "" means the bucket itself. Omit for COS. */
+    prefix?: string;
     secretId: string;
     secretKey: string;
   }): Promise<{ name: string }> {

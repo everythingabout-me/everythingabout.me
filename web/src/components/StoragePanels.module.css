@@ -140,13 +140,26 @@
   color: var(--text-2);
 }
 
-.field input {
+.field input,
+.field select {
   padding: 9px 11px;
   border: 1px solid var(--border-strong);
   border-radius: 9px;
   background: var(--bg);
   color: var(--text);
   font: inherit;
+}
+
+.check {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--text-2);
+}
+
+.check input {
+  margin: 0;
 }
 
 .error {

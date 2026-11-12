@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"everythingabout.me/backend/internal/config"
+	"everythingabout.me/backend/internal/storage"
 )
 
 // ValidateName keeps a connection name usable as one path component. Two things depend
@@ -64,4 +65,29 @@ func ObjectPaths(deployment config.Storage, name, backend, admissionFlag, spoolF
 		}
 	}
 	return admission, spool, nil
+}
+
+// S3ContentPrefix reads the prefix an account chose for its own S3-compatible drive.
+// nil means "no choice was made", so the deployment default applies; an explicit empty
+// string means the bucket itself — the two are different requests and must not collapse
+// into each other, which is why the input is a pointer.
+//
+// The prefix must not name the service's private system folder: that folder lives in the
+// same bucket, and a tree rooted at or inside it would write service material into user
+// content.
+func S3ContentPrefix(chosen *string) (prefix string, rootAtBucket bool, err error) {
+	if chosen == nil {
+		return "drive/", false, nil
+	}
+	trimmed := strings.Trim(strings.TrimSpace(*chosen), "/")
+	if trimmed == "" {
+		return "", true, nil
+	}
+	if storage.ValidatePath(storage.Path(trimmed)) != nil {
+		return "", false, fmt.Errorf("prefix %q is not a valid native path", *chosen)
+	}
+	if trimmed == "__eam_system__" || strings.HasPrefix(trimmed, "__eam_system__/") {
+		return "", false, fmt.Errorf("prefix %q is reserved for the service; use another one", *chosen)
+	}
+	return trimmed + "/", false, nil
 }
