@@ -14,6 +14,25 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
+// folderAtPathSQL answers "is a folder indexed at this relative path", and it resolves the
+// path through canonical identity instead of filtering the file_entries view by path.
+//
+// The view derives every row's current path with file_tree_path(), a PL/pgSQL walk up the
+// ancestry, so `where owner_id=$1 and path=$2` against it can use no index: it is a
+// sequential scan with one ancestry walk per row. Measured on a 1.3k-entry tree, one such
+// lookup cost 40 ms and 45,578 buffer hits, and it is paid once per admission and once per
+// settlement while the owner's advisory lock is held — which made settlement the ceiling of
+// an import at ~5 files/s, falling as the tree grows, because the scan is the whole tree.
+// file_tree_resolve walks down instead: one index probe per path segment on
+// nodes_owner_parent_comparison_uniq, then the row on nodes_pkey. The same answer costs 12
+// buffer hits and 0.19 ms on a 2.2k-entry tree.
+//
+// The one behavioural difference is a row whose current path cannot be resolved from identity
+// while its legacy path cache still carries one: the view would report it and this query does
+// not. Identity is the authority for where an entry is, so a row no identity can address is
+// not a destination — a stale cache must not answer a creation question.
+const folderAtPathSQL = `select is_dir from nodes where owner_id=$1::uuid and id=file_tree_resolve($1::uuid,$2)`
+
 // CommitStagedFile is the index half of a proven native file publication. It is
 // called inside the journal's settlement transaction, while path guards are held.
 // It never touches bytes, deletes a file, or claims an index write published data.
@@ -42,7 +61,7 @@ func commitStagedFile(ctx context.Context, tx pgx.Tx, op fileops.Operation, resu
 	}
 	if parent != "" {
 		var folder bool
-		err := tx.QueryRow(ctx, `select is_dir from file_entries where owner_id=$1::uuid and path=$2`, op.Root.OwnerID, parent).Scan(&folder)
+		err := tx.QueryRow(ctx, folderAtPathSQL, op.Root.OwnerID, parent).Scan(&folder)
 		if err != nil || !folder {
 			return nil, fileops.E("parent_changed", err)
 		}
@@ -113,7 +132,7 @@ func CheckUploadBinding(ctx context.Context, tx pgx.Tx, op fileops.Operation) er
 	occupied := parent == ""
 	if !occupied {
 		var isFolder bool
-		err := tx.QueryRow(ctx, `select is_dir from file_entries where owner_id=$1::uuid and path=$2`, op.Root.OwnerID, parent).Scan(&isFolder)
+		err := tx.QueryRow(ctx, folderAtPathSQL, op.Root.OwnerID, parent).Scan(&isFolder)
 		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
 			return err
 		}
