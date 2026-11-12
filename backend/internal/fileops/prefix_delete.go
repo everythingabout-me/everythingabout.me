@@ -305,6 +305,9 @@ func (a *Actions) purgeEntry(ctx context.Context, op Operation, entry storage.En
 	}
 	// One conditional request where the driver can do it, the journalled removal otherwise:
 	// both refuse to delete an object whose revision moved, and both are safe to repeat.
+	// A driver that journals (Local) always lands on the removal beside this branch; the
+	// intent is named by the accepted operation below, never by the path alone, because a
+	// path can be deleted, re-created and deleted again as two different operations.
 	if purger, ok := native.(storage.Purger); ok {
 		err := purger.Purge(ctx, entry.Path, entry.Kind, revision)
 		switch {
@@ -376,6 +379,13 @@ func (a *Actions) finishPurge(ctx context.Context, root Root, actor Actor, op Op
 	return a.journal.FinishPurge(persist, op.Lease, state, result, failure)
 }
 
+// purgeEntryID names one object's removal inside one accepted deletion. The operation ID
+// comes first because the path alone is not an intent: deleting a re-created path is a
+// second accepted operation and must get a new identity, or the journaled driver refuses
+// it as a conflict and leaves the bytes behind. The path stays in the name because one
+// purge deletes many objects, and each removal is its own intent; the same operation
+// retried over the same object reuses this exact id, which is what makes the retry
+// idempotent instead of a second intent.
 func purgeEntryID(operationID string, path storage.Path) string {
 	return operationID + "/purge/" + string(path)
 }

@@ -198,6 +198,18 @@ func (w *MutationDriver) absent(ctx context.Context, root *os.Root, path storage
 func (w *MutationDriver) Mkdir(ctx context.Context, in storage.Mutation, cp storage.Checkpoint) (storage.MutationResult, error) {
 	return w.runAction(ctx, storage.EffectIntent{ID: in.ID, Action: "mkdir", Target: in.Path, Conditions: in.Conditions}, cp)
 }
+
+// Remove journals one native removal under the caller's intent id. Every Local deletion
+// goes through here, including a purge; there is deliberately no path-keyed Purge adapter.
+//
+// A ledger identity must name one accepted operation, not one path: delete a folder,
+// re-create it, delete it again is two operations over the same path, and a "purge:"+path
+// id made the second delete fail with intent_conflict while its bytes stayed on disk after
+// the index had already told the user they were gone. storage.Purger carries no operation
+// identity to put in that id, so Local takes the caller's journalled removal instead
+// (fileops.purgeEntryID names each intent by accepted operation and path) rather than
+// invent a path-keyed name. An object store's Purge keeps no ledger and needs no
+// operation name.
 func (w *MutationDriver) Remove(ctx context.Context, in storage.Mutation, cp storage.Checkpoint) (storage.MutationResult, error) {
 	// A purge removal and a marker reassert must not interleave their revision check and
 	// effect: rmdir cannot be conditional, so the shared path lock is the fence.
@@ -206,12 +218,6 @@ func (w *MutationDriver) Remove(ctx context.Context, in storage.Mutation, cp sto
 	return w.runAction(ctx, storage.EffectIntent{ID: in.ID, Action: "remove", Target: in.Path, Conditions: in.Conditions}, cp)
 }
 
-// Purge delegates to the journalled removal: a local unlink is a syscall, so the ledger
-// costs microseconds here, and keeping one deletion path keeps one set of guarantees.
-func (w *MutationDriver) Purge(ctx context.Context, p storage.Path, _ storage.Kind, revision []byte) error {
-	_, err := w.Remove(ctx, storage.Mutation{ID: "purge:" + string(p), Path: p, Conditions: storage.Conditions{ExpectedRevision: revision}}, func(context.Context, []byte) error { return nil })
-	return err
-}
 func (w *MutationDriver) Move(ctx context.Context, in storage.MoveRequest, cp storage.Checkpoint) (storage.MutationResult, error) {
 	return w.runAction(ctx, storage.EffectIntent{ID: in.ID, Action: "move", Source: in.Source, Target: in.Target, SourceRevision: in.SourceRevision, Conditions: in.TargetConditions}, cp)
 }
