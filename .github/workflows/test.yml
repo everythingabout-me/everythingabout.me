@@ -24,6 +24,8 @@ jobs:
           --health-retries 20
     env:
       DATABASE_URL: postgres://eam:eam@127.0.0.1:5432/eam?sslmode=disable
+      # APP_ENV has no default (backend/internal/config.appEnv); CI is not a deployment.
+      APP_ENV: development
     steps:
       - uses: actions/checkout@v4
 

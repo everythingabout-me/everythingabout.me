@@ -98,7 +98,7 @@ func TestStorageAdmitObjectsPostgresCLI(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	env := []string{"EAM_SERVER_TEST_PROCESS=1", "EAM_ENV_FILE=" + filepath.Join(root, "missing.env"), "EAM_SQL_DIR=" + sqlDir, "DATABASE_URL=" + isolated, "STORAGE_BACKEND=s3", "STORAGE_CONNECTION_ID=objects", "FILE_COORDINATED_WRITES=true", "FILE_OBJECT_ADMISSION_FILE=" + admissionFile, "FILE_OBJECT_SPOOL_ROOT=" + spool, "S3_ENDPOINT=" + provider.URL, "S3_REGION=test-region", "S3_BUCKET=fixture-bucket", "S3_ACCESS_KEY_ID=fixture-id", "S3_SECRET_ACCESS_KEY=fixture-secret", "S3_PATH_STYLE=true", "USER_QUOTA_BYTES=5"}
+	env := []string{"EAM_SERVER_TEST_PROCESS=1", "EAM_ENV_FILE=" + filepath.Join(root, "missing.env"), "EAM_SQL_DIR=" + sqlDir, "DATABASE_URL=" + isolated, "APP_ENV=development", "STORAGE_BACKEND=s3", "STORAGE_CONNECTION_ID=objects", "FILE_COORDINATED_WRITES=true", "FILE_OBJECT_ADMISSION_FILE=" + admissionFile, "FILE_OBJECT_SPOOL_ROOT=" + spool, "S3_ENDPOINT=" + provider.URL, "S3_REGION=test-region", "S3_BUCKET=fixture-bucket", "S3_ACCESS_KEY_ID=fixture-id", "S3_SECRET_ACCESS_KEY=fixture-secret", "S3_PATH_STYLE=true", "USER_QUOTA_BYTES=5"}
 	run := func(args ...string) (string, error) {
 		cmd := exec.CommandContext(ctx, os.Args[0], append([]string{"-test.run=^TestLocalStorageServerCommand$", "--"}, args...)...)
 		cmd.Env = env

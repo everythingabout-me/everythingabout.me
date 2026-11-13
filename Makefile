@@ -10,10 +10,14 @@ install:
 	cd backend && $(GO) mod download
 	cd web && npm install
 
-# Development: Go backend + Vite (frontend proxies /api to 8080)
+# Development: Go backend + Vite (frontend proxies /api to 8080).
+# APP_ENV is required and has no default (see config.appEnv), so this target — the local
+# entry point — supplies development. An exported APP_ENV still wins, so a developer can
+# deliberately run production semantics; nothing here touches a deployed host, which runs
+# bin/eam from its own unit and .env.
 dev:
 	@echo "backend http://127.0.0.1:8080 · frontend http://127.0.0.1:5173"
-	@( cd backend && $(GO) run ./cmd/eam server ) & \
+	@( cd backend && APP_ENV="$${APP_ENV:-development}" $(GO) run ./cmd/eam server ) & \
 	 ( cd web && npm run dev ) & \
 	 wait
 

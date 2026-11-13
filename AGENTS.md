@@ -130,8 +130,12 @@ while its tests were skipping. CI (`.github/workflows/test.yml`) runs `make migr
 - Every backend maintenance command lives in one binary: `cd backend && go run ./cmd/eam <cmd>` (or `./bin/eam`).
 - `internal/config` loads `.env` automatically, searching up to three directories upward, so you never export
   by hand; Go itself does not read `.env`.
-- Without SES configured in development, the verification code is printed to the backend log and filled into
-  the login page automatically — **never expose a development server to the public internet**.
+- `APP_ENV` is required and has no default: it must be `development` or `production`, and a missing or
+  unrecognized value stops the process at startup naming the variable (defaulting either way silently decides
+  whether verification codes reach the browser and whether cookies get `Secure`). `make dev` supplies
+  `development`; a deployed host sets `production` in `.env`. Without SES configured in development, the
+  verification code is printed to the backend log and filled into the login page automatically —
+  **never expose a development server to the public internet**.
 
 ## Repo map
 

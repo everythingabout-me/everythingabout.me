@@ -113,7 +113,7 @@ disqualify it. Every other missing or mismatched baseline, and every writer revo
 Object connections use current-object ETag revisions with native conditions; COS ignores `If-Match`, so
 replacement rechecks the ETag under a coordinated PUT, and no bucket versioning is required. `STORAGE_BACKEND=local` or `s3` starts without COS configuration.
 
-Server startup requires a stable `APP_SECRET`; production also requires explicit SES credentials. Configure
+Server startup requires a stable `APP_SECRET` and an explicit `APP_ENV` (`development` or `production`, no default); production also requires explicit SES credentials. Configure
 `FILE_COOKIE_ORIGINS` for cookie mutations and credentialed CORS; GET `/api/files/me` bootstraps its
 session-bound CSRF token.
 
@@ -201,7 +201,7 @@ The key sits directly on the path (`drive/<userID>/Photos/2024/a.jpg`), which me
 Prerequisites: **Go 1.26+**, **Node 20.19+** (only for building the frontend), and a Postgres.
 
 ```bash
-cp .env.example .env      # fill in DATABASE_URL / APP_SECRET / selected storage backend
+cp .env.example .env      # fill in DATABASE_URL / APP_SECRET / selected storage backend (APP_ENV is pre-set to development)
 make install              # go mod download + frontend npm install
 make migrate              # create tables: nodes / users / sessions / email_codes
 make check                # self-check: database / selected storage / mail configuration
@@ -226,8 +226,8 @@ cd web && npm run dev                   # Vite dev server
 
 Sign-in, sign-up, and email changes all share the same 6-digit email verification code. With SES configured it sends real mail; **without SES**, development prints the code to the server log and fills it into the login page, while production refuses to send at all.
 
-> In development mode the code is returned straight to the browser, so never expose a development server to the public internet.
-> Production behavior (Secure cookies, refusing to send codes without SES) only kicks in when `APP_ENV=production`.
+> In development (`APP_ENV=development`) the code is returned straight to the browser, so never expose a development server to the public internet.
+> `APP_ENV` is required and has no default: a missing or unrecognized value stops the process at startup with a message naming the variable. `make dev` supplies `development`; a deployed host must set `APP_ENV=production` itself, which adds Secure to cookies and refuses to send codes without SES.
 
 1. Verify the sending domain / sender address in the Tencent Cloud SES console (including SPF and DKIM).
 2. Create the verification code template. `email-templates/` has ready-to-paste copies in both languages:
@@ -482,7 +482,7 @@ password sign-in: 30 per 15 minutes per IP, 10 per 15 minutes per email).
 | `FILE_OBJECT_ADMISSION_FILE` / `FILE_OBJECT_SPOOL_ROOT` | Exact-connection capability evidence and durable shared object spool |
 | `COS_SECRET_ID` / `COS_SECRET_KEY` | Server-side COS control and class A URL signing; never give them to the frontend |
 | `COS_BUCKET` / `COS_REGION` | The bucket must include the APPID |
-| `APP_ENV` | `development` (default) or `production`; decides Secure cookies and the behavior when SES is not configured |
+| `APP_ENV` | Required: `development` or `production`, no default; decides Secure cookies and the behavior when SES is not configured. `make dev` supplies `development` |
 | `SESSION_TTL_DAYS` | Session lifetime, 30 days by default |
 | `TIMELINE_ENABLED` | Whether events get organized in the background (grouping photos into events), `true` by default; set it to `false` to keep only the read endpoints |
 | `TIMELINE_WORKERS` | Background organizer concurrency, 2 by default |

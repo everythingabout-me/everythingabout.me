@@ -70,10 +70,17 @@ type SES struct {
 	ReplyTo      string
 }
 
+// The two runtime environments. APP_ENV must name one of them explicitly; see appEnv.
+const (
+	EnvDevelopment = "development"
+	EnvProduction  = "production"
+)
+
 // IsProduction decides whether cookies get Secure and whether a missing SES setup may print
 // the verification code to the log (production must have SES configured; staying silent is
-// not an option).
-func (c *Config) IsProduction() bool { return c.AppEnv == "production" }
+// not an option). Load has already rejected every other value, so this comparison is the
+// whole decision and a hand-built Config defaults to development.
+func (c *Config) IsProduction() bool { return c.AppEnv == EnvProduction }
 
 func (c *Config) SessionTTL() time.Duration {
 	return time.Duration(c.SessionTTLDays) * 24 * time.Hour
@@ -94,9 +101,38 @@ func COSAppID(bucket string) string {
 	return bucket[index+1:]
 }
 
+// appEnv requires APP_ENV to name the runtime environment explicitly.
+//
+// There is deliberately no fallback. Every possible default is a decision this code cannot
+// make: defaulting to development ships the insecure behavior the variable exists to expose
+// (verification codes in API responses, cookies without Secure) to any host whose operator
+// forgot the line, and defaulting to production breaks a local checkout in a way that looks
+// like a bug (no code is ever sent without SES credentials and Secure cookies vanish over
+// plain http), so the developer's next move is to export the variable anyway. Refusing to
+// start fails before the process listens, at the only moment the operator can answer, and
+// the message names the variable and both accepted values. `make dev` supplies development
+// because that target is by definition the local entry point; a deployed host must say
+// APP_ENV=production in its own environment or .env.
+func appEnv() (string, error) {
+	value := strings.TrimSpace(os.Getenv("APP_ENV"))
+	switch value {
+	case EnvDevelopment, EnvProduction:
+		return value, nil
+	case "":
+		return "", fmt.Errorf("missing required environment variable APP_ENV: set APP_ENV=development for a local machine or APP_ENV=production for a deployed host (there is no default; `make dev` sets development)")
+	default:
+		return "", fmt.Errorf("invalid APP_ENV %q: expected %q or %q (there is no default)", value, EnvDevelopment, EnvProduction)
+	}
+}
+
 // Load reads .env if it exists, then validates the required values.
 func Load() (*Config, error) {
 	loadDotEnv()
+
+	appEnvValue, err := appEnv()
+	if err != nil {
+		return nil, err
+	}
 
 	storageConfig, err := loadStorage(os.Getenv)
 	if err != nil {
@@ -105,7 +141,7 @@ func Load() (*Config, error) {
 
 	c := &Config{
 		Addr:              addr(),
-		AppEnv:            envOr("APP_ENV", "development"),
+		AppEnv:            appEnvValue,
 		WebDir:            webDir(),
 		DatabaseURL:       os.Getenv("DATABASE_URL"),
 		AppSecret:         os.Getenv("APP_SECRET"),
