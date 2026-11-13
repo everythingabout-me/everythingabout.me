@@ -183,6 +183,169 @@ Current ETag and upload guarantees remain those of the [driver](storage-driver.m
 pinned, operation-specific native conditions, length-bound class A part URLs, explicit receipt provenance and
 server-only publication in every transfer class. Stable IDs do not strengthen native publication conditions.
 
+## Write-path audit
+
+A review described the implementation as "the canonical identity still goes through a derived-cache column":
+the trigger derives `nodes.parent_id` from the path string (one Go repair statement writes the column directly,
+`upload_observation.go:100`), and the `file_entries` view falls back to the cached path when ancestry resolution
+fails. This section traces that dependency, records
+an executable probe matrix (`backend/internal/nodes/canonical_identity_audit_test.go`), and decides what it is.
+The audit was done on 2026-11-13 at `7c22410`; line references are to that tree.
+
+### The trace
+
+`file_entries` is a view, not a table. Nothing inserts into it; every row is created by `insert into nodes(…)`
+and the view computes `path`, `parent` and `key` on read (`sql/027_canonical_file_tree.sql:66-73`). A row's
+creation therefore has two halves: the settlement writes the legacy columns it has proven, and the BEFORE
+trigger derives the canonical ones in the same transaction.
+
+| Write path | SQL site | Columns the application supplies | Canonical source |
+|---|---|---|---|
+| Upload commit (staged publication) | `backend/internal/nodes/file_write.go:79` | owner, key, path, parent, name, is_dir, size, mime, source_modified_at | native entry is checked against `intent.Target`, then the trigger |
+| Implicit upload ancestors | `file_write.go:57` → `backend/internal/nodes/upload_observation.go:89` | ancestor path/parent/name | trigger; the only direct Go `parent_id` write is the dangling-link repair at `upload_observation.go:100` |
+| Upload observation / confirmation | `backend/internal/nodes/upload_observation.go:147,191` | path/parent/name/key and observed metadata | trigger |
+| mkdir / copy / move settlement | `backend/internal/nodes/file_actions.go:367,397` | target path/parent/name/key from the proven mutation result | trigger |
+| Eligible native folder move | `backend/internal/nodes/file_tree.go:54` | one row's new path/parent/name/key | trigger; descendants are untouched |
+| Scan / reconcile import | `backend/internal/nodes/scan.go:234` | scanned path/parent/name/key | trigger, including implicit folders |
+| Deletes | `file_actions.go:169,213,248,347,502`, `scan.go:381`, `backend/internal/nodes/nodes.go:237` | identity or path only | none (rows leave) |
+| Legacy claim | `backend/cmd/eam/claim.go:134` | owner and key only | trigger re-derives from the unchanged path |
+| Legacy `nodes.Service` writers | `nodes.go:145,182,248,269` | path/parent/name | trigger; no production caller is left (grep at this tree), but tests and fixtures still use them |
+
+What sets each canonical fact:
+
+- `parent_id` and `comparison_name` are set only by `file_canonical_node_write`
+  (`sql/027_canonical_file_tree.sql:75-158`), a BEFORE INSERT OR UPDATE trigger on `nodes`. It takes a shared
+  advisory lock for the owner's name rules, reads the root and `name_comparison_version`, walks the path's
+  segments resolving each against `nodes(owner_id, parent_id, comparison_name)`, creates missing ancestor rows
+  with `on conflict (owner_id, parent_id, comparison_name) do nothing`, rejects an explicitly supplied parent
+  that disagrees with the path-derived one, rejects cycles, then writes `NEW.parent_id` and
+  `NEW.comparison_name := file_identity_comparison(NEW.name, version)`.
+- The comparison pipeline is SQL's `file_identity_comparison` (`sql/026_file_identity.sql:1693-1700`) and Go's
+  `internal/namecompare.KeyString`; the trigger is the only production writer of the column, and
+  `file_identity_root_rules_changed` (`sql/026_file_identity.sql:1812-1821`) rewrites every row's
+  `comparison_name` when the root's rules change.
+- `membership_revision` is bumped by the AFTER trigger `file_tree_membership_changed`
+  (`sql/027_canonical_file_tree.sql:168-185`) on the old and new direct parents; it does not walk descendants.
+- Ancestry is `nodes.parent_id`, ending at `file_identity_roots.id` for the owner root. There is no foreign key
+  on the column: the trigger plus `nodes_owner_parent_comparison_uniq` are the guards.
+- The view's `parent` is `regexp_replace` of the resolved path, not the stored `parent` column; the stored
+  `path`/`parent`/`key` are caches with their own unique indexes (`nodes_owner_path_uniq`, `nodes_key_key`).
+
+Where the application could write the canonical columns instead: every settlement already has the proven path,
+and most have the bound parent identity (`storage.WriteIntent.ParentID`, `fileops.ActionRequest.ParentID`).
+The missing pieces are not the values but the invariants: ancestor materialization before resolving the parent,
+cycle rejection, sibling-conflict rejection, the old-path cache cleanup that keeps the two legacy unique
+indexes writable, and the lazy root row. A Go writer would need one shared helper called before all nine
+insert/update statements above; `ensureUploadParents` is the existing precedent for the parent-link half.
+
+### Probe matrix
+
+Run with `EAM_TEST_DATABASE_URL=… go test -run TestCanonicalIdentityWritePathAudit ./internal/nodes`. The test
+applies every migration twice to a scratch database and writes rows exactly as the settlement paths do.
+
+| Probe | Identity | Ancestry | Authorization input | Where the trigger is load-bearing |
+|---|---|---|---|---|
+| Rename in place | ID retained; `comparison_name` follows the new spelling; the old spelling stops resolving | `parent_id` unchanged | current path is the new spelling, so a path scope is judged on the new name | without it the row keeps the old `comparison_name`, the unique sibling index still sees the old key, and identity does not resolve the new name at all |
+| Move to another folder | ID retained; `parent_id` becomes the destination folder | new parent link; old path stops resolving | current path is the destination path | `parent_id` is only ever the trigger's `expected` value; without it the link stays at the old parent |
+| Subtree move (one root row) | root ID retained; descendant IDs and `parent_id` untouched | descendants resolve through the moved root; their cached `path`/`parent` stay stale by design | current path is the new location, so a scope excludes the old subtree | the whole derivation is the trigger: without it the view would fall back to the descendants' stale cache |
+| Delete, then create at the same path | a fresh ID; the old ID never resolves again | the re-created row gets new ancestor links | the new ID owns the path | the trigger's `update nodes set path=null,parent=null,key=null where path=NEW.path` (`sql/027:149-151`) clears the moved descendants' stale caches, so `nodes_owner_path_uniq` and `nodes_key_key` do not collide; without it the re-creation fails |
+| NFD spelling (`cafe\u0301.txt`) | accepted spelling preserved in `path`/`name`; `comparison_name` is the NFC form | one row, no ambiguity | NFC and NFD spellings both resolve to the same ID | without `comparison_name` neither spelling resolves by identity; only an exact cached-path match would find the row |
+| Case-insensitive sibling (`nfc-fold-v1`) | `README` and `readme` are one identity; the second insert raises `23505 canonical sibling spelling conflicts`; `Straße`/`STRASSE` collide through full folding, not `lower()` | same parent | mixed-case requests resolve to the one ID | the trigger computes the fold key and rejects the conflict; without it both spellings coexist with NULL keys and the unique sibling index cannot merge them |
+| NULL path cache | metadata-only update nulls `path`/`parent`/`key`; ID and ancestry still answer | `file_tree_path` derives the current path from `parent_id` | current path unchanged | the trigger's metadata-only branch (`sql/027:99-104`) keeps the link instead of re-deriving or clearing it; a relink through a NULL cache is refused (`23514`) |
+| Stale cache with broken ancestry | ID still resolves, but to the stale cached path | `file_tree_path` returns NULL because an ancestor row is missing; the view `coalesce` returns the old cache | the scope check sees the old location (inside a scope the entry has left) | nothing repairs the chain here; the fallback is the only thing that answers, which is why it is debt |
+| No BEFORE trigger | `parent_id`/`comparison_name` are NULL; `file_tree_resolve` returns NULL; the view falls back to the path cache for every row | no ancestry at all | only the exact cached path works | every production upsert targets `(owner_id,parent_id,comparison_name)`; with NULL identity the conflict target cannot match: a same-path retry fails on the still-unique key instead of updating, and a different key or path would insert a duplicate because NULL conflict keys never match |
+| Explicit canonical columns | accepted when `parent_id` agrees with the path | same as normal | same as normal | the trigger overwrites `comparison_name` with its own value, so a Go spelling disagreement is silently corrected today; a validation-only trigger would have to reject it |
+
+The trigger is load-bearing in seven places, all in the write transaction: the upsert conflict target, the
+sibling uniqueness key (case and Unicode), the parent link every read walks, ancestor materialization for
+implicit folders, cycle rejection, old-path cache cleanup for the two legacy unique indexes, and the lazy root
+row plus the path/parent/name consistency checks. Removing it is not a no-op that leaves paths working: the
+index degrades to the pre-027 cache, and writes stop settling.
+
+### The cached-path fallback
+
+The view's `coalesce(file_tree_path(n.owner_id, n.id), n.path)` (`sql/027:73`) is reachable exactly when
+`file_tree_path` returns NULL: the row has no `parent_id`, an ancestor row is gone, or the owner root is
+missing. Normal settlements always give an owned row a `parent_id`, so a null result means index damage — or
+an unclaimed legacy row (`owner_id IS NULL`), which is the fallback's legitimate case. It is not a purely
+theoretical state: `ensureUploadParents` (`upload_observation.go:97-103`) exists to reattach a child whose
+parent row was removed, and its comment records that a concurrent subtree deletion can produce it.
+
+What it can return wrong: for an owned row with a broken chain, the view answers with the last cached path, and
+that string is the input to `fc.WithinScope` for an ID selector (`backend/internal/api/files_identity.go:58-70`).
+The entry can therefore appear inside a scope it has left (the stale-cache row of the matrix). Reads do not leak content: the read path
+re-resolves the selected ID against the path (`filesCheckReadIdentity`, `files_identity.go:271-299`) and answers
+404 when they disagree. Mutations are the sharper edge: upload/move/delete binding re-resolves the same ID and
+gets the same stale path (`filesCheckIdentityBindings`, `files_identity.go:222-269`), so a delete by ID can be
+presented as owning a path that a different entry now occupies. A NULL cache on top of a broken chain makes the
+view return NULL, which `FileResolveID` cannot scan into a string: the request fails, but as an internal error
+rather than a truthful 404. Change snapshots and change filters read the same view
+(`backend/internal/api/files_changes.go:671`, `files_change_snapshots.go:181,432`), and path-derived timeline
+facts consume it too.
+
+The fail-closed fix does not need the view rewritten: an ID selector is already owner-scoped, so its ID→path
+lookup can ask `file_tree_path` strictly for owned rows and report not-found when it returns NULL, leaving the
+`coalesce` for `owner_id IS NULL` legacy display. That is one query in `resolveFileID` plus the three direct
+view reads in the change API, and it turns the only wrong answer into a 404.
+
+### Verdict
+
+**Deliberate design, not a defect. The one piece of debt is the fallback, not the trigger.**
+
+- It is design because the writer is the settlement, not an arbitrary caller: each of the nine statements above
+  passes the path that the native effect just proved (`commitStagedFile` checks it against `intent.Target`;
+  `settle*` uses the mutation result; scan uses the native walk; claim leaves the path unchanged), and the
+  trigger canonicalizes it in the same transaction. After commit, `parent_id` is the identity every read uses;
+  the path is not consulted again unless ancestry is already broken.
+- It is not a defect because the written contract (`AGENTS.md`, "Canonical identity is
+  owner/root/parent/name/comparisonName; legacy path/key columns are nullable derived caches") says where
+  identity resides, not which layer writes it. Migration 027 deliberately makes the database the single writer
+  ("Canonical parent/name authority permits a native tree rename to relink one row"). A Go writer on top of the
+  current trigger would be overwritten by it anyway (the explicit-columns row of the matrix), so "no Go code writes it" is intended, not a
+  gap between contract and code.
+- It is not clean either. The trigger's write input is the path cache, and the only exception to "the
+  application never writes canonical columns" is a repair statement (`upload_observation.go:100`). That is
+  tolerable while every writer is a settlement; it becomes a defect the day a writer needs to set identity from
+  an ID or a provider token rather than from the operation's path. The fallback is the part that is already
+  wrong: it converts "the chain is broken" into a plausible cached answer.
+
+So the review's observation is accurate but its label is not. The canonical identity does pass through a path
+on the way in; it does not pass through a derived cache on the way out, except in the fallback branch.
+
+### If the writer moves (plan, not implemented)
+
+The dependency is real and removable, but not cheaply, and it buys no correctness while the trigger remains a
+fallback. If a later change needs it — a provider that reports identity without a stable path, or a writer that
+must bind an ID directly — this is the sequence:
+
+1. **Migration 054, validation instead of derivation.** Recreate `file_canonical_node_write`: for owned rows it
+   derives only when `NEW.parent_id` or `NEW.comparison_name` is NULL (the fallback), and otherwise verifies
+   that the supplied parent exists under the owner/root, is not the row or a descendant, and that
+   `NEW.comparison_name = file_identity_comparison(NEW.name, version)`; a mismatch raises `23514` instead of
+   being silently overwritten. Keep the AFTER membership trigger and the name-rules trigger.
+2. **One shared Go resolver.** `identityFor(parentID or parentPath, name)` returns `(parent_id, comparison_key)`
+   using `namecompare.KeyString` and `file_tree_resolve` after materializing missing ancestors; every write site
+   above passes both columns. Prefer the already-bound `ParentID` from the intent when it is present, and fall
+   back to the path only for `parents:true` and scan imports.
+3. **Drop the fallback, then the derivation.** After every writer is converted and a full re-index proves it, a
+   later migration rejects NULL canonical columns for owned rows (a `NOT VALID` check validated after the
+   re-index) and removes the derivation branch. The trigger can stay as a cheap validator; only dropping it
+   entirely would also move the cycle check, the cache cleanup and ancestor materialization into Go.
+
+Migration and re-index cost: no existing row needs a backfill — every owned row already has both columns from
+the trigger — so the schema step is one function replacement. Verification is one full re-index per owner
+(`eam reconcile --owner <uuid>`, the same native walk and O(entries) upserts the service already needs after a
+restore), because that is the only way to exercise every write path against a real tree; the Local 30,000-
+descendant fixture (`backend/internal/nodes/file_tree_test.go:12`) and a 50k-entry owner are the two useful
+shapes. The real cost is the nine statements and their tests, plus keeping Go and SQL comparison pipelines in
+step (already pinned by the nameprobe suite). Until step 3, the trigger still answers for direct SQL, fixtures
+and any writer not yet converted, so the change is forward-compatible but its correctness is only proven by the
+re-index.
+
+Recommendation: do not do this now. Keep the trigger as the single writer; fix the fallback (strict ID→path for
+owned rows) and record this reason next to the trigger. Revisit the writer split when a write path actually
+needs to name an entry without a path — not to make the diagram look cleaner.
+
 ## Backup and acceptance
 
 Native files remain readable without Postgres or an export interpreter. A scan can rebuild paths and basic
