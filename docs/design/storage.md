@@ -300,6 +300,11 @@ is.
   revision; once the bytes are gone the same `(path, revision)` pair must not fund a second refund. The row
   survives settlement, and `prune` keeps its operation. A replacement never inherits one.
 
+Rows written before this rule are replacement claims held by settled operations. The next operation adopts such
+a row instead of being refused, because a settled replacement no longer spends its credit; adoption is
+restricted to a holder whose action is `upload_commit` and whose state is `succeeded`, so a deletion receipt
+and an unsettled outcome stay conflicts. A stale row therefore needs no operator command.
+
 Quota for a 100 B file on a non-version-retaining root (logical 100 before):
 
 | Case | Reserved | Settled delta | Logical after |

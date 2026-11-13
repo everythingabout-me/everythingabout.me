@@ -788,7 +788,27 @@ func TestPostgresCreditClaims(t *testing.T) {
 		requireUsage(t, p, r, a, 100, 0, 100, 0)
 	})
 
-	t.Run("a delete credit is a receipt and blocks another claim", func(t *testing.T) {
+	t.Run("a settled replacement claim is adopted, not a conflict", func(t *testing.T) {
+		// A row written by a binary from before the release rule points at a replacement
+		// that already settled. The revision is still current (identical bytes), so the
+		// next replacement adopts the row and the last one releases it.
+		p, r, a := seedOwner(t, pool, provenBaseline(100, 100, 1000, 1000))
+		legacy := applyReplacement(t, p, r, a, "legacy/file", 100, 100, version)
+		if _, err := pool.Exec(ctx, `insert into file_credit_claims(owner_id,comparison_path,version,operation_id) values($1,$2,$3,$4)`, r.OwnerID, "legacy/file", version, legacy.ID); err != nil {
+			t.Fatal(err)
+		}
+		requireClaims(t, pool, r.OwnerID, 1)
+		req := replacementRequest(r, a, "legacy/file", 100, 100, version)
+		next := mustClaim(t, p, mustBegin(t, p, req), a)
+		var holder string
+		if err := pool.QueryRow(ctx, `select operation_id::text from file_credit_claims where owner_id=$1`, r.OwnerID).Scan(&holder); err != nil || holder != next.ID {
+			t.Fatalf("adopted holder %q, want %s: %v", holder, next.ID, err)
+		}
+		finishReplacement(t, p, next, 100, 100)
+		requireClaims(t, pool, r.OwnerID, 0)
+	})
+
+	t.Run("a delete credit is a receipt and is never adopted", func(t *testing.T) {
 		// Arithmetic: the delete refunds its 100 B once. A second delete of the same
 		// revision would subtract bytes that no longer exist, and a replacement must not
 		// inherit that receipt either.
