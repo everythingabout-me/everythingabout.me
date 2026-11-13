@@ -92,6 +92,14 @@ func runServer(args []string) error {
 	if err := resolver.AdoptEnvironmentSecret(ctx); err != nil {
 		return fmt.Errorf("adopt environment-seeded storage credentials: %w", err)
 	}
+	// A connection's evidence and spool are keyed by its row id, because two owners may
+	// each name a connection "nas" (036) and a name-keyed directory is then one
+	// namespace two accounts share. Rows written by an earlier release still store the
+	// name-keyed paths, so move their directories before any owner resolves a
+	// connection; an in-flight upload's staged bytes travel with the directory.
+	if err := resolver.AdoptObjectPaths(ctx); err != nil {
+		return fmt.Errorf("adopt storage connection paths: %w", err)
+	}
 	// The row a binding names is authoritative: when it changed, adopt it and
 	// invalidate the derived view instead of refusing to start. This is a constant
 	// number of statements per changed owner, with no native enumeration.

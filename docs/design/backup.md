@@ -200,7 +200,8 @@ Rules, each answering a specific failure:
   signup is a far larger grant than any single endpoint. The operator CLI is not bound by any of this: it
   already has host access.
 - **A destination is measured when it is used, not when it is recorded.** Both paths derive that
-  connection's own evidence and spool (the name is the leaf), because inheriting the deployment's would
+  connection's own evidence and spool (the row id is the leaf; see
+  [storage](storage.md#5-write-and-recovery-model)), because inheriting the deployment's would
   make the new bucket refuse evidence recorded for another one — and measuring it would overwrite the
   authority's proof. The measurement itself happens before the first snapshot: a drive may be recorded
   while it is unreachable (a NAS that is off, a tunnel that is down), and a person adding one should not
@@ -217,8 +218,9 @@ Rules, each answering a specific failure:
 - Each connection owns its spool root, admission evidence and transfer class. A shared spool across
   connections would let one target's temporary material be published to another; a shared evidence file
   would let one connection's probe overwrite another's proof. `add` therefore derives
-  `<admission dir>/admission-<name>.json` and `<spool dir>/<name>` for object connections, and refuses a
-  connection that names the deployment's own paths.
+  `<admission dir>/admission-<row id>.json` and `<spool dir>/<row id>` for object connections, and refuses
+  a connection that names the deployment's own paths. The id, not the name, is the leaf because two
+  owners may each name a connection "nas"; a name-keyed leaf gave them one host directory.
 
 ## 9. Scheduling and operation
 

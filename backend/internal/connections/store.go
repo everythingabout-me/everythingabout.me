@@ -25,6 +25,10 @@ type Store interface {
 	// environment reference. It is scoped to shared rows: an account-added row
 	// keeps its inline secret because its key has no deployment environment.
 	SetSecretReference(ctx context.Context, id string, ref SecretReference) error
+	// SetObjectPaths rewrites the two per-connection on-disk paths after adoption
+	// moved them. It is scoped by row id, not name, so a rename cannot repoint
+	// another row's evidence.
+	SetObjectPaths(ctx context.Context, id, admissionFile, spoolRoot string) error
 }
 
 type postgresStore struct{ db *store.DB }
@@ -32,7 +36,10 @@ type postgresStore struct{ db *store.DB }
 func NewPostgresStore(db *store.DB) Store { return postgresStore{db: db} }
 
 func (p postgresStore) Connections(ctx context.Context) ([]Connection, error) {
-	rows, err := p.db.Pool().Query(ctx, `select `+connectionColumns+` from storage_connections order by name`)
+	// Creation order is the adoption order: when an older release let two rows share
+	// one name-keyed directory, the older row is the one that adopted it first, so a
+	// repeat start hands the same directory to the same row.
+	rows, err := p.db.Pool().Query(ctx, `select `+connectionColumns+` from storage_connections order by created_at, name`)
 	if err != nil {
 		return nil, fmt.Errorf("read storage connections: %w", err)
 	}
@@ -147,11 +154,14 @@ func (p postgresStore) Insert(ctx context.Context, c Connection) error {
 	if len(c.Admission) > 0 {
 		admission = []byte(c.Admission)
 	}
+	// The id is supplied by a caller that had to place on-disk state before the
+	// INSERT, because a connection's evidence and spool are keyed by it; a caller
+	// without one still gets the schema's gen_random_uuid().
 	tag, err := p.db.Pool().Exec(ctx, `
-		insert into storage_connections(owner_id, name, backend, role, identity, config, secret, secret_reference, generation, admission, enabled)
-		values(nullif($1,'')::uuid,$2,$3,$4,$5,$6,$7,$8,$9,$10,true)
+		insert into storage_connections(id, owner_id, name, backend, role, identity, config, secret, secret_reference, generation, admission, enabled)
+		values(coalesce(nullif($1,'')::uuid, gen_random_uuid()), nullif($2,'')::uuid,$3,$4,$5,$6,$7,$8,$9,$10,$11,true)
 		on conflict (identity) do nothing`,
-		c.OwnerID, c.Name, c.Backend, c.Role, c.Identity, config, secret, reference, c.Generation, admission)
+		c.ID, c.OwnerID, c.Name, c.Backend, c.Role, c.Identity, config, secret, reference, c.Generation, admission)
 	if err != nil {
 		return fmt.Errorf("insert storage connection %q (identity %s): %w", c.Name, c.Identity, err)
 	}
@@ -193,6 +203,28 @@ func (p postgresStore) SetSecretReference(ctx context.Context, id string, ref Se
 	}
 	if tag.RowsAffected() == 0 {
 		return fmt.Errorf("storage connection %s: no shared row was updated; an account-added connection keeps its inline secret", id)
+	}
+	return nil
+}
+
+// SetObjectPaths records the id-keyed paths adoption moved a row's directories to.
+// The two paths live in the row's config, so the driver, the probe command and the
+// CLI all read one answer; leaving the row on a legacy path after moving the
+// directory would make the next start adopt a directory that is no longer there.
+func (p postgresStore) SetObjectPaths(ctx context.Context, id, admissionFile, spoolRoot string) error {
+	if id == "" {
+		return fmt.Errorf("storage connection path adoption: no row id to update")
+	}
+	tag, err := p.db.Pool().Exec(ctx, `
+		update storage_connections
+		set config = jsonb_set(jsonb_set(config, '{objectAdmissionFile}', to_jsonb($2::text)), '{objectSpoolRoot}', to_jsonb($3::text)),
+		    updated_at=now()
+		where id=$1::uuid`, id, admissionFile, spoolRoot)
+	if err != nil {
+		return fmt.Errorf("storage connection %s: write adopted object paths: %w", id, err)
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("storage connection %s: no row was updated with its adopted object paths", id)
 	}
 	return nil
 }

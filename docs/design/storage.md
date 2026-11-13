@@ -237,6 +237,30 @@ requires the spool to hold no non-terminal record, not an empty directory: settl
 locks cannot hide a future effect, and requiring their removal made a lost-index rebuild depend on hand-deleting
 the driver's recovery evidence.
 
+**Per-connection on-disk state is keyed by the connection row id (2026-11-13).** A connection owns two
+pieces of host state: its admission evidence and its spool. Evidence describes one endpoint, so a second
+connection inheriting the file would be refused when it loaded proof recorded elsewhere, and a probe
+against an inherited path would overwrite that proof; a shared spool would let one target's temporary
+material be published to another. Their paths are `<admission dir>/admission-<row id>.json` and
+`<spool root>/<row id>`. The leaf is the row id, never the connection name: migration 036 deliberately
+allows two owners to each call a connection "nas", so a name is not unique, and the earlier name-keyed
+leaf gave two accounts one host directory and one evidence file while every row and query was
+owner-scoped. The id is also the leaf that survives a rename of the connection, which a name-keyed leaf
+would move; the name stays where a person reads it (logs, errors, the settings UI). An operator's explicit
+`--admission-file`/`--spool-root` is kept verbatim, and the deployment's own paths are never moved.
+Existing deployments are adopted at startup, before any owner resolves a connection, and the pass is
+idempotent. A row is a legacy row only when its stored path is exactly the name-keyed derivation. When
+only the legacy path exists it is renamed, so an in-flight upload's staged bytes and the ledger that
+proves a publication may still land move with the directory. When both exist the spool is merged entry by
+entry: entries missing from the new directory move in, byte-identical duplicates are dropped from the old
+one, and one name present in both with different contents stops the start naming both paths, because
+neither copy can be discarded automatically — a non-terminal record proves its effect may still land. The
+single evidence file is not merged: the id-keyed file wins because it is the one the current layout reads,
+and the old file is left in place and logged, since evidence is a measurement the probe rewrites. If two
+rows already shared one name-keyed directory (the failure this fixes), the older row adopts it whole and
+the newer row starts with an empty directory; startup logs the shared path, and nothing is deleted,
+because the ledger it may hold is the evidence of a possible pending effect.
+
 One-file overwrite should preserve old complete bytes until an atomic native switch. Drivers unable to meet
 a required create/replace condition must reject that write capability instead of silently falling back to
 in-place partial overwrite. Conditions against arbitrary external writers need native support or coordinated

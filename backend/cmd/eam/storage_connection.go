@@ -229,8 +229,15 @@ func runStorageConnectionAdd(args []string) error {
 			return err
 		}
 	}
+	// The id is generated here because the connection's evidence and spool are keyed
+	// by it: the name is shared by two owners by design, so it cannot be the leaf of a
+	// host directory.
+	id, err := connections.NewID()
+	if err != nil {
+		return err
+	}
 	c := connections.Connection{
-		OwnerID: ownerID, Name: *name, Backend: *backend, Role: *role, Generation: *generation, Enabled: true,
+		ID: id, OwnerID: ownerID, Name: *name, Backend: *backend, Role: *role, Generation: *generation, Enabled: true,
 		Config: connections.Spec{
 			RootAtBucket:      *rootAtBucket,
 			CoordinatedWrites: *coordinated,
@@ -251,7 +258,7 @@ func runStorageConnectionAdd(args []string) error {
 		c.Config.TransferClass = cfg.Storage.TransferClass
 	}
 	if *backend != "local" {
-		c.Config.ObjectAdmissionFile, c.Config.ObjectSpoolRoot, err = connections.ObjectPaths(cfg.Storage, *name, *backend, *admissionFile, *spoolRoot)
+		c.Config.ObjectAdmissionFile, c.Config.ObjectSpoolRoot, err = connections.ObjectPaths(cfg.Storage, c, *admissionFile, *spoolRoot)
 		if err != nil {
 			return err
 		}

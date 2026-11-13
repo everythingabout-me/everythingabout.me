@@ -132,8 +132,15 @@ func (s *Server) handleStorageConnectionAdd(w http.ResponseWriter, r *http.Reque
 	if backend == "" {
 		backend = "cos"
 	}
+	// The row id is generated before the INSERT because this connection's evidence and
+	// spool are keyed by it; the name is what the account reads, not what separates two
+	// accounts' directories.
+	id, err := connections.NewID()
+	if err != nil {
+		return err
+	}
 	c := connections.Connection{
-		OwnerID: user.ID, Name: in.Name, Backend: backend, Role: connections.RoleBackup,
+		ID: id, OwnerID: user.ID, Name: in.Name, Backend: backend, Role: connections.RoleBackup,
 		Generation: 1, Enabled: true,
 		Config: connections.Spec{CoordinatedWrites: true},
 	}
@@ -164,7 +171,7 @@ func (s *Server) handleStorageConnectionAdd(w http.ResponseWriter, r *http.Reque
 	// Each connection owns its evidence and its spool. Inheriting the deployment's would
 	// make this bucket refuse evidence recorded for another one, and measuring this bucket
 	// would overwrite the authority's proof at that path.
-	admissionFile, spoolRoot, err := connections.ObjectPaths(s.cfg.Storage, c.Name, c.Backend, "", "")
+	admissionFile, spoolRoot, err := connections.ObjectPaths(s.cfg.Storage, c, "", "")
 	if err != nil {
 		return httpx.BadRequest(err.Error())
 	}

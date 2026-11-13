@@ -166,3 +166,87 @@ func TestStorageConnectionSecretReferenceMigrationIsRerunnableAndEnforcesOneSour
 		t.Fatal("a row with both an inline secret and an environment reference was accepted")
 	}
 }
+
+// A caller that has to place a connection's on-disk state before the INSERT generates
+// the row id, so the database must keep it instead of generating a second one; adoption
+// then rewrites the row to the paths it actually moved the directories to.
+func TestPostgresInsertKeepsTheCallersIDAndRecordsAdoptedPaths(t *testing.T) {
+	db := connectionTestDB(t)
+	ctx := context.Background()
+	st := NewPostgresStore(db)
+	cfg := testCOSConfig("AKIDseed", "seed-secret", "data-125", "ap-hongkong")
+	row := legacyRow(t, cfg, "0f0e9d5a-3f2b-4b1a-9f8e-2d7c6a5b4c3d")
+	row.Name = "nas"
+	row.Config.ObjectAdmissionFile = "/srv/eam/state/admission-nas.json"
+	row.Config.ObjectSpoolRoot = "/srv/eam/object-spool/nas"
+	if err := st.Insert(ctx, row); err != nil {
+		t.Fatalf("insert with a caller-supplied id: %v", err)
+	}
+	got, ok, err := st.ByName(ctx, "", "nas")
+	if err != nil || !ok {
+		t.Fatalf("read the row: ok=%t err=%v", ok, err)
+	}
+	if got.ID != row.ID {
+		t.Fatalf("row id = %q, want the id the caller placed the state under (%q)", got.ID, row.ID)
+	}
+	admission, spool := "/srv/eam/state/admission-"+got.ID+".json", "/srv/eam/object-spool/"+got.ID
+	if err := st.SetObjectPaths(ctx, got.ID, admission, spool); err != nil {
+		t.Fatalf("record adopted paths: %v", err)
+	}
+	updated, _, err := st.ByName(ctx, "", "nas")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.Config.ObjectAdmissionFile != admission || updated.Config.ObjectSpoolRoot != spool {
+		t.Fatalf("stored paths = %q, %q; want %q, %q", updated.Config.ObjectAdmissionFile, updated.Config.ObjectSpoolRoot, admission, spool)
+	}
+	if err := st.SetObjectPaths(ctx, "11111111-1111-4111-8111-111111111111", admission, spool); err == nil {
+		t.Fatal("SetObjectPaths accepted an id that names no row")
+	}
+}
+
+// 036 lets two owners each call a connection "nas". Both rows store, and the resolver
+// reads, disjoint id-keyed directories; a unique index on the identity still keeps the
+// two physical trees distinct.
+func TestPostgresSameNameDifferentOwnersKeepDisjointObjectPaths(t *testing.T) {
+	db := connectionTestDB(t)
+	ctx := context.Background()
+	st := NewPostgresStore(db)
+	deployment := adoptionDeployment(t)
+	owners := make([]string, 2)
+	for i, name := range []string{"first", "second"} {
+		if err := db.Pool().QueryRow(ctx, `insert into users(email, password_hash) values($1,'test-only') returning id::text`,
+			name+"-same-name@example.test").Scan(&owners[i]); err != nil {
+			t.Fatal(err)
+		}
+	}
+	rows := make([]Connection, 2)
+	paths := make([][2]string, 2)
+	for i := range rows {
+		c := legacyRow(t, testCOSConfig("id-"+string(rune('a'+i)), "key", "bucket-"+string(rune('a'+i))+"-125", "ap-hongkong"), "")
+		c.OwnerID, c.Name = owners[i], "nas"
+		c.ID = []string{"11111111-1111-4111-8111-111111111111", "22222222-2222-4222-8222-222222222222"}[i]
+		c.Identity = mustIdentity(t, c)
+		c.SecretReference = SecretReference{}
+		c.Secret = Secret{COS: COSCredential{SecretID: "id", SecretKey: "key"}}
+		c.Config.ObjectAdmissionFile, c.Config.ObjectSpoolRoot, _ = ObjectPaths(deployment, c, "", "")
+		paths[i] = [2]string{c.Config.ObjectAdmissionFile, c.Config.ObjectSpoolRoot}
+		rows[i] = c
+		if err := st.Insert(ctx, c); err != nil {
+			t.Fatalf("insert owner %d's row: %v", i, err)
+		}
+	}
+	if paths[0][1] == paths[1][1] || paths[0][0] == paths[1][0] {
+		t.Fatalf("two owners still share on-disk paths: %q/%q and %q/%q", paths[0][0], paths[0][1], paths[1][0], paths[1][1])
+	}
+	for i, owner := range owners {
+		got, ok, err := st.ByName(ctx, owner, "nas")
+		if err != nil || !ok {
+			t.Fatalf("read owner %d's row: ok=%t err=%v", i, ok, err)
+		}
+		if got.Config.ObjectSpoolRoot != paths[i][1] || got.Config.ObjectAdmissionFile != paths[i][0] {
+			t.Fatalf("owner %d's stored paths = %q, %q; want %q, %q", i,
+				got.Config.ObjectAdmissionFile, got.Config.ObjectSpoolRoot, paths[i][0], paths[i][1])
+		}
+	}
+}

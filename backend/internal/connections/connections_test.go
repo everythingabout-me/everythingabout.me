@@ -16,6 +16,9 @@ import (
 type fakeStore struct {
 	rows  []Connection
 	owner map[string]string
+	// writes counts SetObjectPaths calls, so an idempotent second adoption can assert
+	// that it did not rewrite the row.
+	writes int
 }
 
 func newFakeStore(rows ...Connection) *fakeStore {
@@ -60,6 +63,19 @@ func (f *fakeStore) OwnerConnection(_ context.Context, owner string) (string, bo
 func (f *fakeStore) Insert(_ context.Context, c Connection) error {
 	f.rows = append(f.rows, c)
 	return nil
+}
+
+func (f *fakeStore) SetObjectPaths(_ context.Context, id, admissionFile, spoolRoot string) error {
+	for i := range f.rows {
+		if f.rows[i].ID != id {
+			continue
+		}
+		f.rows[i].Config.ObjectAdmissionFile = admissionFile
+		f.rows[i].Config.ObjectSpoolRoot = spoolRoot
+		f.writes++
+		return nil
+	}
+	return fmt.Errorf("fake store: no connection row %q", id)
 }
 
 func (f *fakeStore) SetSecretReference(_ context.Context, id string, ref SecretReference) error {

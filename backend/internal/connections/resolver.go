@@ -68,6 +68,13 @@ func (r *Resolver) AdoptEnvironmentSecret(ctx context.Context) error {
 	return AdoptEnvironmentSecret(ctx, r.store, r.base, os.LookupEnv)
 }
 
+// AdoptObjectPaths moves per-connection directories from the legacy name-keyed layout
+// to the id-keyed one. It runs before any owner resolves a connection, so no driver
+// has opened a spool that is about to be renamed.
+func (r *Resolver) AdoptObjectPaths(ctx context.Context) error {
+	return AdoptObjectPaths(ctx, r.store, r.base.Storage)
+}
+
 // Open implements api.OwnerStorageFactory.
 func (r *Resolver) Open(ctx context.Context, ownerID string) (storage.Driver, error) {
 	e, err := r.entryFor(ctx, ownerID)
