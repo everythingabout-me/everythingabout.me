@@ -225,6 +225,26 @@ version/snapshot or coordinated writer model supports it, content GET/HEAD uses 
 to the quoted contentRevision. Otherwise omit the strong validator, disable validator-dependent guarantees,
 and reject unsupported conditional writes; an index counter alone is not proof of unchanged native bytes.
 
+### The client type contract
+
+[`file-api.schema.json`](file-api.schema.json) is the machine-readable shape of every file-API resource the
+web client consumes: field names, optionality and a coarse value kind. It is **generated**, not written:
+`TestFileAPIContractSchema` in `backend/internal/api/files_contract_schema_test.go` reflects over the Go
+response types (`files_responses.go` and `internal/filecontract`) and fails when the checked-in document no
+longer matches them. `web/tests/fileApiContract.test.mjs` then parses `web/src/api/client.ts` and fails when
+an interface disagrees with that document.
+
+The reason for a generated document rather than a table here or a hand-written fixture: the failure this
+guards against is a server field renamed while the client still asserts the old name, and prose does not
+fail when it goes stale. A fixture written by hand is a third copy of the same fact, so it catches the
+rename only when someone remembers to edit two places — the problem stated again. Here a rename fails the Go
+test; regenerating the document then fails the web test until the client follows, so neither side can move
+alone. Regenerate intentionally with
+`go test ./internal/api -run TestFileAPIContractSchema -update-file-api-schema`.
+
+Request bodies, transfer-class payloads (opaque outside the client's transfer executor) and status codes are
+outside this check; they remain specified above.
+
 ## 3. Resource table
 
 All suffixes are below `B`:
@@ -695,6 +715,10 @@ Example response (numbers are illustrative, not universal defaults):
   }
 }
 ```
+
+A class A session also carries a top-level `signUrl` beside `transport.signUrl`. A direct publication's
+transport carries the single already-signed grant and therefore no `signUrl`, because there is nothing left
+to sign.
 
 `transport` is opaque to every component except the client's transfer executor and is the only field that
 differs between classes. Part numbers start at 1; offset is `(number-1)*partSize`; all but the final part have
