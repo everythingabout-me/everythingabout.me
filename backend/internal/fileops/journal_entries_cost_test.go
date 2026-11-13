@@ -475,6 +475,10 @@ func classifyCostSQL(sql string) string {
 	switch {
 	case strings.Contains(flat, "pg_advisory_xact_lock"):
 		return "owner_advisory_lock"
+	case strings.Contains(flat, "file_operation_entries"):
+		// Release A's shadow write: one row per transition next to the document rewrite.
+		// Measured separately so the one-release cost is visible in the report.
+		return "entry_shadow"
 	case strings.Contains(flat, "update file_operations"):
 		return "document_write"
 	case strings.Contains(flat, "from file_operations where id=$1 for update"):

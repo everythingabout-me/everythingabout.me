@@ -597,17 +597,23 @@ func insertGuards(ctx context.Context, tx pgx.Tx, op Operation) error {
 // insertOperationSQL is the one statement that creates a journal row, so the promoted
 // columns and the document are always written together from operationArgs. A test that needs
 // a row shaped exactly like a real one uses it too, instead of rebuilding the column list.
+//
+// entry_count is not part of operationArgs: it is set once here from the manifest the
+// admission carries and once by FreezeAction, and never re-derived by saveOperation, so a
+// row written by a binary that keeps entries in the table cannot have its count zeroed by a
+// document write that carries none. entries_layout is left to its default ('document'), which
+// is what makes Release A's rows document-backed by construction (sql/049).
 const insertOperationSQL = `insert into file_operations(
 	id,owner_id,principal_id,action,idempotency_key,fingerprint,snapshot,
 	state,phase,created_at,finished_at,retain_until,cleanup_attempted_at,cleaned_at,
 	lease_token,lease_expires_at,root_connection_id,root_generation,root_content_root,
 	root_system_root,root_case_sensitive,root_retains_versions,purge_path,intent_target,
-	stage_size,stage_handle)
+	stage_size,stage_handle,entry_count)
 	values(@id,@owner_id,@principal_id,@action,@idempotency_key,@fingerprint,@snapshot,
 	@state,@phase,@created_at,@finished_at,@retain_until,@cleanup_attempted_at,@cleaned_at,
 	@lease_token,@lease_expires_at,@root_connection_id,@root_generation,@root_content_root,
 	@root_system_root,@root_case_sensitive,@root_retains_versions,@purge_path,@intent_target,
-	@stage_size,@stage_handle)`
+	@stage_size,@stage_handle,@entry_count)`
 
 // beginTx shares admission with upload sessions under the same owner lock and transaction.
 //
@@ -681,8 +687,17 @@ func (p *Postgres) beginTx(ctx context.Context, tx pgx.Tx, req BeginRequest, fin
 		args["action"] = req.Kind
 		args["idempotency_key"] = key
 		args["fingerprint"] = fingerprint
+		// The count is set here because admission is one of the two moments a manifest can
+		// appear (the other is FreezeAction); entries never change after that.
+		args["entry_count"] = len(op.Entries)
 		_, err = tx.Exec(ctx, insertOperationSQL, args)
 		if err != nil {
+			return err
+		}
+		// Release A shadow: the table is written with the document, in this transaction and
+		// under the owner lock, so an operation admitted with a manifest is already
+		// table-backed when Release B flips (see postgres_entries.go).
+		if err = shadowWriteEntries(ctx, tx, op, op.Entries); err != nil {
 			return err
 		}
 		if fence {

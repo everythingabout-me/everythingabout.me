@@ -148,7 +148,7 @@ func (p *Postgres) MarkUnknown(ctx context.Context, l Lease, evidence []byte) er
 	})
 }
 func (p *Postgres) BeginEntry(ctx context.Context, l Lease, n int) error {
-	return p.leased(ctx, l, func(_ pgx.Tx, op *Operation, _ time.Time) error {
+	return p.leased(ctx, l, func(tx pgx.Tx, op *Operation, _ time.Time) error {
 		if op.Terminal() || op.CancelRequested || op.Phase == NativeApplied || op.State == Unknown || uncertainEntries(op) {
 			return E("recovery_required", nil)
 		}
@@ -160,7 +160,9 @@ func (p *Postgres) BeginEntry(ctx context.Context, l Lease, n int) error {
 				}
 				e.State = "started"
 				op.Phase = EffectStarted
-				return nil
+				// Release A shadow, in the transaction that will write the document: one
+				// row update instead of rewriting the other 10,001 entries.
+				return shadowWriteEntry(ctx, tx, *op, *e)
 			}
 		}
 		return E("not_found", nil)
@@ -192,7 +194,11 @@ func (p *Postgres) SaveEntry(ctx context.Context, l Lease, n int, state string, 
 				if !equalJSON(old, *e) {
 					return E("intent_conflict", nil)
 				}
-				return nil
+				// A replayed transition already matches the document; the shadow row is
+				// rewritten from that same value so a missing row (a row written by the
+				// previous release during the deploy window) becomes present here rather
+				// than staying absent.
+				return shadowWriteEntry(ctx, tx, *op, *e)
 			}
 			switch state {
 			case "started":
@@ -235,7 +241,9 @@ func (p *Postgres) SaveEntry(ctx context.Context, l Lease, n int, state string, 
 			} else if op.State == Unknown && !uncertainEntries(op) {
 				op.State = Running
 			}
-			return nil
+			// Release A shadow: the same entry value the document is about to carry, written
+			// in the same transaction as the document write.
+			return shadowWriteEntry(ctx, tx, *op, *e)
 		}
 		return E("not_found", nil)
 	})

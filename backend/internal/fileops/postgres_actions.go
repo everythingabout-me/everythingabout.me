@@ -127,7 +127,18 @@ func (p *Postgres) FreezeAction(ctx context.Context, l Lease, b actionBinding, m
 			return err
 		}
 		_, err = tx.Exec(ctx, `update file_budgets set logical_reserved=logical_reserved+$2,physical_reserved=physical_reserved+$3 where owner_id=$1`, op.Root.OwnerID, logical, q.PhysicalBytes)
-		return err
+		if err != nil {
+			return err
+		}
+		// Freeze is the one moment the manifest appears, so this is where entry_count is
+		// written and where Release A's shadow is seeded in one bulk insert. Both are in this
+		// transaction and behind the parent row lock that `leased` took; the document is
+		// written by the same `leased` call after this function returns. entries_layout is
+		// not written: the column default keeps the row document-backed (sql/049).
+		if _, err = tx.Exec(ctx, `update file_operations set entry_count=$3 where id=$1 and owner_id=$2`, op.ID, op.Root.OwnerID, len(op.Entries)); err != nil {
+			return err
+		}
+		return shadowWriteEntries(ctx, tx, *op, op.Entries)
 	})
 }
 func validateFrozenAction(op Operation, b actionBinding, entries []ManifestEntry, q ReservationRequest) error {
