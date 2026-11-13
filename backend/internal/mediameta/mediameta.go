@@ -149,6 +149,12 @@ func (e stopError) Error() string { return string(e) }
 const (
 	errMalformed = stopError("malformed media container")
 	errBudget    = stopError("media metadata read budget exhausted")
+	// errItemLocations names a refused HEIF item location box: it declares more entries
+	// or extents than the bytes that describe them can hold, so it is refused as
+	// malformed instead of multiplying a zero-width record by a 16-bit count. The
+	// reason is stated because this is the one place where "malformed" is also the only
+	// thing standing between a 400 KB file and a request that never returns.
+	errItemLocations = stopError("refused the HEIF item location box: it declares more entries or extents than its own bytes can describe")
 )
 
 const (

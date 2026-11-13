@@ -156,8 +156,13 @@ func parseHEIFMeta(r *window, data []byte, info *Info) error {
 			}
 		}
 	}
+	// A refused item location stops the walk, but not the facts already read: the size
+	// and rotation properties are recorded before the refusal is reported.
+	var locationErr error
 	if hasExif {
-		if offset, length, ok := heifItemExtent(locations, exifItem); ok {
+		if offset, length, ok, err := heifItemExtent(locations, exifItem); err != nil {
+			locationErr = err
+		} else if ok {
 			if length > maxRegion {
 				length = maxRegion
 			}
@@ -181,7 +186,7 @@ func parseHEIFMeta(r *window, data []byte, info *Info) error {
 	if width > 0 && height > 0 {
 		setDimensions(info, width, height, quarterTurn)
 	}
-	return nil
+	return locationErr
 }
 
 // heifExifItem finds the item whose type is "Exif" in an item information box.
@@ -230,9 +235,18 @@ func (c *cursor) uint(width int) uint64 {
 // heifItemExtent returns where an item's bytes are in the file. Only an item stored as
 // one extent addressed by file offset is resolved: that is how every camera writes Exif,
 // and the other forms would need boxes this parser does not otherwise read.
-func heifItemExtent(data []byte, item uint32) (offset, length int64, ok bool) {
+//
+// The walk is bounded by the bytes the box admits, not by the counts it declares. Both
+// its loops multiply a 16/32-bit count by a variable-width record, and a field width of
+// zero consumes no byte: one entry can declare 65,535 extents that describe nothing, and
+// 65,535 such entries fit in about 393 KB — 4.3 billion iterations, with no context
+// check, on the request path. A real iloc gives every entry at least its id, reference
+// and extent-count fields and every extent at least one byte of the three widths it
+// declares, so a count larger than the remaining bytes can describe is a malformed box,
+// and refusing it costs one comparison instead of the walk.
+func heifItemExtent(data []byte, item uint32) (offset, length int64, ok bool, err error) {
 	if len(data) < 6 {
-		return 0, 0, false
+		return 0, 0, false, nil
 	}
 	version := data[0]
 	offsetSize, lengthSize := int(data[4]>>4), int(data[4]&0xF)
@@ -246,6 +260,16 @@ func heifItemExtent(data []byte, item uint32) (offset, length int64, ok bool) {
 		idSize = 4
 	}
 	count := c.uint(idSize)
+	// item id, reference index, base offset and extent count; a version 1+ entry also
+	// carries its construction method.
+	perEntry := uint64(idSize + 2 + baseSize + 2)
+	if version >= 1 {
+		perEntry += 2
+	}
+	if count > uint64(len(c.data))/perEntry {
+		return 0, 0, false, errItemLocations
+	}
+	perExtent := uint64(indexSize + offsetSize + lengthSize)
 	for i := uint64(0); i < count && !c.bad; i++ {
 		id := c.uint(idSize)
 		method := uint64(0)
@@ -255,6 +279,9 @@ func heifItemExtent(data []byte, item uint32) (offset, length int64, ok bool) {
 		reference := c.uint(2)
 		base := c.uint(baseSize)
 		extents := c.uint(2)
+		if extents > 0 && (perExtent == 0 || extents > uint64(len(c.data))/perExtent) {
+			return 0, 0, false, errItemLocations
+		}
 		var first, size uint64
 		for e := uint64(0); e < extents && !c.bad; e++ {
 			c.uint(indexSize)
@@ -267,11 +294,11 @@ func heifItemExtent(data []byte, item uint32) (offset, length int64, ok bool) {
 			continue
 		}
 		if method != 0 || reference != 0 || extents != 1 || size == 0 || base > math.MaxInt64/2 || first > math.MaxInt64/2 || size > math.MaxInt64/2 {
-			return 0, 0, false
+			return 0, 0, false, nil
 		}
-		return int64(base + first), int64(size), true
+		return int64(base + first), int64(size), true, nil
 	}
-	return 0, 0, false
+	return 0, 0, false, nil
 }
 
 // movieFacts collects what a movie states in several places, so the most specific
