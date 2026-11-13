@@ -7,8 +7,6 @@ import (
 	"strings"
 	"time"
 
-	"golang.org/x/text/unicode/norm"
-
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -16,6 +14,7 @@ import (
 	"everythingabout.me/backend/internal/filechanges"
 	fc "everythingabout.me/backend/internal/filecontract"
 	"everythingabout.me/backend/internal/fileops"
+	"everythingabout.me/backend/internal/namecompare"
 	"everythingabout.me/backend/internal/paths"
 	"everythingabout.me/backend/internal/storage"
 	"everythingabout.me/backend/internal/treescan"
@@ -128,13 +127,21 @@ func ApplyScan(ctx context.Context, db ScanDB, ownerID string, result *treescan.
 	if err != nil {
 		return report, fmt.Errorf("read pending deletions for scan import: %w", err)
 	}
+	// The import compares names exactly as the index will: the canonical key for
+	// this owner's declared rules. A narrower comparison would re-import the
+	// spelling of a path a pending delete covers, or treat an observed NFC-equal
+	// path as absent and delete the row that carries it.
+	nameKey, err := scanNameKey(ctx, tx, opts, ownerID)
+	if err != nil {
+		return report, err
+	}
+	pendingKeys := make([]string, len(pending))
+	for i, root := range pending {
+		pendingKeys[i] = nameKey(root)
+	}
 	for _, record := range records {
-		p := norm.NFC.String(string(record.Entry.Path))
-		for _, root := range pending {
-			root = norm.NFC.String(root)
-			if p == root || strings.HasPrefix(p, root+"/") {
-				return report, fmt.Errorf("scan path %q is pending permanent deletion; finish deletion before reconciling this subtree", record.Entry.Path)
-			}
+		if pendingDeleteCovers(nameKey(string(record.Entry.Path)), pendingKeys) {
+			return report, fmt.Errorf("scan path %q is pending permanent deletion; finish deletion before reconciling this subtree", record.Entry.Path)
 		}
 	}
 	// Existing paths participate in preflight because no-prune imports retain them.
@@ -263,7 +270,7 @@ func ApplyScan(ctx context.Context, db ScanDB, ownerID string, result *treescan.
 		}
 	}
 	if opts.Sync {
-		deletions, err := removeAbsentEntries(ctx, tx, ownerID, absentEntries(existing, records), opts, &report)
+		deletions, err := removeAbsentEntries(ctx, tx, ownerID, absentEntries(existing, records, nameKey), opts, &report)
 		if err != nil {
 			return report, err
 		}
@@ -283,12 +290,45 @@ func ApplyScan(ctx context.Context, db ScanDB, ownerID string, result *treescan.
 	return report, nil
 }
 
+// pendingDeleteCovers reports whether an already-keyed scan path is equal to a
+// pending delete root or below it. Both sides must be keyed by scanNameKey so a
+// divergent spelling cannot slip an index-equal path past the delete.
+func pendingDeleteCovers(path string, roots []string) bool {
+	for _, root := range roots {
+		if path == root || strings.HasPrefix(path, root+"/") {
+			return true
+		}
+	}
+	return false
+}
+
+// scanNameKey returns the comparison key the scan must use: the configured
+// root's rules when the caller bound one, otherwise the owner's stored rules.
+// A nil ChangeRoot is an index-only utility, and the index it writes to still
+// compares with the owner's rules, so assuming NFC would silently disagree with
+// every row the nodes trigger stores.
+func scanNameKey(ctx context.Context, tx pgx.Tx, opts ScanApplyOptions, ownerID string) (func(string) string, error) {
+	caseSensitive := true
+	if opts.ChangeRoot != nil {
+		caseSensitive = opts.ChangeRoot.CaseSensitive
+	} else {
+		var version string
+		if err := tx.QueryRow(ctx, `select coalesce((select name_comparison_version from file_identity_roots where owner_id=$1::uuid),'nfc-sensitive-v1')`, ownerID).Scan(&version); err != nil {
+			return nil, fmt.Errorf("read scan name comparison: %w", err)
+		}
+		caseSensitive = version == "nfc-sensitive-v1"
+	}
+	return namecompare.Key(caseSensitive), nil
+}
+
 // absentEntries lists the indexed entries the complete scan did not observe,
 // deepest first so a removed folder's children leave before the folder itself.
-func absentEntries(existing []storage.Entry, records []treescan.Record) []storage.Entry {
+// Comparison uses the same name key as the index, so an observed spelling that
+// the index treats as equal is not a removal.
+func absentEntries(existing []storage.Entry, records []treescan.Record, key func(string) string) []storage.Entry {
 	present := make(map[string]struct{}, len(records))
 	for _, record := range records {
-		present[norm.NFC.String(string(record.Entry.Path))] = struct{}{}
+		present[key(string(record.Entry.Path))] = struct{}{}
 	}
 	absent := make([]storage.Entry, 0, len(existing))
 	for _, entry := range existing {
@@ -296,7 +336,7 @@ func absentEntries(existing []storage.Entry, records []treescan.Record) []storag
 			// The owner root is identity, not a scanned child.
 			continue
 		}
-		if _, ok := present[norm.NFC.String(string(entry.Path))]; !ok {
+		if _, ok := present[key(string(entry.Path))]; !ok {
 			absent = append(absent, entry)
 		}
 	}

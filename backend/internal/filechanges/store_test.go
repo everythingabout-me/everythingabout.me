@@ -13,6 +13,7 @@ import (
 	"time"
 
 	fc "everythingabout.me/backend/internal/filecontract"
+	"everythingabout.me/backend/internal/namecompare"
 	"everythingabout.me/backend/internal/testpg"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -364,7 +365,7 @@ func TestPostgresDurableChanges(t *testing.T) {
 		if err != nil || len(rows) != 1 || rows[0].Kind != "deleted" || rows[0].Before.Path != before.Path {
 			t.Fatalf("retained tombstone %+v %v", rows, err)
 		}
-		projection, ok := Project(rows[0], "/apps/STRASSE", NameKey(false))
+		projection, ok := Project(rows[0], "/apps/STRASSE", namecompare.Key(false))
 		if !ok || projection.Type != "remove" {
 			t.Fatalf("delete projection %+v %v", projection, ok)
 		}
@@ -381,7 +382,7 @@ func TestPostgresDurableChanges(t *testing.T) {
 		if err != nil || len(rows) != 1 {
 			t.Fatalf("ancestor SQL candidate %+v %v", rows, err)
 		}
-		p, ok := Project(rows[0], "/Apps/Notes", NameKey(true))
+		p, ok := Project(rows[0], "/Apps/Notes", namecompare.Key(true))
 		if !ok || p.Type != "invalidated" || p.Path != "/Apps/Notes" {
 			t.Fatalf("ancestor projection %+v %v", p, ok)
 		}

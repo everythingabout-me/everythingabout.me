@@ -204,7 +204,9 @@ while its tests were skipping. CI (`.github/workflows/test.yml`) runs `make migr
   with CSRF protection on every mutation.
 - Canonical identity is owner/root/parent/name/comparisonName; legacy path/key columns are nullable derived
   caches. Use file_entries/current ancestry, never stale cached paths as identity or authorization. Comparison
-  versions nfc-sensitive-v1/nfc-fold-v1 must agree between Go and Postgres; full Unicode folding is not lower().
+  versions nfc-sensitive-v1/nfc-fold-v1 must agree between Go and Postgres; `internal/namecompare.Key` is the
+  only Go implementation (NFC → full fold → NFC, including the trailing NFC), and full Unicode folding is not
+  lower().
   Eligible Local non-growing folder moves use one root native effect; growing/deeper targets and flat object
   moves retain finite manifests. Dynamic ancestry/search is not universally O(1).
 - State vocabulary: **revision** (`Entry.Revision`, `ExpectedRevision`, `SourceRevision`) is the driver's opaque

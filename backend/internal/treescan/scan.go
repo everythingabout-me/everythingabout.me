@@ -10,8 +10,8 @@ import (
 	"sort"
 	"strings"
 
+	"everythingabout.me/backend/internal/namecompare"
 	"everythingabout.me/backend/internal/storage"
-	"golang.org/x/text/cases"
 	"golang.org/x/text/unicode/norm"
 )
 
@@ -174,12 +174,15 @@ func (c *collector) validate(e storage.Entry) error {
 	if len(parts) > c.opts.MaxDepth || len(e.Path) > c.opts.Names.MaxPathBytes {
 		return issue("limit_exceeded", e.Path, "", "path exceeds depth or byte limit")
 	}
+	key := namecompare.Key(c.opts.Names.CaseSensitive)
 	for _, part := range parts {
 		if len(part) > c.opts.Names.MaxSegmentBytes {
 			return issue("limit_exceeded", e.Path, "", "segment exceeds byte limit")
 		}
 		for _, reserved := range c.opts.Names.ReservedNames {
-			if part == reserved || (!c.opts.Names.CaseSensitive && cases.Fold().String(part) == cases.Fold().String(reserved)) {
+			// The same key as the index: a reserved name is reserved under the
+			// destination's declared comparison, not under a private fold.
+			if key(part) == key(reserved) {
 				return issue("invalid_name", e.Path, "", "reserved native name")
 			}
 		}
@@ -217,7 +220,11 @@ func (c *collector) add(r Record) error {
 		return issue("normalization_conflict", e.Path, old, "NFC-equivalent native spellings")
 	}
 	if !c.opts.Names.CaseSensitive {
-		f := cases.Fold().String(n)
+		// The duplicate check is one name equivalence, so it uses the canonical
+		// key rather than a fold of the NFC form: folding can leave text that
+		// composes with a later combining mark, which would report two spellings
+		// as distinct when the uniqueness index merges them.
+		f := namecompare.KeyString(false, n)
 		if old, ok := c.folded[f]; ok && old != e.Path {
 			return issue("case_conflict", e.Path, old, "case-equivalent native spellings")
 		}

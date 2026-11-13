@@ -9,12 +9,12 @@ import (
 )
 
 // AuthorizeFileOperation rechecks a queued effect's paths against the token
-// scope. It builds its own fold-only key, so a token created for one spelling
-// is refused for an index-equal sibling.
-func TestTokenScopeUsesLegacyKey(t *testing.T) {
+// scope with the canonical comparison key, so a token created for one spelling
+// also covers an index-equal sibling.
+func TestTokenScopeUsesReferenceKey(t *testing.T) {
 	ctx, _, service, owner := tokenPostgresService(t)
 	root := fileops.Root{OwnerID: owner, CaseSensitive: false}
-	nameprobe.CheckPair(t, "auth.AuthorizeFileOperation", nameprobe.LegacyPipeline, false, func(a, b string) bool {
+	nameprobe.CheckPair(t, "auth.AuthorizeFileOperation", nameprobe.ReferencePipeline, false, func(a, b string) bool {
 		_, token, err := service.CreateToken(ctx, NewTokenInput{UserID: owner, Name: "probe", Prefix: a, CanRead: true, CanWrite: true})
 		if err != nil {
 			t.Fatal(err)

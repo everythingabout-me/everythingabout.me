@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	fc "everythingabout.me/backend/internal/filecontract"
+	"everythingabout.me/backend/internal/namecompare"
 )
 
 const testOwner = "81995470-212d-4f40-934c-8435dba67a0f"
@@ -31,7 +32,7 @@ func TestProjectionConcealsMovesAndParents(t *testing.T) {
 	change := Change{ID: testRoot, Kind: "moved", Coverage: "entry", EntryID: &before.ID, Before: before, After: after,
 		Actor: Actor{Kind: "token", PrincipalID: "hidden-principal"}, EffectKey: "private-effect", Position: 42,
 		BeforeAncestors: []Ancestor{{ID: testRoot, Path: "/"}}, ImpactPaths: []fc.Path{"/", "/Private"}}
-	projected, ok := Project(change, "/Apps/Notes", NameKey(true))
+	projected, ok := Project(change, "/Apps/Notes", namecompare.Key(true))
 	if !ok || projected.Type != "remove" || projected.Before == nil || projected.After != nil {
 		t.Fatalf("departure %+v visible=%v", projected, ok)
 	}
@@ -47,23 +48,23 @@ func TestProjectionConcealsMovesAndParents(t *testing.T) {
 	if before.ParentID == nil {
 		t.Fatal("projection changed its retained snapshot")
 	}
-	arrival, ok := Project(change, "/Private", NameKey(true))
+	arrival, ok := Project(change, "/Private", namecompare.Key(true))
 	if !ok || arrival.Type != "upsert" || arrival.Before != nil || arrival.After.Path != after.Path {
 		t.Fatalf("arrival %+v %v", arrival, ok)
 	}
-	both, ok := Project(change, "/", NameKey(true))
+	both, ok := Project(change, "/", namecompare.Key(true))
 	if !ok || both.Type != "moved" || both.Before == nil || both.After == nil {
 		t.Fatalf("owner move %+v %v", both, ok)
 	}
 	atRoot := Change{Kind: "updated", Coverage: "entry", Before: snapshot(testEntry, "/Apps/Notes", "folder"), After: snapshot(testEntry, "/Apps/Notes", "folder")}
-	redacted, ok := Project(atRoot, "/Apps/Notes", NameKey(true))
+	redacted, ok := Project(atRoot, "/Apps/Notes", namecompare.Key(true))
 	if !ok || redacted.After.ParentID != nil || redacted.After.ParentPath != "" {
 		t.Fatalf("concealed parent %+v", redacted)
 	}
 }
 
 func TestNativeAwareScopeAndAncestorInvalidation(t *testing.T) {
-	key := NameKey(false)
+	key := namecompare.Key(false)
 	for _, candidate := range []fc.Path{"/Apps/Straße/cafe\u0301.txt", "/APPS/STRASSE/Café.txt"} {
 		if !MatchesScope("/apps/STRASSE", candidate, "entry", key) {
 			t.Fatalf("missed native-equivalent path %q", candidate)

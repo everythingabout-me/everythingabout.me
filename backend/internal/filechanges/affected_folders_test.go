@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	fc "everythingabout.me/backend/internal/filecontract"
+	"everythingabout.me/backend/internal/namecompare"
 )
 
 func TestAffectedFolderProjectionAndReplayFingerprint(t *testing.T) {
@@ -20,7 +21,7 @@ func TestAffectedFolderProjectionAndReplayFingerprint(t *testing.T) {
 	private := snapshot(privateID, "/Private", "folder")
 	c := createChange(testOwner, "patches", "/Apps/Notes/a.txt")
 	c.AffectedFolders = []fc.Metadata{*private, *folder, *snapshot(testRoot, "/", "folder")}
-	projected, visible := Project(c, "/Apps/Notes", NameKey(true))
+	projected, visible := Project(c, "/Apps/Notes", namecompare.Key(true))
 	if !visible || len(projected.AffectedFolders) != 1 {
 		t.Fatalf("visible patches %+v visible=%v", projected, visible)
 	}
@@ -80,7 +81,7 @@ func TestPostgresAffectedFolderSnapshots(t *testing.T) {
 	if err != nil || len(rows) != 1 || len(rows[0].AffectedFolders) != 2 {
 		t.Fatalf("stored folder patches %+v %v", rows, err)
 	}
-	projection, visible := Project(rows[0], "/Apps/Notes", NameKey(true))
+	projection, visible := Project(rows[0], "/Apps/Notes", namecompare.Key(true))
 	if !visible || len(projection.AffectedFolders) != 1 || projection.AffectedFolders[0].Revision != folder.Revision {
 		t.Fatalf("captured patch projection %+v visible=%v", projection, visible)
 	}

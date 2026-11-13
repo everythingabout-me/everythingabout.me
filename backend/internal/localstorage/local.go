@@ -20,9 +20,8 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	"everythingabout.me/backend/internal/namecompare"
 	"everythingabout.me/backend/internal/storage"
-	"golang.org/x/text/cases"
-	"golang.org/x/text/unicode/norm"
 )
 
 const (
@@ -258,12 +257,11 @@ func validatePath(path storage.Path) error {
 	return nil
 }
 
+// key is the native equivalence one name has on this filesystem. It must be the
+// canonical comparison key, so a name lookup, collision check and rename agree
+// with the index that records the same tree.
 func (d *driver) key(name string) string {
-	key := norm.NFC.String(name)
-	if !d.factory.options.CaseSensitive {
-		key = cases.Fold().String(key)
-	}
-	return key
+	return namecompare.KeyString(d.factory.options.CaseSensitive, name)
 }
 
 func childPath(parent storage.Path, name string) storage.Path {

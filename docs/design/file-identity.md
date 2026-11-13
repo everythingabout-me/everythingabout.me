@@ -77,10 +77,14 @@ This acceptance does not restore retired routes or JSON envelopes.
 Files and folders share one sibling namespace. Enforce owner/root/parent/comparison-name uniqueness with
 backend case and Unicode rules; equal names in different parents are valid. Preserve original accepted
 spelling and raw contents. Display names, DB uniqueness, native admission, resolution and scope checks must
-use compatible versioned comparison rules: nfc-sensitive-v1 or nfc-fold-v1. The latter applies full Unicode
-case folding with the same generated mapping in Go and Postgres, including expansions that lower() cannot
-represent. Providers permitting duplicate equivalent sibling names require
-explicit conflict resolution, even if their native IDs could distinguish them. Do not silently rename or
+use compatible versioned comparison rules: nfc-sensitive-v1 or nfc-fold-v1. The latter applies NFC, full
+Unicode case folding, then NFC again, with the same generated mapping in Go and Postgres, including
+expansions that lower() cannot represent. The trailing NFC is part of the version, not a detail: folding can
+leave a base letter and a following combining mark that then compose, and a pipeline that stops after the
+fold treats two spellings as different names that the unique sibling index merges. Go has exactly one
+implementation, `internal/namecompare.Key`; a call site that re-derives the pipeline is a defect, because it
+can admit a write the index rejects or deny an index-equal sibling. Providers permitting duplicate
+equivalent sibling names require explicit conflict resolution, even if their native IDs could distinguish them. Do not silently rename or
 expose an ambiguous native tree only through IDs.
 
 Resolve both selectors under owner isolation and check current native-aware path scope. IDs grant no access

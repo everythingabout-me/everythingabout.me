@@ -6,10 +6,9 @@ import (
 	"strings"
 
 	"everythingabout.me/backend/internal/fileops"
+	"everythingabout.me/backend/internal/namecompare"
 	"everythingabout.me/backend/internal/storage"
 	"github.com/jackc/pgx/v5"
-	"golang.org/x/text/cases"
-	"golang.org/x/text/unicode/norm"
 )
 
 // AuthorizeFileOperation rechecks durable creator privileges before a queued
@@ -54,10 +53,7 @@ func (s *Service) AuthorizeFileOperation(ctx context.Context, op fileops.Operati
 	if !write || ((op.Kind == "copy" || op.Kind == "move") && !read) || storage.ValidatePath(storage.Path(scope)) != nil {
 		return fileops.E("forbidden", nil)
 	}
-	key := func(value string) string { return norm.NFC.String(value) }
-	if !op.Root.CaseSensitive {
-		key = func(value string) string { return cases.Fold().String(norm.NFC.String(value)) }
-	}
+	key := namecompare.Key(op.Root.CaseSensitive)
 	scoped := key(scope)
 	for _, guard := range op.Guards {
 		p := key(string(guard.Path))

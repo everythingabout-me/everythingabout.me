@@ -2,11 +2,12 @@
 //
 // A case-insensitive root compares sibling names with nfc-fold-v1: NFC, full
 // Unicode case folding, NFC. The SQL implementation (file_identity_comparison)
-// and filechanges.NameKey apply that whole pipeline. Most Go call sites instead
-// stop after folding, and the reserved-name checks skip the leading NFC. The
-// difference is invisible for ordinary names because folding an NFC string
-// rarely leaves decomposed text, but it is visible when a fold produces a base
-// letter that then composes with a following combining mark.
+// and the one Go implementation (internal/namecompare.Key) apply that whole
+// pipeline. Before the convergence, most Go call sites instead stopped after
+// folding and the reserved-name checks skipped the leading NFC. The difference
+// is invisible for ordinary names because folding an NFC string rarely leaves
+// decomposed text, but it is visible when a fold produces a base letter that
+// then composes with a following combining mark.
 //
 // The corpus below contains pairs that separate the pipelines. The four pairs
 // in Divergent are equal under the documented pipeline but different under the
@@ -22,30 +23,28 @@
 // and the API path scope treat it as two. That is a real fence/authorization
 // divergence, not just a byte-level difference.
 //
-// The audited sites are:
+// The audited sites, all now on the reference pipeline, are:
 //
-//	reference: SQL file_identity_comparison, filechanges.NameKey
-//	legacy:    fileops.comparePath, auth token scope, api.filesPathKey,
-//	           api.RequireRead, localstorage driver key, treescan case conflict
-//	fold-only: treescan and snapshot reserved-name checks
-//	NFC-only:  paths.Normalize, nodes scan pending/absent paths, browse path
-//	           filters, API cursor validation, treescan normalization conflict
+//	reference: SQL file_identity_comparison, internal/namecompare.Key
+//	converged: fileops.comparePath, auth token scope, api.filesPathKey,
+//	           api.RequireRead, localstorage driver key, treescan duplicate and
+//	           reserved-name checks, snapshot reserved names, nodes scan
+//	           pending-delete and absent paths
+//	retained:  paths.Normalize, browse path filters, API cursor validation,
+//	           treescan normalization conflict — NFC-only by design, because
+//	           they normalize a spelling rather than compare two siblings
 //
 // This package is a test fixture. It is not imported by production code and
-// must not grow a comparison implementation of its own. Converging means one
-// shared Go key function, matching the SQL function, used at every site above.
-// It also needs a backfill of the stored comparison_path columns, because they
-// were written by the legacy key: file_operation_guards (write-only today),
-// file_uploads and file_credit_claims. Applying NFC to those values upgrades
-// the legacy key to the reference key; credit-claim primary-key collisions
-// must be collapsed first. The backfill is why this audit stops short of the
-// code change: it would rewrite existing rows, which the audit branch forbids.
+// must not grow a comparison implementation of its own. The convergence that
+// this audit demanded is one Go key (internal/namecompare.Key), the SQL
+// function it mirrors, and one pipeline at every comparison site. Stored
+// comparison_path values written by the legacy key still need a backfill,
+// because the reference key is exactly the legacy key with one NFC applied.
 //
-// The per-package tests declare the pipeline they exercise. They are
-// characterization tests: while the divergence is unfixed they assert the
-// pipeline that is there, and the convergence change flips the declaration to
-// ReferencePipeline. A failure means the declaration needs updating, not that
-// the assertion should be loosened.
+// The per-package tests declare the pipeline they exercise. They are regression
+// tests: they assert ReferencePipeline, and a failure means a call site grew a
+// private fold or NFC-only comparison again. Do not loosen an assertion; route
+// the site through internal/namecompare.
 package nameprobe
 
 import (
@@ -90,14 +89,16 @@ type Pipeline int
 
 const (
 	// ReferencePipeline is nfc-sensitive-v1 / nfc-fold-v1: NFC, full case
-	// fold, NFC. SQL file_identity_comparison and filechanges.NameKey use it.
+	// fold, NFC. SQL file_identity_comparison and internal/namecompare.Key
+	// use it.
 	ReferencePipeline Pipeline = iota
-	// LegacyPipeline is NFC then full case fold, without the final NFC. It is
-	// used by fileops.comparePath, auth's token scope, the API path scope and
-	// the local driver.
+	// LegacyPipeline is NFC then full case fold, without the final NFC. Older
+	// releases wrote stored comparison_path values with it and some Go call
+	// sites compared with it before the convergence; it survives here so the
+	// corpus can keep proving that the reference pipeline coarsens it.
 	LegacyPipeline
-	// FoldOnlyPipeline is full case fold with no NFC on either side. The
-	// reserved-name checks use it.
+	// FoldOnlyPipeline is full case fold with no NFC on either side. The old
+	// reserved-name checks used it.
 	FoldOnlyPipeline
 	// NFCOnlyPipeline is NFC with no case folding. Path ingestion, index
 	// search and scan prefix checks that do not consult name rules use it.
@@ -119,7 +120,9 @@ func (p Pipeline) String() string {
 }
 
 // Key returns the exact key a pipeline computes. Case-sensitive roots use NFC
-// for the fold pipelines, exactly as the SQL function does.
+// for the fold pipelines, exactly as the SQL function does. Production code
+// gets this from internal/namecompare.Key; this copy exists only to declare
+// what a test expects.
 func Key(p Pipeline, caseSensitive bool) func(string) string {
 	switch p {
 	case ReferencePipeline:

@@ -11,10 +11,9 @@ import (
 	"strings"
 	"unicode/utf8"
 
+	"everythingabout.me/backend/internal/namecompare"
 	"everythingabout.me/backend/internal/storage"
 	"github.com/jackc/pgx/v5/pgtype"
-	"golang.org/x/text/cases"
-	"golang.org/x/text/unicode/norm"
 )
 
 func validateRoot(r Root) error {
@@ -29,12 +28,12 @@ func validateRoot(r Root) error {
 	}
 	return nil
 }
+
+// comparePath is the operation fence, scope and stored comparison_path key. It
+// must be the same pipeline SQL uses (namecompare.Key), or the guard admits a
+// pair the unique sibling index rejects later.
 func comparePath(r Root, p storage.Path) string {
-	s := norm.NFC.String(string(p))
-	if !r.CaseSensitive {
-		s = cases.Fold().String(s)
-	}
-	return s
+	return namecompare.KeyString(r.CaseSensitive, string(p))
 }
 func within(path, base string) bool {
 	return base == "" || path == base || strings.HasPrefix(path, base+"/")

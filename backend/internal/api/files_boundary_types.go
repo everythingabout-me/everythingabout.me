@@ -6,9 +6,8 @@ import (
 
 	"everythingabout.me/backend/internal/auth"
 	fc "everythingabout.me/backend/internal/filecontract"
+	"everythingabout.me/backend/internal/namecompare"
 	"everythingabout.me/backend/internal/storage"
-	"golang.org/x/text/cases"
-	"golang.org/x/text/unicode/norm"
 )
 
 // fileRequest carries one verified principal and owner-bound native driver. The
@@ -28,10 +27,7 @@ func (f *fileRequest) RequireRead(path fc.Path) error {
 	if err := fc.ValidatePath(string(path)); err != nil {
 		return err
 	}
-	key := func(s string) string { return norm.NFC.String(s) }
-	if !f.Driver.Describe().Names.CaseSensitive {
-		key = func(s string) string { return cases.Fold().String(norm.NFC.String(s)) }
-	}
+	key := fc.SegmentKey(namecompare.Key(f.Driver.Describe().Names.CaseSensitive))
 	if !fc.WithinScope(f.Scope, path, key) {
 		return fc.NewProblem(404, "not_found", "The path was not found.")
 	}

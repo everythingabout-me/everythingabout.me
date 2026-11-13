@@ -104,7 +104,8 @@ readable native tree below the owner's content root. A scoped credential's paths
 native conditional admission. Preserve original accepted spelling. A file and folder cannot share the same
 name in one parent; distinct parents may contain equal names. Reject equivalent-name collisions rather than
 creating duplicates with different IDs. Comparison versions are nfc-sensitive-v1 and nfc-fold-v1; the latter
-uses Unicode full case folding with the same generated mapping in Go and Postgres. Original accepted spelling
+is NFC, Unicode full case folding, NFC, with the same generated mapping in Go and Postgres, and one Go
+implementation (`internal/namecompare.Key`) behind every fence and scope check. Original accepted spelling
 is preserved. Imports from providers allowing duplicate siblings report conflicts
 until resolved explicitly; never hide, silently rename, or ID-only expose an ambiguous native tree.
 

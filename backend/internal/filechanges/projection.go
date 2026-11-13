@@ -4,21 +4,7 @@ import (
 	"slices"
 
 	fc "everythingabout.me/backend/internal/filecontract"
-	"golang.org/x/text/cases"
-	"golang.org/x/text/unicode/norm"
 )
-
-// NameKey matches identity's nfc-sensitive-v1 / nfc-fold-v1 comparison. It
-// preserves segmentation and never rewrites displayed native spelling.
-func NameKey(caseSensitive bool) fc.SegmentKey {
-	return func(segment string) string {
-		value := norm.NFC.String(segment)
-		if !caseSensitive {
-			value = norm.NFC.String(cases.Fold().String(value))
-		}
-		return value
-	}
-}
 
 // MatchesScope includes descendants, plus ancestor subtree effects which require
 // refreshing the visible scope. Plain ancestor metadata edits do not match.

@@ -7,12 +7,11 @@ import (
 	"everythingabout.me/backend/internal/storage"
 )
 
-// The scan's duplicate check first rejects NFC-equal spellings and then
-// fold-equal ones, which is the fold-only equivalence. It therefore refuses a
-// native tree containing a pair the index would also merge, but not the four
-// post-fold cases.
-func TestCollectorCaseConflictUsesLegacyKey(t *testing.T) {
-	nameprobe.CheckPair(t, "treescan.case_conflict", nameprobe.LegacyPipeline, false, func(a, b string) bool {
+// The scan's duplicate check must use the canonical key, so a native tree
+// containing two spellings the index would merge is reported instead of
+// imported and rejected later by the unique sibling index.
+func TestCollectorCaseConflictUsesReferenceKey(t *testing.T) {
+	nameprobe.CheckPair(t, "treescan.case_conflict", nameprobe.ReferencePipeline, false, func(a, b string) bool {
 		c, err := newCollector(Options{Names: storage.NameRules{CaseSensitive: false}})
 		if err != nil {
 			t.Fatal(err)
@@ -24,11 +23,11 @@ func TestCollectorCaseConflictUsesLegacyKey(t *testing.T) {
 	})
 }
 
-// The reserved-name check folds without normalizing either side. Production
-// reserved names are ASCII today, so this is latent rather than live; it is
-// recorded because the convergence must cover it too.
-func TestReservedNameUsesFoldOnly(t *testing.T) {
-	nameprobe.CheckPair(t, "treescan.reservedName", nameprobe.FoldOnlyPipeline, false, func(a, b string) bool {
+// The reserved-name check compares under the same key. Production reserved
+// names are ASCII today, so the four post-fold pairs are latent rather than
+// live; they are recorded because the convergence covers them too.
+func TestReservedNameUsesReferenceKey(t *testing.T) {
+	nameprobe.CheckPair(t, "treescan.reservedName", nameprobe.ReferencePipeline, false, func(a, b string) bool {
 		c, err := newCollector(Options{Names: storage.NameRules{CaseSensitive: false, ReservedNames: []string{a}}})
 		if err != nil {
 			t.Fatal(err)

@@ -110,7 +110,8 @@ comparison rules and original accepted display names. Different IDs cannot make 
 siblings valid. ID resolution checks owner/current native-aware path scope; moving outside scope removes
 access and never retargets a path grant. Migration 027 makes parent/name identity canonical, resolves current
 paths through the file_entries ancestry view and retains nullable legacy path/key caches. Versioned NFC/full
-Unicode case-fold comparison agrees between Go and Postgres. Eligible Local atomic folder moves update one
+Unicode case-fold comparison agrees between Go and Postgres through one Go implementation
+(`internal/namecompare.Key`, pipeline NFC, full fold, NFC). Eligible Local atomic folder moves update one
 root linkage/native effect without mandatory descendant identity rewrites; a destination prefix that grows
 in bytes or depth falls back to finite preflight. Dynamic ancestry/search can cost O(candidates × depth), and
 cache maintenance or flat object copy/delete moves can scale with subtree size.

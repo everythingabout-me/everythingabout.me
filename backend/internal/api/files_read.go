@@ -18,9 +18,9 @@ import (
 
 	fc "everythingabout.me/backend/internal/filecontract"
 	"everythingabout.me/backend/internal/fileops"
+	"everythingabout.me/backend/internal/namecompare"
 	"everythingabout.me/backend/internal/nodes"
 	"everythingabout.me/backend/internal/storage"
-	"golang.org/x/text/cases"
 	"golang.org/x/text/unicode/norm"
 )
 
@@ -92,11 +92,12 @@ func parseFilesReadQuery(r *http.Request, scope fc.Path, pathRequired bool) (fil
 	return result, nil
 }
 
+// filesPathKey is the production producer for every WithinScope check: request
+// scope, hidden pending-delete roots, change projection and cursor ordering. It
+// is namecompare.Key so it can never disagree with the SQL index about whether
+// two spellings are one name.
 func filesPathKey(f *fileRequest) fc.SegmentKey {
-	if f.Driver.Describe().Names.CaseSensitive {
-		return norm.NFC.String
-	}
-	return func(s string) string { return cases.Fold().String(norm.NFC.String(s)) }
+	return fc.SegmentKey(namecompare.Key(f.Driver.Describe().Names.CaseSensitive))
 }
 
 // Accepted deletions remain hidden while their native purge completes.

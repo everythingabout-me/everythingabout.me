@@ -18,17 +18,16 @@ func probeRequest(caseSensitive bool) *fileRequest {
 
 // filesPathKey is the production producer for every WithinScope check: request
 // scope, hidden pending-delete roots, change projection and cursor ordering.
-// It is the fold-only pipeline, while the SQL change filter and index use the
-// documented one.
-func TestFilesPathKeyUsesLegacyKey(t *testing.T) {
-	nameprobe.CheckKey(t, "api.filesPathKey", nameprobe.LegacyPipeline, false, filesPathKey(probeRequest(false)))
+// It must be the index's reference pipeline.
+func TestFilesPathKeyUsesReferenceKey(t *testing.T) {
+	nameprobe.CheckKey(t, "api.filesPathKey", nameprobe.ReferencePipeline, false, filesPathKey(probeRequest(false)))
 }
 
-// RequireRead gates every read with the same fold-only key, so a token scoped
-// to one spelling cannot read an index-equal sibling.
-func TestRequireReadUsesLegacyKey(t *testing.T) {
+// RequireRead gates every read with the same key, so a token scoped to one
+// spelling can read an index-equal sibling and cannot read an index-distinct one.
+func TestRequireReadUsesReferenceKey(t *testing.T) {
 	f := probeRequest(false)
-	nameprobe.CheckPair(t, "api.RequireRead", nameprobe.LegacyPipeline, false, func(a, b string) bool {
+	nameprobe.CheckPair(t, "api.RequireRead", nameprobe.ReferencePipeline, false, func(a, b string) bool {
 		f.Scope = fc.Path("/" + a)
 		return f.RequireRead(fc.Path("/"+b)) == nil
 	})

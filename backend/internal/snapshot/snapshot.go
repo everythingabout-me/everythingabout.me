@@ -19,8 +19,8 @@ import (
 	"sort"
 	"strings"
 
+	"everythingabout.me/backend/internal/namecompare"
 	"everythingabout.me/backend/internal/storage"
-	"golang.org/x/text/cases"
 )
 
 // Target is the writer half of a driver: folders plus staged publication. Both
@@ -82,14 +82,9 @@ func destinationNameRules(dst Target) storage.NameRules {
 
 // reservedName reports whether one native segment is a name the destination reserves.
 func reservedName(segment string, rules storage.NameRules) bool {
+	key := namecompare.Key(rules.CaseSensitive)
 	for _, reserved := range rules.ReservedNames {
-		if rules.CaseSensitive {
-			if segment == reserved {
-				return true
-			}
-			continue
-		}
-		if cases.Fold().String(segment) == cases.Fold().String(reserved) {
+		if key(segment) == key(reserved) {
 			return true
 		}
 	}
