@@ -1,8 +1,10 @@
 # Operation journal entries: measured cost, and the table that would replace them
 
-> Status: **measured; design proposed, not implemented.** Phase 1 of this document is the
-> measurement the sql/047 header asserted but never took; Phase 2 is the table design that
-> measurement justifies. Nothing here is implemented in the branch that wrote it.
+> Status: **measured; Release A implemented, Release B proposed.** Phase 1 of this document is
+> the measurement the sql/047 header asserted but never took; Phase 2 is the table design that
+> measurement justifies. Release A (schema, shadow writes, backfill, no reader switch) is in
+> `sql/049`, `sql/050` and `internal/fileops/postgres_entries.go`; §4 records its measured cost.
+> Release B (the flip) is not implemented.
 >
 > The measured harness is `backend/internal/fileops/journal_entries_cost_test.go`
 > (`TestJournalEntriesDocumentCost`). It drives a real move through `Actions.Prepare` +
@@ -457,3 +459,70 @@ harness creates a random database, applies every migration twice, and drops it. 
 `EAM_JOURNAL_COST_MEASUREMENT=1` (which `make measure-journal` sets) keeps the harness out of
 `make test` and `make test-pg`. The harness asserts nothing: it measures and prints, so a
 slow or fast machine changes the numbers, not the result.
+
+## 4. Release A: implemented
+
+Release A adds the table from §2.1, `file_operations.entry_count` and `entries_layout` (default
+`'document'`), fills the table from the documents already in the journal, and makes every entry
+transition write its row to the table **in the same transaction as the document rewrite**.
+Nothing reads the table: the document stays authoritative, settlement and progress are unchanged,
+and a previous binary runs against this schema unchanged. Schema: `sql/049`. Backfill:
+`sql/050`. Shadow: `internal/fileops/postgres_entries.go`.
+
+**Where the shadow is written.** `FreezeAction` (one bulk insert, plus `entry_count`), the
+admission `INSERT` when a `Begin` carries a manifest, and `BeginEntry` / `SaveEntry` (one row
+upsert each). Each runs inside the transaction that already holds the parent row lock and that
+`saveOperation` writes the document in, so a commit produces both writes or neither.
+`TestShadowEntryAndDocumentWriteCommitTogether` proves the direction a crash would hurt by
+making the document update fail *after* the shadow write: the transaction rolls back and the
+table is not ahead of the document.
+
+**Measured cost of the shadow.** `FILES=500 make measure-journal`, same machine, same fixture;
+the "before" column is §1.2 above.
+
+| | before | Release A | delta |
+|---|---:|---:|---:|
+| journal writes | 5,017 | 5,018 | +1 |
+| logical document bytes | 5,248,098,217 | 5,248,100,046 | +1,829 (+0.00003%) |
+| WAL | 368,974,256 | 371,480,328 | +2,506,072 (+0.68%) |
+| run | 2m48.25s | 2m49.03s | +0.79 s (+0.47%) |
+| prepare (the freeze) | 167.7 ms | 190.6 ms | +22.9 ms |
+| shadow statements | — | 3,007, 881.7 ms | +0.52% of the run |
+
+The document bytes barely move because the one extra `file_operations` statement — the
+`entry_count` update at freeze — runs before the document gains its entries, so it records the
+1.8 KB admitted document. The real cost is one small row write per entry transition (three per
+entry: `BeginEntry`, `SaveEntry started`, `SaveEntry applied`; 0.29 ms average per statement),
+and the owner lock is held for that much longer. That is the cost §2.7 named: Release A must not
+be kept for longer than the release after it.
+
+**Backfill.** `sql/050` is one `DO` loop: at most 500 operations per iteration, locked `for
+update skip locked`, moved in one `jsonb_to_recordset` insert, with `entry_count` set in the same
+iteration. The DDL is a separate file so the ACCESS EXCLUSIVE lock from `add column` is not held
+for the backfill; the backfill itself takes only ACCESS SHARE on `file_operations` and never
+waits on a row a live worker holds. `on conflict do nothing` plus the "no rows yet" target filter
+make a re-run a no-op. A file is one transaction (§2.5, sql/044), so an interrupted run rolls
+every batch back: the schema stays, the next `eam migrate` re-runs the file from the start, and
+per-batch progress is deliberately not kept. The scope is bounded by the journal's retention.
+
+**Disagreement detection.** The exact detector is `TestShadowEntriesMatchDocument`: after a real
+`Prepare` + `Run` it rebuilds each row as the document's entry object and compares it with `is
+distinct from`; it fails on a single differing field and on a count that disagrees with
+`entry_count`. `TestJournalEntriesBackfill` and its interruption variant hold the migration to the
+same comparison. The gross detector for a live journal is in `sql/050`'s header (table row count
+vs `entry_count`). A row written by a pre-Release-A binary during the deploy window may have a
+stale or missing shadow; that is safe in Release A (nothing reads it) and Release B's Claim-time
+upgrade overwrites it from the document, which is why §2.5's upgrade overwrites rather than
+inserts-and-ignores.
+
+**Read guard.** `TestJournalEntriesTableIsWriteOnly` fails if a production Go source other than
+`postgres_entries.go` names the table, if any production source reads it
+(`from`/`join file_operation_entries`), or if any production source mentions `entries_layout`. It
+is a textual lint in the style of `TestOperationJournalPredicatesReadColumns`. Release B deletes
+it together with the layout branch that it guards.
+
+**What Release B still has to do** (§2.3-2.5, unchanged): load the entries inside `Settle`'s
+transaction; turn the per-transition questions into row predicates; upgrade a `'document'` row on
+`Claim`; write new operations as `'table'`; and make `mkdir` / `CommitNativeTreeMove` read
+`entry_count` instead of the document's list.
+
