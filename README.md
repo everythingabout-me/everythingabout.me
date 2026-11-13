@@ -375,7 +375,7 @@ existing separate endpoints and envelopes.
 | PUT | `/api/files/transfer/{encoded-object-key}?…` | Optional class A same-origin edge route; the application always refuses it |
 | POST | `/api/files/downloads` | Batch read grants (URL or bearer), renewable on expiry |
 | GET | `/api/files/media-metadata?path=` or `?id=` | Capture time, GPS position, device, size and duration a photo or video states in its own bytes; parsed on first view by ranged reads, then cached |
-| POST | `/api/files/uploads/{id}/commit` | Server verifies provider state and publishes; metadata or stable Operation |
+| POST | `/api/files/uploads/{id}/commit` | Server verifies provider state and publishes; metadata with the destination folder's `parentRevision`, or stable Operation |
 | POST | `/api/files/sync` | Sync the index to the native tree (`{dryRun}`); removals are audited and emitted as deleted change facts |
 | POST | `/api/files/change-snapshots` | Complete bounded synchronous metadata baseline with committed feed checkpoint |
 | GET, DELETE | `/api/files/change-snapshots/{id}` | Immutable metadata pages or release retained snapshot |

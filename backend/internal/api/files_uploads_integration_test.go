@@ -907,6 +907,61 @@ func TestFilesUploadCommitBatchPageLimit(t *testing.T) {
 	uploadsHTTPProblem(t, h.request("POST", "/api/files/uploads/commit/batch", h.bearer, page(17), http.Header{"Content-Type": {"application/json"}}), 400, "invalid_request")
 }
 
+// A commit answer names the folder it published into: the client's next rename, move or
+// delete of that folder sends its revision as If-Revision, and the settle that published the
+// file changed it. The value has to be the one a metadata read returns, present on a single
+// commit, a repeated commit and a batch item, or the client keeps paying that read after
+// every import for a value the settlement already had.
+func TestFilesUploadCommitAnswersParentRevision(t *testing.T) {
+	f := newFileWorkerFixture(t)
+	h := newUploadsHTTPFixture(t, f)
+	jsonHeader := http.Header{"Content-Type": {"application/json"}}
+	parentRevision := func(path string) string {
+		t.Helper()
+		value := uploadsHTTPJSON(t, h.request("GET", "/api/files?path="+url.QueryEscape(path), h.bearer, nil, nil), 200)
+		revision, _ := value["revision"].(string)
+		if revision == "" {
+			t.Fatalf("metadata %s names no revision: %v", path, value)
+		}
+		return revision
+	}
+	upload := func(path, key string) string {
+		t.Helper()
+		body, _ := json.Marshal(map[string]any{"path": path, "size": 4, "mediaType": "text/plain", "parents": true})
+		value := uploadsHTTPJSON(t, h.request("POST", "/api/files/uploads", h.bearer, body, http.Header{"Idempotency-Key": {key}, "Content-Type": {"application/json"}}), 201)
+		id, _ := value["id"].(string)
+		if id == "" {
+			t.Fatalf("upload admission %v", value)
+		}
+		uploadsHTTPJSON(t, h.part(id, 1, []byte("data"), nil), 201)
+		return id
+	}
+	first := h.commit(t, upload("/Trip/one.txt", "parent-revision-one"))
+	if first["parentRevision"] != parentRevision("/Trip") {
+		t.Fatalf("commit answered parentRevision %v, metadata answers %q", first["parentRevision"], parentRevision("/Trip"))
+	}
+	// A second settle into the same folder advances its membership, and the batch item that
+	// reports it must carry the new value rather than the one the first settle answered.
+	secondID := upload("/Trip/two.txt", "parent-revision-two")
+	page := uploadsHTTPJSON(t, h.request("POST", "/api/files/uploads/commit/batch", h.bearer, []byte(`{"items":[{"id":"`+secondID+`"}]}`), jsonHeader), 200)
+	items, _ := page["items"].([]any)
+	if len(items) != 1 {
+		t.Fatalf("settle page %v", page)
+	}
+	settled, _ := items[0].(map[string]any)["result"].(map[string]any)
+	after := parentRevision("/Trip")
+	if settled["parentRevision"] != after || after == first["parentRevision"] {
+		t.Fatalf("batch item answered parentRevision %v, metadata answers %q (before %v)", settled["parentRevision"], after, first["parentRevision"])
+	}
+	// The root is a folder like any other; its revision is synthetic but has to advance too.
+	rootBefore := parentRevision("/")
+	root := h.commit(t, upload("/top.txt", "parent-revision-root"))
+	rootAfter := parentRevision("/")
+	if root["parentRevision"] != rootAfter || rootAfter == rootBefore {
+		t.Fatalf("commit at the root answered parentRevision %v, metadata answers %q (before %q)", root["parentRevision"], rootAfter, rootBefore)
+	}
+}
+
 // A destination whose folders do not exist yet is admitted without creating them; the
 // ancestors enter the index when the file lands, because only then does the tree carry the
 // prefix they name. Materializing them at admission cost one provider-heavy mkdir per folder

@@ -262,6 +262,22 @@ type filesSubscriptionList struct {
 	Items []filesSubscription `json:"items"`
 }
 
+// filesUploadCommitResource is one commit answer (POST B/uploads/{id}/commit) and the
+// `result` of one item of POST B/uploads/commit/batch: the published file plus the revision
+// of the folder it landed in, after the settlement that published it.
+//
+// The parent folder's revision is in the answer because the client keeps it for the next
+// rename, move or delete of that folder, which send it as If-Revision. The settle changes
+// that revision, so a client without it must read the folder back after an import; the value
+// here is the one such a read would return.
+//
+// It is an alias rather than a second struct because the settlement stores this exact
+// document (nodes produces the durable result, and a repeated commit, a session status and
+// an Operation poll replay it): the wire resource and the stored result have to be one type.
+// Declaring it here keeps the contract check reflecting over it, so a renamed field fails
+// that test instead of a browser.
+type filesUploadCommitResource = fc.UploadCommitResult
+
 // filesChangeSnapshotPage is GET B/change-snapshots/{id}: the snapshot resource
 // plus one page of complete metadata.
 type filesChangeSnapshotPage struct {

@@ -402,3 +402,19 @@ func CommitStagedFile(ctx context.Context, tx pgx.Tx, op fileops.Operation, resu
 	}
 	return settledChangeResult(ctx, tx, op.Root.OwnerID, resource)
 }
+
+// CommitStagedUpload is CommitStagedFile for an upload session's publication, whose answer
+// also names the destination folder's revision after the settlement: the client's next
+// mutation of that folder sends it as If-Revision, and no other answer carries it.
+//
+// A content PUT shares the settlement but not this wrapper. Its answer is documented as the
+// file resource a metadata read returns, and the folder's new revision is a need specific to
+// importing files, where the value changes once per settled file and reading it back is a
+// request per import.
+func CommitStagedUpload(ctx context.Context, tx pgx.Tx, op fileops.Operation, result *storage.MutationResult) (json.RawMessage, error) {
+	resource, err := CommitStagedFile(ctx, tx, op, result)
+	if err != nil {
+		return nil, err
+	}
+	return settledUploadCommitResult(ctx, tx, op.Root, resource)
+}

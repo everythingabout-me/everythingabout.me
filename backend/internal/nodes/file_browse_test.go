@@ -120,7 +120,31 @@ func TestIndexedMutationResponsesMatchBrowsing(t *testing.T) {
 			t.Fatal(err)
 		}
 		expected, _ := json.Marshal(metadata)
-		if string(raw) != string(expected) {
+		var got, want map[string]json.RawMessage
+		if err := json.Unmarshal(raw, &got); err != nil {
+			t.Fatal(err)
+		}
+		if err := json.Unmarshal(expected, &want); err != nil {
+			t.Fatal(err)
+		}
+		// A publication also names the folder it landed in; every other settled mutation
+		// does not. Compare the file resource and check the one extra field when present.
+		if revision, ok := got["parentRevision"]; ok {
+			delete(got, "parentRevision")
+			parent, err := fileBrowseMetadata(ctx, pool, root.OwnerID, namespace, paths.ParentOf(path), nil)
+			if err != nil || parent == nil {
+				t.Fatalf("parent browse %+v %v", parent, err)
+			}
+			parentMetadata, err := IndexedMetadata(namespace, *parent)
+			if err != nil {
+				t.Fatal(err)
+			}
+			wantRevision, _ := json.Marshal(parentMetadata.Revision)
+			if string(revision) != string(wantRevision) {
+				t.Fatalf("publication named parent revision %s, browse answers %s", revision, wantRevision)
+			}
+		}
+		if !reflect.DeepEqual(got, want) {
 			t.Fatalf("settlement differs from browse:\n%s\n%s", raw, expected)
 		}
 	}
@@ -132,7 +156,7 @@ func TestIndexedMutationResponsesMatchBrowsing(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	raw, err := CommitStagedFile(ctx, tx, fileops.Operation{Root: root, Intent: intent}, &storage.MutationResult{Entry: &entry})
+	raw, err := CommitStagedUpload(ctx, tx, fileops.Operation{Root: root, Intent: intent}, &storage.MutationResult{Entry: &entry})
 	if err != nil {
 		tx.Rollback(ctx)
 		t.Fatal(err)

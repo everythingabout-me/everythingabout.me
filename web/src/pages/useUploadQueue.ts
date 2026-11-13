@@ -13,7 +13,7 @@
  * owner is exercisable without a DOM (the test harness drives the hook directly).
  */
 import { useEffect, useState } from "react";
-import { ApiError, FileApiError, api, type FileProblem, type FileResource, type Item, type FileOperation, type FileUploadInput, type FileUploadPartGrant, type FileUploadSession } from "../api/client";
+import { ApiError, FileApiError, api, type FileProblem, type FileUploadCommit, type Item, type FileOperation, type FileUploadInput, type FileUploadPartGrant, type FileUploadSession } from "../api/client";
 import { t } from "../i18n";
 import { foldersWithoutFiles, type UploadEntry } from "./uploadSelection";
 import { claimUploadPath } from "./uploadOwnership";
@@ -103,7 +103,7 @@ function waitBeforeRetry(attempt: number, signal?: AbortSignal): Promise<void> {
     signal?.addEventListener("abort", abort, { once: true });
   });
 }
-async function commitUpload(id: string, signal: AbortSignal | undefined, settle: (id: string, signal?: AbortSignal) => Promise<FileResource | FileOperation>): Promise<FileResource | FileOperation> {
+async function commitUpload(id: string, signal: AbortSignal | undefined, settle: (id: string, signal?: AbortSignal) => Promise<FileUploadCommit | FileOperation>): Promise<FileUploadCommit | FileOperation> {
   for (let attempt = 0; ; attempt++) {
     try { return await settle(id, signal); }
     catch (error) {
@@ -485,7 +485,7 @@ interface BatchState<T> {
 }
 
 interface PendingCreate { input: FileUploadInput; key: string; resolve: (session: FileUploadSession) => void; reject: (error: unknown) => void; cancelled: boolean }
-interface PendingSettle { id: string; resolve: (result: FileResource | FileOperation) => void; reject: (error: unknown) => void; cancelled: boolean }
+interface PendingSettle { id: string; resolve: (result: FileUploadCommit | FileOperation) => void; reject: (error: unknown) => void; cancelled: boolean }
 
 /** One look-ahead admission in flight or in hand, one per file. */
 interface AdmissionEntry { controller: AbortController; promise: Promise<FileUploadSession>; ready: boolean }
@@ -525,7 +525,7 @@ interface UploadRunHost {
   /** Ask the engine for the next turn: a step that finished something schedules the pump. */
   requestPump(): void;
   askConflict(path: string): Promise<"replace" | "skip">;
-  settleUpload(id: string, signal?: AbortSignal): Promise<FileResource | FileOperation>;
+  settleUpload(id: string, signal?: AbortSignal): Promise<FileUploadCommit | FileOperation>;
   releaseWindow(id: string): void;
   acquirePart(rank: number, number: number, signal: AbortSignal): Promise<void>;
   releasePart(): void;
@@ -1453,7 +1453,7 @@ function createQueue(): QueueOwner {
     }
   }, [pauseQueue]);
 
-  const settleUpload = useCallback((id: string, signal?: AbortSignal) => new Promise<FileResource | FileOperation>((resolve, reject) => {
+  const settleUpload = useCallback((id: string, signal?: AbortSignal) => new Promise<FileUploadCommit | FileOperation>((resolve, reject) => {
     if (typeof api.commitUploadBatch !== "function") { api.commitUpload(id, signal).then(resolve, reject); return; }
     if (signal?.aborted) { reject(new DOMException("Upload canceled", "AbortError")); return; }
     const state = settleBatch.current;

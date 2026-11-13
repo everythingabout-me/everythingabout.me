@@ -95,6 +95,7 @@ var fileAPIContractShapes = []struct {
 	{"FileSubscriptionNotification", filesChangeNotification{}},
 	{"FileSyncReport", filesSyncResponse{}},
 	{"FileUploadCollection", fc.Collection[*filesUploadSession]{}},
+	{"FileUploadCommit", filesUploadCommitResource{}},
 	{"FileUploadPartGrant", filesPartGrant{}},
 	{"FileUploadPartsPage", filesUploadPartsPage{}},
 	{"FileUploadReceipt", filesUploadReceiptResource{}},

@@ -930,6 +930,78 @@
         }
       }
     },
+    "FileUploadCommit": {
+      "fields": {
+        "changeToken": {
+          "kind": "string",
+          "optional": true
+        },
+        "checksum": {
+          "kind": "object",
+          "optional": false
+        },
+        "contentRevision": {
+          "kind": "string",
+          "optional": false
+        },
+        "createdAt": {
+          "kind": "string",
+          "optional": false
+        },
+        "id": {
+          "kind": "string",
+          "optional": false
+        },
+        "kind": {
+          "kind": "string",
+          "optional": false
+        },
+        "lastChangedAt": {
+          "kind": "string",
+          "optional": true
+        },
+        "mediaType": {
+          "kind": "string",
+          "optional": false
+        },
+        "name": {
+          "kind": "string",
+          "optional": false
+        },
+        "parentId": {
+          "kind": "string",
+          "optional": false
+        },
+        "parentPath": {
+          "kind": "string",
+          "optional": false
+        },
+        "parentRevision": {
+          "kind": "string",
+          "optional": false
+        },
+        "path": {
+          "kind": "string",
+          "optional": false
+        },
+        "revision": {
+          "kind": "string",
+          "optional": false
+        },
+        "size": {
+          "kind": "number",
+          "optional": false
+        },
+        "sourceModifiedAt": {
+          "kind": "string",
+          "optional": false
+        },
+        "updatedAt": {
+          "kind": "string",
+          "optional": false
+        }
+      }
+    },
     "FileUploadPartGrant": {
       "fields": {
         "expiresAt": {

@@ -421,7 +421,17 @@ func (s *Server) runFileOperation(ctx context.Context, op fileops.Operation) err
 		return nil
 	}
 	if op.Kind == "upload_commit" {
-		service, err := fileops.NewService(s.filesJournal, fileops.ServiceOptions{Authorize: authorize, Commit: nodes.CommitStagedFile, PhysicalDelta: func(op fileops.Operation, result storage.MutationResult) (int64, error) {
+		// A session's publication answers with the destination folder's revision
+		// (CommitStagedUpload); a content PUT shares the settlement but answers with the plain
+		// file resource, because its response is the metadata a read returns.
+		var commit fileops.IndexCommit = nodes.CommitStagedFile
+		upload := false
+		if _, e := s.filesJournal.GetUpload(ctx, op.Root, actor, op.ID); e == nil {
+			upload, commit = true, nodes.CommitStagedUpload
+		} else if !fileops.IsCode(e, "not_found") {
+			return e
+		}
+		service, err := fileops.NewService(s.filesJournal, fileops.ServiceOptions{Authorize: authorize, Commit: commit, PhysicalDelta: func(op fileops.Operation, result storage.MutationResult) (int64, error) {
 			if result.Entry == nil {
 				return 0, fileops.E("invalid_native_result", nil)
 			}
@@ -430,10 +440,8 @@ func (s *Server) runFileOperation(ctx context.Context, op fileops.Operation) err
 		if err != nil {
 			return err
 		}
-		if _, e := s.filesJournal.GetUpload(ctx, op.Root, actor, op.ID); e == nil {
-			_, e = s.runUploadOperation(ctx, op, actor, native, service)
-			return e
-		} else if !fileops.IsCode(e, "not_found") {
+		if upload {
+			_, e := s.runUploadOperation(ctx, op, actor, native, service)
 			return e
 		}
 		var updated fileops.Operation

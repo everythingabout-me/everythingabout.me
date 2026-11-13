@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"time"
 
+	fc "everythingabout.me/backend/internal/filecontract"
 	"everythingabout.me/backend/internal/fileops"
 	"everythingabout.me/backend/internal/filerevision"
 	"everythingabout.me/backend/internal/paths"
@@ -126,6 +127,37 @@ func ensureUploadParents(ctx context.Context, tx pgx.Tx, ownerID, path string) (
 	}
 	changed = changed || tag.RowsAffected() > 0
 	return changed, nil
+}
+
+// settledUploadCommitResult adds the parent folder's revision to a settled publication's
+// stored result.
+//
+// The client keeps that folder's revision for its next rename, move or delete, which send
+// it as If-Revision. A settle changes the folder's direct-child membership, so the value
+// the page loaded with is stale from then on; without it here the client reads the folder
+// back after every import just to learn a value this transaction already has, and a client
+// that does not read meets a permanent 412. Deriving it from the same index view a metadata
+// read uses (after the file row exists, inside the same transaction) is what makes the
+// answer equal to that read instead of a second observation that could disagree with it.
+func settledUploadCommitResult(ctx context.Context, tx pgx.Tx, root fileops.Root, resource json.RawMessage) (json.RawMessage, error) {
+	var result fc.UploadCommitResult
+	if err := json.Unmarshal(resource, &result); err != nil {
+		return nil, fmt.Errorf("decode settled upload result: %w", err)
+	}
+	parent := paths.ParentOf(result.Path.Relative())
+	record, err := fileBrowseMetadata(ctx, tx, root.OwnerID, fileRootNamespace(root), parent, nil)
+	if err != nil {
+		return nil, fmt.Errorf("read parent folder %q after settling upload: %w", parent, err)
+	}
+	if record == nil {
+		return nil, fmt.Errorf("no folder is indexed at %q after settling its upload, though the settlement required one", parent)
+	}
+	metadata, err := IndexedMetadata(fileRootNamespace(root), *record)
+	if err != nil {
+		return nil, err
+	}
+	result.ParentRevision = metadata.Revision
+	return json.Marshal(result)
 }
 
 // CheckUploadBinding is the index half of freezing an upload session: it verifies, inside

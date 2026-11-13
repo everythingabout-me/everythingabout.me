@@ -111,6 +111,20 @@ export interface FileResource {
 }
 
 /**
+ * The answer to settling an upload: the published file, plus the revision of the folder it
+ * landed in.
+ *
+ * The settle changes that folder's direct-child membership, so the revision the page loaded
+ * with is stale from then on, and the next rename, move or delete of the folder must send
+ * this one as If-Revision. It is the value a metadata read of the folder returns, without
+ * the read. Absent when an older server (or an answer stored before this field existed)
+ * does not carry it; the page then falls back to reading the folder once.
+ */
+export interface FileUploadCommit extends FileResource {
+  parentRevision: string;
+}
+
+/**
  * What a photo or video states about its own capture. Every field is null when the file
  * does not state it; `state` tells a file that says nothing ("empty") from one the server
  * does not parse ("unsupported").
@@ -354,7 +368,7 @@ export interface FileUploadSession {
   partsUrl: string;
   commitUrl: string;
   operationId: string;
-  result: FileResource | null;
+  result: FileUploadCommit | null;
   /**
    * The destination already holds exactly the bytes this session would upload, because a
    * direct publication landed before its commit failed. There is nothing to transfer: the
@@ -460,8 +474,14 @@ export interface AuthUser {
   emailChangedAt: string | null;
 }
 
-/** File pages consume the public resource without a compatibility DTO. */
-export type Item = FileResource;
+/**
+ * File pages consume the public resource without a compatibility DTO.
+ *
+ * A settle answer also carries the parent folder's revision (FileUploadCommit); the field
+ * is optional here because listing and metadata rows do not, and a commit answered by an
+ * older server may not either.
+ */
+export type Item = FileResource & { parentRevision?: string };
 
 export interface Crumb {
   name: string;
@@ -1702,8 +1722,8 @@ export const api = {
   },
 
   /** Settle a page of sessions in one request; each item is a file or its Operation. */
-  async commitUploadBatch(ids: string[], signal?: AbortSignal): Promise<{ result?: FileResource | FileOperation; error?: FileProblem }[]> {
-    const result = await filePost<{ items: { result?: FileResource | FileOperation; error?: FileProblem }[] }>("/uploads/commit/batch", { items: ids.map((id) => ({ id })) }, undefined, signal);
+  async commitUploadBatch(ids: string[], signal?: AbortSignal): Promise<{ result?: FileUploadCommit | FileOperation; error?: FileProblem }[]> {
+    const result = await filePost<{ items: { result?: FileUploadCommit | FileOperation; error?: FileProblem }[] }>("/uploads/commit/batch", { items: ids.map((id) => ({ id })) }, undefined, signal);
     return Array.isArray(result.items) ? result.items : [];
   },
 
@@ -1769,7 +1789,7 @@ export const api = {
     throw new Error("The read grant has no usable URL.");
   },
 
-  commitUpload(id: string, signal?: AbortSignal): Promise<FileResource | FileOperation> {
+  commitUpload(id: string, signal?: AbortSignal): Promise<FileUploadCommit | FileOperation> {
     return filePost(`/uploads/${encodeURIComponent(id)}/commit`, undefined, undefined, signal);
   },
 

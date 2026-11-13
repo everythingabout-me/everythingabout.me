@@ -384,7 +384,8 @@ does not fail the deletion — the index already recorded it — and it resumes 
 not promised. Temporary transfer cleanup is background work, not deletion of authoritative user content.
 
 Completed rename/move returns `200` file/folder metadata; copy returns `201`; deletion returns `204`; upload
-commit returns `200` with the published file. Work the server does not settle inside the request returns
+commit returns `200` with the published file and the destination folder's new `parentRevision` (see
+[§7](#7-upload-sessions-and-transfer-classes)). Work the server does not settle inside the request returns
 `202 + Operation + Location`. The public action is the same even when backend work differs.
 Cancellation/failure of multi-file work can leave native partial effects; the Operation records them.
 A non-atomic move must never expose one ID at both source and independent destination. Reserve source IDs
@@ -803,7 +804,9 @@ authority nor proves inactivity of other clients, origins or devices.
 `POST /api/files/uploads/batch` admits up to 32 sessions in one request and
 `POST /api/files/uploads/commit/batch` settles up to sixteen. Each item is the single-item body
 (each create item carries its own `idempotencyKey`) and each answers independently: a
-refused destination is one item's `error`, never the page's. An item is handed to the
+refused destination is one item's `error`, never the page's. A commit item's `result` is the
+single commit resource — the published file with its `parentRevision` — or the Operation still
+publishing it, so a page reports each folder's new revision exactly as a single commit does. An item is handed to the
 single-item handler as the bytes the client sent: re-encoding a decoded request fills every
 absent field with `null`, and the single handler reads a `null` `destination` beside a `path`
 as a mixed selector, which fails the item while the page still answers 200. The browser sends a create page
@@ -879,6 +882,18 @@ settlement itself always runs under the server's context, so a client that gives
 accepted publication; it only stops reading the answer. A commit is therefore idempotent in the way every
 provider's finalize is: after a lost response the client sends the same commit again and gets the file, or the
 Operation that is publishing it. Clients must not treat an uncertain commit as a failed upload.
+
+**The commit resource also names the destination folder.** Alongside the file's fields, a succeeded commit
+carries `parentRevision`: the revision of the folder the file landed in, observed after the settlement, which
+is the value `GET B?path=<folder>` returns for that folder. Publishing a file changes the folder's indexed
+direct-child membership and therefore its revision, so a client that keeps the folder's revision for its next
+rename, move or delete would otherwise send the pre-import value — a permanent `412` until it reads the folder
+back. Without this field that read is the price of every import, one request per import at best and per file at
+worst; the settlement already computes the membership change, so the answer states it. The value is stored with
+the settled result, so a repeated commit, the session status and an `upload_commit` Operation all report the
+same one. It is not present on ordinary metadata reads; a client that does not receive it (an older server, a
+result settled before this field existed) falls back to reading the folder once, and a client that receives it
+must still treat a `412` as "the revision moved on" and re-read before retrying.
 
 Class B sessions are created at the destination with the conflict rule set up front: create fails on an
 existing name, and replace targets the existing provider file with its native revision condition where one
@@ -967,7 +982,8 @@ carries `result: null`. The index settlement is final at `202`, but the bytes ar
 so a nonterminal operation that keeps failing is distinguishable from one that is merely slow; the attempts back off
 from 30 seconds to 30 minutes instead of repeating once per lease. The cause chain itself stays in the server log.
 Kinds are bounded file actions (`mkdir/move/copy/delete/upload_commit/thumbnail`), not user-submitted arbitrary tasks.
-Result is the file/folder metadata for mkdir/move/copy/upload_commit, `{deleted,purged,adopted}` for delete, or
+Result is the file/folder metadata for mkdir/move/copy/upload_commit (an `upload_commit` also names the destination
+folder's new `parentRevision`, as the commit answer does), `{deleted,purged,adopted}` for delete, or
 `{contentUrl,mediaType,size,contentRevision}` for thumbnail; contentUrl is a same-origin representation endpoint.
 The committed upload also stores its file metadata result in session status. Errors use the same Problem structure.
 
