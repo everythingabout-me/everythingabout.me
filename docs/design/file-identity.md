@@ -252,7 +252,7 @@ applies every migration twice to a scratch database and writes rows exactly as t
 | NFD spelling (`cafe\u0301.txt`) | accepted spelling preserved in `path`/`name`; `comparison_name` is the NFC form | one row, no ambiguity | NFC and NFD spellings both resolve to the same ID | without `comparison_name` neither spelling resolves by identity; only an exact cached-path match would find the row |
 | Case-insensitive sibling (`nfc-fold-v1`) | `README` and `readme` are one identity; the second insert raises `23505 canonical sibling spelling conflicts`; `Straße`/`STRASSE` collide through full folding, not `lower()` | same parent | mixed-case requests resolve to the one ID | the trigger computes the fold key and rejects the conflict; without it both spellings coexist with NULL keys and the unique sibling index cannot merge them |
 | NULL path cache | metadata-only update nulls `path`/`parent`/`key`; ID and ancestry still answer | `file_tree_path` derives the current path from `parent_id` | current path unchanged | the trigger's metadata-only branch (`sql/027:99-104`) keeps the link instead of re-deriving or clearing it; a relink through a NULL cache is refused (`23514`) |
-| Stale cache with broken ancestry | ID still resolves, but to the stale cached path | `file_tree_path` returns NULL because an ancestor row is missing; the view `coalesce` returns the old cache | the scope check sees the old location (inside a scope the entry has left) | nothing repairs the chain here; the fallback is the only thing that answers, which is why it is debt |
+| Stale cache with broken ancestry | ID still resolves, but to the stale cached path | `file_tree_path` returns NULL because an ancestor row is missing; the view `coalesce` returns the old cache | the strict ID→path resolution has no answer, so no scope sees the entry; the view still displays the old cache | nothing repairs the chain here; ID→path resolution is strict, so the cache is display-only |
 | No BEFORE trigger | `parent_id`/`comparison_name` are NULL; `file_tree_resolve` returns NULL; the view falls back to the path cache for every row | no ancestry at all | only the exact cached path works | every production upsert targets `(owner_id,parent_id,comparison_name)`; with NULL identity the conflict target cannot match: a same-path retry fails on the still-unique key instead of updating, and a different key or path would insert a duplicate because NULL conflict keys never match |
 | Explicit canonical columns | accepted when `parent_id` agrees with the path | same as normal | same as normal | the trigger overwrites `comparison_name` with its own value, so a Go spelling disagreement is silently corrected today; a validation-only trigger would have to reject it |
 
@@ -283,14 +283,44 @@ rather than a truthful 404. Change snapshots and change filters read the same vi
 (`backend/internal/api/files_changes.go:671`, `files_change_snapshots.go:181,432`), and path-derived timeline
 facts consume it too.
 
-The fail-closed fix does not need the view rewritten: an ID selector is already owner-scoped, so its ID→path
-lookup can ask `file_tree_path` strictly for owned rows and report not-found when it returns NULL, leaving the
-`coalesce` for `owner_id IS NULL` legacy display. That is one query in `resolveFileID` plus the three direct
-view reads in the change API, and it turns the only wrong answer into a 404.
+The fail-closed fix did not need the view rewritten, and the view is unchanged: its `coalesce` still serves
+display reads and the `owner_id IS NULL` legacy rows (`eam claim`'s `from file_entries where owner_id is null`,
+doctor's count) that have no canonical ancestry to walk. What changed is the ID→path question. These four
+places now ask `file_tree_path` strictly for the owned row and never fall back to `n.path`:
+
+| Call site | Question | Broken chain answers |
+|---|---|---|
+| `nodes.resolveFileID` (`file_identity.go`, behind `FileResolveID` and `FileResolveIDOn`) | map an owned ID to its current path for a selector, a replay check, an upload binding or a mutation check | `ErrIdentityUnresolved` |
+| `api.files_changes.go` ID-watch continuation | re-resolve the watched ID before matching change facts | `409 watch_access_lost`, ending the watch |
+| `api.files_change_snapshots.go` `filesSnapshotResolveTarget` | resolve a new snapshot's target ID | `404 not_found` |
+| `api.files_change_snapshots.go` `filesLoadChangeSnapshot` | re-verify a saved snapshot's target before a page | `409 target_changed` |
+
+An ID selection now answers **404 `not_found`**, not 409: `GET`/`DELETE /api/files?id=…`, a new snapshot's
+target and a replay's preflight all resolve through the same strict `resolveFileID`, so an entry with no
+current path cannot be represented, scoped or mutated. 404 is the answer the read path already gave when an ID
+and its path disagreed, and it is not retryable. A 409 would tell the client to retry a request that can only
+fail again until an operator repairs the index; the two reads that already carry a 409 vocabulary keep it and
+name the terminal condition instead. The stale-cache binding is refused where it was admitted:
+`filesCheckIdentityBindings` and `nodes.CheckUploadBinding` answer `target_changed` with the cause, so a
+preserved operation or an upload session whose captured ID no longer resolves is refused instead of being
+settled at the path the cache still spells. Reads never leaked bytes — `filesCheckReadIdentity` already
+rechecked ID against path — but a replacement/upload could still land on a path a different entry now occupies,
+and that is closed.
+
+The probe suite records the decision: `resolveFileID` returns `ErrIdentityUnresolved` for the stale-cache row a
+scope would have admitted and for the same broken chain with a NULL cache, and the Postgres-backed tests
+(`TestFilesUnresolvedAncestryFailsClosed`, `TestUploadBindingRejectsBrokenAncestry`,
+`TestFilesChangesRejectUnresolvedWatchTarget`, `TestFilesChangeSnapshotsRejectUnresolvedTarget`) drive that
+state through a scope match, a mutation and an upload binding, an ID watch and a saved snapshot and assert each
+named answer. Run them with
+`EAM_TEST_DATABASE_URL=… go test -run 'TestCanonicalIdentityWritePathAudit|TestUploadBindingRejectsBrokenAncestry|TestFilesUnresolved|TestFilesChangesReject|TestFilesChangeSnapshotsReject' ./internal/nodes ./internal/api`.
+What remains is the trigger design and the writer plan below. Display and path-derived facts (browse ordering,
+timeline path annotations) still read the view's `coalesce`, because they describe a location rather than
+authorize one.
 
 ### Verdict
 
-**Deliberate design, not a defect. The one piece of debt is the fallback, not the trigger.**
+**Deliberate design, not a defect. The one piece of debt was the fallback, and it is paid; the trigger stays.**
 
 - It is design because the writer is the settlement, not an arbitrary caller: each of the nine statements above
   passes the path that the native effect just proved (`commitStagedFile` checks it against `intent.Target`;
@@ -306,16 +336,18 @@ view reads in the change API, and it turns the only wrong answer into a 404.
 - It is not clean either. The trigger's write input is the path cache, and the only exception to "the
   application never writes canonical columns" is a repair statement (`upload_observation.go:100`). That is
   tolerable while every writer is a settlement; it becomes a defect the day a writer needs to set identity from
-  an ID or a provider token rather than from the operation's path. The fallback is the part that is already
-  wrong: it converts "the chain is broken" into a plausible cached answer.
+  an ID or a provider token rather than from the operation's path. The fallback was the part that was already
+  wrong, and it no longer answers an ID→path question: it converted "the chain is broken" into a plausible
+  cached answer, which is now a named not-found.
 
 So the review's observation is accurate but its label is not. The canonical identity does pass through a path
-on the way in; it does not pass through a derived cache on the way out, except in the fallback branch.
+on the way in; it does not pass through a derived cache on the way out, except in the display-only view branch,
+which no authorization or mutation input reads.
 
 ### If the writer moves (plan, not implemented)
 
-The dependency is real and removable, but not cheaply, and it buys no correctness while the trigger remains a
-fallback. If a later change needs it — a provider that reports identity without a stable path, or a writer that
+The dependency is real and removable, but not cheaply, and it buys no correctness now that ID→path resolution
+is strict. If a later change needs it — a provider that reports identity without a stable path, or a writer that
 must bind an ID directly — this is the sequence:
 
 1. **Migration 054, validation instead of derivation.** Recreate `file_canonical_node_write`: for owned rows it
@@ -342,9 +374,10 @@ step (already pinned by the nameprobe suite). Until step 3, the trigger still an
 and any writer not yet converted, so the change is forward-compatible but its correctness is only proven by the
 re-index.
 
-Recommendation: do not do this now. Keep the trigger as the single writer; fix the fallback (strict ID→path for
-owned rows) and record this reason next to the trigger. Revisit the writer split when a write path actually
-needs to name an entry without a path — not to make the diagram look cleaner.
+Recommendation: do not do this now. Keep the trigger as the single writer, and record this reason next to it.
+The fallback that motivated the review is already fixed for ID→path resolution (see "The cached-path
+fallback"); what the plan above still buys is a writer that can name an entry without a path, so revisit it
+when a write path actually needs that — not to make the diagram look cleaner.
 
 ## Backup and acceptance
 

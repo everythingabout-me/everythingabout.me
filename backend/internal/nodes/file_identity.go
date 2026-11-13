@@ -3,33 +3,71 @@ package nodes
 import (
 	"context"
 	"errors"
+	"fmt"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+// ErrIdentityUnresolved reports an owned entry whose canonical ancestry no longer
+// resolves to a current path: a missing parent link, a removed ancestor, or a missing
+// owner root. The row exists, but it lives nowhere, so it must not be matched by a scope
+// and must not be mutated through the cached path it last carried
+// (docs/design/file-identity.md, "The cached-path fallback").
+var ErrIdentityUnresolved = errors.New("file identity has no resolvable current path")
+
+// RowQuerier is the read surface shared by a pool and a transaction, so the same
+// identity question can be asked inside the repeatable-read transaction that
+// materializes a change feed or snapshot.
+type RowQuerier interface {
+	QueryRow(context.Context, string, ...any) pgx.Row
+}
+
+// resolveFileIDPathSQL resolves an owned row strictly: file_tree_path is the canonical
+// ancestry walk, never the cached path column. The coalesce in the file_entries view
+// exists for display and for owner_id IS NULL legacy rows; reusing it here answered "the
+// entry moved" with a plausible location it had left. The union keeps the identity root,
+// which has no nodes row and an empty relative path.
+const resolveFileIDPathSQL = `select file_tree_path(entry.owner_id,entry.id) from nodes entry
+ where entry.owner_id=$1::uuid and entry.id=$2::uuid
+ union all select '' from file_identity_roots where owner_id=$1::uuid and id=$2::uuid`
+
 // FileResolveID resolves an opaque public UUID within the authenticated owner.
 // Roots have an empty relative path. Invalid, deleted and foreign IDs are absent.
+// An owned row whose ancestry cannot be resolved is ErrIdentityUnresolved rather than
+// its cached path, because that path is exactly the stale location the caller must not
+// authorize (DELETE /api/files?id=…, docs/api/api.md).
 func (s *Service) FileResolveID(ctx context.Context, owner, id string) (string, bool, error) {
 	return resolveFileID(ctx, s.db.Pool(), owner, id)
 }
 
-// resolveFileID is FileResolveID on a caller-chosen connection, so a transaction can ask
-// the same question about the state it is about to act on.
-func resolveFileID(ctx context.Context, q interface {
-	QueryRow(context.Context, string, ...any) pgx.Row
-}, owner, id string) (string, bool, error) {
+// FileResolveIDOn is FileResolveID on a caller-chosen connection. The change API uses it
+// to ask inside the transaction whose MVCC snapshot it reads, so ID, ancestry and change
+// facts agree instead of racing the writer.
+func FileResolveIDOn(ctx context.Context, q RowQuerier, owner, id string) (string, bool, error) {
+	return resolveFileID(ctx, q, owner, id)
+}
+
+// resolveFileID is the one strict ID→path query above. A NULL result means the row
+// exists but its ancestry is broken; scanning it as a string used to fail the request as
+// an internal error, so NULL is reported as the named condition instead.
+func resolveFileID(ctx context.Context, q RowQuerier, owner, id string) (string, bool, error) {
 	var parsed pgtype.UUID
 	if err := parsed.Scan(id); err != nil || !parsed.Valid {
 		return "", false, nil
 	}
-	var path string
-	err := q.QueryRow(ctx, `select path from file_entries where owner_id=$1::uuid and id=$2::uuid
- union all select '' from file_identity_roots where owner_id=$1::uuid and id=$2::uuid`, owner, parsed).Scan(&path)
+	var path *string
+	err := q.QueryRow(ctx, resolveFileIDPathSQL, owner, parsed).Scan(&path)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return "", false, nil
 	}
-	return path, err == nil, err
+	if err != nil {
+		return "", false, err
+	}
+	if path == nil {
+		return "", false, fmt.Errorf("%w: entry %s does not resolve through owner %s; its cached path is not a current location", ErrIdentityUnresolved, id, owner)
+	}
+	return *path, true, nil
 }
 
 // FileIdentity returns the stored identity and parent identity without inspecting

@@ -177,20 +177,17 @@ func filesSnapshotResolveTarget(ctx context.Context, tx pgx.Tx, f *fileRequest, 
 	if !selector.IsID() {
 		return selector.Path, filesSnapshotScope(f, selector.Path)
 	}
-	var relative string
-	err := tx.QueryRow(ctx, `select path from file_entries where owner_id=$1::uuid and id=$2::uuid
- union all select '' from file_identity_roots where owner_id=$1::uuid and id=$2::uuid limit 1`, f.Principal.User.ID, selector.ID).Scan(&relative)
-	if errors.Is(err, pgx.ErrNoRows) {
+	current, found, err := filesResolveIDPath(ctx, tx, f.Principal.User.ID, selector.ID)
+	if err != nil {
+		if errors.Is(err, nodes.ErrIdentityUnresolved) {
+			return "", fc.NewProblem(404, "not_found", "The snapshot target was not found.")
+		}
+		return "", err
+	}
+	if !found {
 		return "", fc.NewProblem(404, "not_found", "The snapshot target was not found.")
 	}
-	if err != nil {
-		return "", err
-	}
-	p, err := fc.FromRelative(relative)
-	if err != nil {
-		return "", err
-	}
-	return p, filesSnapshotScope(f, p)
+	return current, filesSnapshotScope(f, current)
 }
 
 // Native effects that may already have changed a tree cannot be represented as
@@ -428,19 +425,20 @@ func (s *Server) filesLoadChangeSnapshot(ctx context.Context, tx pgx.Tx, f *file
 	if err = filesSnapshotScope(f, snapshot.anchor); err != nil {
 		return snapshot, err
 	}
-	var relative string
-	err = tx.QueryRow(ctx, `select path from file_entries where owner_id=$1::uuid and id=$2::uuid
- union all select '' from file_identity_roots where owner_id=$1::uuid and id=$2::uuid limit 1`, f.Principal.User.ID, snapshot.targetID).Scan(&relative)
-	if err == nil {
-		current, e := fc.FromRelative(relative)
-		if e != nil {
+	current, found, resolveErr := filesResolveIDPath(ctx, tx, f.Principal.User.ID, snapshot.targetID)
+	if errors.Is(resolveErr, nodes.ErrIdentityUnresolved) {
+		// The saved baseline names a target whose current location cannot be verified, so
+		// paging it could serve an answer scoped to a path the target has left. Refuse it
+		// and let the client create a new baseline (which will name the target truthfully).
+		return snapshot, fc.NewProblem(409, "target_changed", "The snapshot target no longer resolves to a current path.")
+	}
+	if resolveErr != nil {
+		return snapshot, resolveErr
+	}
+	if found {
+		if e := filesSnapshotScope(f, current); e != nil {
 			return snapshot, e
 		}
-		if e = filesSnapshotScope(f, current); e != nil {
-			return snapshot, e
-		}
-	} else if !errors.Is(err, pgx.ErrNoRows) {
-		return snapshot, err
 	}
 	return snapshot, nil
 }

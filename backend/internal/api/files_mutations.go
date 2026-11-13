@@ -757,10 +757,15 @@ func (s *Server) filesAuthorizeReplaySelection(ctx context.Context, f *fileReque
 			}
 			_, found, err := index.FileResolveID(ctx, f.Principal.User.ID, selection.selector.ID)
 			if err != nil {
+				if errors.Is(err, nodes.ErrIdentityUnresolved) {
+					return filesIDNotFound()
+				}
 				return err
 			}
 			// A retired ID has no current entry to disclose. Only a matched, scoped
 			// journal record can reach here; pending operations still validate bindings.
+			// A row that still exists but cannot resolve its ancestry is not retired, so
+			// it is refused rather than replayed.
 			if !found {
 				continue
 			}

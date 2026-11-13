@@ -210,6 +210,9 @@ func CheckUploadBinding(ctx context.Context, tx pgx.Tx, op fileops.Operation) er
 	if intent.ParentID != "" {
 		resolved, found, err := resolveFileID(ctx, tx, op.Root.OwnerID, intent.ParentID)
 		if err != nil {
+			if errors.Is(err, ErrIdentityUnresolved) {
+				return fileops.E("target_changed", err)
+			}
 			return err
 		}
 		if !found {
@@ -222,6 +225,9 @@ func CheckUploadBinding(ctx context.Context, tx pgx.Tx, op fileops.Operation) er
 	if intent.EntryID != "" {
 		resolved, found, err := resolveFileID(ctx, tx, op.Root.OwnerID, intent.EntryID)
 		if err != nil {
+			if errors.Is(err, ErrIdentityUnresolved) {
+				return fileops.E("target_changed", err)
+			}
 			return err
 		}
 		if !found || resolved != string(intent.Target) {

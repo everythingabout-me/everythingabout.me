@@ -3,15 +3,17 @@ package api
 import (
 	"context"
 	"encoding/json"
-	"strings"
-
-	"everythingabout.me/backend/internal/fileops"
-	"everythingabout.me/backend/internal/storage"
+	"errors"
 	"net/http"
 	"net/url"
 	"path"
+	"strings"
 
 	fc "everythingabout.me/backend/internal/filecontract"
+	"everythingabout.me/backend/internal/fileops"
+	"everythingabout.me/backend/internal/nodes"
+	"everythingabout.me/backend/internal/storage"
+	"github.com/jackc/pgx/v5"
 )
 
 type FileIdentityIndex interface {
@@ -21,6 +23,26 @@ type FileIdentityIndex interface {
 
 func filesSelectorError() error {
 	return fc.NewProblem(400, "invalid_selector", "Provide exactly one nonempty ID or path, or one valid destination.")
+}
+
+// filesIDNotFound is the named answer for an ID that names no current location. An owned
+// row whose ancestry is broken is reported exactly like a deleted or foreign ID: it has no
+// path to select, so it must not be matched by a scope or serve a cached one.
+func filesIDNotFound() error {
+	return fc.NewProblem(404, "not_found", "The selected ID has no current location; its index ancestry is unresolved.")
+}
+
+// filesResolveIDPath is the strict ID→path question the change API asks inside its
+// repeatable-read transaction. nodes.ErrIdentityUnresolved is returned unchanged so each
+// endpoint can answer in its own vocabulary (404 for a selection, 409 for a watch or a
+// saved snapshot); the cached path is never a fallback.
+func filesResolveIDPath(ctx context.Context, tx pgx.Tx, owner, id string) (fc.Path, bool, error) {
+	relative, found, err := nodes.FileResolveIDOn(ctx, tx, owner, id)
+	if err != nil || !found {
+		return "", false, err
+	}
+	p, err := fc.FromRelative(relative)
+	return p, err == nil, err
 }
 
 // filesResolveSelector resolves a selected entry for a read, or for a delete, which is
@@ -57,6 +79,9 @@ func (s *Server) filesResolveSelection(ctx context.Context, f *fileRequest, sele
 		}
 		relative, found, err := index.FileResolveID(ctx, f.Principal.User.ID, selector.ID)
 		if err != nil {
+			if errors.Is(err, nodes.ErrIdentityUnresolved) {
+				return "", filesIDNotFound()
+			}
 			return "", err
 		}
 		if !found {
@@ -259,6 +284,13 @@ func (s *Server) filesCheckIdentityBindings(ctx context.Context, op fileops.Oper
 		}
 		resolved, found, err := index.FileResolveID(ctx, op.Root.OwnerID, b.id)
 		if err != nil {
+			if errors.Is(err, nodes.ErrIdentityUnresolved) {
+				// The captured identity no longer names a current path, so this operation
+				// cannot prove it still acts on what it was admitted for. Refusing it here
+				// is the mutation's fail-closed answer: the cached path it last carried is
+				// not a location the operation may bind to.
+				return fileops.E("target_changed", err)
+			}
 			return err
 		}
 		if !found || resolved != b.p {

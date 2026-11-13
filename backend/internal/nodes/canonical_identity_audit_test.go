@@ -420,8 +420,9 @@ func TestCanonicalIdentityWritePathAudit(t *testing.T) {
 		if !fc.WithinScope(scopePhotos, fc.Path("/"+*row.ViewPath), key) {
 			t.Fatal("the fallback path is not inside /Photos; the authorization difference is not being probed")
 		}
-		// If the cache is also gone, the view returns NULL rather than a path. FileResolveID
-		// scans that into a string and fails, so there is no "root" fallback.
+		// If the cache is also gone, the view returns NULL rather than a path. The strict ID
+		// resolution never scans that NULL: it reports ErrIdentityUnresolved, which the file
+		// API turns into a named not-found (the next probe records it).
 		if _, err := pool.Exec(ctx, `update nodes set path=null,parent=null,key=null
 			where owner_id=$1::uuid and id=$2::uuid`, owner, photo); err != nil {
 			t.Fatalf("null the orphan cache: %v", err)
@@ -432,6 +433,64 @@ func TestCanonicalIdentityWritePathAudit(t *testing.T) {
 		}
 		if nullPath != nil {
 			t.Fatalf("expected NULL path with broken ancestry and NULL cache, got %q", *nullPath)
+		}
+	})
+
+	t.Run("strict ID resolution refuses a broken chain the display view still reports", func(t *testing.T) {
+		// The probe above records what the view answers; this one records why the ID→path
+		// resolution the file API uses may not read that answer. The tree is the same shape:
+		// a folder moves, then its row is removed while the child keeps the old cached path.
+		owner := identityAuditOwner(t, pool, "")
+		photos := identityAuditInsert(t, pool, owner, "Photos", "", "Photos", true)
+		_ = identityAuditInsert(t, pool, owner, "Photos/2024", "Photos", "2024", true)
+		photo := identityAuditInsert(t, pool, owner, "Photos/2024/x.jpg", "Photos/2024", "x.jpg", false)
+		_ = identityAuditInsert(t, pool, owner, "Media", "", "Media", true)
+		if _, err := pool.Exec(ctx, `update nodes set key=$3,path='Media/Photos',parent='Media',name='Photos'
+			where owner_id=$1::uuid and id=$2::uuid`, owner, photos, "drive/"+owner+"/Media/Photos/"); err != nil {
+			t.Fatalf("tree move: %v", err)
+		}
+		if _, err := pool.Exec(ctx, `delete from nodes where owner_id=$1::uuid and id=$2::uuid`, owner, photos); err != nil {
+			t.Fatalf("break ancestry: %v", err)
+		}
+
+		// The display view still names the pre-move location, and that string is inside a
+		// scope the entry has left. This is the input an ID selector used to hand to
+		// fc.WithinScope, so the scope admitted the entry.
+		row := identityAuditRead(t, pool, owner, photo)
+		cached := identityAuditString(t, row.ViewPath)
+		if cached != "Photos/2024/x.jpg" {
+			t.Fatalf("view path %q, want the stale cache", cached)
+		}
+		scope := fc.Path("/Photos")
+		if !fc.WithinScope(scope, fc.Path("/"+cached), namecompare.Key(true)) {
+			t.Fatal("the stale cache is outside /Photos; the authorization difference is not being probed")
+		}
+
+		// The owned ID→path resolution now asks file_tree_path strictly. It has no answer,
+		// so no scope can match the row and no caller can bind a mutation to the cache.
+		resolved, found, err := resolveFileID(ctx, pool, owner, photo)
+		if found || resolved != "" {
+			t.Fatalf("strict resolution returned the cached path %q (found=%v)", resolved, found)
+		}
+		if !errors.Is(err, ErrIdentityUnresolved) {
+			t.Fatalf("strict resolution error = %v, want ErrIdentityUnresolved", err)
+		}
+
+		// A NULL cache on the same broken chain is the same named condition. Scanning the
+		// view used to turn this state into an internal error instead of a truthful 404.
+		if _, err := pool.Exec(ctx, `update nodes set path=null,parent=null,key=null,size=size+1
+			where owner_id=$1::uuid and id=$2::uuid`, owner, photo); err != nil {
+			t.Fatalf("null the orphan cache: %v", err)
+		}
+		var viewPath *string
+		if err := pool.QueryRow(ctx, `select path from file_entries where owner_id=$1::uuid and id=$2::uuid`, owner, photo).Scan(&viewPath); err != nil {
+			t.Fatal(err)
+		}
+		if viewPath != nil {
+			t.Fatalf("view path with NULL cache %q, want NULL", *viewPath)
+		}
+		if _, found, err = resolveFileID(ctx, pool, owner, photo); found || !errors.Is(err, ErrIdentityUnresolved) {
+			t.Fatalf("strict resolution of a NULL cache: found=%v error=%v, want ErrIdentityUnresolved", found, err)
 		}
 	})
 

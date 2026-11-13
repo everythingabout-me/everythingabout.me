@@ -20,6 +20,7 @@ import (
 
 	"everythingabout.me/backend/internal/filechanges"
 	fc "everythingabout.me/backend/internal/filecontract"
+	"everythingabout.me/backend/internal/nodes"
 	"github.com/jackc/pgx/v5"
 )
 
@@ -667,16 +668,20 @@ func (s *Server) filesReadChanges(ctx context.Context, f *fileRequest, c filesCh
 	}
 	if c.Filter.Target.IsID() {
 		watchPath = c.Anchor
-		var relative string
-		err = tx.QueryRow(ctx, `select path from file_entries where owner_id=$1::uuid and id=$2::uuid union all select '' from file_identity_roots where owner_id=$1::uuid and id=$2::uuid limit 1`, f.Principal.User.ID, c.Filter.Target.ID).Scan(&relative)
-		if err == nil {
-			watchPath, err = fc.FromRelative(relative)
-		}
-		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
-			return page, err
-		}
-		if err == nil && f.RequireRead(watchPath) != nil {
-			watchPath = c.Anchor
+		current, found, resolveErr := filesResolveIDPath(ctx, tx, f.Principal.User.ID, c.Filter.Target.ID)
+		switch {
+		case errors.Is(resolveErr, nodes.ErrIdentityUnresolved):
+			// The entry exists but has no current path. Continuing with the cursor's
+			// baseline path would keep matching changes at a location it may have left,
+			// which is the cached-path binding this strict read removes. Ending the watch
+			// is the fail-closed answer; a new baseline is an ordinary snapshot request.
+			return page, fc.NewProblem(409, "watch_access_lost", "The ID watch ended because the selected entry's current path cannot be resolved.")
+		case resolveErr != nil:
+			return page, resolveErr
+		case found:
+			if f.RequireRead(current) == nil {
+				watchPath = current
+			}
 		}
 	}
 	if fc.ValidatePath(string(watchPath)) != nil {
