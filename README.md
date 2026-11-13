@@ -514,6 +514,7 @@ go run ./cmd/eam reconcile --owner … [--inventory …] [--dry-run]
 go run ./cmd/eam storage-resolve-upload --operation-id … [--dry-run]  # operator fallback: release a discarded upload whose abort answer was lost
 go run ./cmd/eam storage-ledger-prune --owner-id UUID [--dry-run]  # reclaim expired settled intent records; non-terminal records stay
 go run ./cmd/eam file-changes-prune --owner-id UUID [--dry-run]
+go run ./cmd/eam file-operations-prune --owner-id UUID [--dry-run]  # delete terminal operations past retention; referenced or live ones stay
 go run ./cmd/eam file-changes-reset --owner-id UUID --writers-quiesced [--dry-run]
 go run ./cmd/eam claim --email … [--dry-run] [--keep-source]
 go run ./cmd/eam token create --email … --name … [--prefix …] [--write=false] [--changes] [--subscribe]
@@ -522,6 +523,9 @@ go run ./cmd/eam token revoke --email … --id …
 ```
 
 Change pruning removes only an expired contiguous feed prefix, retaining effect receipts and file bytes.
+Operation pruning deletes only settled operations past their retention window, and refuses any row a guard, a
+retained change fact, a credit claim or a live upload session still needs; a row whose promoted columns
+disagree with its document is repaired and kept rather than deleted.
 Intent-ledger pruning removes only records whose operation already settled and whose 24-hour retention has
 passed; a non-terminal record is never removed, because its native effect may still land. Admission needs no
 empty spool, so a lost-index rebuild does not depend on this command or on hand-deleting driver evidence.

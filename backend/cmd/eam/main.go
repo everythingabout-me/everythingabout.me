@@ -58,6 +58,8 @@ func main() {
 		err = runStorageLedgerPrune(args)
 	case "file-changes-prune":
 		err = runFileChangesMaintenance(args, false)
+	case "file-operations-prune":
+		err = runFileOperationsPrune(args)
 	case "file-changes-reset":
 		err = runFileChangesMaintenance(args, true)
 	case "claim":
@@ -101,6 +103,7 @@ usage:
   eam storage-resolve-upload --operation-id UUID [--dry-run]  resolve a terminal upload stuck on an unconfirmed part receipt
   eam storage-ledger-prune --owner-id UUID [--dry-run]  remove expired settled intent records, keep non-terminal evidence
   eam file-changes-prune --owner-id UUID [--dry-run]  remove expired change rows, retain deduplication receipts
+  eam file-operations-prune --owner-id UUID [--dry-run]  remove terminal operations past retention, keep referenced ones
   eam file-changes-reset --owner-id UUID --writers-quiesced [--dry-run]  bind current root and expire old cursors
   eam claim --email email [--dry-run] [--keep-source]
   eam token create --email email --name name [--prefix path] [--write=false]
