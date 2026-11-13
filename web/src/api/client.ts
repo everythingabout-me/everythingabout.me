@@ -264,14 +264,6 @@ export interface FileReservations {
   physicalBytes: number;
 }
 
-export interface FileEffect {
-  number: number;
-  action: "mkdir" | "copy" | "move" | "delete";
-  state: string;
-  source?: string;
-  target?: string;
-}
-
 export interface FileOperation {
   id: string;
   kind: "mkdir" | "move" | "copy" | "delete" | "upload_commit" | "thumbnail";
@@ -279,8 +271,13 @@ export interface FileOperation {
   progress: { completed: number; total: number | null; unit: string };
   // A deletion answers with what happened to the bytes, and only once the purge has
   // settled: `purged` counts objects removed, `adopted` those left because a newer intent
-  // claimed them. While the operation runs this is null.
-  result: FileResource | { deleted: boolean; purged?: number; adopted?: number } | { effects: FileEffect[]; remaining: FileEffect[] } | null;
+  // claimed them. A thumbnail answers with its representation. While the operation runs
+  // this is null.
+  result:
+    | FileResource
+    | { deleted: boolean; purged: number; adopted: number }
+    | { contentUrl: string; mediaType: string; size: number; contentRevision: string }
+    | null;
   error: FileProblem | null;
   cancelRequested: boolean;
   // Present while a worker keeps failing on a nonterminal operation: the attempts
@@ -321,14 +318,28 @@ export interface FileUploadPartGrant {
 }
 
 export type FileUploadTransport =
-  | { kind: "presigned-parts"; parts: FileUploadPartGrant[]; signUrl: string; expiresAt: string }
+  | {
+    kind: "presigned-parts";
+    parts: FileUploadPartGrant[];
+    /** Present for a multipart window; a direct publication has one grant and nothing to sign. */
+    signUrl?: string;
+    expiresAt: string;
+  }
   | { kind: "resumable-session"; url: string; chunkSize: number; credential?: { scheme: "bearer"; value: string; expiresAt: string } }
   | { kind: "relay"; url: string };
+
+/** One signed part window: the grants to send now and when this window closes. */
+export interface FileSignedParts {
+  parts: FileUploadPartGrant[];
+  expiresAt: string;
+}
 
 export interface FileUploadSession {
   id: string;
   class: FileTransferClass;
   transport?: FileUploadTransport;
+  /** Class A only: the part-signing endpoint beside the transport's copy. */
+  signUrl?: string;
   path: string;
   state: "open" | "committing" | "committed" | "outcome_unknown" | "failed" | "aborted" | "expired";
   size: number;
@@ -370,24 +381,28 @@ export interface FileUploadPartsPage {
   watermark?: number;
 }
 
+/**
+ * One read grant. Every field except `etag` is what the service observed at grant time;
+ * `kind` names how the client fetches the bytes. A refused item answers with a Problem in
+ * the same collection position instead of a grant.
+ */
 export interface FileDownloadGrant {
-  id?: string;
+  id: string;
   kind: "url" | "bearer";
-  url?: string;
-  headers?: Record<string, string>;
-  expiresAt?: string;
-  size?: number;
-  contentType?: string;
-  acceptRanges?: boolean;
+  url: string;
+  headers: Record<string, string>;
+  expiresAt: string;
+  size: number;
+  contentType: string;
+  acceptRanges: boolean;
+  /** Present only when the effective route proves the content-version guarantee. */
   etag?: string;
-  conditions?: string[];
-  code?: string;
-  detail?: string;
-  status?: number;
+  conditions: string[];
 }
 
 export interface FileDownloadGrantCollection {
-  items: FileDownloadGrant[];
+  /** Per-item failures are Problem objects in the item position. */
+  items: (FileDownloadGrant | FileProblem)[];
 }
 
 export interface FileChangeTrackingCapabilities {
@@ -607,7 +622,12 @@ export type FileUploadInput = {
 } & (
   | { path: string; condition: FileUploadCondition; parents?: true; destination?: never; target?: never }
   | { destination: Destination; condition?: { mode: "create" }; path?: never; target?: never }
-  | { target: EntrySelector; condition: { mode: "replace"; contentRevision: string }; path?: never; destination?: never }
+  | {
+    target: EntrySelector;
+    condition: { mode: "replace"; contentRevision: string } | { mode: "overwrite" };
+    path?: never;
+    destination?: never;
+  }
 );
 
 export interface FileUploadCollection {
@@ -737,7 +757,9 @@ function uploadInput(input: FileUploadInput): Record<string, unknown> {
     return { ...input, path: filePath(input.path) };
   }
   if (hasOwn(input, "target")) {
-    if (mode !== "replace" || !input.target || typeof input.target !== "object") return invalidSelector();
+    // Overwrite selects the destination the way a replacement does (docs §7): it may name
+    // an existing file by ID, and it creates when nothing is there.
+    if ((mode !== "replace" && mode !== "overwrite") || !input.target || typeof input.target !== "object") return invalidSelector();
     return { ...input, target: entrySelector(input.target) };
   }
   if (mode !== "create") return invalidSelector();
@@ -1050,11 +1072,11 @@ async function uploadRelayPart(id: string, number: number, blob: Blob, signal?: 
 
 async function fetchDownloadGrant(selector: FileSelector, disposition: "inline" | "attachment", signal?: AbortSignal): Promise<FileDownloadGrant> {
   const result = await filePost<FileDownloadGrantCollection>("/downloads", { items: [typeof selector === "string" ? filePath(selector) : entrySelector(selector)], disposition }, undefined, signal);
-  const grant = result.items[0];
-  if (!grant || !grant.kind || grant.code) {
-    throw new ApiError(grant?.detail ?? "The download grant was refused.", grant?.status ?? 502, grant ?? {});
-  }
-  return grant;
+  const item = result.items[0];
+  if (!item) throw new ApiError("The download grant was refused.", 502);
+  // A refused item is a Problem in the grant's position: it carries no `kind`.
+  if ("kind" in item) return item;
+  throw new ApiError(item.detail, item.status, item);
 }
 
 export function isFileOperation(result: FileResource | FileOperation | void): result is FileOperation {
@@ -1696,7 +1718,7 @@ export const api = {
   },
 
   async signUploadParts(id: string, numbers: number[], signal?: AbortSignal): Promise<FileUploadPartGrant[]> {
-    const result = await filePost<{ parts: FileUploadPartGrant[] }>(`/uploads/${encodeURIComponent(id)}/parts/sign`, { numbers }, undefined, signal);
+    const result = await filePost<FileSignedParts>(`/uploads/${encodeURIComponent(id)}/parts/sign`, { numbers }, undefined, signal);
     if (!Array.isArray(result.parts)) throw new Error("The signed part list is invalid.");
     return result.parts;
   },
