@@ -15,6 +15,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"everythingabout.me/backend/internal/fileops"
 	"everythingabout.me/backend/internal/nodes"
 	"everythingabout.me/backend/internal/storage"
 	"everythingabout.me/backend/internal/testpg"
@@ -210,20 +211,20 @@ func TestReconcilePostgresIdentityDryRunAndAtomicity(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := guard.Exec(ctx, `select pg_advisory_lock(hashtextextended($1,0))`, "browser-write:"+owner); err != nil {
+	if _, err := guard.Exec(ctx, `select pg_advisory_lock(`+fileops.OwnerLockKey+`)`, owner); err != nil {
 		guard.Release()
 		t.Fatal(err)
 	}
 	_, lockedErr := nodes.ApplyScan(ctx, pool, owner, result, nodes.ScanApplyOptions{})
-	_, unlockErr := guard.Exec(ctx, `select pg_advisory_unlock(hashtextextended($1,0))`, "browser-write:"+owner)
+	_, unlockErr := guard.Exec(ctx, `select pg_advisory_unlock(`+fileops.OwnerLockKey+`)`, owner)
 	guard.Release()
-	if lockedErr == nil || !strings.Contains(lockedErr.Error(), "another file change") || unlockErr != nil {
-		t.Fatalf("namespace lock was not respected: %v, unlock: %v", lockedErr, unlockErr)
+	if lockedErr == nil || !strings.Contains(lockedErr.Error(), "a file write is in progress") || unlockErr != nil {
+		t.Fatalf("a live owner write did not block the scan: %v, unlock: %v", lockedErr, unlockErr)
 	}
 	if !reflect.DeepEqual(before, snapshot()) {
 		t.Fatal("blocked scan changed the index")
 	}
-	scanConn, finishScan, err := nodes.LockScanNamespace(ctx, pool, owner)
+	scanConn, finishScan, err := nodes.LockScanOwner(ctx, pool, owner)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -11,7 +11,7 @@ import (
 )
 
 func TestBrowseExpectedIdentityRejectsRecreatedFolder(t *testing.T) {
-	db, ctx := observationTestDB(t)
+	db, ctx := nodesTestDB(t)
 	pool := db.Pool()
 	service := New(db, nil)
 	owner := actionOwner(t, pool)
@@ -57,7 +57,7 @@ func TestBrowseExpectedIdentityRejectsRecreatedFolder(t *testing.T) {
 }
 
 func TestFileIdentityBusyUsesOwnerNativeRulesAndDurableGuards(t *testing.T) {
-	db, ctx := observationTestDB(t)
+	db, ctx := nodesTestDB(t)
 	pool := db.Pool()
 	service := New(db, nil)
 	owner, other := actionOwner(t, pool), actionOwner(t, pool)

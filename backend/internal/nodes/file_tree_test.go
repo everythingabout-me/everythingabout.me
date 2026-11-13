@@ -10,7 +10,7 @@ import (
 )
 
 func TestCanonicalTreeMovePreservesThirtyThousandDescendants(t *testing.T) {
-	db, ctx := observationTestDB(t)
+	db, ctx := nodesTestDB(t)
 	pool := db.Pool()
 	service := New(db, nil)
 	root := actionOwner(t, pool)

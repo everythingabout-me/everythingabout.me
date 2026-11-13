@@ -54,7 +54,7 @@ func (s *Server) handleFilesSync(w http.ResponseWriter, r *http.Request, f *file
 	// The scan lock also takes the owner write-admission lock every /api/files
 	// settlement takes, so a sync never races an upload or a delete and a second
 	// sync is refused instead of queued.
-	conn, unlock, err := nodes.LockScanNamespace(ctx, s.db.Pool(), owner)
+	conn, unlock, err := nodes.LockScanOwner(ctx, s.db.Pool(), owner)
 	if err != nil {
 		return fc.NewProblem(409, "sync_in_progress", "Another scan or write session holds this owner's storage lock.")
 	}

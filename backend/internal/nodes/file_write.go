@@ -97,6 +97,37 @@ func commitStagedFile(ctx context.Context, tx pgx.Tx, op fileops.Operation, resu
 	return json.Marshal(metadata)
 }
 
+// ensureUploadParents materializes the folder chain a parents:true upload
+// promised. The bytes are already in place when commitment calls it, so every
+// folder it writes is backed by the native tree; a commit that never publishes
+// leaves no folder behind.
+//
+// It also reattaches the target row when its folder rows were lost: an
+// unchanged native file may keep its identity while its ancestors are gone, and
+// a moved entry with a valid parent must never follow its stale advisory path
+// cache, so only a dangling link is repaired.
+func ensureUploadParents(ctx context.Context, tx pgx.Tx, ownerID, path string) (bool, error) {
+	changed := false
+	for _, dir := range paths.AncestorsOf(path) {
+		tag, err := tx.Exec(ctx, `insert into nodes(owner_id,key,path,parent,name,is_dir)
+			values($1::uuid,$2,$3,$4,$5,true) on conflict(owner_id,parent_id,comparison_name) do nothing`,
+			ownerID, paths.DirKeyFor(dir, ownerID), dir, paths.ParentOf(dir), paths.NameOf(dir))
+		if err != nil {
+			return false, err
+		}
+		changed = changed || tag.RowsAffected() > 0
+	}
+	tag, err := tx.Exec(ctx, `update nodes set parent_id=file_tree_resolve($1::uuid,$3)
+ where owner_id=$1::uuid and path=$2
+ and not exists(select 1 from nodes parent_node where parent_node.owner_id=$1::uuid and parent_node.id=nodes.parent_id)
+ and not exists(select 1 from file_identity_roots root where root.owner_id=$1::uuid and root.id=nodes.parent_id)`, ownerID, path, paths.ParentOf(path))
+	if err != nil {
+		return false, err
+	}
+	changed = changed || tag.RowsAffected() > 0
+	return changed, nil
+}
+
 // CheckUploadBinding is the index half of freezing an upload session: it verifies, inside
 // the freeze transaction, that what the session bound when it was opened is still what the
 // index holds. The session fenced nothing while it was open, so a delete, a move or a

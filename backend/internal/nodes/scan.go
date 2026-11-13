@@ -55,7 +55,7 @@ type ScanApplyReport struct {
 // The serializable transaction is not isolation from live writers by itself: a
 // write that commits after the native walk is invisible to this snapshot yet
 // absent from the scanned records. Callers that share the owner with writers must
-// hold LockScanNamespace across the walk and this import; it takes the same owner
+// hold LockScanOwner across the walk and this import; it takes the same owner
 // lock every fileops transaction takes.
 func ApplyScan(ctx context.Context, db ScanDB, ownerID string, result *treescan.Result, opts ScanApplyOptions) (ScanApplyReport, error) {
 	var report ScanApplyReport
@@ -84,7 +84,7 @@ func ApplyScan(ctx context.Context, db ScanDB, ownerID string, result *treescan.
 	if db == nil {
 		return report, fmt.Errorf("scan import database is required")
 	}
-	conn, unlock, err := LockScanNamespace(ctx, db, ownerID)
+	conn, unlock, err := LockScanOwner(ctx, db, ownerID)
 	if err != nil {
 		return report, err
 	}
@@ -407,16 +407,16 @@ func removeAbsentEntries(ctx context.Context, tx pgx.Tx, ownerID string, absent 
 	return deletions, nil
 }
 
-// LockScanNamespace retains one connection for the admission locks a scan needs
-// before it enumerates and applies, then releases them on that session:
+// LockScanOwner retains one connection holding the owner's write-admission
+// lock (fileops.OwnerLockKey) for a scan, and releases it on that session.
 //
-//   - "browser-write:"+owner, the legacy namespace lock, first;
-//   - the owner's write-admission lock (fileops.OwnerLockKey) second.
-//
-// Every fileops transaction takes the owner lock before its change-root and
-// index locks, and no path that holds the owner lock acquires the namespace
-// lock, so namespace -> owner matches the rest of the service and cannot
-// deadlock.
+// That one lock is the whole exclusion a scan needs: every fileops transaction
+// takes it before its change-root and index locks, so a scan that holds it sees
+// no settlement land between its native walk and its import. The legacy
+// "browser-write:"+owner namespace lock is gone with the browser-upload writer
+// it excluded; keeping it would make a scan wait on a key no live writer takes,
+// and its "another file change is in progress" message would name a holder that
+// cannot exist.
 //
 // The owner lock must be held across the native walk AND the import, not only by
 // the import transaction. A SERIALIZABLE snapshot cannot exclude a write that
@@ -425,7 +425,7 @@ func removeAbsentEntries(ctx context.Context, tx pgx.Tx, ownerID string, absent 
 // removed rows a stale walk still reports, so the import re-inserts them. Taking
 // the owner lock as a transaction lock inside ApplyScan would also establish the
 // snapshot before the wait, so this session lock is taken before BeginTx.
-func LockScanNamespace(ctx context.Context, db ScanDB, ownerID string) (*pgx.Conn, func(), error) {
+func LockScanOwner(ctx context.Context, db ScanDB, ownerID string) (*pgx.Conn, func(), error) {
 	var conn *pgx.Conn
 	release := func() {}
 	switch value := db.(type) {
@@ -441,50 +441,22 @@ func LockScanNamespace(ctx context.Context, db ScanDB, ownerID string) (*pgx.Con
 	case *pgx.Conn:
 		conn = value
 	default:
-		return nil, nil, fmt.Errorf("scan import requires a dedicated Postgres connection or pool for namespace coordination")
-	}
-	key := "browser-write:" + ownerID
-	var acquired bool
-	if err := conn.QueryRow(ctx, `select pg_try_advisory_lock(hashtextextended($1,0))`, key).Scan(&acquired); err != nil {
-		release()
-		return nil, nil, err
-	}
-	if !acquired {
-		release()
-		return nil, nil, fmt.Errorf("another file change is in progress; retry reconcile shortly")
-	}
-	unlockNamespace := func() error {
-		unlockCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		_, err := conn.Exec(unlockCtx, `select pg_advisory_unlock(hashtextextended($1,0))`, key)
-		return err
+		return nil, nil, fmt.Errorf("scan import requires a dedicated Postgres connection or pool for owner lock coordination")
 	}
 	var admitted bool
 	if err := conn.QueryRow(ctx, `select pg_try_advisory_lock(`+fileops.OwnerLockKey+`)`, ownerID).Scan(&admitted); err != nil {
-		if unlockErr := unlockNamespace(); unlockErr != nil {
-			_ = conn.Close(context.Background())
-		}
 		release()
 		return nil, nil, err
 	}
 	if !admitted {
-		if unlockErr := unlockNamespace(); unlockErr != nil {
-			_ = conn.Close(context.Background())
-		}
 		release()
-		return nil, nil, fmt.Errorf("a file write is in progress; retry reconcile shortly")
+		return nil, nil, fmt.Errorf("a file write is in progress for this owner; retry reconcile shortly")
 	}
 	return conn, func() {
 		unlockCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		// Release in reverse acquisition order: write admission, then namespace.
 		if _, err := conn.Exec(unlockCtx, `select pg_advisory_unlock(`+fileops.OwnerLockKey+`)`, ownerID); err != nil {
 			// A session lock must never escape back into a shared pool.
-			_ = conn.Close(context.Background())
-			release()
-			return
-		}
-		if _, err := conn.Exec(unlockCtx, `select pg_advisory_unlock(hashtextextended($1,0))`, key); err != nil {
 			_ = conn.Close(context.Background())
 		}
 		release()

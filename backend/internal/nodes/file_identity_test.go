@@ -31,7 +31,7 @@ func TestIdentityMetadataUsesStoredUUIDs(t *testing.T) {
 }
 
 func TestFileIdentityResolutionParentsAndIsolation(t *testing.T) {
-	db, ctx := observationTestDB(t)
+	db, ctx := nodesTestDB(t)
 	pool := db.Pool()
 	owner, other := actionOwner(t, pool), actionOwner(t, pool)
 	service := New(db, nil)
@@ -110,7 +110,7 @@ func TestFileIdentityResolutionParentsAndIsolation(t *testing.T) {
 }
 
 func TestFileIdentityNameComparisonAndFullFold(t *testing.T) {
-	db, ctx := observationTestDB(t)
+	db, ctx := nodesTestDB(t)
 	pool := db.Pool()
 	service := New(db, nil)
 	owner := actionOwner(t, pool)
@@ -198,7 +198,7 @@ func TestFileIdentityNameComparisonAndFullFold(t *testing.T) {
 }
 
 func TestFileIdentityMigrationBackfillsTwiceWithoutChangingNativeSpelling(t *testing.T) {
-	db, ctx := observationTestDB(t)
+	db, ctx := nodesTestDB(t)
 	pool := db.Pool()
 	owner := actionOwner(t, pool)
 	if _, err := pool.Exec(ctx, `alter table nodes disable trigger user`); err != nil {

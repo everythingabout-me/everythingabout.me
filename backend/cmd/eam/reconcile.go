@@ -118,7 +118,7 @@ func runReconcile(args []string) error {
 	changeRoot := fileops.Root{OwnerID: binding.OwnerID, ConnectionID: binding.ConnectionID, Generation: binding.Generation, ContentRoot: binding.ContentRoot, SystemRoot: binding.SystemRoot, CaseSensitive: descriptor.Names.CaseSensitive, RetainsVersions: descriptor.RetainsVersions}
 	// Keep deletion admission excluded through enumeration and import. A result
 	// captured before an accepted deletion cannot be applied after it completes.
-	scanConn, unlock, err := nodes.LockScanNamespace(ctx, db.Pool(), ownerID)
+	scanConn, unlock, err := nodes.LockScanOwner(ctx, db.Pool(), ownerID)
 	if err != nil {
 		return err
 	}

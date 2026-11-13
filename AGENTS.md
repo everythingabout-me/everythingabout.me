@@ -493,8 +493,6 @@ Variants: `Committed locally main@abc1234, not pushed` / `Not committed (tests f
 
 ## Known traps (already hit)
 
-- `cos-js-sdk-v5` pins a `fast-xml-parser` with an audit advisory; `npm audit` reports critical and there is
-  currently no upgrade path.
 - STS decodes policy resource paths before comparing, so `+` is treated as a space; `internal/cos` already
   encodes per path segment, so do not regress that when touching signing or policies (otherwise uploads of
   filenames containing `+` return 403).

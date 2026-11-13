@@ -47,7 +47,7 @@ func settleOwner(t *testing.T, pool *pgxpool.Pool, owner string, settle func(con
 // holdScanLock keeps a failed assertion from leaking the scan's session locks.
 func holdScanLock(t *testing.T, ctx context.Context, pool *pgxpool.Pool, owner string) (*pgx.Conn, func()) {
 	t.Helper()
-	conn, unlock, err := LockScanNamespace(ctx, pool, owner)
+	conn, unlock, err := LockScanOwner(ctx, pool, owner)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -63,13 +63,13 @@ func holdScanLock(t *testing.T, ctx context.Context, pool *pgxpool.Pool, owner s
 	return conn, release
 }
 
-// TestScanNamespaceLockSerializesOwnerSettlements pins the two consequences of a
-// scan and a live settlement sharing only the legacy namespace lock: an upload
-// that settled after the native walk looked absent to Sync and was pruned, and a
+// TestScanOwnerLockSerializesSettlements pins the two consequences of a
+// scan and a live settlement sharing the owner admission lock: an upload that
+// settled after the native walk looked absent to Sync and was pruned, and a
 // deletion that settled there had already removed the rows the stale walk
-// reported, so the import re-inserted them. LockScanNamespace holds the owner
+// reported, so the import re-inserted them. LockScanOwner holds the owner
 // lock across the walk and the import, so neither settlement can land in between.
-func TestScanNamespaceLockSerializesOwnerSettlements(t *testing.T) {
+func TestScanOwnerLockSerializesSettlements(t *testing.T) {
 	pool := actionTestDatabase(t)
 	ctx := context.Background()
 	root := actionOwner(t, pool)

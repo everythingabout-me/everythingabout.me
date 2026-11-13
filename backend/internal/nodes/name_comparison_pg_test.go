@@ -12,7 +12,7 @@ import (
 // SQL is the reference implementation. Every corpus spelling must produce the
 // documented key exactly, not merely the same equivalence classes.
 func TestSQLComparisonMatchesReference(t *testing.T) {
-	db, ctx := observationTestDB(t)
+	db, ctx := nodesTestDB(t)
 	for _, pair := range nameprobe.Pairs {
 		for _, spelling := range []string{pair.A, pair.B} {
 			var got string
@@ -31,7 +31,7 @@ func TestSQLComparisonMatchesReference(t *testing.T) {
 // fence and scope checks now compute the same key, so this is the contract both
 // sides must keep, not a divergence the fence has to be told about.
 func TestSQLIndexCollision(t *testing.T) {
-	db, ctx := observationTestDB(t)
+	db, ctx := nodesTestDB(t)
 	pool := db.Pool()
 	owner := actionOwner(t, pool)
 	service := New(db, nil)
