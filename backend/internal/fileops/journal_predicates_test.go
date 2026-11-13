@@ -26,6 +26,14 @@ func TestOperationJournalPredicatesReadColumns(t *testing.T) {
 	check := func(path, source string) {
 		t.Helper()
 		for number, line := range strings.Split(source, "\n") {
+			// `Entries` is the one key of the document that has no promoted column: it is the
+			// per-entry list itself, which Release A copies into file_operation_entries. The
+			// backfill (sql/050) and the shadow-agreement test must read the whole list, so
+			// that exact key is allowed; any other arrow read stays banned, because a
+			// predicate over the entries' own fields (number, state, ...) still spells an
+			// arrow out of the document and does not match this exact token.
+			line = strings.ReplaceAll(line, "snapshot->'Entries'", "Entries(list)")
+			line = strings.ReplaceAll(line, "snapshot -> 'Entries'", "Entries(list)")
 			if journalRead.MatchString(line) {
 				t.Errorf("%s:%d reads a journal field out of JSON: %s\n\tquery the promoted column sql/047 added instead",
 					path, number+1, strings.TrimSpace(line))
