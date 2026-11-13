@@ -1,0 +1,43 @@
+-- Retire the three legacy upload tables no reachable code creates rows in and no
+-- surviving code reads. docs/design/upload-table-retirement.md is the audit that
+-- proved that; this file is the execution of its Phase 1 and Phase 2 together.
+--
+-- Why one release instead of the plan's two: the service has not launched and its
+-- database may be wiped at will, so there is no deployed data to protect with a
+-- drain-then-drop dance. Phase 0 (operator reconciliation against the provider and
+-- the index) is not needed either: a published file is the native object in the
+-- tree, and an abandoned provider allocation or an unindexed object is not
+-- user-visible content. The native tree is authoritative and disposable database
+-- rows never were its record.
+--
+-- What replaced each table:
+--   * browser_uploads        -> file_uploads + file_operation_entries (the server
+--                               commits; a client never publishes a staged transfer)
+--   * upload_index_watches   -> server commit plus `eam reconcile` (the index is
+--                               repaired from the native tree, not from a watch)
+--   * upload_sessions        -> file_uploads + file_operations
+--
+-- Deliberately unconditional `drop table if exists`. The runner records an applied
+-- file permanently in schema_migrations; a guard that declined to drop (because a
+-- row or a dependent still existed) would be recorded as done and could never run
+-- again. `if exists` is only there so the file stays cheaply re-runnable after a
+-- lost history table.
+--
+-- Deploy window, accepted and not an oversight: the deploy script runs `eam migrate`
+-- and only then restarts the service, so for a few seconds the new binary has
+-- dropped tables the still-running old binary reads (its storage-baseline query).
+-- That old binary sees an undefined table for those seconds and nothing else: no
+-- legacy route has been reachable since the 410 retirement, and no code writes these
+-- tables. A rollback past this release is not supported. The no-launch, disposable
+-- database decision is what makes the race acceptable.
+--
+-- No data backfill: there is nothing here that the native tree does not contain.
+-- Do not touch file_uploads, file_upload_parts or file_upload_native_metadata; that
+-- journal is live. If generation 4 is ever retired, drop file_upload_parts and
+-- file_upload_native_metadata before file_uploads (both hold a foreign key to it).
+--
+-- The drop order is the audit's: no foreign keys join these three, but the last one
+-- is the table whose absence changes storage-baseline semantics, so it goes last.
+drop table if exists browser_uploads;
+drop table if exists upload_index_watches;
+drop table if exists upload_sessions;

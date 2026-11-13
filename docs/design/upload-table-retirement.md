@@ -1,14 +1,23 @@
-# Legacy upload tables: liveness audit and retirement plan
+# Legacy upload tables: liveness audit and retirement
 
-> **Status: audit and plan only.** This document deletes no code, row or table. It records which tables
-> track an upload or its parts, which of them are still reachable, and the exact conditions and order under
-> which the dead ones may be retired. `fs_jobs` (owned by another branch) and the handler packages (a third
-> branch) are out of scope and were not changed.
+> **Status: retired.** The product owner decided to ship Phase 1 and Phase 2 in one release, skipping the
+> Phase 0 operator reconciliation: the service has not launched and its database may be wiped at will, so
+> there is no deployed data to protect. What shipped: the readers and the drain are deleted (no
+> `internal/uploadindex`, `internal/browserupload`, `StartUploadIndex`, or legacy-table read in
+> `eam storage-baseline`), and `sql/053_retire_legacy_upload_tables.sql` drops the three tables. The audit
+> below is kept as the record of why they could be dropped; its plan sections are the executed plan, not an
+> open question.
+>
+> The document originally stopped at "audit and plan only" because, under the plan's own gate, no table was
+> provably dead while drain workers still read two of them. The decision recorded here removes that gate's
+> premises rather than arguing with its evidence.
+>
+> `fs_jobs` (owned by another branch) and the handler packages (a third branch) are out of scope and were not
+> changed.
 >
 > It lives here rather than as a section of [transfer-protocol.md](transfer-protocol.md) because that file
 > states the protocol every client and driver must implement, while this is a one-time audit of the
-> implementation that protocol replaced. Its conclusion is a deployment gate (drain, remove readers, then
-> drop), not a transfer contract; mixing the two would make a settled contract look open.
+> implementation that protocol replaced. The execution decision and its reason are in the migration header.
 
 ## 1. Inventory
 
@@ -197,11 +206,14 @@ What a row can be the only **database** record of is unpublished native work:
 None of these is user-visible loss if dropped — the bytes are untouched and the native tree remains the
 source of truth — but dropping them asserts a reconciliation that has not been performed.
 
-**Stop-and-report (task item 4).** `upload_sessions` is dead as a feature, yet its unfinished rows are
-the only database evidence of legacy provider allocations, and the product's own admission command treats
-them as blocking. `upload_index_watches` is in the same position for an index observation. This is a
-reconciliation problem, not a schema cleanup, so this task stops here: **no table is dropped now.** The
-plan below is the gate that would make them droppable.
+**Stop-and-report (task item 4), superseded.** `upload_sessions` was dead as a feature, yet its unfinished
+rows were the only database evidence of legacy provider allocations, and the product's own admission command
+treated them as blocking. `upload_index_watches` was in the same position for an index observation. Under the
+audit's rule that was a reconciliation problem, not a schema cleanup, so the audit stopped there: no table was
+dropped in that change. The product owner then made the call this audit could not make from inside the code:
+the service is pre-launch, the database is disposable, and neither an abandoned provider allocation nor an
+unindexed object is user-visible loss (the bytes are in the tree; `eam reconcile` and the provider listing
+are the recovery path). Phase 0 is therefore skipped and the tables are dropped in the same release.
 
 A timing fact bounds the risk without removing the obligation: the legacy routes were retired in
 `4005cae` (2026-11-02) and a legacy session lived one hour (`api_upload.go:24`), so at the time of this
@@ -209,12 +221,15 @@ audit no client transfer from that code can still be arriving. What remains is a
 and unresolved observations, which is exactly what `storage-baseline` and the watch worker exist to
 resolve.
 
-## 5. Retirement plan
+## 5. Retirement plan (executed)
 
-### Phase 0 — Reconcile (operator, on the current revision)
+### Phase 0 — Reconcile (skipped by product decision)
 
-This phase produces the evidence the drop will assume. It must be recorded (an artifact or a runbook
-entry naming the owner and the date) before Phase 1 starts.
+This phase would produce the evidence the drop assumes: settle each unfinished `upload_sessions` row against
+the provider, drain the watch worker, and let the `browser_uploads` worker clean up. It was skipped because
+the service has not launched and the database may be wiped at will; there is no deployed data whose
+native state needs the evidence. The steps are kept below as the record of what an operator would do if a
+populated deployment ever faced the same three tables again.
 
 1. **`upload_sessions`.** For every row with `completed_at is null`, ask the provider whether the
    allocation still exists (`ListParts`/`ListMultipartUploads` for `provider_upload_id`; `Head` on the
@@ -231,69 +246,53 @@ entry naming the owner and the date) before Phase 1 starts.
    and the row, since the worker will never retire it.
 4. Record the result and re-run `eam doctor`.
 
-**Gate:** do not start Phase 1 while any of the three tables holds a nonterminal row whose native outcome
-is unknown, or while the baseline still reports a legacy session for an owner being admitted.
+**Gate (waived):** do not start Phase 1 while any of the three tables holds a nonterminal row whose native
+outcome is unknown, or while the baseline still reports a legacy session for an owner being admitted.
 
-### Phase 1 — Release A: remove the readers and the drain, keep the tables
+### Phase 1 — Remove the readers and the drain (shipped)
 
-- `server.New`: stop constructing `uploadIndex`/`browserUploads` (`server.go:107-111`); remove
-  `StartUploadIndex` and its call site (`upload_index.go:97-125`, `cmd/eam/server.go:121`).
-- Delete `internal/uploadindex`, `internal/browserupload`, the retired handlers (`api_upload.go`, the
-  legacy half of `files.go`, `api_actions.go`, `api_files.go`, `api_jobs.go` if nothing live references
-  them), `watchUpload`, `settleUpload`, `checkDeleteLegacyUploads`, and the browser-namespace lock once
-  its last caller is gone.
-- `cmd/eam/storage_baseline.go`: remove the `upload_sessions` query. Keep
-  `Snapshot.LegacyUploads` (emit `[]`) and `Version: 1` so artifacts captured before the change remain
-  readable by the offline `--input` recheck.
-- Do **not** drop anything in this release. A server still running the previous revision (during the
-  deploy window, or after a rollback) reads these tables; its drain and its baseline command must keep
-  working.
+- `api.New`: stopped constructing `uploadIndex`/`browserUploads`; `StartUploadIndex` and its call site are
+  gone; `internal/uploadindex` and `internal/browserupload` are deleted, together with their tests.
+- The dead API-side pieces went with them: `upload_index.go` (binding, observer, worker starter),
+  `browser_upload.go` (index/recovery callbacks, legacy conflict and deletion checks, the browser-namespace
+  lock), and the COS legacy driver methods in `internal/cos/browser_upload.go`.
+- `cmd/eam/storage_baseline.go`: the `upload_sessions` query is gone. `Snapshot.LegacyUploads` still emits
+  `[]` and `Version` stays `1` so artifacts captured before the change remain readable by the offline
+  `--input` recheck.
 
-### Phase 2 — Release B, at least one deployment after A: drop
+### Phase 2 — Drop (shipped in the same release)
 
-Ship the migration in §6 only once Release A is the oldest revision that can be running. After it, a
-rollback past A is not supported and the release note must say so. Inside the file, drop
-`browser_uploads`, then `upload_index_watches`, then `upload_sessions`: there are no foreign keys between
-them, but the last one is the one whose absence changes baseline semantics, so it goes last.
+`sql/053_retire_legacy_upload_tables.sql` drops `browser_uploads`, then `upload_index_watches`, then
+`upload_sessions`: there are no foreign keys between them, but the last one is the one whose absence changes
+baseline semantics, so it goes last.
 
-### Why this order
+### Why the order was collapsed
 
 `make migrate` runs from the new binary while the old server is still serving (the deploy script builds,
-migrates, then restarts). A drop shipped in the same release as the code removal would therefore race a
-running old binary, and a rollback would hit a missing table. No legacy table has a reachable producer, so
-"stop writing first" here means **remove the readers and the drain first**; the table must outlive the
-last revision that reads it.
+migrates, then restarts). Shipping the drop with the code removal therefore races a running old binary, and a
+rollback would hit a missing table. The plan's two-release dance exists to protect a deployed database and a
+supported rollback; here there is neither, so the race is accepted and stated in the migration header. What
+the old binary loses in that window is its `storage-baseline` query, nothing else.
 
-## 6. Migration shape for the follow-up
+## 6. The shipped migration
 
-`sql/047_retire_legacy_upload_tables.sql`:
+`sql/053_retire_legacy_upload_tables.sql` (the plan's `047` number was already taken):
 
 ```sql
--- Retire the three upload tables that no reachable code creates rows in.
---
--- Precondition, enforced by deployment order and recorded in the release note,
--- not by this SQL: (1) the legacy drain has been reconciled with the provider and
--- the index (plan Phase 0); (2) the release that removed the readers and the drain
--- is the oldest revision that can still be running (plan Phase 1).
---
--- Why drop, and why now: the rows are not the only record of any user-visible fact
--- (the native tree and the index are), and the unresolved part of them has been
--- settled against the provider and the index. Keeping the tables would keep the
--- old state machine looking reachable.
---
--- Deliberately unconditional. The runner records an applied file permanently; a
--- guard that declined to drop would be recorded as done and could never run again.
--- `if exists` only keeps the file cheaply re-runnable after a lost history table.
+-- Retire the three legacy upload tables ... (full header in the file)
 drop table if exists browser_uploads;
 drop table if exists upload_index_watches;
 drop table if exists upload_sessions;
 ```
 
+The full header states the three reasons a reader needs: why one release instead of two, what replaced each
+table, and why the drop is unconditional (the runner records an applied file permanently, so a guarded drop
+could be recorded as done and never retried).
+
 Do not add a data backfill: there is no data in these tables that the native tree does not already
-contain, and the rows that were evidence were reconciled in Phase 0. Do not touch `file_uploads`,
-`file_upload_parts` or `file_upload_native_metadata`; they are live. If the generation-4 tables are ever
-retired, drop `file_upload_parts` and `file_upload_native_metadata` before `file_uploads` — both have a
-foreign key to it.
+contain. Do not touch `file_uploads`, `file_upload_parts` or `file_upload_native_metadata`; they are live. If
+the generation-4 tables are ever retired, drop `file_upload_parts` and `file_upload_native_metadata` before
+`file_uploads` — both have a foreign key to it.
 
 Verification after the drop: `eam migrate` twice (the second must report zero applied), `make test-pg`,
 and `eam doctor`.
