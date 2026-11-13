@@ -1066,8 +1066,8 @@ export const files = {
   metadata(selector: FileSelector, signal?: AbortSignal): Promise<FileResource> {
     return fileRequest(fileURL("", entrySelector(selector)), { signal });
   },
-  list(selector: FileSelector, options: { limit?: number; cursor?: string } = {}): Promise<FileCollection> {
-    return fileRequest(fileURL("/list", { limit: options.limit, cursor: options.cursor, ...entrySelector(selector) }));
+  list(selector: FileSelector, options: { limit?: number; cursor?: string; signal?: AbortSignal } = {}): Promise<FileCollection> {
+    return fileRequest(fileURL("/list", { limit: options.limit, cursor: options.cursor, ...entrySelector(selector) }), { signal: options.signal });
   },
   search(options: FileSearchOptions): Promise<FileCollection> {
     const selected = Object.fromEntries(["id", "path"].filter((key) => hasOwn(options, key)).map((key) => [key, options[key as "id" | "path"]]));
@@ -1132,21 +1132,6 @@ export const files = {
   },
 };
 
-async function allFiles(
-  load: (cursor?: string) => Promise<FileCollection>,
-  firstPage?: Promise<FileCollection>,
-): Promise<FileResource[]> {
-  const items = new Map<string, FileResource>();
-  let page = firstPage ? await firstPage : await load();
-  for (;;) {
-    for (const item of page.items) items.set(item.id, item);
-    const cursor = page.nextCursor ?? undefined;
-    if (!cursor) break;
-    page = await load(cursor);
-  }
-  return [...items.values()];
-}
-
 function selectorKey(selected: EntrySelector): string {
   return selected.id !== undefined ? `id:${selected.id}` : `path:${selected.path}`;
 }
@@ -1159,17 +1144,110 @@ function missingPathAsNull(error: unknown, selected: EntrySelector): null {
 }
 
 /**
- * One directory read for the page: the parent metadata and the first page are independent
- * queries, so both start together instead of paying two round trips in sequence.
+ * A directory listing that is read one page at a time.
+ *
+ * The first page is the only one opening a folder waits for. Continuation pages are
+ * keyset cursors: the server hands the next cursor inside the previous page, so a single
+ * stream can have only one continuation request in flight. The pool below therefore
+ * bounds the page reads the client has outstanding across streams — the open folder plus
+ * hover prefetches — not one cursor chain, which the API cannot split in parallel.
  */
-async function loadListing(selected: EntrySelector): Promise<ListResult> {
-  const nodeRequest = files.metadata(selected).catch((error: unknown) => missingPathAsNull(error, selected));
-  const firstPage = files.list(selected);
-  // A file selector only needs its metadata; the page request answers 409. Keep that rejection
-  // from surfacing as unhandled even though the branch below never awaits it.
-  firstPage.catch(() => undefined);
+export interface ListingStream {
+  readonly key: string;
+  /** Metadata and the first page, requested together. */
+  readonly first: Promise<ListResult>;
+  /** Deliver every page after the first, in order; resolves when the folder is exhausted. */
+  rest(onPage: (items: Item[]) => void): Promise<void>;
+  /** Stop the continuation; a page already in flight is discarded. */
+  cancel(): void;
+}
 
-  const node = await nodeRequest;
+/**
+ * How many file-API page reads this client keeps in flight.
+ *
+ * The server admits 12,000 requests/minute per owner (backend/internal/api/server.go,
+ * filesRatePerMinute) — 200/s — and uploads, previews and every open tab share that one
+ * bucket. A listing page is one indexed keyset query, so the budget worth spending on it
+ * is a rate: reserving a fifth of the budget leaves four fifths for transfers, and a
+ * 100 ms page round trip (a warm Postgres index read plus JSON) turns
+ * 200/s × 0.2 × 0.1 s into 4 concurrent page reads: enough to warm the folder under the
+ * pointer while an open streams its continuation, without letting a pointer sweep become
+ * a request storm. The number is derived, not picked: changing the server budget or the
+ * measured round trip changes it.
+ */
+const listingRequestBudgetPerMinute = 12_000;
+const listingRequestShare = 0.2;
+const listingPageRoundTripMs = 100;
+export const listingRequestConcurrency = Math.max(
+  1,
+  Math.round((listingRequestBudgetPerMinute / 60_000) * listingRequestShare * listingPageRoundTripMs),
+);
+
+/** The largest page the list endpoint accepts, so an exhausted folder costs fewer trips. */
+const listingContinuationLimit = 1000;
+
+let listingInFlight = 0;
+const listingWaiters: (() => void)[] = [];
+
+function listingAbortError(): DOMException {
+  return new DOMException("The listing was canceled.", "AbortError");
+}
+
+function isListingAbort(error: unknown): boolean {
+  return error instanceof DOMException && error.name === "AbortError";
+}
+
+/**
+ * One hovered folder may warm, and only while nothing else is reading. Its two requests
+ * then occupy two of the pool's slots and leave the other two for the open that follows;
+ * a slower prefetch can never take capacity the first paint needs. A pointer sweeping
+ * across many rows therefore warms the first one and drops the rest.
+ */
+function canPrefetchListing(): boolean {
+  return listingInFlight === 0 && listingWaiters.length === 0 && listingRequestConcurrency >= 2;
+}
+
+function acquireListingSlot(signal: AbortSignal, queue: boolean): Promise<void> {
+  if (signal.aborted) return Promise.reject(listingAbortError());
+  if (listingInFlight < listingRequestConcurrency && listingWaiters.length === 0) {
+    listingInFlight += 1;
+    return Promise.resolve();
+  }
+  // A hover prefetch is best effort: if it would have to wait behind demand, it is not
+  // worth warming, and queueing it would only delay the folder someone actually opens.
+  if (!queue) return Promise.reject(listingAbortError());
+  return new Promise((resolve, reject) => {
+    const wake = () => {
+      signal.removeEventListener("abort", onAbort);
+      resolve();
+    };
+    const onAbort = () => {
+      const at = listingWaiters.indexOf(wake);
+      if (at >= 0) listingWaiters.splice(at, 1);
+      reject(listingAbortError());
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
+    listingWaiters.push(wake);
+  });
+}
+
+function releaseListingSlot(): void {
+  // A slot handed straight to a waiter never returns to the counter.
+  const next = listingWaiters.shift();
+  if (next) next();
+  else listingInFlight -= 1;
+}
+
+async function withListingSlot<T>(signal: AbortSignal, task: () => Promise<T>, queue = true): Promise<T> {
+  await acquireListingSlot(signal, queue);
+  try {
+    return await task();
+  } finally {
+    releaseListingSlot();
+  }
+}
+
+function listingHeader(node: Item | null, selected: EntrySelector): Omit<ListResult, "items"> {
   const absolute = node?.path ?? selected.path!;
   const breadcrumb: Crumb[] = [{ name: "", path: "/" }];
   let current = "";
@@ -1180,26 +1258,94 @@ async function loadListing(selected: EntrySelector): Promise<ListResult> {
   return {
     path: absolute, parent: node?.parentPath ?? (absolute.slice(0, absolute.lastIndexOf("/")) || "/"),
     breadcrumb, node,
-    items: node?.kind === "folder" ? await allFiles((cursor) => files.list(selected, { cursor }), firstPage) : [],
   };
 }
 
 /**
- * Listings warmed by hovering a row, so opening it does not wait for a round trip. An entry is
- * single use and expires quickly: a listing is a snapshot, and a mutation must not be followed
- * by a stale page.
+ * Listings warmed by hovering a row, so opening one renders from a request already in
+ * flight. An entry is single use and expires quickly: a listing is a snapshot, and a
+ * mutation must not be followed by a stale page.
  */
-const listingPrefetches = new Map<string, { listing: Promise<ListResult>; expiresAt: number }>();
+const listingPrefetches = new Map<string, { stream: ListingStream; expiresAt: number }>();
 const listingPrefetchTTL = 10_000;
 const listingPrefetchLimit = 24;
+/** Streams the page is reading now; hover must join one, not start a second. */
+const activeListings = new Map<string, ListingStream>();
+
+function createListingSession(selected: EntrySelector, queueReads = true): ListingStream {
+  const key = selectorKey(selected);
+  const controller = new AbortController();
+  let cursor: string | null = null;
+  let restPromise: Promise<void> | null = null;
+
+  const metadata = withListingSlot(controller.signal, () =>
+    files.metadata(selected, controller.signal).catch((error: unknown) => missingPathAsNull(error, selected)), queueReads);
+  const firstPage = withListingSlot(controller.signal, () => files.list(selected, { signal: controller.signal }), queueReads);
+  // A file selector only needs its metadata; /list answers 409 there. Keep that rejection
+  // from surfacing as unhandled even though the branch below never awaits it.
+  firstPage.catch(() => undefined);
+
+  const first = (async (): Promise<ListResult> => {
+    const node = await metadata;
+    const header = listingHeader(node, selected);
+    let items: Item[] = [];
+    if (node?.kind === "folder") {
+      const page = await firstPage;
+      items = page.items;
+      cursor = page.nextCursor ?? null;
+    }
+    return { ...header, items };
+  })();
+
+  const session: ListingStream = {
+    key,
+    first,
+    cancel() {
+      controller.abort();
+      if (activeListings.get(key) === session) activeListings.delete(key);
+    },
+    async rest(onPage) {
+      if (restPromise) return restPromise;
+      restPromise = (async () => {
+        try {
+          while (cursor !== null && !controller.signal.aborted) {
+            const at = cursor;
+            let page: FileCollection;
+            try {
+              page = await withListingSlot(controller.signal, () =>
+                files.list(selected, { cursor: at, limit: listingContinuationLimit, signal: controller.signal }));
+            } catch (error) {
+              if (controller.signal.aborted || isListingAbort(error)) return;
+              throw error;
+            }
+            if (controller.signal.aborted) return;
+            cursor = page.nextCursor ?? null;
+            onPage(page.items);
+          }
+        } finally {
+          if (activeListings.get(key) === session) activeListings.delete(key);
+        }
+      })();
+      return restPromise;
+    },
+  };
+  return session;
+}
 
 /** Session-bound state that must not survive a sign-out or an expired credential. */
 function forgetSession(): void {
   csrfRequest = undefined;
+  for (const { stream } of listingPrefetches.values()) stream.cancel();
   listingPrefetches.clear();
+  for (const stream of activeListings.values()) stream.cancel();
+  activeListings.clear();
 }
 
-/** Warm one listing before the click that opens it; safe to call repeatedly. */
+/**
+ * Warm one listing before the click that opens it; safe to call repeatedly. Only the
+ * first page is read here: the continuation starts when a page actually opens the
+ * folder, so a pointer sweep cannot pull an entire subtree listing into memory.
+ */
 export function prefetchListing(selector: FileSelector): void {
   let selected: EntrySelector;
   try {
@@ -1215,28 +1361,68 @@ export function prefetchListing(selector: FileSelector): void {
     listingPrefetches.set(key, known);
     return;
   }
+  if (known) {
+    // Expired: a refresh is the only reason to read this folder again, so drop the old
+    // snapshot before deciding whether there is room to warm it.
+    listingPrefetches.delete(key);
+    known.stream.cancel();
+  }
+  // The page is already reading this folder. Warming it again would issue a second
+  // metadata and first-page pair for a request that is in flight right now.
+  if (activeListings.has(key)) return;
+  // Prefetching is opportunistic: warm only when nothing else is reading, so the two
+  // requests occupy half the pool and the other half stays ready for the open. A sweep
+  // over a long list therefore warms the first hovered folder and drops the rest instead
+  // of stacking requests in front of the next open.
+  if (!canPrefetchListing()) return;
   listingPrefetches.delete(key);
-  const entry: { listing: Promise<ListResult>; expiresAt: number } = {
-    listing: loadListing(selected), expiresAt: Number.POSITIVE_INFINITY,
+  const stream = createListingSession(selected, false);
+  const entry: { stream: ListingStream; expiresAt: number } = {
+    stream, expiresAt: Number.POSITIVE_INFINITY,
   };
-  entry.listing.then(
+  stream.first.then(
     () => { entry.expiresAt = Date.now() + listingPrefetchTTL; },
-    () => { if (listingPrefetches.get(key) === entry) listingPrefetches.delete(key); },
+    () => {
+      if (listingPrefetches.get(key) === entry) listingPrefetches.delete(key);
+      // A half-started pair must not keep a slot for a prefetch that was dropped.
+      stream.cancel();
+    },
   );
   listingPrefetches.set(key, entry);
   while (listingPrefetches.size > listingPrefetchLimit) {
     const oldest = listingPrefetches.keys().next().value;
     if (oldest === undefined) break;
+    const dropped = listingPrefetches.get(oldest);
     listingPrefetches.delete(oldest);
+    dropped?.stream.cancel();
   }
 }
 
-function takeListingPrefetch(selected: EntrySelector): Promise<ListResult> | null {
+function takeListingPrefetch(selected: EntrySelector): ListingStream | null {
   const key = selectorKey(selected);
   const entry = listingPrefetches.get(key);
   if (!entry) return null;
   listingPrefetches.delete(key);
-  return entry.expiresAt > Date.now() ? entry.listing : null;
+  if (entry.expiresAt <= Date.now()) {
+    entry.stream.cancel();
+    return null;
+  }
+  return entry.stream;
+}
+
+/**
+ * Start (or join) the progressive read of one listing. The returned stream is registered
+ * while it is reading, which is what makes a hover during that read a no-op instead of a
+ * duplicate request.
+ */
+export function openListing(selector: FileSelector): ListingStream {
+  const selected = entrySelector(selector);
+  const key = selectorKey(selected);
+  const stream = takeListingPrefetch(selected) ?? createListingSession(selected);
+  activeListings.set(key, stream);
+  // A failed first page never reaches rest(), so it releases the key itself.
+  stream.first.catch(() => { if (activeListings.get(key) === stream) activeListings.delete(key); });
+  return stream;
 }
 
 export interface StorageConnection {
@@ -1429,15 +1615,30 @@ export const api = {
   contentURL: files.contentURL,
   thumbnailURL: files.thumbnailURL,
 
-  /** App navigation composed from resources, rather than a legacy server listing DTO. */
+  /**
+   * The whole listing in one answer, for callers that cannot render progressively.
+   * FilesPage uses openListing() instead; this stays the compatibility shape.
+   */
   async list(selector: FileSelector): Promise<ListResult> {
     const selected = entrySelector(selector);
-    return takeListingPrefetch(selected) ?? loadListing(selected);
+    const stream = takeListingPrefetch(selected) ?? createListingSession(selected);
+    const first = await stream.first;
+    const items = new Map(first.items.map((item) => [item.id, item] as const));
+    await stream.rest((page) => { for (const item of page) items.set(item.id, item); });
+    return { ...first, items: [...items.values()] };
   },
 
   async search(keyword: string, selector?: FileSelector): Promise<SearchResult> {
     const selected = selector === undefined ? {} : entrySelector(selector);
-    return { items: await allFiles((cursor) => files.search({ q: keyword, cursor, ...selected })) };
+    const items = new Map<string, FileResource>();
+    let page = await files.search({ q: keyword, ...selected });
+    for (;;) {
+      for (const item of page.items) items.set(item.id, item);
+      const cursor = page.nextCursor ?? undefined;
+      if (!cursor) break;
+      page = await files.search({ q: keyword, cursor, ...selected });
+    }
+    return { items: [...items.values()] };
   },
 
   mkdir(destination: string | Destination, parents = false): Promise<FileResource | FileOperation> {

@@ -1356,6 +1356,15 @@ a.crumb:hover {
   display: block;
 }
 
+/*
+ * The next chunk mounts when this reaches the viewport. It is deliberately no taller than
+ * a hairline: the rows are the interface, so the trigger must not read as a footer or a
+ * "load more" control.
+ */
+.listSentinel {
+  height: 1px;
+}
+
 @keyframes fade-in {
   from {
     opacity: 0;

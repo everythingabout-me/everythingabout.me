@@ -11,7 +11,7 @@ import {
   type ReactNode,
 } from "react";
 import { Link, useBlocker, useLoaderData, useLocation, useNavigate } from "react-router";
-import { ApiError, api, filePath, isFileOperation, isNativeAbsent, prefetchListing, type AuthUser, type Crumb, type FileMediaMetadata, type Item, type FileOperation } from "../api/client";
+import { ApiError, api, filePath, isFileOperation, isNativeAbsent, openListing, prefetchListing, type AuthUser, type Crumb, type FileMediaMetadata, type Item, type FileOperation, type ListingStream } from "../api/client";
 import { AppHeader } from "../components/AppHeader";
 import { StorageNotice } from "../components/StorageNotice";
 import {
@@ -41,6 +41,7 @@ import { droppedUploadEntries, filesToUploadEntries, foldersWithoutFiles } from 
 import { buildUploadRows, failedTasks, isUploadDirectory, isUploadRowActive, type UploadRowEntry } from "./uploadRows";
 import { pendingFileOperations, setUploadOwner, settleFileOperation, subscribeFileOperations, trackFileOperation } from "./uploadPersistence";
 import { formatBytes, formatPreciseBytes, formatSize, formatSpeed } from "./sizeFormat";
+import { chunkRows, growRowCount, LIST_CHUNK_SIZE, visibleRowCount } from "./listChunk";
 import { cameraText, capturedAtText, coordinatesText, dimensionsText, durationText, exposureText, mayHaveMediaMetadata } from "./mediaMetadataFormat";
 import styles from "./FilesPage.module.css";
 
@@ -65,6 +66,20 @@ function compareNames(a: string, b: string): number {
 function compareItems(a: Item, b: Item): number {
   if (a.kind !== b.kind) return a.kind === "folder" ? -1 : 1;
   return compareNames(a.name, b.name);
+}
+
+/**
+ * Append a streamed page to the rows already on screen.
+ *
+ * The keyset cursor should never repeat an entry, but an upload can settle into the
+ * folder while the rest loads, and a retried page can overlap; replacing by ID keeps a
+ * newer revision without moving the row or duplicating a key.
+ */
+function mergeListingItems(previous: Item[], page: Item[]): Item[] {
+  if (page.length === 0) return previous;
+  const merged = new Map(previous.map((item) => [item.id, item] as const));
+  for (const item of page) merged.set(item.id, item);
+  return [...merged.values()];
 }
 
 /**
@@ -861,6 +876,16 @@ export function FilesPage() {
   // A first paint has no previous listing to grow from.
   const loadedPathRef = useRef<string | null>(null);
   loadedPathRef.current = loadedPath;
+  // The listing read in progress. A new folder cancels its continuation, so a page the
+  // person already left cannot keep reading or append to the new folder's rows.
+  const listingStream = useRef<ListingStream | null>(null);
+  // Rows mounted from the streamed listing; the sentinel below grows this by one chunk.
+  const [renderedRows, setRenderedRows] = useState(LIST_CHUNK_SIZE);
+  // The listing that count belongs to. A different one starts from one chunk on the very
+  // render that shows it, not one effect later: switching between two large listings must
+  // not mount the new one's rows at the old count even for a frame.
+  const [renderedKey, setRenderedKey] = useState<string | null>(null);
+  const sentinelRef = useRef<HTMLDivElement | null>(null);
 
   const rememberPanelHeight = useCallback((key: string) => {
     const panel = panelRef.current;
@@ -946,11 +971,21 @@ export function FilesPage() {
   const load = useCallback(
     async (target: string) => {
       const request = ++requestId.current;
+      // Leaving a folder stops its cursor chain. The page already in flight is discarded by
+      // the request check below, so it cannot append to the next folder's rows.
+      listingStream.current?.cancel();
+      const stream = openListing(target);
+      listingStream.current = stream;
       setLoading(true);
       setLoadError(null);
       try {
-        const data = await api.list(target);
-        if (requestId.current !== request) return;
+        // Metadata and the first page were requested together. Waiting for both is the
+        // whole first paint; the cursor chain below is not part of it.
+        const data = await stream.first;
+        if (requestId.current !== request) {
+          stream.cancel();
+          return;
+        }
         rememberPanelHeight(`${target}|`);
         setItems(data.items);
         setCurrent(data.node);
@@ -958,6 +993,7 @@ export function FilesPage() {
         setActiveQuery("");
         setQuery("");
         setLoadedPath(target);
+        setLoading(false);
         // The listing is the new truth for this folder, so it also seeds the revision the
         // next mutation will name — an upload that settles later invalidates it again.
         const tracker = new FolderRevision(async () => {
@@ -966,6 +1002,16 @@ export function FilesPage() {
         });
         tracker.seed(data.node?.revision ?? null);
         folderRevision.current = { path: target, tracker };
+        // The rest streams in behind the rows already on screen. A failed continuation
+        // keeps what loaded and reports itself; it does not replace the folder with an
+        // error, because the first page proved the folder is readable.
+        void stream.rest((page) => {
+          if (requestId.current !== request) return;
+          setItems((existing) => mergeListingItems(existing, page));
+        }).catch((error: unknown) => {
+          if (requestId.current !== request) return;
+          showToast(error instanceof Error ? error.message : t("drive.loadMoreFailed"), "error");
+        });
       } catch (error) {
         if (requestId.current !== request) return;
         if (error instanceof ApiError && error.status === 401) {
@@ -978,7 +1024,7 @@ export function FilesPage() {
         if (requestId.current === request) setLoading(false);
       }
     },
-    [navigate, rememberPanelHeight],
+    [navigate, rememberPanelHeight, showToast],
   );
 
   /**
@@ -1059,6 +1105,9 @@ export function FilesPage() {
   useEffect(() => {
     void load(path);
   }, [path, load]);
+
+  // A browser-level navigation must not leave a cursor chain reading for a page that is gone.
+  useEffect(() => () => { listingStream.current?.cancel(); }, []);
 
   useEffect(() => {
     setRenaming(false);
@@ -1260,6 +1309,9 @@ export function FilesPage() {
       void load(path);
       return;
     }
+    // Search results replace the folder rows, so its cursor chain has nothing left to feed.
+    listingStream.current?.cancel();
+    listingStream.current = null;
     const request = ++requestId.current;
     setLoading(true);
     setLoadError(null);
@@ -1333,6 +1385,33 @@ export function FilesPage() {
   const uploadDirectory = isUploadDirectory(uploads, path);
 
   const listKey = `${loadedPath ?? ""}|${activeQuery}`;
+
+  // A listing starts with one chunk mounted; streaming continuation pages add items behind
+  // the rows already on screen, and the sentinel decides when mounting more is worth it.
+  const mountedRows = renderedKey === listKey ? renderedRows : LIST_CHUNK_SIZE;
+  useEffect(() => {
+    if (renderedKey === listKey) return;
+    setRenderedKey(listKey);
+    setRenderedRows(LIST_CHUNK_SIZE);
+  }, [listKey, renderedKey]);
+
+  const shownEntries = useMemo(() => chunkRows(entries, mountedRows), [entries, mountedRows]);
+
+  useEffect(() => {
+    const sentinel = sentinelRef.current;
+    if (!sentinel || shownEntries.length >= entries.length) return;
+    // Without an observer (an old engine), showing the list beats leaving rows unreachable.
+    if (typeof IntersectionObserver === "undefined") {
+      setRenderedRows(visibleRowCount(entries.length, entries.length));
+      return;
+    }
+    const observer = new IntersectionObserver((records) => {
+      if (!records.some((record) => record.isIntersecting)) return;
+      setRenderedRows(growRowCount(mountedRows, entries.length));
+    }, { rootMargin: "600px 0px" });
+    observer.observe(sentinel);
+    return () => observer.disconnect();
+  }, [entries.length, mountedRows, shownEntries.length]);
 
   // A folder switch changes the card's height by whole rows (six folders to an empty state is
   // over 200px), and that jump reads as a blink even when the rows fade. Resize the card along
@@ -2066,7 +2145,7 @@ export function FilesPage() {
                   inert={navigating}
                   className={`${styles.list} ${styles.enter} ${navigating ? styles.dim : ""}`}
                 >
-                  {entries.map((entry) =>
+                  {shownEntries.map((entry) =>
                     isUploadRowActive(entry) ? (
                       <UploadRow
                         key={entry.path}
@@ -2081,6 +2160,12 @@ export function FilesPage() {
                         activeQuery={Boolean(activeQuery)}
                       />
                     ) : null,
+                  )}
+
+                  {shownEntries.length < entries.length && (
+                    // Reaching this point mounts the next chunk. It is one pixel and
+                    // invisible: the list itself is the affordance, not a "load more" button.
+                    <div ref={sentinelRef} className={styles.listSentinel} aria-hidden="true" />
                   )}
 
                   {!pending && entries.length === 0 && (
