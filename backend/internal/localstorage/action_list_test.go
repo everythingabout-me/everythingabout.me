@@ -51,8 +51,12 @@ func TestMutationListScansSiblingsOncePerPage(t *testing.T) {
 			if e.Path != expectedPath || len(e.Revision) == 0 || len(e.ContentIdentity) == 0 {
 				t.Fatalf("bad enriched entry %+v", e)
 			}
-			if e.Kind == storage.File && (e.Digest == nil || e.Digest.Algorithm != "sha-256") {
-				t.Fatal("missing verified file digest")
+			// A listing observes native metadata only. It used to hash every file it
+			// named, so listing a folder read all of its bytes; the revision and the
+			// identity are enough to name the native state, and a content digest is
+			// computed by the writer that already has the bytes.
+			if e.Digest != nil {
+				t.Fatalf("listing read file bytes to produce a digest for %q", e.Path)
 			}
 			seen++
 		}

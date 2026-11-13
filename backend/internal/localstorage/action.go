@@ -74,8 +74,24 @@ func (w *MutationDriver) Describe() storage.Descriptor {
 }
 func (w *MutationDriver) Close() error { return w.driver.Close() }
 
-// mtime is retained across rename; ctime and path are deliberately excluded.
-// Files also carry a verified digest so equal size/timestamp cannot hide edits.
+// nativeVersion derives an entry's native identity and the revision that names its
+// current state. The revision must change when the state changes and must survive a
+// rename, because a move preserves it: identity, kind, size, mtime and mode are all
+// rename-stable, while a path is not and ctime is not (rename bumps it). A folder's
+// revision is its identity alone, so removing children does not version the folder.
+//
+// No bytes are read. The revision used to include a SHA-256 of the file's contents,
+// and that made observing a file cost the file: Stat of a 16 MiB file read all 16 MiB
+// (6.2 ms, 38 KiB of hash buffer), and every ranged Open read the whole file before
+// serving one kilobyte. What the digest bought is exactly one case: an in-place
+// rewrite that keeps the same size and restores the same mtime on the same inode
+// (rsync -t, cp -p, utimes) leaves this revision unchanged, while the digest moved.
+// Callers tolerate it because this driver is admitted only for a coordinated
+// exclusive writer: every write the service makes stages a new file and renames it
+// into place, so the inode changes; and an outside writer rewrites through an
+// unobservable native state anyway, which storage-driver.md already excludes from
+// every fencing claim. A content digest in a cheap observation cannot be had: the
+// kernel keeps no read-free content version to ask for.
 func nativeVersion(e storage.Entry, info os.FileInfo) storage.Entry {
 	e.NativeRef = []byte(rootIdentity(info))
 	e.ContentIdentity = bytes.Clone(e.NativeRef)
@@ -89,43 +105,13 @@ func nativeVersion(e storage.Entry, info os.FileInfo) storage.Entry {
 		Kind           storage.Kind
 		Size, Modified int64
 		Mode           uint32
-		Digest         *storage.Digest
-	}{rootIdentity(info), e.Kind, e.Size, info.ModTime().UnixNano(), uint32(info.Mode()), e.Digest})
+	}{rootIdentity(info), e.Kind, e.Size, info.ModTime().UnixNano(), uint32(info.Mode())})
 	h := sha256.Sum256(b)
 	e.Revision = h[:]
 	return e
 }
 func sameNativeStat(a, b os.FileInfo) bool {
 	return os.SameFile(a, b) && a.Size() == b.Size() && a.ModTime() == b.ModTime() && a.Mode() == b.Mode()
-}
-func verifiedNative(ctx context.Context, root *os.Root, name string, path storage.Path, expected os.FileInfo) (storage.Entry, *os.File, error) {
-	f, err := openReadOnly(root, name)
-	if err != nil {
-		return storage.Entry{}, nil, mapError(path, err)
-	}
-	fail := func(err error) (storage.Entry, *os.File, error) { f.Close(); return storage.Entry{}, nil, err }
-	before, err := f.Stat()
-	if err != nil || !before.Mode().IsRegular() || !sameNativeStat(expected, before) {
-		return fail(storage.NewError("changed", path, err))
-	}
-	h := sha256.New()
-	n, err := io.Copy(h, stageReader{ctx: ctx, reader: f})
-	if err != nil {
-		return fail(err)
-	}
-	after, err := f.Stat()
-	if err != nil || n != before.Size() || !sameNativeStat(before, after) {
-		return fail(storage.NewError("changed", path, err))
-	}
-	e, err := entry(path, after)
-	if err != nil {
-		return fail(err)
-	}
-	e.Digest = &storage.Digest{Algorithm: "sha-256", Value: h.Sum(nil)}
-	if _, err := f.Seek(0, io.SeekStart); err != nil {
-		return fail(err)
-	}
-	return nativeVersion(e, after), f, nil
 }
 func (w *MutationDriver) stat(ctx context.Context, path storage.Path) (storage.Entry, error) {
 	if path == "" {
@@ -149,14 +135,9 @@ func (w *MutationDriver) nativeAt(ctx context.Context, root *os.Root, parent sto
 	if err != nil {
 		return storage.Entry{}, err
 	}
-	if found.entry.Kind == storage.Folder {
-		return nativeVersion(found.entry, found.info), nil
-	}
-	e, f, err := verifiedNative(ctx, root, name, childPath(parent, name), found.info)
-	if f != nil {
-		f.Close()
-	}
-	return e, err
+	// The scan already read this entry's native metadata; nothing about the
+	// observation needs to open it.
+	return nativeVersion(found.entry, found.info), nil
 }
 func (w *MutationDriver) Stat(ctx context.Context, path storage.Path) (storage.Entry, error) {
 	if err := validatePath(path); err != nil {
@@ -171,8 +152,9 @@ func (w *MutationDriver) Stat(ctx context.Context, path storage.Path) (storage.E
 }
 
 // List scans and validates all immediate names once, then verifies only the
-// selected page through the same pinned parent. File versions require reading
-// their bytes; listing cost is linear in sibling names plus returned file bytes.
+// selected page through the same pinned parent. Listing cost is linear in sibling
+// names: a page no longer reads the bytes of the files it names, which made listing
+// a folder of videos as expensive as reading them all.
 func (w *MutationDriver) List(ctx context.Context, path storage.Path, request storage.PageRequest) (storage.Page, error) {
 	if err := validatePath(path); err != nil {
 		return storage.Page{}, err
@@ -224,19 +206,7 @@ func (w *MutationDriver) List(ctx context.Context, path storage.Path, request st
 		if err != nil {
 			return storage.Page{}, err
 		}
-		if e.Kind == storage.Folder {
-			e = nativeVersion(e, info)
-		} else {
-			var file *os.File
-			e, file, err = verifiedNative(ctx, root, found.name, found.entry.Path, info)
-			if file != nil {
-				file.Close()
-			}
-			if err != nil {
-				return storage.Page{}, err
-			}
-		}
-		page.Entries = append(page.Entries, e)
+		page.Entries = append(page.Entries, nativeVersion(e, info))
 	}
 	if end < len(all) {
 		page.NextCursor = w.driver.encodeCursor(path, all[end-1].name)
@@ -276,10 +246,21 @@ func (w *MutationDriver) Open(ctx context.Context, path storage.Path, options st
 	if found.entry.Kind != storage.File {
 		return storage.Read{}, storage.NewError("not_file", path, nil)
 	}
-	e, f, err := verifiedNative(ctx, root, name, path, found.info)
+	f, err := openReadOnly(root, name)
 	if err != nil {
+		return storage.Read{}, mapError(path, err)
+	}
+	info, err := f.Stat()
+	if err != nil || !info.Mode().IsRegular() || !sameNativeStat(found.info, info) {
+		f.Close()
+		return storage.Read{}, storage.NewError("changed", path, err)
+	}
+	e, err := entry(path, info)
+	if err != nil {
+		f.Close()
 		return storage.Read{}, err
 	}
+	e = nativeVersion(e, info)
 	if len(options.PinnedVersion) != 0 && !bytes.Equal(options.PinnedVersion, e.Revision) {
 		f.Close()
 		return storage.Read{}, storage.NewError("changed", path, nil)

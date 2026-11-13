@@ -33,13 +33,30 @@ func (w *MutationDriver) copyAction(ctx context.Context, root *os.Root, r *actio
 		release()
 		return storage.MutationResult{}, noEffect(storage.NewError("unsupported", in.Source, nil))
 	}
-	e, f, err := verifiedNative(ctx, source, name, in.Source, found.info)
-	source.Close()
+	// Observe the source through its open handle without hashing it: the staged copy
+	// computes the digest of the bytes it actually copies, and the source's native
+	// state is checked again after the copy, so the extra full read bought nothing.
+	f, err := openReadOnly(source, name)
 	if err != nil {
+		source.Close()
+		release()
+		return storage.MutationResult{}, noEffect(mapError(in.Source, err))
+	}
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil || !info.Mode().IsRegular() || !sameNativeStat(found.info, info) {
+		source.Close()
+		release()
+		return storage.MutationResult{}, noEffect(storage.NewError("changed", in.Source, err))
+	}
+	e, err := entry(in.Source, info)
+	if err != nil {
+		source.Close()
 		release()
 		return storage.MutationResult{}, noEffect(err)
 	}
-	defer f.Close()
+	e = nativeVersion(e, info)
+	source.Close()
 	if !bytes.Equal(e.Revision, in.SourceRevision) {
 		release()
 		return storage.MutationResult{}, noEffect(storage.NewError("changed", in.Source, nil))
@@ -58,7 +75,11 @@ func (w *MutationDriver) copyAction(ctx context.Context, root *os.Root, r *actio
 	r.Source = &e
 	r.SourceParent = identity
 	r.TargetParent = targetIdentity
-	r.Write = &storage.WriteIntent{ID: "local-copy-v1/" + intentKey(in.ID), Target: in.Target, Conditions: in.Conditions, SourceModifiedAt: &e.ModifiedAt, Size: e.Size, Digest: cloneDigest(e.Digest)}
+	// No digest is carried into the intent: Stage computes the digest of the bytes it
+	// copies and verifies the staged file against it, and the source's native state is
+	// re-checked after the copy. A digest observed before the copy would only have
+	// compared those bytes to themselves.
+	r.Write = &storage.WriteIntent{ID: "local-copy-v1/" + intentKey(in.ID), Target: in.Target, Conditions: in.Conditions, SourceModifiedAt: &e.ModifiedAt, Size: e.Size}
 	r.Phase = "staging"
 	if err := w.saveAction(root, r); err != nil {
 		return storage.MutationResult{}, noEffect(err)
@@ -72,6 +93,12 @@ func (w *MutationDriver) copyAction(ctx context.Context, root *os.Root, r *actio
 	})
 	if err != nil {
 		return storage.MutationResult{}, noEffect(err)
+	}
+	// The copy read the source for as long as it took, so confirm the bytes it read
+	// still belong to the state the operation was admitted for. This replaces the
+	// observation-time digest as the torn-copy check at the cost of one stat.
+	if after, statErr := f.Stat(); statErr != nil || !sameNativeStat(found.info, after) {
+		return storage.MutationResult{}, noEffect(storage.NewError("changed", in.Source, statErr))
 	}
 	r.Phase = "executing"
 	if err := w.saveAction(root, r); err != nil {

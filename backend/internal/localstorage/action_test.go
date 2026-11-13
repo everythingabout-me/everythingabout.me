@@ -5,6 +5,7 @@ package localstorage
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"io"
@@ -95,8 +96,14 @@ func TestMutationNativeCRUDAndContentIdentity(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if bytes.Equal(copied.Entry.Revision, source.Revision) || bytes.Equal(copied.Entry.ContentIdentity, source.ContentIdentity) || !bytes.Equal(copied.Entry.Digest.Value, source.Digest.Value) {
+	if bytes.Equal(copied.Entry.Revision, source.Revision) || bytes.Equal(copied.Entry.ContentIdentity, source.ContentIdentity) {
 		t.Fatal("copy is not an independent native generation")
+	}
+	// The copy's digest comes from the bytes the staging write read, so it proves the
+	// destination holds the source's bytes without a second source read.
+	want := sha256.Sum256([]byte("raw\x00\xffbytes"))
+	if copied.Entry.Digest == nil || !bytes.Equal(copied.Entry.Digest.Value, want[:]) {
+		t.Fatal("copied bytes differ from the source")
 	}
 	moveReq := storage.MoveRequest{ID: "move", Source: in.Target, Target: "renamed", SourceRevision: source.Revision, TargetConditions: storage.Conditions{Absent: true}}
 	moved, err := w.Move(ctx, moveReq, stageOK)

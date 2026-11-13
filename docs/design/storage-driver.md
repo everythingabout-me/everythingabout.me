@@ -49,8 +49,10 @@ Three words cover state in this service. They are not interchangeable.
 - **revision** — `Entry.Revision`, `Conditions.ExpectedRevision`, `MoveRequest.SourceRevision`. The driver's
   opaque token for the exact native state of one entry. It is what a conditional effect compares against and
   what proves an effect applied to the node we observed. Its derivation belongs to the driver: the object ETag
-  on S3/COS/R2, a generation number on GCS, a revision id on a cloud drive. It is internal and never crosses the
-  API boundary.
+  on S3/COS/R2, a generation number on GCS, a revision id on a cloud drive, or the rename-stable inode metadata
+  of a local file. It is internal and never crosses the API boundary. A revision is a native state token, not a
+  content hash: a driver must not read a file's bytes just to derive it, and a comparison against it proves the
+  state the driver can observe, which is all a conditional effect can be compared with.
 - **version** — `Descriptor.RetainsVersions`, `Descriptor.PinnedRead`, `ReadOptions.PinnedVersion`,
   `objecttree.Object.VersionID`. A retained historical copy held by the provider. Version history is a product
   feature this service does not use: every deployed driver reports `RetainsVersions=false` and
@@ -714,7 +716,7 @@ liability until that discard is confirmed.
 
 | Backend | Native readable representation | Main effects/constraints |
 |---|---|---|
-| Local filesystem | Ordinary relative folders/files | Stage in same filesystem; atomic rename/no-replace where supported; fsync file and containing directories; root/symlink isolation; cross-volume moves need fallback |
+| Local filesystem | Ordinary relative folders/files | Stage in same filesystem; atomic rename/no-replace where supported; fsync file and containing directories; root/symlink isolation; cross-volume moves need fallback. A file's revision is its inode identity plus size/mtime/mode (rename-stable, so a move preserves it) and observation reads no bytes; an in-place rewrite that restores mtime on the same inode is invisible to it, which the coordinated-exclusive writer model already excludes |
 | S3/COS | Original path keys below owner prefix; standard empty-folder markers (a reasserted marker carries a small service token so its ETag moves) | Single-object publish can be atomic; provider-side copy (one conditional request, or conditional part copies above 5 GiB) keeps bytes inside the provider; folder move is still per-entry copy/verify/delete, not metadata-only |
 | WebDAV | Native folders and original names | Stream to temp then native MOVE if its semantics suffice; plain final PUT can expose partial data; ETags/atomic conditions vary |
 | Cloud drive | Real folders/names, native IDs used internally | Duplicate names and unsupported characters require checks; native move/replace/version guarantees vary; upload sessions/credentials expire independently |
