@@ -655,15 +655,23 @@ Idempotency-Key: mobile-upload-001
 }
 ```
 
-`parents:true` (create mode, full-path destination) creates the destination's missing ancestor folders
-as part of this request. Each created folder gets a fresh ID, its native marker object and the same
-change facts and audit an explicit `mkdir` would produce. The reason: importing a selected tree
-otherwise costs one mkdir round trip per directory before the first file may start, and a client that
-cannot start for minutes looks stuck. Only *who* sends that mkdir moves — the ordering rule does not:
+`parents:true` (a create or overwrite with a full-path destination) creates the destination's missing
+ancestor folders as part of this request. Each created folder gets a fresh ID, its native marker object and
+the same change facts and audit an explicit `mkdir` would produce. The reason: the caller is importing a
+tree it enumerated, so the ancestors it names are not a typo, and an earlier, cancelled import may never
+have created them — the same request must be able to succeed when it is retried, instead of answering
+`409 parent_missing` forever. It also spares the import one mkdir round trip per directory before the
+first file may start, and a client that cannot start for minutes looks stuck. Only *who* sends that mkdir
+moves — the ordering rule does not:
 the parent row and marker exist before the upload binds the parent identity and revision it observed, so a
 concurrent move/recreate of that parent still fails the commit (`412 target_changed`, or `409 parent_missing`
 when no folder is left at that path). Without `parents` a missing
 parent is still `409 parent_missing`, and a destination whose parent is a file is still `409 not_a_folder`.
+A replacement needs no flag: the entry it names proves that its parent exists, and nothing is materialized
+for it.
+An admission page carries one dropped tree, so its items share one ancestor materialization per path: a
+page of 32 files under the same missing folder creates that chain once. An empty folder still needs its
+own create, because an upload cannot represent a folder with no file in it.
 
 Create mode (default) accepts `destination:Destination` and forbids `target`. For example,
 `destination:{"parent":{"id":"14baf74e-feb7-47b4-acf1-c4d3146eea91"},"name":"a.mp4"}` creates under an existing folder.
