@@ -475,7 +475,7 @@ password sign-in: 30 per 15 minutes per IP, 10 per 15 minutes per email).
 | `APP_SECRET` | Stable application secret independent of storage credentials |
 | `STORAGE_BACKEND` | `local`, `cos` or `s3`; configure one bound root per connection |
 | `FILE_COOKIE_ORIGINS` | Explicit allowed cookie mutation origins including port |
-| `FILE_COORDINATED_WRITES` | Default false; enable only after native evidence, legacy drain and root budget admission |
+| `FILE_COORDINATED_WRITES` | Default false; enable only after native evidence and root budget admission |
 | `FILE_TRANSFER_CLASS` | `presigned-parts` (class A) or `relay` (class C); class B is reserved until a cloud-drive driver exists |
 | `FILE_UPLOAD_INGRESS` | `embedded` for direct provider class A URLs, or `edgeone` for the optional same-origin class A edge relay |
 | `FILE_MAX_SINGLE_PUT_BYTES` | Simple PUT/object publication policy for interactive class C requests; default 32 MiB, admitted object maximum 5 GiB. A snapshot or restore derives its staging bound from the entries it copies instead |

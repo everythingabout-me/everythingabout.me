@@ -143,23 +143,9 @@ func captureStorageBaseline(ctx context.Context, cfg *config.Config, owner strin
 	if err = rows.Err(); err != nil {
 		return a, err
 	}
-	// Retain even cancelled/expired unfinished sessions: DB status cannot prove native quiescence.
-	rows, err = tx.Query(ctx, `select to_jsonb(upload_sessions) from upload_sessions where user_id=$1::uuid and completed_at is null order by id`, owner)
-	if err != nil {
-		return a, err
-	}
-	for rows.Next() {
-		var data json.RawMessage
-		if err = rows.Scan(&data); err != nil {
-			rows.Close()
-			return a, err
-		}
-		a.Snapshot.LegacyUploads = append(a.Snapshot.LegacyUploads, data)
-	}
-	rows.Close()
-	if err = rows.Err(); err != nil {
-		return a, err
-	}
+	// LegacyUploads stays in the artifact shape, always empty: the legacy upload
+	// sessions table was retired (sql/053), but artifacts written before that still
+	// carry rows, and the offline --input recheck must keep reading them.
 	if err = tx.Commit(ctx); err != nil {
 		return a, err
 	}

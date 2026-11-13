@@ -126,7 +126,6 @@ func runServer(args []string) error {
 	defer stop()
 
 	apiServer.StartTimeline(shutdownSignal)
-	apiServer.StartUploadIndex(shutdownSignal)
 	apiServer.StartFileOperations(shutdownSignal)
 
 	serveDone := make(chan error, 1)

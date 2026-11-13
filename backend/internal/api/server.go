@@ -12,7 +12,6 @@ import (
 	"time"
 
 	"everythingabout.me/backend/internal/auth"
-	"everythingabout.me/backend/internal/browserupload"
 	"everythingabout.me/backend/internal/config"
 	"everythingabout.me/backend/internal/connections"
 	"everythingabout.me/backend/internal/emailcode"
@@ -28,7 +27,6 @@ import (
 	"everythingabout.me/backend/internal/storage"
 	"everythingabout.me/backend/internal/store"
 	"everythingabout.me/backend/internal/timeline"
-	"everythingabout.me/backend/internal/uploadindex"
 	"everythingabout.me/backend/internal/uploadspool"
 )
 
@@ -37,19 +35,17 @@ type OwnerStorageFactory interface {
 }
 
 type Server struct {
-	browserUploads *browserupload.Service
-	uploadIndex    UploadIndex
-	trees          OwnerStorageFactory
-	conns          connections.Store
-	backupMu       sync.Mutex
-	backupJobs     map[string]bool
-	filesAuth      FilesAuthenticator
-	filesIndex     FileReadIndex
-	mediaCache     mediameta.Cache
-	filesJournal   *fileops.Postgres
-	uploadSpools   fileUploadSpoolFactory
-	fileWorkerMu   sync.Mutex
-	fileWorkers    *fileWorkers
+	trees        OwnerStorageFactory
+	conns        connections.Store
+	backupMu     sync.Mutex
+	backupJobs   map[string]bool
+	filesAuth    FilesAuthenticator
+	filesIndex   FileReadIndex
+	mediaCache   mediameta.Cache
+	filesJournal *fileops.Postgres
+	uploadSpools fileUploadSpoolFactory
+	fileWorkerMu sync.Mutex
+	fileWorkers  *fileWorkers
 	// background tracks the goroutines the Start* methods launch, so WaitBackground
 	// can prove they have stopped before the caller closes the pool they use.
 	background sync.WaitGroup
@@ -96,12 +92,6 @@ func New(cfg *config.Config, db *store.DB, objectStorage storage.Storage, web ht
 		server.mediaCache = mediameta.NewPostgresCache(db.Pool())
 		server.conns = connections.NewPostgresStore(db)
 	}
-	if cfg.BackendName() == "cos" && !cfg.Storage.CoordinatedWrites {
-		server.uploadIndex = uploadindex.New(uploadIndexBinding(cfg), uploadindex.NewJournal(db.Pool()), uploadindex.ObserverFunc(server.observeUploadedObject))
-		if driver, ok := objectStorage.(browserupload.Driver); ok {
-			server.browserUploads = browserupload.New(uploadIndexBinding(cfg), browserupload.NewJournal(db.Pool()), driver, server.indexBrowserUpload)
-		}
-	}
 	return server
 }
 
@@ -122,17 +112,17 @@ func (s *Server) StartTimeline(ctx context.Context) {
 	s.timeline.Start(ctx)
 }
 
-// WaitBackground blocks until the background work started by StartTimeline,
-// StartUploadIndex and StartFileOperations has stopped, or ctx ends first. Call it
+// WaitBackground blocks until the background work started by StartTimeline
+// and StartFileOperations has stopped, or ctx ends first. Call it
 // after http.Server.Shutdown has returned and before closing the database pool,
 // storage backend or connection resolver.
 //
 // Shutdown waits for handlers, not for work a handler leaves running after it has
-// answered. The recovery scanners, the upload index, the timeline organizer and
-// every admitted file operation query the same pool; their contexts are cancelled
-// by the same signal, but cancellation only asks them to stop. Closing the pool on
-// cancellation alone is a race that looks clean most of the time and fails exactly
-// under load, so the close path waits here instead of assuming.
+// answered. The recovery scanners, the timeline organizer and every admitted file
+// operation query the same pool; their contexts are cancelled by the same signal,
+// but cancellation only asks them to stop. Closing the pool on cancellation alone
+// is a race that looks clean most of the time and fails exactly under load, so the
+// close path waits here instead of assuming.
 func (s *Server) WaitBackground(ctx context.Context) error {
 	// File operations are the one kind that can still be writing after every
 	// cancellable goroutine has returned: once a native effect is published, fileops

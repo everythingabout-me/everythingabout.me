@@ -39,13 +39,9 @@ func TestReadOnlyBackendRejectsLegacyEffectsBeforeServices(t *testing.T) {
 		})
 	}
 }
-func TestCOSCoordinatedWritesDisableLegacyNativeAuthorities(t *testing.T) {
+func TestCOSCoordinatedWritesExposeNoLegacyServices(t *testing.T) {
 	s := New(&config.Config{Storage: config.Storage{Backend: "cos", CoordinatedWrites: true}}, nil, nil, nil)
-	if s.browserUploads != nil || s.uploadIndex != nil {
-		t.Fatal("coordinated COS retained legacy native writers")
-	}
 	s.StartTimeline(context.Background())
-	s.StartUploadIndex(context.Background())
 	handler := s.Handler()
 	for _, tc := range []struct{ method, path string }{{"POST", "/api/fs/upload/sign"}, {"POST", "/api/fs/upload/confirm"}, {"POST", "/api/fs/mkdir"}, {"POST", "/api/fs/delete"}, {"POST", "/api/fs/rename"}, {"GET", "/api/fs/rename/job"}, {"POST", "/upload"}, {"POST", "/upload/complete"}, {"POST", "/mkdir"}, {"POST", "/move"}, {"POST", "/copy"}, {"POST", "/api/timeline/rebuild"}} {
 		w := httptest.NewRecorder()

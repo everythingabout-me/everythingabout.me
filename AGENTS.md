@@ -149,8 +149,6 @@ while its tests were skipping. CI (`.github/workflows/test.yml`) runs `make migr
 | `backend/internal/mediameta/` | Capture facts (time, GPS, device, size) read from a photo or video by ranged reads, on demand; results are a disposable cache |
 | `backend/internal/timeline/` + `events/` | The stream: analyze → group → score → narrate, stored as `events` |
 | `backend/internal/auth/` `emailcode/` `mail/` | Verification codes, passwords, sessions, API tokens, SES |
-| `backend/internal/browserupload/` | Legacy server-owned upload journal/recovery; constructed and run only for COS without coordinated writes |
-| `backend/internal/uploadindex/` | Legacy direct-upload/folder-marker watch recovery; same COS non-coordinated configuration |
 | `sql/` | Forward-only migrations, run in filename order |
 | `web/src/` | React 19 + Vite + React Router 8; styling is CSS Modules |
 | `docs/` | API and design docs; read these before changing semantics |
@@ -318,8 +316,8 @@ while its tests were skipping. CI (`.github/workflows/test.yml`) runs `make migr
 
 1. `make test` must pass (Go tests + frontend typecheck); run it even if you only touched the frontend.
    A change that touches uploads, the upload journal, operations or the change stream must also pass
-   `make test-pg` against a disposable database — the suites covering `internal/browserupload`,
-   `internal/uploadindex`, `internal/fileops`, `internal/filechanges`, `internal/nodes` and the upload/operation
+   `make test-pg` against a disposable database — the suites covering
+   `internal/fileops`, `internal/filechanges`, `internal/nodes` and the upload/operation
    paths in `internal/api` skip without `EAM_TEST_DATABASE_URL`, so a green `make test` alone is not evidence.
    If no database is available, say so in the handoff instead of merging on skipped coverage.
 2. Run `gofmt` on Go code (or `make fmt`); keep the existing TS style (2 spaces, double quotes, semicolons).
