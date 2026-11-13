@@ -72,7 +72,11 @@ func (p *Postgres) MarkCleaned(ctx context.Context, root Root, a Actor, id strin
 		if err = authorizeOperation(op, root, a, true); err != nil {
 			return err
 		}
-		if !op.Terminal() || uncertainEntries(&op) {
+		uncertain, err := operationEntriesUncertain(ctx, tx, &op)
+		if err != nil {
+			return err
+		}
+		if !op.Terminal() || uncertain {
 			return E("recovery_required", nil)
 		}
 		if op.CleanedAt != nil {

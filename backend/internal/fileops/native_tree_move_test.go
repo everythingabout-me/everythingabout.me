@@ -125,7 +125,8 @@ func TestNativeTreeMovePostgres(t *testing.T) {
 		p, r, actor := seedOwner(t, pool, provenBaseline(0, 0, 100, 1000))
 		actions, native, req := nativeTreeFixture(t, p, r, actor)
 		op := prepareAction(t, actions, req, native)
-		if len(op.Entries) != 1 || op.Entries[0].Action != "move" || len(op.Guards) != 2 || !op.Guards[0].Subtree || !op.Guards[1].Subtree {
+		entries := mustEntries(t, p, op)
+		if len(entries) != 1 || entries[0].Action != "move" || len(op.Guards) != 2 || !op.Guards[0].Subtree || !op.Guards[1].Subtree {
 			t.Fatalf("native move journal: %+v", op)
 		}
 		before := mustUsage(t, p, r, actor)

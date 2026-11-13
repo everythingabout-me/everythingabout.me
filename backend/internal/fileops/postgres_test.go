@@ -92,6 +92,19 @@ func mustClaim(t *testing.T, p *Postgres, op Operation, a Actor) Operation {
 	}
 	return out
 }
+
+// mustEntries loads an operation's manifest the way a reader that needs the list does.
+// After Release B a Get returns no list for a table-backed row, so a test that checks the
+// manifest asks the journal for it instead of reading it off the operation.
+func mustEntries(t *testing.T, p *Postgres, op Operation) []EntryEffect {
+	t.Helper()
+	entries, err := p.Entries(context.Background(), op)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return entries
+}
+
 func mustUsage(t *testing.T, p *Postgres, r Root, a Actor) Usage {
 	t.Helper()
 	u, err := p.Usage(context.Background(), r, a)
@@ -462,7 +475,7 @@ func TestPostgresJournal(t *testing.T) {
 		_, err := p.Settle(ctx, op.Lease, Settlement{State: Succeeded, LogicalDelta: 5, PhysicalDelta: 5}, nil)
 		requireCode(t, err, "invalid_transition")
 		result, err := p.Settle(ctx, op.Lease, Settlement{State: Failed, LogicalDelta: 5, PhysicalDelta: 5, Result: json.RawMessage(`{"applied":[0],"remaining":[1]}`)}, nil)
-		if err != nil || result.Entries[0].State != "applied" || result.Entries[1].State != "pending" {
+		if err != nil || len(result.Entries) != 2 || result.Entries[0].State != "applied" || result.Entries[1].State != "pending" {
 			t.Fatal(result, err)
 		}
 		if u := mustUsage(t, p, r, a); u.LogicalBytes != 5 || u.LogicalReserved != 0 {

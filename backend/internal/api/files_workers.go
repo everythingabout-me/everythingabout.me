@@ -284,10 +284,13 @@ func (s *Server) fileOperationRetained(op fileops.Operation, err error) {
 	attempts, code, nextTry := retry.attempts, retry.code, retry.nextTry
 	worker.mu.Unlock()
 
-	applied, total := 0, len(op.Entries)
-	for _, entry := range op.Entries {
-		if entry.State == "applied" {
-			applied++
+	applied, total := op.EntryCompleted, op.EntryTotal()
+	if op.EntriesLayout != fileops.EntriesLayoutTable {
+		applied = 0
+		for _, entry := range op.Entries {
+			if entry.State == "applied" {
+				applied++
+			}
 		}
 	}
 	attributes := []any{

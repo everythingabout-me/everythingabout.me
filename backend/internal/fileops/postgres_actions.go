@@ -75,7 +75,7 @@ func (p *Postgres) ActionBinding(ctx context.Context, op Operation) (actionBindi
 // source versions; generic Begin remains unable to mint tree credit.
 func (p *Postgres) FreezeAction(ctx context.Context, l Lease, b actionBinding, manifest []ManifestEntry, q ReservationRequest) error {
 	return p.leased(ctx, l, func(tx pgx.Tx, op *Operation, _ time.Time) error {
-		if op.Terminal() || op.Phase != Admitted || len(op.Entries) > 0 || op.CancelRequested {
+		if op.Terminal() || op.Phase != Admitted || op.EntryCount > 0 || op.CancelRequested {
 			return E("invalid_transition", nil)
 		}
 		if _, found, err := readActionBinding(ctx, tx, *op); err != nil {
@@ -130,15 +130,18 @@ func (p *Postgres) FreezeAction(ctx context.Context, l Lease, b actionBinding, m
 		if err != nil {
 			return err
 		}
-		// Freeze is the one moment the manifest appears, so this is where entry_count is
-		// written and where Release A's shadow is seeded in one bulk insert. Both are in this
-		// transaction and behind the parent row lock that `leased` took; the document is
-		// written by the same `leased` call after this function returns. entries_layout is
-		// not written: the column default keeps the row document-backed (sql/049).
-		if _, err = tx.Exec(ctx, `update file_operations set entry_count=$3 where id=$1 and owner_id=$2`, op.ID, op.Root.OwnerID, len(op.Entries)); err != nil {
+		// Freeze is the one moment the manifest appears, so this is where the entry rows
+		// and entry_count are written together with the frozen binding, in this
+		// transaction and behind the parent row lock `leased` took. The document is
+		// written by the same `leased` call after this function returns, without Entries
+		// (documentOf), so the row's layout and its rows cannot disagree. The layout is
+		// already 'table' (admission wrote it, and Claim upgrades a document-backed row
+		// before returning), so this only records the count.
+		if err = writeEntries(ctx, tx, *op, op.Entries); err != nil {
 			return err
 		}
-		return shadowWriteEntries(ctx, tx, *op, op.Entries)
+		_, err = tx.Exec(ctx, `update file_operations set entry_count=$3, entries_layout='table' where id=$1 and owner_id=$2`, op.ID, op.Root.OwnerID, len(op.Entries))
+		return err
 	})
 }
 func validateFrozenAction(op Operation, b actionBinding, entries []ManifestEntry, q ReservationRequest) error {
@@ -261,7 +264,11 @@ func (p *Postgres) SaveActionApplied(ctx context.Context, l Lease, observation *
 		if err != nil {
 			return err
 		}
-		if !found || op.Terminal() || uncertainEntries(op) {
+		uncertain, err := operationEntriesUncertain(ctx, tx, op)
+		if err != nil {
+			return err
+		}
+		if !found || op.Terminal() || uncertain {
 			return E("recovery_required", nil)
 		}
 		req, err := actionRequest(*op)
@@ -270,19 +277,21 @@ func (p *Postgres) SaveActionApplied(ctx context.Context, l Lease, observation *
 		}
 		result := storage.MutationResult{}
 		var evidence []json.RawMessage
-		for _, e := range op.Entries {
-			if e.State == "applied" {
-				if _, err := recordedEntry(e); err != nil {
-					return err
-				}
-				var native storage.MutationResult
-				if json.Unmarshal(e.Result, &native) != nil {
-					return E("invalid_native_result", nil)
-				}
-				evidence = append(evidence, e.Result)
-				if native.Entry != nil && native.Entry.Path == req.To {
-					result.Entry = native.Entry
-				}
+		applied, err := appliedEntries(ctx, tx, *op)
+		if err != nil {
+			return err
+		}
+		for _, e := range applied {
+			if _, err := recordedEntry(e); err != nil {
+				return err
+			}
+			var native storage.MutationResult
+			if json.Unmarshal(e.Result, &native) != nil {
+				return E("invalid_native_result", nil)
+			}
+			evidence = append(evidence, e.Result)
+			if native.Entry != nil && native.Entry.Path == req.To {
+				result.Entry = native.Entry
 			}
 		}
 		if b.Existing != nil {
@@ -326,12 +335,26 @@ func (p *Postgres) MarkActionObservationUnknown(ctx context.Context, l Lease) er
 		if err != nil {
 			return err
 		}
-		if !found || op.Terminal() || uncertainEntries(op) {
+		uncertain, err := operationEntriesUncertain(ctx, tx, op)
+		if err != nil {
+			return err
+		}
+		if !found || op.Terminal() || uncertain {
 			return E("recovery_required", nil)
 		}
-		for _, entry := range op.Entries {
-			if entry.State != "applied" {
+		if op.EntriesLayout == EntriesLayoutTable {
+			unfinished, err := unfinishedEntryExists(ctx, tx, *op)
+			if err != nil {
+				return err
+			}
+			if unfinished {
 				return E("recovery_required", nil)
+			}
+		} else {
+			for _, entry := range op.Entries {
+				if entry.State != "applied" {
+					return E("recovery_required", nil)
+				}
 			}
 		}
 		op.State = Unknown

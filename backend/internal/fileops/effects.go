@@ -45,7 +45,11 @@ func (s *Service) coordinateEntry(ctx context.Context, root Root, actor Actor, i
 	if err != nil {
 		return op, err
 	}
-	entry, intent, err := manifestEffect(op, number)
+	entry, err := s.entryOf(ctx, op, number)
+	if err != nil {
+		return op, err
+	}
+	entry, intent, err := manifestEffect(op, entry)
 	if err != nil {
 		return op, err
 	}
@@ -64,7 +68,11 @@ func (s *Service) coordinateEntry(ctx context.Context, root Root, actor Actor, i
 	}
 	work, stop := s.keepLease(ctx, op.Lease)
 	defer stop()
-	entry, intent, err = manifestEffect(op, number)
+	entry, err = s.entryOf(ctx, op, number)
+	if err != nil {
+		return op, err
+	}
+	entry, intent, err = manifestEffect(op, entry)
 	if err != nil {
 		return op, err
 	}
@@ -144,28 +152,57 @@ func setOperationEntry(op *Operation, entry EntryEffect) {
 	}
 }
 
-func manifestEffect(op Operation, number int) (EntryEffect, storage.EffectIntent, error) {
-	if op.ID == "" || number < 0 {
-		return EntryEffect{}, storage.EffectIntent{}, E("invalid_intent", nil)
+// entryLoader is the journal read a table-backed operation needs for one entry.
+// It is an optional interface on purpose: a document-backed journal (the test
+// fixtures) already carries its entries, and the layout branch — not a type
+// assertion — is what decides whether a read happens.
+type entryLoader interface {
+	Entry(context.Context, Operation, int) (EntryEffect, error)
+}
+
+// entryOf returns one entry from wherever its operation keeps it: the loaded list
+// for a document-backed row, one row read for a table-backed one. This is the
+// per-transition read that replaces the old scan of the whole document (§2.4).
+func (s *Service) entryOf(ctx context.Context, op Operation, number int) (EntryEffect, error) {
+	if op.EntriesLayout == EntriesLayoutTable {
+		if loader, ok := s.journal.(entryLoader); ok {
+			return loader.Entry(ctx, op, number)
+		}
 	}
-	switch op.Kind {
-	case "mkdir", "move", "copy", "delete":
-	default:
-		return EntryEffect{}, storage.EffectIntent{}, E("invalid_intent", nil)
-	}
+	return manifestEntryOf(op.Entries, number)
+}
+
+// manifestEntryOf is the document-backed lookup, including the duplicate-number
+// refusal the document decoder has always applied.
+func manifestEntryOf(entries []EntryEffect, number int) (EntryEffect, error) {
 	var selected EntryEffect
 	found := false
-	for _, entry := range op.Entries {
+	for _, entry := range entries {
 		if entry.Number == number {
 			if found {
-				return EntryEffect{}, storage.EffectIntent{}, E("invalid_intent", nil)
+				return EntryEffect{}, E("invalid_intent", nil)
 			}
 			selected = entry
 			found = true
 		}
 	}
 	if !found {
-		return selected, storage.EffectIntent{}, E("not_found", nil)
+		return EntryEffect{}, E("not_found", nil)
+	}
+	return selected, nil
+}
+
+// manifestEffect validates one already-loaded entry and builds its native intent.
+// The list lookup moved to entryOf: a table-backed operation must not load the
+// whole manifest to run one entry.
+func manifestEffect(op Operation, selected EntryEffect) (EntryEffect, storage.EffectIntent, error) {
+	if selected.Number < 0 {
+		return EntryEffect{}, storage.EffectIntent{}, E("invalid_intent", nil)
+	}
+	switch op.Kind {
+	case "mkdir", "move", "copy", "delete":
+	default:
+		return EntryEffect{}, storage.EffectIntent{}, E("invalid_intent", nil)
 	}
 	e := selected.ManifestEntry
 	if storage.ValidatePath(e.Source) != nil || storage.ValidatePath(e.Target) != nil || e.Size < 0 || e.Size > 9007199254740991 || e.TargetConditions.Absent && len(e.TargetConditions.ExpectedRevision) > 0 {
@@ -199,9 +236,10 @@ func manifestEffect(op Operation, number int) (EntryEffect, storage.EffectIntent
 	selected.Checkpoint = bytes.Clone(selected.Checkpoint)
 	selected.Evidence = bytes.Clone(selected.Evidence)
 	selected.Result = bytes.Clone(selected.Result)
-	intent := storage.EffectIntent{ID: fmt.Sprintf("%s/entry/%d", op.ID, number), Action: e.Action, Source: e.Source, Target: e.Target, Conditions: storage.Conditions{Absent: e.TargetConditions.Absent, ExpectedRevision: bytes.Clone(e.TargetConditions.ExpectedRevision)}, SourceRevision: bytes.Clone(e.SourceRevision)}
+	intent := storage.EffectIntent{ID: fmt.Sprintf("%s/entry/%d", op.ID, selected.Number), Action: e.Action, Source: e.Source, Target: e.Target, Conditions: storage.Conditions{Absent: e.TargetConditions.Absent, ExpectedRevision: bytes.Clone(e.TargetConditions.ExpectedRevision)}, SourceRevision: bytes.Clone(e.SourceRevision)}
 	return selected, intent, nil
 }
+
 func cloneEffectIntent(intent storage.EffectIntent) storage.EffectIntent {
 	intent.SourceRevision = bytes.Clone(intent.SourceRevision)
 	intent.Conditions.ExpectedRevision = bytes.Clone(intent.Conditions.ExpectedRevision)
@@ -265,7 +303,11 @@ func (s *Service) inspectEntry(ctx context.Context, root Root, actor Actor, op O
 	if readErr != nil {
 		return op, errors.Join(cause, readErr)
 	}
-	latestEntry, latestIntent, readErr := manifestEffect(latest, entry.Number)
+	latestEntry, readErr := s.entryOf(persist, latest, entry.Number)
+	if readErr != nil {
+		return op, errors.Join(cause, readErr)
+	}
+	latestEntry, latestIntent, readErr := manifestEffect(latest, latestEntry)
 	if readErr != nil {
 		return op, errors.Join(cause, readErr)
 	}

@@ -26,6 +26,11 @@ func insertJournalRow(t *testing.T, pool *pgxpool.Pool, op Operation) {
 	args["idempotency_key"] = nil
 	args["fingerprint"] = "prune-test"
 	args["entry_count"] = len(op.Entries)
+	layout := op.EntriesLayout
+	if layout == "" {
+		layout = EntriesLayoutDocument
+	}
+	args["entries_layout"] = string(layout)
 	if _, err := pool.Exec(context.Background(), insertOperationSQL, args); err != nil {
 		t.Fatal(err)
 	}

@@ -37,24 +37,18 @@ func (p *Postgres) AccountEntry(ctx context.Context, l Lease, charge EntryCharge
 		if op.Terminal() {
 			return E("invalid_transition", nil)
 		}
-		found := false
-		for _, entry := range op.Entries {
-			if entry.Number == charge.Number {
-				if entry.State != "applied" || len(entry.Evidence) == 0 {
-					return E("recovery_required", nil)
-				}
-				if charge.LogicalDelta > entry.Size {
-					return E("reservation_exceeded", nil)
-				}
-				if op.Root.RetainsVersions && (entry.Action != "copy" || charge.LogicalDelta != entry.Size || charge.PhysicalDelta != entry.Size) {
-					return E("reservation_exceeded", nil)
-				}
-				found = true
-				break
-			}
+		entry, _, err := operationEntry(ctx, op, tx, charge.Number)
+		if err != nil {
+			return err
 		}
-		if !found {
-			return E("not_found", nil)
+		if entry.State != "applied" || len(entry.Evidence) == 0 {
+			return E("recovery_required", nil)
+		}
+		if charge.LogicalDelta > entry.Size {
+			return E("reservation_exceeded", nil)
+		}
+		if op.Root.RetainsVersions && (entry.Action != "copy" || charge.LogicalDelta != entry.Size || charge.PhysicalDelta != entry.Size) {
+			return E("reservation_exceeded", nil)
 		}
 		var logical, physical int64
 		var settled bool

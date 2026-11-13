@@ -95,8 +95,12 @@ func anyApplied(op *Operation) bool {
 	return false
 }
 func (p *Postgres) StartEffect(ctx context.Context, l Lease) error {
-	return p.leased(ctx, l, func(_ pgx.Tx, op *Operation, _ time.Time) error {
-		if op.Phase == EffectStarted || op.Phase == NativeApplied || op.State == Unknown || uncertainEntries(op) {
+	return p.leased(ctx, l, func(tx pgx.Tx, op *Operation, _ time.Time) error {
+		uncertain, err := operationEntriesUncertain(ctx, tx, op)
+		if err != nil {
+			return err
+		}
+		if op.Phase == EffectStarted || op.Phase == NativeApplied || op.State == Unknown || uncertain {
 			return E("recovery_required", nil)
 		}
 		if op.Terminal() || op.CancelRequested {
@@ -110,14 +114,18 @@ func (p *Postgres) StartEffect(ctx context.Context, l Lease) error {
 	})
 }
 func (p *Postgres) SaveApplied(ctx context.Context, l Lease, result storage.MutationResult) error {
-	return p.leased(ctx, l, func(_ pgx.Tx, op *Operation, _ time.Time) error {
+	return p.leased(ctx, l, func(tx pgx.Tx, op *Operation, _ time.Time) error {
 		if op.Phase == NativeApplied {
 			if !equalJSON(op.NativeResult, result) {
 				return E("intent_conflict", nil)
 			}
 			return nil
 		}
-		if op.Terminal() || op.Phase != EffectStarted || uncertainEntries(op) {
+		uncertain, err := operationEntriesUncertain(ctx, tx, op)
+		if err != nil {
+			return err
+		}
+		if op.Terminal() || op.Phase != EffectStarted || uncertain {
 			return E("invalid_transition", nil)
 		}
 		if result.Entry != nil && (result.Entry.Size < 0 || storage.ValidatePath(result.Entry.Path) != nil || !covered(op.Root, op.Guards, result.Entry.Path)) {
@@ -149,8 +157,26 @@ func (p *Postgres) MarkUnknown(ctx context.Context, l Lease, evidence []byte) er
 }
 func (p *Postgres) BeginEntry(ctx context.Context, l Lease, n int) error {
 	return p.leased(ctx, l, func(tx pgx.Tx, op *Operation, _ time.Time) error {
-		if op.Terminal() || op.CancelRequested || op.Phase == NativeApplied || op.State == Unknown || uncertainEntries(op) {
+		uncertain, err := operationEntriesUncertain(ctx, tx, op)
+		if err != nil {
+			return err
+		}
+		if op.Terminal() || op.CancelRequested || op.Phase == NativeApplied || op.State == Unknown || uncertain {
 			return E("recovery_required", nil)
+		}
+		if op.EntriesLayout == EntriesLayoutTable {
+			// One conditional row update. 0 rows means the entry is not pending — another
+			// attempt claimed it or it is terminal — and the answer is recovery_required,
+			// never a second native effect (§2.2).
+			tag, err := tx.Exec(ctx, beginEntrySQL, op.ID, op.Root.OwnerID, n)
+			if err != nil {
+				return err
+			}
+			if tag.RowsAffected() != 1 {
+				return E("recovery_required", nil)
+			}
+			op.Phase = EffectStarted
+			return nil
 		}
 		for i := range op.Entries {
 			e := &op.Entries[i]
@@ -160,9 +186,7 @@ func (p *Postgres) BeginEntry(ctx context.Context, l Lease, n int) error {
 				}
 				e.State = "started"
 				op.Phase = EffectStarted
-				// Release A shadow, in the transaction that will write the document: one
-				// row update instead of rewriting the other 10,001 entries.
-				return shadowWriteEntry(ctx, tx, *op, *e)
+				return nil
 			}
 		}
 		return E("not_found", nil)
@@ -180,74 +204,127 @@ func (p *Postgres) SaveEntry(ctx context.Context, l Lease, n int, state string, 
 				return err
 			}
 		}
-		for i := range op.Entries {
-			e := &op.Entries[i]
-			if e.Number != n {
-				continue
+		// The transition validates against the entry's current durable value. For a table
+		// row that is one row read under the parent lock this transaction already holds;
+		// for a document row it is the list the document carried.
+		entry, position, err := operationEntry(ctx, op, tx, n)
+		if err != nil {
+			return err
+		}
+		if entry.State == "applied" || entry.State == "not_applied" {
+			old := entry
+			old.Checkpoint = checkpoint
+			old.Evidence = evidence
+			old.Result = result
+			old.State = state
+			// A replayed transition already matches the durable value; nothing is written.
+			if !equalJSON(old, entry) {
+				return E("intent_conflict", nil)
 			}
-			if e.State == "applied" || e.State == "not_applied" {
-				old := *e
-				old.Checkpoint = checkpoint
-				old.Evidence = evidence
-				old.Result = result
-				old.State = state
-				if !equalJSON(old, *e) {
-					return E("intent_conflict", nil)
-				}
-				// A replayed transition already matches the document; the shadow row is
-				// rewritten from that same value so a missing row (a row written by the
-				// previous release during the deploy window) becomes present here rather
-				// than staying absent.
-				return shadowWriteEntry(ctx, tx, *op, *e)
+			if op.EntriesLayout != EntriesLayoutTable {
+				op.Entries[position] = entry
 			}
-			switch state {
-			case "started":
-				if e.State != "started" {
-					return E("invalid_transition", nil)
-				}
-				if len(evidence) == 0 {
-					evidence = e.Evidence
-				} else if len(e.Evidence) > 0 && !bytes.Equal(e.Evidence, evidence) {
-					return E("intent_conflict", nil)
-				}
-				if len(result) == 0 {
-					result = e.Result
-				} else if len(e.Result) > 0 && !equalJSON(e.Result, result) {
-					return E("intent_conflict", nil)
-				}
-			case "pending":
-				if e.State != "pending" {
-					return E("invalid_transition", nil)
-				}
-			case "applied", "not_applied", "outcome_unknown":
-				if state != "outcome_unknown" && len(evidence) == 0 {
-					return E("invalid_request", nil)
-				}
-				if e.State != "started" && e.State != "outcome_unknown" {
-					return E("invalid_transition", nil)
-				}
-			default:
+			return nil
+		}
+		switch state {
+		case "started":
+			if entry.State != "started" {
+				return E("invalid_transition", nil)
+			}
+			if len(evidence) == 0 {
+				evidence = entry.Evidence
+			} else if len(entry.Evidence) > 0 && !bytes.Equal(entry.Evidence, evidence) {
+				return E("intent_conflict", nil)
+			}
+			if len(result) == 0 {
+				result = entry.Result
+			} else if len(entry.Result) > 0 && !equalJSON(entry.Result, result) {
+				return E("intent_conflict", nil)
+			}
+		case "pending":
+			if entry.State != "pending" {
+				return E("invalid_transition", nil)
+			}
+		case "applied", "not_applied", "outcome_unknown":
+			if state != "outcome_unknown" && len(evidence) == 0 {
 				return E("invalid_request", nil)
 			}
-			if err := appendCheckpoint(ctx, tx, op, n, checkpoint); err != nil {
+			if entry.State != "started" && entry.State != "outcome_unknown" {
+				return E("invalid_transition", nil)
+			}
+		default:
+			return E("invalid_request", nil)
+		}
+		if err := appendCheckpoint(ctx, tx, op, n, checkpoint); err != nil {
+			return err
+		}
+		entry.State = state
+		entry.Checkpoint = append([]byte(nil), checkpoint...)
+		entry.Evidence = append([]byte(nil), evidence...)
+		entry.Result = result
+		if op.EntriesLayout == EntriesLayoutTable {
+			// One row update, ordered behind the parent row lock this transaction holds.
+			var value any
+			if len(result) > 0 {
+				value = string(result)
+			}
+			if _, err := tx.Exec(ctx, saveEntrySQL, op.ID, op.Root.OwnerID, n, entry.State, entry.Checkpoint, entry.Evidence, value); err != nil {
 				return err
 			}
-			e.State = state
-			e.Checkpoint = append([]byte(nil), checkpoint...)
-			e.Evidence = append([]byte(nil), evidence...)
-			e.Result = result
+			uncertain, err := uncertainEntriesExist(ctx, tx, *op)
+			if err != nil {
+				return err
+			}
 			if state == "outcome_unknown" {
 				op.State = Unknown
-			} else if op.State == Unknown && !uncertainEntries(op) {
+			} else if op.State == Unknown && !uncertain {
 				op.State = Running
 			}
-			// Release A shadow: the same entry value the document is about to carry, written
-			// in the same transaction as the document write.
-			return shadowWriteEntry(ctx, tx, *op, *e)
+			return nil
 		}
-		return E("not_found", nil)
+		op.Entries[position] = entry
+		if state == "outcome_unknown" {
+			op.State = Unknown
+		} else if op.State == Unknown && !uncertainEntries(op) {
+			op.State = Running
+		}
+		return nil
 	})
 }
+
+// operationEntry returns the entry with this number and, for a document-backed
+// operation, its position in the list.
+func operationEntry(ctx context.Context, op *Operation, tx pgx.Tx, number int) (EntryEffect, int, error) {
+	if op.EntriesLayout == EntriesLayoutTable {
+		entry, err := loadEntry(ctx, tx, *op, number)
+		return entry, -1, err
+	}
+	for i := range op.Entries {
+		if op.Entries[i].Number == number {
+			return op.Entries[i], i, nil
+		}
+	}
+	return EntryEffect{}, -1, E("not_found", nil)
+}
+
+// operationEntriesUncertain answers "may an entry still land?" from the durable layout:
+// a row predicate for a table-backed operation, the loaded list for a document-backed
+// one. It must run in a transaction that holds the parent row lock.
+func operationEntriesUncertain(ctx context.Context, tx pgx.Tx, op *Operation) (bool, error) {
+	if op.EntriesLayout == EntriesLayoutTable {
+		return uncertainEntriesExist(ctx, tx, *op)
+	}
+	return uncertainEntries(op), nil
+}
+
+// operationEntriesApplied is the same for "did any entry apply?".
+func operationEntriesApplied(ctx context.Context, tx pgx.Tx, op *Operation) (bool, error) {
+	if op.EntriesLayout == EntriesLayoutTable {
+		return anyAppliedEntry(ctx, tx, *op)
+	}
+	return anyApplied(op), nil
+}
+
 func terminalState(s State) bool { return s == Succeeded || s == Failed || s == Cancelled }
 func finish(op *Operation, s State, now time.Time) {
 	op.State = s
@@ -279,12 +356,20 @@ func (p *Postgres) FinishWithoutEffect(ctx context.Context, l Lease, s State, pr
 			}
 			return E("invalid_transition", nil)
 		}
-		if op.Phase == EffectStarted || op.Phase == NativeApplied || op.NativeResult != nil || uncertainEntries(op) || anyApplied(op) {
+		uncertain, err := operationEntriesUncertain(ctx, tx, op)
+		if err != nil {
+			return err
+		}
+		applied, err := operationEntriesApplied(ctx, tx, op)
+		if err != nil {
+			return err
+		}
+		if op.Phase == EffectStarted || op.Phase == NativeApplied || op.NativeResult != nil || uncertain || applied {
 			return E("recovery_required", nil)
 		}
 		// The caller has proved all staging allocations unused/cleaned before invoking.
 		var logical, physical int64
-		err := tx.QueryRow(ctx, `select logical_reserved,physical_reserved from file_reservations where operation_id=$1 for update`, op.ID).Scan(&logical, &physical)
+		err = tx.QueryRow(ctx, `select logical_reserved,physical_reserved from file_reservations where operation_id=$1 for update`, op.ID).Scan(&logical, &physical)
 		if err != nil {
 			return err
 		}
@@ -338,6 +423,18 @@ func (p *Postgres) Settle(ctx context.Context, l Lease, s Settlement, commit Ind
 			}
 			out = *op
 			return nil
+		}
+		// The settlement's one ordered load. It must stay here: this transaction holds the
+		// parent row lock from the readOperation above, so no transition can change an
+		// entry between this read and the index commit that validates it (§2.3, §2.7).
+		// Hoisting it into Get would reopen the window where an index row commits for an
+		// entry whose evidence was not read.
+		if op.EntriesLayout == EntriesLayoutTable {
+			entries, loadErr := loadEntries(ctx, tx, *op)
+			if loadErr != nil {
+				return loadErr
+			}
+			op.Entries = entries
 		}
 		binding, action, err := readActionBinding(ctx, tx, *op)
 		if err != nil {

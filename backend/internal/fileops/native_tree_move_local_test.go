@@ -72,8 +72,9 @@ func TestNativeTreeMoveLocalThirtyThousand(t *testing.T) {
 	if err != nil || replay {
 		t.Fatalf("prepare real native tree move replay=%v: %v", replay, err)
 	}
-	if len(op.Entries) != 1 || op.Entries[0].Action != "move" || native.lists != 0 {
-		t.Fatalf("descendant enumeration at admission: entries%d lists%d", len(op.Entries), native.lists)
+	entries, err := fixture.journal.Entries(ctx, op)
+	if err != nil || len(entries) != 1 || entries[0].Action != "move" || native.lists != 0 {
+		t.Fatalf("descendant enumeration at admission: entries%d lists%d %v", len(entries), native.lists, err)
 	}
 	done, err := actions.Run(ctx, fixture.root, fixture.actor, op.ID, native)
 	if err != nil || done.State != fileops.Succeeded {

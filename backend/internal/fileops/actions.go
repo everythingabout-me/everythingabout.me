@@ -693,6 +693,54 @@ func actionErrorCode(err error) string {
 	return "storage_failure"
 }
 
+// runEntries is a run's in-memory copy of a table-backed operation's manifest.
+//
+// Release B takes the entries out of the operation document, so the run has to hold
+// them for the decisions that are genuinely about the whole manifest (destination
+// verification, step validation, deltas, the partial result). It loads them once per
+// run, never once per entry: the old shape re-read a document that carried every entry
+// inside the per-entry loop, and that quadratic read was a third of the measured cost
+// (§2.4). The copy is not authority — every write goes through BeginEntry/SaveEntry,
+// which are row updates, and settlement reloads under its own lock.
+type runEntries struct {
+	tracked bool
+	list    []EntryEffect
+}
+
+func (r *runEntries) attach(op Operation) Operation {
+	if r.tracked {
+		op.Entries = r.list
+	}
+	return op
+}
+
+// absorb refreshes one entry after a transition. A table-backed run cannot read the
+// entry state from the returned operation (its document carries none), and the next
+// step's validation (for example "is the destination parent's mkdir already applied?")
+// must see it. One row read per transition is the per-entry accessor, not a manifest
+// load.
+func (a *Actions) absorb(ctx context.Context, r *runEntries, op Operation, number int) (Operation, error) {
+	if !r.tracked {
+		return op, nil
+	}
+	entry, err := a.journal.Entry(ctx, op, number)
+	if err != nil {
+		return op, err
+	}
+	setEntryEffect(r.list, entry)
+	op.Entries = r.list
+	return op, nil
+}
+
+func setEntryEffect(entries []EntryEffect, entry EntryEffect) {
+	for i := range entries {
+		if entries[i].Number == entry.Number {
+			entries[i] = entry
+			return
+		}
+	}
+}
+
 // Run resumes only the saved manifest. Each native entry has its own short worker
 // lease. An unresolved entry is inspected before further work, even after cancel.
 func (a *Actions) Run(ctx context.Context, root Root, actor Actor, id string, native NativeActions) (Operation, error) {
@@ -735,12 +783,34 @@ func (a *Actions) Run(ctx context.Context, root Root, actor Actor, id string, na
 	if err != nil {
 		return op, err
 	}
+	tracked := &runEntries{tracked: op.EntriesLayout == EntriesLayoutTable, list: op.Entries}
+	if tracked.tracked {
+		list, err := a.journal.Entries(ctx, op)
+		if err != nil {
+			return op, err
+		}
+		tracked.list = list
+		op.Entries = list
+	}
+	refresh := func(ctx context.Context) (Operation, error) {
+		next, err := a.journal.Get(ctx, root, actor, id)
+		if err != nil {
+			return next, err
+		}
+		return tracked.attach(next), nil
+	}
 	var cause error
 	// First repair every uncertain effect. Recovery never depends on creator rights
 	// that may have been revoked after its native effect, and never publishes again.
 	for _, entry := range op.Entries {
 		if entry.State == "started" || entry.State == "outcome_unknown" {
-			op, err = a.service.RecoverEntry(ctx, root, actor, id, entry.Number, native)
+			next, callErr := a.service.RecoverEntry(ctx, root, actor, id, entry.Number, native)
+			if next.ID != "" {
+				if next, err = a.absorb(ctx, tracked, next, entry.Number); err != nil {
+					return next, errors.Join(callErr, err)
+				}
+			}
+			op, err = next, callErr
 			if uncertainEntries(&op) {
 				return a.accountUnknown(ctx, root, actor, op, err)
 			}
@@ -763,7 +833,7 @@ func (a *Actions) Run(ctx context.Context, root Root, actor Actor, id string, na
 			if entry.State != "pending" {
 				continue
 			}
-			op, err = a.journal.Get(ctx, root, actor, id)
+			op, err = refresh(ctx)
 			if err != nil {
 				return op, err
 			}
@@ -787,7 +857,7 @@ func (a *Actions) Run(ctx context.Context, root Root, actor Actor, id string, na
 				}
 				destinationsVerified = true
 			}
-			op, err = a.service.ApplyEntry(ctx, root, actor, id, entry.Number, native, func(work context.Context, intent storage.EffectIntent, save storage.Checkpoint) (storage.MutationResult, error) {
+			next, callErr := a.service.ApplyEntry(ctx, root, actor, id, entry.Number, native, func(work context.Context, intent storage.EffectIntent, save storage.Checkpoint) (storage.MutationResult, error) {
 				// Repeat identity checks after the durable entry start and immediately before
 				// passing the actual immutable intent to the admitted native executor.
 				if checkErr := validateActionStep(work, native, req, binding, op, entry); checkErr != nil {
@@ -795,6 +865,12 @@ func (a *Actions) Run(ctx context.Context, root Root, actor Actor, id string, na
 				}
 				return executeAction(work, native, intent, save)
 			})
+			if next.ID != "" {
+				if next, err = a.absorb(ctx, tracked, next, entry.Number); err != nil {
+					return next, errors.Join(callErr, err)
+				}
+			}
+			op, err = next, callErr
 			if uncertainEntries(&op) {
 				return a.accountUnknown(ctx, root, actor, op, err)
 			}
@@ -804,7 +880,7 @@ func (a *Actions) Run(ctx context.Context, root Root, actor Actor, id string, na
 			}
 		}
 	}
-	return a.settle(ctx, root, actor, op, binding, native, cause)
+	return a.settle(ctx, root, actor, op, tracked, binding, native, cause)
 }
 
 // reassertMarker moves a mkdir destination's native marker revision after the settlement
@@ -887,6 +963,13 @@ func (a *Actions) accountUnknown(ctx context.Context, root Root, actor Actor, op
 	}
 	defer releaseLease(persist, a.journal, current.Lease)
 	lease := current.Lease
+	if current.EntriesLayout == EntriesLayoutTable {
+		entries, readErr := a.journal.Entries(persist, current)
+		if readErr != nil {
+			return op, errors.Join(cause, E("outcome_unknown", readErr))
+		}
+		current.Entries = entries
+	}
 	for _, entry := range current.Entries {
 		if entry.State == "applied" && entry.Action == "copy" && entry.Size > 0 {
 			current, err = a.journal.AccountEntry(persist, lease, EntryCharge{Number: entry.Number, LogicalDelta: entry.Size, PhysicalDelta: entry.Size})
@@ -928,7 +1011,7 @@ func (a *Actions) finishInterruptedPrepare(ctx context.Context, root Root, actor
 	} else if !IsCode(err, "manifest_not_frozen") {
 		return op, err
 	}
-	if op.Phase != Admitted || len(op.Entries) != 0 || op.NativeResult != nil || op.Stage != nil {
+	if op.Phase != Admitted || op.HasEntries() || op.NativeResult != nil || op.Stage != nil {
 		return op, E("recovery_required", nil)
 	}
 	state := Failed
@@ -1185,13 +1268,17 @@ func actionPartialResult(op Operation) json.RawMessage {
 	value, _ := json.Marshal(map[string]any{"effects": effects, "remaining": remaining})
 	return value
 }
-func (a *Actions) settle(ctx context.Context, root Root, actor Actor, op Operation, b actionBinding, native NativeActions, cause error) (Operation, error) {
+func (a *Actions) settle(ctx context.Context, root Root, actor Actor, op Operation, entries *runEntries, b actionBinding, native NativeActions, cause error) (Operation, error) {
 	persist, cancel := durableContext(ctx)
 	defer cancel()
 	op, err := a.journal.Claim(persist, root, actor, op.ID, a.options.LeaseTTL)
 	if err != nil {
 		return op, err
 	}
+	// The run's copy carries the states this worker just wrote; Claim returns the parent
+	// without the list for a table-backed row. This is not the authority Settlement
+	// validates — journal.Settle reloads under its own transaction and parent lock.
+	op = entries.attach(op)
 	defer releaseLease(persist, a.journal, op.Lease)
 	if uncertainEntries(&op) {
 		return op, E("outcome_unknown", cause)

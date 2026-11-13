@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"log/slog"
@@ -31,13 +32,20 @@ func writeFilesOperationWithRetry(w http.ResponseWriter, op fileops.Operation, s
 	if !op.Terminal() {
 		w.Header().Set("Retry-After", "2")
 	}
-	completed := 0
-	for _, e := range op.Entries {
-		if e.State == "applied" || e.State == "not_applied" {
-			completed++
+	// Progress is a count, not a load: `entry_count` is the frozen total and the
+	// completed number is one count query filled by the caller (see
+	// fileops.Postgres.EntryProgress). A document-backed row still counts its list,
+	// which it carries.
+	completed := op.EntryCompleted
+	if op.EntriesLayout != fileops.EntriesLayoutTable {
+		completed = 0
+		for _, e := range op.Entries {
+			if e.State == "applied" || e.State == "not_applied" {
+				completed++
+			}
 		}
 	}
-	var total any = len(op.Entries)
+	var total any = op.EntryTotal()
 	unit := "entries"
 	switch {
 	case op.Kind == "upload_commit":
@@ -125,7 +133,7 @@ func (s *Server) handleFilesGetOperation(w http.ResponseWriter, r *http.Request,
 					slog.Warn("file operation could not be queued", "operation", op.ID, "cause", errorCauseChain(e))
 				}
 			}
-			return s.writeFilesOperation(w, op, 200, f)
+			return s.writeFilesOperation(r.Context(), w, op, 200, f)
 		} else if !fileops.IsCode(e, "not_found") {
 			return filesMutationProblem(e)
 		}
@@ -146,13 +154,25 @@ func (s *Server) handleFilesGetOperation(w http.ResponseWriter, r *http.Request,
 			return err
 		}
 	}
-	return s.writeFilesOperation(w, op, 200, f)
+	return s.writeFilesOperation(r.Context(), w, op, 200, f)
 }
 
 // writeFilesOperation attaches the retry record only while the operation is still
 // nonterminal: a terminal operation that failed already explains itself through its
 // Problem, and a stale record must not outlive it.
-func (s *Server) writeFilesOperation(w http.ResponseWriter, op fileops.Operation, status int, scopes ...*fileRequest) error {
+func (s *Server) writeFilesOperation(ctx context.Context, w http.ResponseWriter, op fileops.Operation, status int, scopes ...*fileRequest) error {
+	// Fill the decided-entry count for a table-backed operation. The document no longer
+	// carries the list a status poll used to count, and loading it per poll would put the
+	// quadratic read straight back on the read side; one count of that operation's rows
+	// answers it. An upload has no entries (`entry_count` 0) and a purge reports objects,
+	// so both keep their own counters.
+	if op.EntriesLayout == fileops.EntriesLayoutTable && op.Kind != "upload_commit" && op.Purge == nil {
+		if completed, err := s.filesJournal.EntryProgress(ctx, op); err == nil {
+			op.EntryCompleted = completed
+		} else {
+			slog.Warn("operation progress could not be read", "operation", op.ID, "cause", errorCauseChain(err))
+		}
+	}
 	var retrying map[string]any
 	if !op.Terminal() {
 		retrying = s.fileOperationRetry(op.ID)
@@ -196,7 +216,7 @@ func (s *Server) handleFilesCancelOperation(w http.ResponseWriter, r *http.Reque
 	if !op.Terminal() {
 		status = 202
 	}
-	return s.writeFilesOperation(w, op, status, f)
+	return s.writeFilesOperation(r.Context(), w, op, status, f)
 }
 
 var errFilesWorkerBusy = errors.New("file operation workers are busy")

@@ -19,8 +19,10 @@ package fileops
 //	bytes pass — a trigger on file_operations records, for every INSERT and UPDATE, the
 //	  exact logical document size (`octet_length(snapshot::text)`) and the size of the
 //	  same document with `Entries` removed (`octet_length((snapshot - 'Entries')::text)`).
-//	  The difference is the share of every rewrite that exists only because the entries
-//	  live in the document.
+//	  Before Release B the difference was the share of every rewrite that existed only
+//	  because the entries lived in the document; after it the document carries none, so
+//	  the second number equals the first and the figure to compare with the design doc is
+//	  the total document bytes.
 //	timing pass — no trigger; the pool carries a pgx QueryTracer that attributes every
 //	  statement to a class (document write, locked document read, advisory lock, ...) and
 //	  sums its execution time. The result is the share of the operation spent inside
@@ -337,7 +339,7 @@ func measureCostBytes(t *testing.T, pool *pgxpool.Pool, files int) costBytes {
 	if out.State != Succeeded {
 		t.Fatalf("move of %d files settled %s: %s", files, out.State, out.Problem)
 	}
-	res := readCostWrites(t, ctx, pool, op.ID, files, len(op.Entries))
+	res := readCostWrites(t, ctx, pool, op.ID, files, op.EntryTotal())
 	res.walBytes = costWAL(t, pool) - walBefore
 	return res
 }
@@ -476,9 +478,9 @@ func classifyCostSQL(sql string) string {
 	case strings.Contains(flat, "pg_advisory_xact_lock"):
 		return "owner_advisory_lock"
 	case strings.Contains(flat, "file_operation_entries"):
-		// Release A's shadow write: one row per transition next to the document rewrite.
-		// Measured separately so the one-release cost is visible in the report.
-		return "entry_shadow"
+		// One row read or write per transition, where the document used to carry every
+		// entry. Measured separately so the report shows what the flip moved.
+		return "entry_table"
 	case strings.Contains(flat, "update file_operations"):
 		return "document_write"
 	case strings.Contains(flat, "from file_operations where id=$1 for update"):
@@ -549,7 +551,7 @@ func reportCost(t *testing.T, bytes costBytes, timing *costTiming, files int) {
 			writes, bytes.inserts, bytes.updates, float64(writes)/float64(entries), float64(writes)/float64(files))
 	}
 	t.Logf("document bytes per write: after the manifest froze %d, peak %d", bytes.frozenDoc, bytes.peakDoc)
-	t.Logf("document bytes written by the operation: %d total (%.3f MB); Entries account for %d (%.1f%%)",
+	t.Logf("logical document bytes written by the operation: %d total (%.3f MB); documents still carrying Entries: %d (%.1f%%)",
 		bytes.totalDoc, float64(bytes.totalDoc)/1e6, bytes.totalDoc-bytes.totalNoEntries,
 		100*float64(bytes.totalDoc-bytes.totalNoEntries)/float64(bytes.totalDoc))
 	t.Logf("without Entries the same transitions would write: %d total (%.3f MB) = %.1f%% of the measured volume",

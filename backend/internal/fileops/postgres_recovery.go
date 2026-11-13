@@ -23,14 +23,22 @@ func (p *Postgres) ResolveNotApplied(ctx context.Context, l Lease, state State, 
 		}
 	}
 	return p.leased(ctx, l, func(tx pgx.Tx, op *Operation, now time.Time) error {
-		if op.Terminal() || op.Phase != EffectStarted || op.NativeResult != nil || uncertainEntries(op) || anyApplied(op) {
+		uncertain, err := operationEntriesUncertain(ctx, tx, op)
+		if err != nil {
+			return err
+		}
+		applied, err := operationEntriesApplied(ctx, tx, op)
+		if err != nil {
+			return err
+		}
+		if op.Terminal() || op.Phase != EffectStarted || op.NativeResult != nil || uncertain || applied {
 			return E("recovery_required", nil)
 		}
 		if err := appendCheckpoint(ctx, tx, op, nil, evidence); err != nil {
 			return err
 		}
 		var logical, physical int64
-		err := tx.QueryRow(ctx, `select logical_reserved,physical_reserved from file_reservations where operation_id=$1 for update`, op.ID).Scan(&logical, &physical)
+		err = tx.QueryRow(ctx, `select logical_reserved,physical_reserved from file_reservations where operation_id=$1 for update`, op.ID).Scan(&logical, &physical)
 		if err != nil {
 			return err
 		}

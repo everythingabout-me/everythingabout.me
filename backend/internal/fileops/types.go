@@ -113,24 +113,46 @@ type EntryEffect struct {
 	Result     json.RawMessage
 }
 type Operation struct {
-	Attribution        Actor `json:",omitempty"`
-	ID                 string
-	Root               Root
-	PrincipalID        string
-	Kind               string
-	State              State
-	Phase              Phase
-	Intent             json.RawMessage
-	Fingerprint        string
-	Checkpoint         []byte
-	RecoveryEvidence   []byte
-	Stage              *storage.Staged
-	NativeResult       *storage.MutationResult
-	Result             json.RawMessage
-	Problem            json.RawMessage
-	CancelRequested    bool
-	Guards             []Guard
-	Entries            []EntryEffect
+	Attribution      Actor `json:",omitempty"`
+	ID               string
+	Root             Root
+	PrincipalID      string
+	Kind             string
+	State            State
+	Phase            Phase
+	Intent           json.RawMessage
+	Fingerprint      string
+	Checkpoint       []byte
+	RecoveryEvidence []byte
+	Stage            *storage.Staged
+	NativeResult     *storage.MutationResult
+	Result           json.RawMessage
+	Problem          json.RawMessage
+	CancelRequested  bool
+	Guards           []Guard
+	// Entries is the manifest's per-entry state. For an operation with
+	// EntriesLayoutTable it is not part of the operation document: the rows in
+	// file_operation_entries are the record, and a reader that needs the list asks
+	// for it. Settlement is the one reader that must ask inside its own transaction
+	// (docs/design/journal-entries.md §2.3), and it fills this field on the copy it
+	// commits with. saveOperation pins Entries to null for a table-backed row, so
+	// this field never puts the list back into that document; `omitempty` keeps the key
+	// out of a table-backed document entirely, and a document-backed row that has an
+	// empty list has always been equivalent to one without the key. The field stays
+	// decodable because every row written before Release B spells its list here and
+	// must keep reading until the last one is pruned.
+	Entries []EntryEffect `json:",omitempty"`
+	// EntriesLayout is the durable layout of this operation's entries (sql/049).
+	// It is read from the parent row, never serialized into the document, and it is
+	// immutable after the manifest freezes.
+	EntriesLayout EntriesLayout `json:"-"`
+	// EntryCount is the number of manifest entries, set once at freeze. It is
+	// authoritative only for EntriesLayoutTable; a document-backed row's count is
+	// the document's list. Progress reports it as `total` instead of loading rows.
+	EntryCount int `json:"-"`
+	// EntryCompleted is how many entries are decided (applied or not_applied). It is
+	// filled by the progress read only, never by a transition.
+	EntryCompleted     int `json:"-"`
 	CreatedAt          time.Time
 	FinishedAt         *time.Time
 	RetainUntil        time.Time
@@ -187,6 +209,48 @@ type LivePaths func(context.Context, Root, []storage.Path) ([]bool, error)
 
 func (o Operation) Terminal() bool {
 	return o.State == Succeeded || o.State == Failed || o.State == Cancelled
+}
+
+// EntriesLayout names where an operation's manifest entries live. It is the one
+// switch every reader of the list must branch on, never "does the document happen
+// to carry Entries": a row's layout is durable, the document's shape is not a fact
+// about the operation (docs/design/journal-entries.md §2.1).
+//
+// Forward-only: a binary from before Release B reads only EntriesLayoutDocument, so
+// an operation carrying EntriesLayoutTable is invisible to it and can never settle
+// (§2.6). There is no runtime downgrade path; the drain alternative is named in that
+// section, and the column comment from sql/051 says the same thing to an operator who
+// is about to redeploy an older commit.
+type EntriesLayout string
+
+const (
+	// EntriesLayoutDocument: entries are in the operation document's Entries key.
+	// Every row written before Release B has this layout, including terminal rows
+	// that are never upgraded; they are pruned with their document.
+	EntriesLayoutDocument EntriesLayout = "document"
+	// EntriesLayoutTable: entries are in file_operation_entries and the document
+	// carries none.
+	EntriesLayoutTable EntriesLayout = "table"
+)
+
+// HasEntries reports whether the frozen manifest has any entry. It answers the
+// question every "is this manifest empty?" check asks, from the durable layout
+// rather than from the shape of a document a reader may not have loaded.
+func (o Operation) HasEntries() bool {
+	if o.EntriesLayout == EntriesLayoutTable {
+		return o.EntryCount > 0
+	}
+	return len(o.Entries) > 0
+}
+
+// EntryTotal is the manifest size, from `entry_count` for a table-backed row and
+// from the list for a document-backed one. It is the number a progress report shows
+// as `total`, and the reason a status read never loads the table.
+func (o Operation) EntryTotal() int {
+	if o.EntriesLayout == EntriesLayoutTable {
+		return o.EntryCount
+	}
+	return len(o.Entries)
 }
 
 // Baseline is trusted operator evidence, never an automatic index SUM/backfill.

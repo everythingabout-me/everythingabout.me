@@ -24,7 +24,7 @@ func (p *Postgres) AcceptPrefixDelete(ctx context.Context, l Lease, path storage
 		return out, E("invalid_request", nil)
 	}
 	err := p.leased(ctx, l, func(tx pgx.Tx, op *Operation, now time.Time) error {
-		if op.Terminal() || op.Kind != "delete" || op.Purge != nil || len(op.Entries) > 0 || len(op.Checkpoint) > 0 {
+		if op.Terminal() || op.Kind != "delete" || op.Purge != nil || op.HasEntries() || len(op.Checkpoint) > 0 {
 			return E("invalid_transition", nil)
 		}
 		var request ActionRequest

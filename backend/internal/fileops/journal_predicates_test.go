@@ -23,20 +23,27 @@ import (
 // boundary excludes them.
 func TestOperationJournalPredicatesReadColumns(t *testing.T) {
 	journalRead := regexp.MustCompile(`\bsnapshot\s*->`)
-	check := func(path, source string) {
+	// `Entries` is the one key of the document that has no promoted column. Release A
+	// allowed the exact token everywhere because the list lived in the document; Release B
+	// moved it into file_operation_entries, so production Go must not read the key at all.
+	// The remaining readers are the data backfill (sql/050, which moves a pre-Release-B
+	// document) and test fixtures that have to build the old document shape — hence the
+	// allowance is the exact token in test sources and in that one migration file.
+	entriesKey := "snapshot" + "->'Entries'"
+	check := func(path, source string, allowEntriesKey bool) {
 		t.Helper()
 		for number, line := range strings.Split(source, "\n") {
-			// `Entries` is the one key of the document that has no promoted column: it is the
-			// per-entry list itself, which Release A copies into file_operation_entries. The
-			// backfill (sql/050) and the shadow-agreement test must read the whole list, so
-			// that exact key is allowed; any other arrow read stays banned, because a
-			// predicate over the entries' own fields (number, state, ...) still spells an
-			// arrow out of the document and does not match this exact token.
-			line = strings.ReplaceAll(line, "snapshot->'Entries'", "Entries(list)")
-			line = strings.ReplaceAll(line, "snapshot -> 'Entries'", "Entries(list)")
+			trimmed := strings.TrimSpace(line)
+			if strings.HasPrefix(trimmed, "--") {
+				continue
+			}
+			if allowEntriesKey {
+				line = strings.ReplaceAll(line, entriesKey, "Entries(list)")
+				line = strings.ReplaceAll(line, "snapshot -> 'Entries'", "Entries(list)")
+			}
 			if journalRead.MatchString(line) {
 				t.Errorf("%s:%d reads a journal field out of JSON: %s\n\tquery the promoted column sql/047 added instead",
-					path, number+1, strings.TrimSpace(line))
+					path, number+1, trimmed)
 			}
 		}
 	}
@@ -60,7 +67,7 @@ func TestOperationJournalPredicatesReadColumns(t *testing.T) {
 		if err != nil {
 			return err
 		}
-		check(path, string(data))
+		check(path, string(data), strings.HasSuffix(path, "_test.go"))
 		return nil
 	})
 	if err != nil {
@@ -81,6 +88,6 @@ func TestOperationJournalPredicatesReadColumns(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		check(path, string(data))
+		check(path, string(data), filepath.Base(path) == "050_file_operation_entries_backfill.sql")
 	}
 }

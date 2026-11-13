@@ -82,11 +82,16 @@ type journalColumns struct {
 	IntentTarget        *string
 	StageSize           *int64
 	StageHandle         []byte
+	// EntryCount and EntriesLayout are immutable facts about the manifest, not
+	// derived from the document, so divergence ignores them: they are written at
+	// freeze and by the Claim-time upgrade, never by saveOperation.
+	EntryCount    int
+	EntriesLayout string
 }
 
 // journalColumnList names every promoted column once, in scan order. The migration that
 // added them and the queries below refer to the same names.
-const journalColumnList = `state,phase,created_at,finished_at,retain_until,cleanup_attempted_at,cleaned_at,lease_token,lease_expires_at,root_connection_id,root_generation,root_content_root,root_system_root,root_case_sensitive,root_retains_versions,purge_path,intent_target,stage_size,stage_handle`
+const journalColumnList = `state,phase,created_at,finished_at,retain_until,cleanup_attempted_at,cleaned_at,lease_token,lease_expires_at,root_connection_id,root_generation,root_content_root,root_system_root,root_case_sensitive,root_retains_versions,purge_path,intent_target,stage_size,stage_handle,entry_count,entries_layout`
 
 func journalColumnTargets(c *journalColumns) []any {
 	return []any{
@@ -94,6 +99,7 @@ func journalColumnTargets(c *journalColumns) []any {
 		&c.CleanedAt, &c.LeaseToken, &c.LeaseExpiresAt, &c.RootConnectionID, &c.RootGeneration,
 		&c.RootContentRoot, &c.RootSystemRoot, &c.RootCaseSensitive, &c.RootRetainsVersions,
 		&c.PurgePath, &c.IntentTarget, &c.StageSize, &c.StageHandle,
+		&c.EntryCount, &c.EntriesLayout,
 	}
 }
 
@@ -231,6 +237,7 @@ func readOperationSnapshot(ctx context.Context, q pgx.Tx, id string) (Operation,
 	if err = json.Unmarshal(b, &op); err != nil {
 		return op, nil, err
 	}
+	applyEntryLayout(&op, columns)
 	if err = canonicalOperation(&op); err != nil {
 		return op, nil, err
 	}
@@ -252,6 +259,7 @@ func readOperation(ctx context.Context, tx pgx.Tx, id string) (Operation, []stri
 	}
 	err = json.Unmarshal(b, &op)
 	if err == nil {
+		applyEntryLayout(&op, columns)
 		err = canonicalOperation(&op)
 	}
 	if err != nil {
@@ -260,6 +268,18 @@ func readOperation(ctx context.Context, tx pgx.Tx, id string) (Operation, []stri
 	diverged := divergence(op, columns)
 	warnOperationDivergence(id, diverged)
 	return op, diverged, nil
+}
+
+// applyEntryLayout attaches the immutable layout facts and enforces the one rule that
+// makes the column authoritative: a table-backed row's document carries no entries,
+// so whatever a stale document spelled is discarded. Readers branch on the column,
+// never on whether a document happens to have Entries (§2.1).
+func applyEntryLayout(op *Operation, c journalColumns) {
+	op.EntryCount = c.EntryCount
+	op.EntriesLayout = EntriesLayout(c.EntriesLayout)
+	if op.EntriesLayout == EntriesLayoutTable {
+		op.Entries = nil
+	}
 }
 
 func warnOperationDivergence(id string, diverged []string) {
@@ -300,11 +320,22 @@ func operationArgs(op Operation, snapshot []byte) pgx.NamedArgs {
 	}
 }
 
+// documentOf is the document a table-backed row must keep: its entries live in
+// file_operation_entries, so marshalling the in-memory list (which settlement carries so
+// the index commit can validate it) must never put it back. A document-backed row keeps
+// its list exactly as before.
+func documentOf(op Operation) Operation {
+	if op.EntriesLayout == EntriesLayoutTable {
+		op.Entries = nil
+	}
+	return op
+}
+
 // saveOperation writes the document and the promoted columns in one statement. One statement
 // is the whole reason they cannot disagree for a row this binary wrote: there is no window in
 // which a reader sees the new state in one place and the old state in the other.
 func saveOperation(ctx context.Context, tx pgx.Tx, op Operation) error {
-	b, err := json.Marshal(op)
+	b, err := json.Marshal(documentOf(op))
 	if err != nil {
 		return err
 	}
@@ -601,19 +632,21 @@ func insertGuards(ctx context.Context, tx pgx.Tx, op Operation) error {
 // entry_count is not part of operationArgs: it is set once here from the manifest the
 // admission carries and once by FreezeAction, and never re-derived by saveOperation, so a
 // row written by a binary that keeps entries in the table cannot have its count zeroed by a
-// document write that carries none. entries_layout is left to its default ('document'), which
-// is what makes Release A's rows document-backed by construction (sql/049).
+// document write that carries none. entries_layout is set explicitly to 'table' (Release B):
+// the column default stays 'document' so that a writer which forgets the column produces a
+// complete, readable document rather than a row with no entries anywhere. The default is a
+// safety net, not the writer's answer.
 const insertOperationSQL = `insert into file_operations(
 	id,owner_id,principal_id,action,idempotency_key,fingerprint,snapshot,
 	state,phase,created_at,finished_at,retain_until,cleanup_attempted_at,cleaned_at,
 	lease_token,lease_expires_at,root_connection_id,root_generation,root_content_root,
 	root_system_root,root_case_sensitive,root_retains_versions,purge_path,intent_target,
-	stage_size,stage_handle,entry_count)
+	stage_size,stage_handle,entry_count,entries_layout)
 	values(@id,@owner_id,@principal_id,@action,@idempotency_key,@fingerprint,@snapshot,
 	@state,@phase,@created_at,@finished_at,@retain_until,@cleanup_attempted_at,@cleaned_at,
 	@lease_token,@lease_expires_at,@root_connection_id,@root_generation,@root_content_root,
 	@root_system_root,@root_case_sensitive,@root_retains_versions,@purge_path,@intent_target,
-	@stage_size,@stage_handle,@entry_count)`
+	@stage_size,@stage_handle,@entry_count,@entries_layout)`
 
 // beginTx shares admission with upload sessions under the same owner lock and transaction.
 //
@@ -669,11 +702,11 @@ func (p *Postgres) beginTx(ctx context.Context, tx pgx.Tx, req BeginRequest, fin
 			return err
 		}
 		retention := max(req.RetainFor, 24*time.Hour)
-		op = Operation{Attribution: req.Actor, ID: newID(), Root: req.Root, PrincipalID: req.Actor.ID, Kind: req.Kind, State: Queued, Phase: Admitted, Intent: req.Intent, Fingerprint: fingerprint, Guards: req.Guards, CreatedAt: now, RetainUntil: now.Add(retention), Reservation: req.Reservation}
+		op = Operation{Attribution: req.Actor, ID: newID(), Root: req.Root, PrincipalID: req.Actor.ID, Kind: req.Kind, State: Queued, Phase: Admitted, Intent: req.Intent, Fingerprint: fingerprint, Guards: req.Guards, CreatedAt: now, RetainUntil: now.Add(retention), Reservation: req.Reservation, EntriesLayout: EntriesLayoutTable}
 		for _, e := range req.Manifest {
 			op.Entries = append(op.Entries, EntryEffect{ManifestEntry: e, State: "pending"})
 		}
-		b, err := json.Marshal(op)
+		b, err := json.Marshal(documentOf(op))
 		if err != nil {
 			return err
 		}
@@ -690,14 +723,15 @@ func (p *Postgres) beginTx(ctx context.Context, tx pgx.Tx, req BeginRequest, fin
 		// The count is set here because admission is one of the two moments a manifest can
 		// appear (the other is FreezeAction); entries never change after that.
 		args["entry_count"] = len(op.Entries)
+		args["entries_layout"] = string(op.EntriesLayout)
 		_, err = tx.Exec(ctx, insertOperationSQL, args)
 		if err != nil {
 			return err
 		}
-		// Release A shadow: the table is written with the document, in this transaction and
-		// under the owner lock, so an operation admitted with a manifest is already
-		// table-backed when Release B flips (see postgres_entries.go).
-		if err = shadowWriteEntries(ctx, tx, op, op.Entries); err != nil {
+		// Release B: the table is the entry record, written with the parent in this
+		// transaction and under the owner lock, so a manifest can never be admitted
+		// without its rows (see postgres_entries.go).
+		if err = writeEntries(ctx, tx, op, op.Entries); err != nil {
 			return err
 		}
 		if fence {
@@ -795,6 +829,14 @@ func (p *Postgres) Claim(ctx context.Context, root Root, a Actor, id string, ttl
 		if op.Terminal() {
 			return E("invalid_transition", nil)
 		}
+		// A 'document' row is upgraded on its first Claim: this binary cannot transition
+		// entries it keeps in a document, and the upgrade is what lets an operation from
+		// before Release B (or from the deploy window) settle normally (§2.5). It reads the
+		// document's list, which is the authority for that layout, overwrites any shadow
+		// Release A left behind, and flips the layout in this transaction.
+		if err = upgradeEntries(ctx, tx, &op); err != nil {
+			return err
+		}
 		var uploadState string
 		err = tx.QueryRow(ctx, `select state from file_uploads where operation_id=$1 and owner_id=$2`, op.ID, root.OwnerID).Scan(&uploadState)
 		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
@@ -811,7 +853,13 @@ func (p *Postgres) Claim(ctx context.Context, root Root, a Actor, id string, ttl
 			return E("operation_in_progress", nil)
 		}
 		op.Lease = Lease{OperationID: op.ID, Token: newID(), Epoch: op.Lease.Epoch + 1, ExpiresAt: now.Add(ttl)}
-		if op.Phase == EffectStarted && (len(op.Entries) == 0 || uncertainEntries(&op)) {
+		uncertain := false
+		if op.EntryCount > 0 {
+			if uncertain, err = uncertainEntriesExist(ctx, tx, op); err != nil {
+				return err
+			}
+		}
+		if op.Phase == EffectStarted && (op.EntryCount == 0 || uncertain) {
 			op.State = Unknown
 		} else if op.State != Unknown {
 			op.State = Running

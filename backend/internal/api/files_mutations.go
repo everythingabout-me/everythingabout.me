@@ -1014,7 +1014,7 @@ func (s *Server) filesAction(w http.ResponseWriter, r *http.Request, f *fileRequ
 		if err = s.startFilesAction(r, f, op); err != nil && !errors.Is(err, errFilesWorkerBusy) {
 			return filesMutationProblem(err)
 		}
-		return writeFilesOperation(w, op, 202, f)
+		return s.writeFilesOperation(r.Context(), w, op, 202, f)
 	}
 	if !op.Terminal() {
 		op, err = actions.Run(r.Context(), root, actor, op.ID, native)
@@ -1026,7 +1026,7 @@ func (s *Server) filesAction(w http.ResponseWriter, r *http.Request, f *fileRequ
 		return filesMutationProblem(err)
 	}
 	if !op.Terminal() {
-		return writeFilesOperation(w, op, 202, f)
+		return s.writeFilesOperation(r.Context(), w, op, 202, f)
 	}
 	if op.State != fileops.Succeeded {
 		return filesOperationFailure(op)
@@ -1039,7 +1039,7 @@ func (s *Server) filesAction(w http.ResponseWriter, r *http.Request, f *fileRequ
 	if request.Kind == "move" {
 		status = 200
 	}
-	if request.Kind == "mkdir" && len(op.Entries) == 0 {
+	if request.Kind == "mkdir" && op.EntryTotal() == 0 {
 		status = 200
 	}
 	_ = replay

@@ -322,8 +322,9 @@ func TestActionsPostgres(t *testing.T) {
 		}
 		req := ActionRequest{Root: r, Actor: actor, Kind: "mkdir", To: "one/two/three", Parents: true, IdempotencyKey: "mkdir"}
 		op := prepareAction(t, a, req, n)
-		if len(op.Entries) != 3 || op.Entries[0].Target != "one" || op.Entries[2].Target != req.To {
-			t.Fatal(op.Entries)
+		entries := mustEntries(t, p, op)
+		if len(entries) != 3 || entries[0].Target != "one" || entries[2].Target != req.To {
+			t.Fatal(entries)
 		}
 		out := runAction(t, a, op, actor, n)
 		if out.State != Succeeded || string(out.Result) != `{"path":"/one/two/three"}` {
