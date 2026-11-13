@@ -443,6 +443,747 @@ interface BatchState<T> {
 interface PendingCreate { input: FileUploadInput; key: string; resolve: (session: FileUploadSession) => void; reject: (error: unknown) => void; cancelled: boolean }
 interface PendingSettle { id: string; resolve: (result: FileResource | FileOperation) => void; reject: (error: unknown) => void; cancelled: boolean }
 
+/** One look-ahead admission in flight or in hand, one per file. */
+interface AdmissionEntry { controller: AbortController; promise: Promise<FileUploadSession>; ready: boolean }
+/** The receipt hashes a relay session's parts were verified against, for reselection. */
+interface VerifiedFile { file: File; parts: Map<number, string> }
+/** The global part pool: slots in flight and the queue ordered by file rank, then part. */
+interface PartPool { active: number; waiters: PartWaiter[] }
+
+/**
+ * The cells and operations one attempt's steps may use — and nothing else.
+ *
+ * The steps are module-level functions rather than nested closures so each stage can be
+ * read on its own. This interface is the whole of what they share with the engine: the
+ * maps and sets are the engine's own cells (shared by reference, never copied), the two
+ * getters read cells that are reassigned during the tab's lifetime, and the callbacks are
+ * the engine's already-published operations.
+ */
+interface UploadRunHost {
+  readonly tasks: Map<string, UploadTask>;
+  readonly admissions: Map<string, AdmissionEntry>;
+  readonly admissionFailed: Set<string>;
+  readonly pathClaims: Map<string, () => void>;
+  readonly verified: Map<string, VerifiedFile>;
+  readonly deadlines: Set<ReturnType<typeof setTimeout>>;
+  readonly partPool: PartPool;
+  readonly ranks: Map<string, number>;
+  readonly transferring: Set<string>;
+  /** The authenticated owner, empty until the mount-time session check resolves. */
+  owner(): string;
+  /** The import's standing answer to "this destination already exists". */
+  conflictPolicy(): ConflictPolicy;
+  patch(id: string, changes: Partial<UploadTask>): void;
+  complete(task: UploadTask, item: Item): void;
+  skip(id: string): void;
+  applyOperation(task: UploadTask, operation: FileOperation): void;
+  admitUpload(input: FileUploadInput, key: string, signal?: AbortSignal): Promise<FileUploadSession>;
+  /** Ask the engine for the next turn: a step that finished something schedules the pump. */
+  requestPump(): void;
+  askConflict(path: string): Promise<"replace" | "skip">;
+  settleUpload(id: string, signal?: AbortSignal): Promise<FileResource | FileOperation>;
+  releaseWindow(id: string): void;
+  acquirePart(rank: number, number: number, signal: AbortSignal): Promise<void>;
+  releasePart(): void;
+}
+
+/**
+ * Step: a recorded deletion at this path owns the destination, so this attempt waits.
+ *
+ * Contract
+ * - Caller: the row exists, no bytes have moved for this attempt, and the path may be
+ *   blocked. Nothing else needs to be read first.
+ * - Returns `true` when the row is now `waiting` and the attempt is over, `false` when the
+ *   path is free and the attempt may continue.
+ * - The browser's durable record is the authority, never the task's latched copy: a record
+ *   the page has already settled is not a wait, while a terminal state this row observed
+ *   earlier is kept so "Continue" stays the gesture that clears it.
+ * - Writes only `status`, `waitingFor` and `waitMessage`; sends no request.
+ */
+function waitOnRecordedDeletion(host: UploadRunHost, id: string, task: UploadTask): boolean {
+  const deletion = pendingFileOperation(task.path);
+  if (!deletion) return false;
+  const known = task.waitingFor?.operationId === deletion.id ? task.waitingFor.state : "running";
+  const waitingFor: FileOperationWait = { ...task.waitingFor, operationId: deletion.id, path: deletion.path, state: known, kind: "delete", from: "record" };
+  host.patch(id, { status: "waiting", waitingFor, waitMessage: waitMessage(waitingFor) });
+  return true;
+}
+
+/**
+ * Step: read the Operation a row already names and apply its answer.
+ *
+ * Contract
+ * - Caller: the row has an `operationId` (a publication or folder creation this queue is
+ *   already following) and no recorded deletion.
+ * - Returns `true` when this attempt is over, `false` when the row has no Operation and a
+ *   later stage applies.
+ * - Sends exactly one `GET /operations/{id}`; never allocates, transfers or aborts. A read
+ *   failure propagates to `abandonAttempt`.
+ */
+async function adoptRecordedOperation(host: UploadRunHost, task: UploadTask, signal: AbortSignal): Promise<boolean> {
+  if (!task.operationId) return false;
+  const operation = await api.getOperation(task.operationId, signal);
+  if (!signal.aborted) host.applyOperation(task, operation);
+  return true;
+}
+
+/**
+ * Step: create the folder a directory row stands for.
+ *
+ * Contract
+ * - Caller: `task.isDir` is true and no deletion or Operation holds the path.
+ * - Completes the row from a synchronous answer, or records the Operation and leaves the
+ *   row `finalizing` for the queue's own poll. Either way the attempt is over on return.
+ * - A `409 name_conflict` is a folder that already exists, not a failure: the destination is
+ *   re-read and only a folder answers for it. Every other failure propagates to
+ *   `abandonAttempt`.
+ * - Holds no transfer slot and moves no byte.
+ */
+async function createDirectoryTask(host: UploadRunHost, id: string, task: UploadTask, signal: AbortSignal): Promise<void> {
+  let result: Item | FileOperation;
+  try { result = await api.mkdir(task.path); }
+  catch (error) {
+    if (!(error instanceof ApiError) || error.code !== "name_conflict") throw error;
+    result = await api.metadata(task.path);
+    if (result.kind !== "folder") throw error;
+  }
+  if (signal.aborted) return;
+  if (isOperation(result)) { host.patch(id, { operationId: result.id, status: "finalizing" }); }
+  else { if (result.kind !== "folder") throw new Error("A file occupies the destination folder."); host.complete(task, result); }
+}
+
+/** An open session to move bytes into, or `null` when admission ended the attempt. */
+type AdmissionResult = { session: FileUploadSession; allocated: boolean } | null;
+
+/**
+ * Admission's request side: claim the path, freeze the intent, allocate the session.
+ *
+ * Contract
+ * - Caller: an authenticated owner and a file row whose intent may or may not exist yet.
+ * - The cross-tab claim is taken before the create, because admitting a path is what ends
+ *   an older open session for that path: creating before the claim would let a second tab
+ *   kill this one's session.
+ * - Returns the session and records its `uploadId` on the row; throws the refusal every
+ *   time (there is no "handled" answer here — that is the window's decision in
+ *   `admitUploadAttempt`, so the look-ahead never answers a refusal a row should own).
+ * - The intent and create key are retained in memory before allocation, so a lost create
+ *   ACK can be recovered by replaying the same idempotent request.
+ */
+async function prepareUploadSession(host: UploadRunHost, task: UploadTask, signal: AbortSignal): Promise<FileUploadSession> {
+  if (!host.pathClaims.has(task.id)) {
+    let release: (() => void) | null;
+    const claimController = new AbortController();
+    const abortClaim = () => claimController.abort();
+    signal.addEventListener("abort", abortClaim, { once: true });
+    try { release = await claimUploadPath(host.owner(), task.path, claimController.signal); }
+    catch (error) {
+      if (signal.aborted) throw error;
+      throw new Error(t("drive.uploadCoordinationUnavailable"), { cause: error });
+    } finally { signal.removeEventListener("abort", abortClaim); }
+    if (signal.aborted) { release?.(); throw new DOMException("Upload canceled", "AbortError"); }
+    if (!release) throw new Error(t("drive.uploadAlreadyInProgress"));
+    host.pathClaims.set(task.id, release);
+  }
+  let intent = task.intent;
+  if (!intent) {
+    if (!task.file) throw new Error(t("drive.uploadFileUnavailable"));
+    let condition: FileUploadInput["condition"] = { mode: "create" };
+    if (task.overwrite && task.observedRevision) {
+      // The refusal that raised the question observed the destination, so this row can
+      // name the exact bytes it may replace without another read.
+      condition = { mode: "replace", contentRevision: task.observedRevision };
+    } else if (host.conflictPolicy() === "replace") {
+      // The person answered "replace every file that already exists" for this import, and
+      // that answer is the authorization: this row names no revision at all. Naming one
+      // means reading the destination before the create can be sent — one round trip per
+      // file — and naming the wrong one (an index left behind by an interrupted import)
+      // is refused forever. The server observes the destination and binds that revision
+      // instead, so the write stays conditional on the bytes it found.
+      condition = { mode: "overwrite" };
+    } else if (task.overwrite) {
+      // A replace condition names the bytes it is allowed to overwrite, and a standing
+      // "replace" is a decision about a destination that can be gone by the time this
+      // file's turn comes — a re-imported tree edited between the drop and this row. An
+      // absent destination cannot be named (412 target_changed), so the row creates
+      // instead: the same thing the person would do by hand, and not a failure that has
+      // to be answered again for every file behind it.
+      const old = await observedEntry(task.path);
+      if (old) {
+        if (old.kind !== "file" || !old.contentRevision) throw new Error("The destination cannot be replaced safely.");
+        condition = { mode: "replace", contentRevision: old.contentRevision };
+      }
+    }
+    const sourceModifiedAt = await supportsSourceModifiedAt();
+    if (signal.aborted) throw new DOMException("Upload canceled", "AbortError");
+    intent = { path: task.path, size: task.size, mediaType: task.file?.type || "application/octet-stream", condition,
+      ...(task.parents && condition.mode === "create" ? { parents: true as const } : {}),
+      ...(sourceModifiedAt && task.modifiedAt !== undefined ? { sourceModifiedAt: new Date(task.modifiedAt).toISOString() } : {}) };
+    // Retain the exact intent/key in memory before allocation, including a lost create ACK.
+    host.patch(task.id, { intent });
+  }
+  const session = await host.admitUpload(intent, task.createKey, signal);
+  host.patch(task.id, { uploadId: session.id, allocationRejected: false });
+  return session;
+}
+
+/**
+ * One admission per file, whoever asks first: the look-ahead that prepares a page and the
+ * window that starts the file await the same request, so a file can never be admitted
+ * twice — which for one path would end the other session.
+ *
+ * Contract
+ * - Caller: the pump (look-ahead or window), for a file row that is eligible to start.
+ * - Returns the existing entry when one exists; otherwise starts `prepareUploadSession` and
+ *   registers it before returning, so a second caller joins instead of asking again.
+ * - A refusal removes the entry and marks the file "already refused" unless it was a
+ *   page-level pause; the look-ahead never answers the refusal itself, because a refusal is
+ *   the row's (the window decides between waiting, retrying and failing).
+ * - A prepared session this tab never starts is aborted by the row's teardown, never here.
+ */
+function ensureUploadAdmission(host: UploadRunHost, task: UploadTask): AdmissionEntry {
+  const existing = host.admissions.get(task.id);
+  if (existing) return existing;
+  const controller = new AbortController();
+  const promise = prepareUploadSession(host, task, controller.signal);
+  // An entry this tab prepares and then never starts (a cancellation) must not surface as
+  // an unhandled rejection; whoever drives the row handles the refusal.
+  promise.catch(() => {});
+  const entry: AdmissionEntry = { controller, promise, ready: false };
+  host.admissions.set(task.id, entry);
+  void promise.then(
+    () => {
+      entry.ready = true;
+      host.admissionFailed.delete(task.id);
+      // A file starts the moment its own session is in hand, not when its wave does: a
+      // transfer slot handed to a file that is still waiting for a create page is a slot
+      // that is not moving bytes.
+      host.requestPump();
+    },
+    (error) => {
+      if (host.admissions.get(task.id) === entry) host.admissions.delete(task.id);
+      // A paused page is not this destination's refusal: the look-ahead must be free to
+      // prepare this file again once the queue resumes, so the paused error does not make
+      // it "already refused".
+      if (!isQueuePaused(error)) host.admissionFailed.add(task.id);
+      // The window owns a refusal — it decides between waiting on the blocker, retrying
+      // and failing the row — so the look-ahead steps back and lets the queue move on.
+      host.requestPump();
+    },
+  );
+  return entry;
+}
+
+/**
+ * Step: admission — claim the path, freeze the intent, obtain the session.
+ *
+ * Contract
+ * - Caller: a file row (not a directory) with no recorded deletion or Operation wait, and
+ *   an authenticated owner. The admission may run ahead of the transfer window; the
+ *   caller's snapshot is the row as the attempt started.
+ * - Returns the session and whether *this attempt* allocated it. Only a session this
+ *   attempt created may trust its reported `receivedParts`; a resumed one must list.
+ * - Returns `null` when admission itself decided the row's next state: an allocation
+ *   refusal marked for the failure list, a committing publication adopted, a blocker
+ *   Operation watched or already ended, a lost replace target re-queued, or a name conflict
+ *   answered (replace or skip). Every other refusal is thrown for `abandonAttempt`.
+ * - Ordering is the server's fence: the cross-tab claim is taken before the create, so
+ *   admitting a path is what ends an older open session for it.
+ * - Sends at most one create (or one status read when the row already holds a session),
+ *   plus at most one read of the Operation that holds the path.
+ */
+async function admitUploadAttempt(host: UploadRunHost, id: string, task: UploadTask, signal: AbortSignal): Promise<AdmissionResult> {
+  // A session the look-ahead prepared is already in hand: starting the file must not ask
+  // the server again. A file with no admission yet is admitted here, so a queue that has
+  // not caught up (or a resumed row) still works — that is the same request, only later.
+  // Clearing the refused mark here re-arms the look-ahead for a file the window is about
+  // to retry, which is the only place a refusal gets a second opinion.
+  host.admissionFailed.delete(task.id);
+  const entry = task.uploadId && !host.admissions.has(task.id) ? undefined : host.admissions.get(task.id) ?? ensureUploadAdmission(host, task);
+  if (!entry) return { session: await api.uploadStatus(task.uploadId!, signal), allocated: false };
+  let session: FileUploadSession;
+  try { session = await entry.promise; }
+  catch (error) {
+    if (error instanceof ApiError && [400, 401, 403, 409, 413, 422, 507].includes(error.status)) host.patch(id, { allocationRejected: true });
+    // An upload that holds the path is one that is committing: an open session fences
+    // nothing, and the server ends an older open session for this path itself when it
+    // admits a new one. So the only upload this refusal can name is a publication
+    // already under way, and only that kind needs the session resource. Every other
+    // holder (mkdir, delete, move, copy) is answered by its own Operation, so asking
+    // /uploads/{id} about it was a request that could only ever 404 — one red line and
+    // one round trip per conflict that could not change the outcome. A server that does
+    // not name the kind still gets the probe, because then it is the only way to tell
+    // the two apart.
+    //
+    // An Operation this branch reads is kept for the generic wait below: both ask
+    // the same resource what it is doing, and a second round trip learns nothing.
+    let blockerOperation: FileOperation | undefined;
+    if (error instanceof ApiError && error.code === "operation_in_progress" && error.operationId
+      && (error.operationKind === undefined || error.operationKind === "upload_commit")) {
+      let blocking: FileUploadSession | undefined;
+      try { blocking = await api.uploadStatus(error.operationId, signal); }
+      catch (statusError) {
+        // Only a definitive non-upload identity belongs in generic Operation waiting.
+        if (!(statusError instanceof ApiError) || statusError.status !== 404) throw statusError;
+      }
+      if (signal.aborted) return null;
+      if (blocking?.id === error.operationId && relative(blocking.path) === task.path) {
+        if (["aborted", "expired", "failed"].includes(blocking.state)) {
+          const operation = await api.getOperation(blocking.id, signal);
+          blockerOperation = operation;
+          if (signal.aborted) return null;
+          if (operation.id === blocking.id && operation.state === "cancelled") {
+            host.patch(id, { status: "queued", allocationRejected: false });
+            return null;
+          }
+        }
+        if (blocking.state === "committed" && blocking.result) {
+          host.complete(task, blocking.result);
+          return null;
+        }
+        // The path's earlier attempt is already publishing, and a second session over it
+        // could only wait for this one. Adopt it instead: the poll finishes the row from
+        // the same Operation and its own result. No abort and no allocation — which is
+        // also what the contract forbids for committing/outcome_unknown work. Treated as
+        // an unrelated blocker, this was the state that showed "waiting for deletion of
+        // <a file>" and cost a poll interval per file.
+        if (blocking.state === "committing" || blocking.state === "outcome_unknown" || blocking.state === "committed") {
+          if (!signal.aborted) host.patch(id, { uploadId: blocking.id, operationId: blocking.operationId ?? error.operationId, status: "finalizing", uploaded: true, speed: 0, allocationRejected: false });
+          return null;
+        }
+      }
+    }
+    // A non-delete blocker is almost always one of this import's own short-lived steps:
+    // the destination's missing ancestors are created inside another create, so a
+    // sibling's folder creation can refuse this one for milliseconds. Ask once whether
+    // it has already ended and retry; latching a poll for it cost a poll interval per
+    // file and showed the row "waiting for deletion of <a file>" for a deletion that
+    // never existed. A deletion is different: it is long, it is the user's decision,
+    // and it must keep the wait and its own report.
+    if (error instanceof ApiError && error.operationKind && error.operationKind !== "delete" && error.operationId) {
+      // The resource has to be the blocking Operation: another operation's terminal
+      // state, even one this attempt just read, says nothing about this path.
+      const blocker = blockerOperation?.id === error.operationId
+        ? blockerOperation
+        : await api.getOperation(error.operationId, signal).catch(() => undefined);
+      if (signal.aborted) return null;
+      if (blocker && blocker.id === error.operationId && ["succeeded", "failed", "cancelled"].includes(blocker.state)) {
+        host.patch(id, { status: "queued", allocationRejected: false });
+        return null;
+      }
+    }
+    if (error instanceof ApiError && error.status === 412 && error.code === "target_changed" && task.overwrite && task.observedRevision) {
+      // The destination the replace condition named is gone — the tree was edited
+      // between the conflict probe and this attempt. Nothing is left to replace, so
+      // the row creates; leaving it failed would turn a deleted file into an import
+      // that has to be answered again.
+      host.patch(id, { overwrite: false, observedRevision: undefined, intent: undefined, createKey: taskId(), status: "queued" });
+      return null;
+    }
+    if (error instanceof ApiError && error.status === 409 && error.code === "name_conflict" && !task.overwrite) {
+      // The refusal already names the revision the server observed at the destination,
+      // which is the only value a replacement can prove it may overwrite: reading the
+      // same file again would spend a round trip per file to learn what this answer
+      // just said. A refusal without it (a provider's own 409, a folder) still reads.
+      const named = error instanceof FileApiError ? error.problem.observedRevision : undefined;
+      const old = named === undefined ? await observedEntry(task.path) : { kind: "file" as const, contentRevision: named };
+      if (!old) { host.patch(id, { status: "queued", intent: undefined, createKey: taskId() }); return null; }
+      if (old.kind === "file") {
+        if (await host.askConflict(task.path) === "replace") {
+          host.patch(id, { overwrite: true, observedRevision: old.contentRevision ?? undefined, intent: undefined, createKey: taskId(), status: "queued" }); return null;
+        }
+        host.skip(id); return null;
+      }
+    }
+    throw error;
+  }
+  host.admissions.delete(id);
+  return { session, allocated: true };
+}
+
+/**
+ * What to do with the session admission returned.
+ *
+ * `stop` means the row's next state is already written; `settle` means the bytes are
+ * already at the destination (a retried publication whose object the server recognized);
+ * `upload` means a transfer slot should move the missing parts first.
+ */
+type TransferPlan =
+  | { kind: "stop" }
+  | { kind: "settle"; task: UploadTask; session: FileUploadSession }
+  | { kind: "upload"; task: UploadTask; session: FileUploadSession; file: File; allocated: boolean };
+
+/**
+ * Step: decide what the session admission returned still needs.
+ *
+ * Contract
+ * - Caller: admission returned a session and the patched row was re-read, so `task` is the
+ *   snapshot the transfer will use.
+ * - A `committed` session completes the row; a `committing` or `outcome_unknown` one is
+ *   adopted by its Operation; a terminal one fails — or re-queues when the person asked
+ *   for a retry; an `open` one moves bytes unless the server says they are already there.
+ * - Returns the plan; throws when an open session's file is gone, the wrong size, or an
+ *   unknown state arrives, and the abandon step reports it.
+ * - Sends no request and takes no transfer slot; the row's `uploadId` is already recorded.
+ */
+function takeUploadSession(host: UploadRunHost, id: string, task: UploadTask, admission: { session: FileUploadSession; allocated: boolean }): TransferPlan {
+  const { session } = admission;
+  if (session.state === "committed") {
+    if (!session.result) throw new Error("The upload result is incomplete.");
+    host.complete(task, session.result);
+    return { kind: "stop" };
+  }
+  if (session.state === "committing" || session.state === "outcome_unknown") {
+    host.patch(id, { operationId: session.operationId, status: "finalizing", uploaded: true });
+    return { kind: "stop" };
+  }
+  if (session.state !== "open") {
+    if (session.state === "failed" || session.state === "aborted" || session.state === "expired") {
+      if (task.retryRequested && task.file) {
+        host.patch(id, { status: "queued", uploadId: undefined, operationId: undefined, intent: undefined, observedRevision: undefined, createKey: taskId(), terminalState: undefined, retryRequested: false, uploaded: false, loaded: 0 });
+        return { kind: "stop" };
+      }
+      host.patch(id, { terminalState: session.state });
+    }
+    throw new Error(`Upload ${session.state}; select the file again to start a new session.`);
+  }
+  if (!task.file) {
+    host.patch(id, { status: "failed", error: t("drive.uploadFileUnavailable"), speed: 0 });
+    return { kind: "stop" };
+  }
+  if (task.file.size !== session.size) throw new Error("The selected file has a different size.");
+  // A retried publication whose bytes already landed: the server recognized its own
+  // object at the destination and admitted a session that only has to settle it.
+  // Uploading again would be refused by the create condition, so the row goes straight
+  // to commit — the same trailing steps every other row takes after its bytes are in.
+  if (session.bytesPresent) return { kind: "settle", task, session };
+  return { kind: "upload", task, session, file: task.file, allocated: admission.allocated };
+}
+
+/**
+ * Step: transfer/parts — make every part of an open session durable.
+ *
+ * Contract
+ * - Caller: an `open` session, the row's current File, and a size that matches the
+ *   session. The row holds no transfer slot yet.
+ * - Takes a transfer slot for this file (the caller's `finally` releases it on every path)
+ *   and holds a part slot only while a part is actually in flight; the global pool orders
+ *   files by their first-start rank.
+ * - Returns `true` when every part is durable and the row may settle, `false` when the
+ *   attempt is over (aborted, or an ascending session still has parts and the row went back
+ *   to the queue as `queued`).
+ * - Reads receipts before sending anything it cannot prove is missing; a lost ACK is
+ *   resolved by a status + receipts read, never by a blind resend. A failure that survives
+ *   the bounded retries (or a non-transient one) throws after reporting the bytes it has.
+ * - Progress is published at most once per `PROGRESS_INTERVAL_MS`, and the speed sample
+ *   covers `SPEED_WINDOW_MS`.
+ * - Only a session this attempt allocated may trust `receivedParts`; any other session is
+ *   listed first.
+ */
+async function moveUploadParts(
+  host: UploadRunHost,
+  id: string,
+  session: FileUploadSession,
+  file: File,
+  allocated: boolean,
+  signal: AbortSignal,
+): Promise<boolean> {
+  // The session is in hand, so this file can move bytes and takes a transfer slot now.
+  // Taking it at claim time instead put slots on files that were still waiting for their
+  // create page, and the part pool then had nothing to hand out.
+  host.transferring.add(id);
+  if (!Number.isSafeInteger(session.partSize) || session.partSize < 1 || !Number.isSafeInteger(session.partCount)
+    || session.partCount !== Math.ceil(session.size / session.partSize)
+    || !["any", "ascending"].includes(session.ordering)) throw new Error("Invalid upload session geometry.");
+  const classA = session.class === "A";
+  if (classA && session.transport?.kind !== "presigned-parts") throw new Error("A class A session must advertise its presigned part window.");
+  if (!classA && session.class !== "C") throw new Error("Unsupported upload transfer class.");
+  if (!classA && session.transport?.kind !== "relay") throw new Error("A class C session must advertise its relay URL.");
+  const parallelism = session.ordering === "ascending" ? 1 : PART_POOL_SIZE;
+  const chunkFor = (number: number) => {
+    const start = (number - 1) * session.partSize;
+    return file.slice(start, Math.min(start + session.partSize, session.size));
+  };
+  const known = new Map<number, number>();
+  let verification = host.verified.get(session.id);
+  if (!classA && (!verification || verification.file !== file)) {
+    verification = { file, parts: new Map() };
+    host.verified.set(session.id, verification);
+  }
+  const verifyReceipt = async (receipt: { number: number; size: number; sha256: string }) => {
+    if (!Number.isSafeInteger(receipt.number) || receipt.number < 1 || receipt.number > session.partCount) throw new Error("Invalid part receipt.");
+    const chunk = chunkFor(receipt.number);
+    if (receipt.size !== chunk.size || (verification!.parts.get(receipt.number) !== receipt.sha256 && await sha256(chunk) !== receipt.sha256)) throw new Error(t("drive.reselectedFileChanged"));
+    verification!.parts.set(receipt.number, receipt.sha256);
+  };
+  const readParts = async (requestSignal: AbortSignal) => {
+    const result = new Map<number, number>();
+    let next: string | undefined;
+    let watermark: number | undefined;
+    do {
+      const page = await api.uploadParts(session.id, next, requestSignal);
+      if (!classA && watermark !== undefined && page.watermark !== watermark) throw new Error("The receipt watermark changed.");
+      watermark = page.watermark;
+      for (const part of page.items) {
+        if (result.has(part.number)) throw new Error("Invalid part listing.");
+        const chunk = chunkFor(part.number);
+        if (part.size !== chunk.size) throw new Error("The provider part size changed.");
+        if (classA) {
+          if (!("etag" in part) || typeof part.etag !== "string") throw new Error("Invalid provider part listing.");
+        } else {
+          if (!("sha256" in part)) throw new Error("Invalid part receipt.");
+          await verifyReceipt(part);
+        }
+        result.set(part.number, part.size);
+      }
+      next = page.nextCursor ?? undefined;
+    } while (next);
+    return result;
+  };
+  // A session this attempt created holds exactly what it reported, so an empty one needs
+  // no listing: one request saved per file, a quarter of a 23k-file import's traffic.
+  // Anything else lists, because receipts the client never saw are the only way it can
+  // know what is already durable.
+  if (!allocated || session.receivedParts > 0) {
+    for (const [number, size] of await readParts(signal)) known.set(number, size);
+  }
+  if (signal.aborted) return false;
+  let received = [...known.values()].reduce((sum, size) => sum + size, 0);
+  host.patch(id, { loaded: received, speed: 0 });
+  const missing: number[] = [];
+  // Up to `parallelism` workers drain this file's missing parts; every request also
+  // takes a slot from the global part pool, so the next queued part starts as soon
+  // as any part anywhere finishes.
+  for (let number = 1; number <= session.partCount && (session.ordering !== "ascending" || missing.length < 1); number++) {
+    if (!known.has(number)) missing.push(number);
+  }
+  if (session.ordering === "ascending" && missing.length && session.nextPart !== missing[0]) throw new Error("The next upload part changed.");
+  const grants = new Map<number, FileUploadPartGrant>();
+  if (classA && session.transport?.kind === "presigned-parts") {
+    for (const grant of session.transport.parts) grants.set(grant.number, grant);
+  }
+  let grantChain: Promise<void> = Promise.resolve();
+  const ensureGrants = (from: number): Promise<void> => {
+    const run = grantChain.then(async () => {
+      if (grants.has(from) && Date.parse(grants.get(from)!.expiresAt) > Date.now()) return;
+      const numbers: number[] = [];
+      for (let number = from; number <= session.partCount && numbers.length < 32; number++) {
+        const current = grants.get(number);
+        if (!known.has(number) && (!current || Date.parse(current.expiresAt) <= Date.now())) numbers.push(number);
+      }
+      if (!numbers.length) return;
+      for (const grant of await api.signUploadParts(session.id, numbers, signal)) {
+        if (grant.number < 1 || grant.number > session.partCount || grant.size !== chunkFor(grant.number).size) throw new Error("The signed part geometry changed.");
+        grants.set(grant.number, grant);
+      }
+    });
+    grantChain = run.catch(() => {});
+    return run;
+  };
+  if (classA && missing.length) await ensureGrants(missing[0]);
+  if (missing.length) {
+    const batch = new AbortController();
+    const abortBatch = () => batch.abort();
+    signal.addEventListener("abort", abortBatch, { once: true });
+    const inFlight = new Map<number, number>();
+    const samples: ProgressSample[] = [];
+    const flush = () => {
+      if (signal.aborted || batch.signal.aborted) return;
+      const at = performance.now();
+      const loaded = Math.min(session.size, received + [...inFlight.values()].reduce((sum, bytes) => sum + bytes, 0));
+      samples.push({ at, loaded });
+      while (samples.length > 1 && at - samples[0].at > SPEED_WINDOW_MS) samples.shift();
+      const elapsed = at - samples[0].at;
+      host.patch(id, { loaded, speed: elapsed > 0 ? Math.max(0, loaded - samples[0].loaded) * 1000 / elapsed : 0 });
+    };
+    // One sample per second, independent of how often XHR reports bytes: the list
+    // stays readable, and a stalled link visibly falls to 0 B/s instead of freezing
+    // on its last value.
+    const ticker = setInterval(flush, PROGRESS_INTERVAL_MS);
+    host.deadlines.add(ticker);
+    const cancelProgress = () => {
+      clearInterval(ticker);
+      host.deadlines.delete(ticker);
+    };
+    const retryDelay = (attempt: number) => new Promise<void>((resolve, reject) => {
+      if (batch.signal.aborted) { reject(new DOMException("Upload canceled", "AbortError")); return; }
+      const abort = () => { clearTimeout(timer); host.deadlines.delete(timer); reject(new DOMException("Upload canceled", "AbortError")); };
+      const timer = setTimeout(() => { host.deadlines.delete(timer); batch.signal.removeEventListener("abort", abort); resolve(); },
+        Math.min(PART_RETRY_MAX_DELAY_MS, PART_RETRY_DELAY_MS * 2 ** attempt));
+      host.deadlines.add(timer);
+      batch.signal.addEventListener("abort", abort, { once: true });
+    });
+    let failure: unknown;
+    try {
+      const pending = [...missing];
+      const uploadOne = async (number: number) => {
+        const chunk = chunkFor(number);
+        try {
+          let attempt = 0;
+          let busy = 0;
+          while (attempt < PART_UPLOAD_ATTEMPTS) {
+            if (batch.signal.aborted) throw new DOMException("Upload canceled", "AbortError");
+            try {
+              if (classA) {
+                await ensureGrants(number);
+                const grant = grants.get(number);
+                if (!grant) throw new Error("The part grant is unavailable.");
+                await api.uploadPresignedPart(grant, chunk, batch.signal, (sample) => {
+                  if (batch.signal.aborted || known.has(number)) return;
+                  inFlight.set(number, Math.max(inFlight.get(number) ?? 0, Math.max(0, Math.min(chunk.size, sample.loaded))));
+                });
+                grants.delete(number);
+              } else {
+                const receipt = await api.uploadPart(session.id, number, chunk, batch.signal, (sample) => {
+                  if (batch.signal.aborted || known.has(number)) return;
+                  inFlight.set(number, Math.max(inFlight.get(number) ?? 0, Math.max(0, Math.min(chunk.size, sample.loaded))));
+                });
+                if (receipt.number !== number) throw new Error("The part receipt identity changed.");
+                await withVerifySlot(() => verifyReceipt(receipt));
+                known.set(number, receipt.size);
+              }
+              if (batch.signal.aborted) return;
+              if (classA) known.set(number, chunk.size);
+              received += chunk.size;
+              inFlight.delete(number);
+              return;
+            } catch (error) {
+              if (batch.signal.aborted) throw error;
+              if (error instanceof ApiError && error.status === 429) {
+                // The receiver is full with other parts. Waiting is the protocol;
+                // counting this as a failed attempt would abort the whole file.
+                if (++busy > PART_BUSY_WAITS) throw error;
+                inFlight.delete(number);
+                await retryDelay(Math.min(busy, 3));
+                continue;
+              }
+              const transient = !(error instanceof ApiError) || [0, 403, 408, 425, 500, 502, 503, 504].includes(error.status);
+              if (!transient) throw error;
+              // A lost ACK may already represent durable success. Inspect the
+              // original session and exact byte identity before any replay.
+              const status = await api.uploadStatus(session.id, batch.signal);
+              if (status.state !== "open") throw error;
+              const existing = await readParts(batch.signal);
+              if (existing.has(number)) {
+                if (classA) grants.delete(number);
+                known.set(number, existing.get(number)!);
+                received = [...known.values()].reduce((sum, size) => sum + size, 0);
+                inFlight.delete(number);
+                return;
+              }
+              if (classA) grants.delete(number);
+              if (++attempt === PART_UPLOAD_ATTEMPTS) throw error;
+              inFlight.delete(number);
+              await retryDelay(attempt - 1);
+            }
+          }
+        } catch (error) {
+          if (failure === undefined) failure = error;
+          batch.abort();
+        }
+      };
+      const rank = host.ranks.get(id) ?? Number.MAX_SAFE_INTEGER;
+      // Slots this file holds right now, across its workers. A worker keeps its slot
+      // between its own parts, so this count is what the row reads to decide whether
+      // the file is moving.
+      let held = 0;
+      const holdSlot = () => { held++; host.patch(id, { activeParts: held }); };
+      const yieldSlot = () => { held--; host.releasePart(); host.patch(id, { activeParts: held }); };
+      await Promise.all(Array.from({ length: Math.min(parallelism, pending.length) }, async () => {
+        let holding = false;
+        try {
+          for (let number = pending.shift(); number !== undefined && !batch.signal.aborted; number = pending.shift()) {
+            // Keep a held slot unless a part queued by an earlier file, or this file's
+            // own earlier part, is waiting for it.
+            const head = host.partPool.waiters[0];
+            if (holding && head && (head.rank < rank || head.rank === rank && head.number < number)) { holding = false; yieldSlot(); }
+            if (!holding) {
+              try { await host.acquirePart(rank, number, batch.signal); }
+              catch (error) { if (failure === undefined && !signal.aborted) failure = error; return; }
+              holding = true; holdSlot();
+            }
+            await uploadOne(number);
+          }
+        } finally { if (holding) yieldSlot(); }
+      }));
+    } finally { signal.removeEventListener("abort", abortBatch); cancelProgress(); }
+    if (signal.aborted) return false;
+    if (failure !== undefined) { host.patch(id, { loaded: received }); throw failure; }
+    // Ascending sessions send one new part per turn; requeue for the next one.
+    if (known.size !== session.partCount) { host.patch(id, { loaded: received, status: "queued", speed: 0 }); return false; }
+  }
+  return true;
+}
+
+/**
+ * Step: settle — publish the uploaded bytes and adopt the answer.
+ *
+ * Contract
+ * - Caller: every part is durable (or the server recognized them), and no settle has been
+ *   sent for this attempt yet.
+ * - Marks the row `finalizing`, gives the transfer slot back before waiting, then sends the
+ *   idempotent commit (bounded retries, abandoned on abort). A file answer completes the
+ *   row; an Operation answer is recorded for the poll to follow.
+ * - Returns nothing; a commit failure that survives retries propagates to `abandonAttempt`.
+ *   A page-level settlement failure reaches it as `QueuePaused` and re-queues the row.
+ */
+async function settleUploadSession(host: UploadRunHost, id: string, task: UploadTask, session: FileUploadSession, signal: AbortSignal): Promise<void> {
+  host.patch(id, { status: "finalizing", uploaded: true, loaded: session.size, speed: 0 });
+  // The bytes are placed. Give the slot back before waiting for the settlement: the
+  // next admitted file starts streaming now, and this row's answer arrives on its own.
+  host.releaseWindow(id);
+  const result = await commitUpload(session.id, signal, host.settleUpload);
+  if (signal.aborted) return;
+  if (isOperation(result)) { host.patch(id, { operationId: result.id }); }
+  else { host.complete(task, result); }
+}
+
+/**
+ * Step: retry/abandon — map a failed attempt to the row's next state.
+ *
+ * Contract
+ * - Caller: the attempt threw and was not aborted. `error` may be anything a stage (or the
+ *   server) produced.
+ * - A `QueuePaused` page failure never fails a row: the row goes back to `queued` with its
+ *   session, intent and create key intact, and the queue's one message explains the stop.
+ * - A live `operation_in_progress` becomes a `waiting` row that names the blocker's kind;
+ *   a name conflict becomes the replace/skip question (or a failure when the destination
+ *   is not a file); everything else fails the row with the server's Problem text.
+ * - Returns nothing; may read the destination once and may ask the conflict question.
+ */
+async function abandonAttempt(host: UploadRunHost, id: string, error: unknown): Promise<void> {
+  if (isQueuePaused(error)) {
+    // The page this file was carried by failed as a whole, so this row is not a
+    // failure. It returns to the queue with its session, intent and create key intact —
+    // a settle resumes by asking the server about that session again, and an admission
+    // replays the same idempotent create — while the one message explains the stop.
+    host.patch(id, { status: "queued", speed: 0 });
+    return;
+  }
+  if (error instanceof ApiError && error.code === "operation_in_progress" && error.operationId) {
+    const task = host.tasks.get(id);
+    const waitingFor: FileOperationWait = { operationId: error.operationId, path: task?.path ?? "", state: "running", kind: waitKind(error.operationKind), from: "conflict" };
+    host.patch(id, { status: "waiting", waitingFor, waitMessage: waitMessage(waitingFor), speed: 0 });
+  } else if (error instanceof ApiError && error.status === 409 && error.code === "name_conflict" && !(host.tasks.get(id)?.overwrite)) {
+    // A direct publication that lost the race for the destination is the same decision
+    // the create endpoint reports: replace the file, or leave it. The session is over
+    // either way — the provider refused the write — so a skip ends it rather than
+    // leaving an open session nobody will ever commit.
+    const current = host.tasks.get(id);
+    const old = current ? await observedEntry(current.path) : null;
+    if (current && !old) {
+      // The name is free again: the publication lost to a file that is no longer there.
+      host.patch(id, { uploadId: undefined, intent: undefined, createKey: taskId(), status: "queued", error: undefined, speed: 0 });
+    } else if (current && old && old.kind === "file") {
+      if (await host.askConflict(current.path) === "replace") {
+        host.patch(id, { overwrite: true, observedRevision: old.contentRevision ?? undefined, intent: undefined, uploadId: undefined, createKey: taskId(), status: "queued", error: undefined, speed: 0 });
+      } else { host.skip(id); }
+    } else {
+      host.patch(id, { status: "failed", error: message(error), speed: 0 });
+    }
+  } else { host.patch(id, { status: "failed", error: message(error), speed: 0 }); }
+}
+
+
 function createQueue(): QueueOwner {
   // The engine outlives every page, so its cells are plain closure state rather than hook
   // slots. The two shims below keep `useRef`/`useCallback` spellings at the call sites, which
@@ -932,103 +1673,6 @@ function createQueue(): QueueOwner {
     } else { patch(task.id, { status: "finalizing", speed: 0 }); }
   }, [complete, patch, remove]);
 
-  // Admission is a stage of its own: claim the path, freeze the intent, allocate the
-  // session. It runs ahead of the transfer window so a file that starts moving already
-  // holds its session. The order inside it — claim, then create — is the order the server's
-  // fences require: admitting a path is what ends an older open session for that path, so
-  // creating before the cross-tab claim would let a second tab kill this one's session.
-  const admitSession = useCallback(async (task: UploadTask, signal: AbortSignal): Promise<FileUploadSession> => {
-    if (!pathClaims.current.has(task.id)) {
-      let release: (() => void) | null;
-      const claimController = new AbortController();
-      const abortClaim = () => claimController.abort();
-      signal.addEventListener("abort", abortClaim, { once: true });
-      try { release = await claimUploadPath(owner.current, task.path, claimController.signal); }
-      catch (error) {
-        if (signal.aborted) throw error;
-        throw new Error(t("drive.uploadCoordinationUnavailable"), { cause: error });
-      } finally { signal.removeEventListener("abort", abortClaim); }
-      if (signal.aborted) { release?.(); throw new DOMException("Upload canceled", "AbortError"); }
-      if (!release) throw new Error(t("drive.uploadAlreadyInProgress"));
-      pathClaims.current.set(task.id, release);
-    }
-    let intent = task.intent;
-    if (!intent) {
-      if (!task.file) throw new Error(t("drive.uploadFileUnavailable"));
-      let condition: FileUploadInput["condition"] = { mode: "create" };
-      if (task.overwrite && task.observedRevision) {
-        // The refusal that raised the question observed the destination, so this row can
-        // name the exact bytes it may replace without another read.
-        condition = { mode: "replace", contentRevision: task.observedRevision };
-      } else if (policyRef.current === "replace") {
-        // The person answered "replace every file that already exists" for this import, and
-        // that answer is the authorization: this row names no revision at all. Naming one
-        // means reading the destination before the create can be sent — one round trip per
-        // file — and naming the wrong one (an index left behind by an interrupted import)
-        // is refused forever. The server observes the destination and binds that revision
-        // instead, so the write stays conditional on the bytes it found.
-        condition = { mode: "overwrite" };
-      } else if (task.overwrite) {
-        // A replace condition names the bytes it is allowed to overwrite, and a standing
-        // "replace" is a decision about a destination that can be gone by the time this
-        // file's turn comes — a re-imported tree edited between the drop and this row. An
-        // absent destination cannot be named (412 target_changed), so the row creates
-        // instead: the same thing the person would do by hand, and not a failure that has
-        // to be answered again for every file behind it.
-        const old = await observedEntry(task.path);
-        if (old) {
-          if (old.kind !== "file" || !old.contentRevision) throw new Error("The destination cannot be replaced safely.");
-          condition = { mode: "replace", contentRevision: old.contentRevision };
-        }
-      }
-      const sourceModifiedAt = await supportsSourceModifiedAt();
-      if (signal.aborted) throw new DOMException("Upload canceled", "AbortError");
-      intent = { path: task.path, size: task.size, mediaType: task.file?.type || "application/octet-stream", condition,
-        ...(task.parents && condition.mode === "create" ? { parents: true as const } : {}),
-        ...(sourceModifiedAt && task.modifiedAt !== undefined ? { sourceModifiedAt: new Date(task.modifiedAt).toISOString() } : {}) };
-      // Retain the exact intent/key in memory before allocation, including a lost create ACK.
-      patch(task.id, { intent });
-    }
-    const session = await admitUpload(intent, task.createKey, signal);
-    patch(task.id, { uploadId: session.id, allocationRejected: false });
-    return session;
-  }, [admitUpload, patch]);
-
-  // One admission per file, whoever asks first: the look-ahead that prepares a page and
-  // the window that starts the file await the same request, so a file can never be
-  // admitted twice — which for one path would end the other session.
-  const ensureAdmission = useCallback((task: UploadTask) => {
-    const existing = admissions.current.get(task.id);
-    if (existing) return existing;
-    const controller = new AbortController();
-    const promise = admitSession(task, controller.signal);
-    // An entry this tab prepares and then never starts (a cancellation) must not surface as
-    // an unhandled rejection; whoever drives the row handles the refusal.
-    promise.catch(() => {});
-    const entry = { controller, promise, ready: false };
-    admissions.current.set(task.id, entry);
-    void promise.then(
-      () => {
-        entry.ready = true;
-        admissionFailed.current.delete(task.id);
-        // A file starts the moment its own session is in hand, not when its wave does: a
-        // transfer slot handed to a file that is still waiting for a create page is a slot
-        // that is not moving bytes.
-        requestPump();
-      },
-      (error) => {
-        if (admissions.current.get(task.id) === entry) admissions.current.delete(task.id);
-        // A paused page is not this destination's refusal: the look-ahead must be free to
-        // prepare this file again once the queue resumes, so the paused error does not make
-        // it "already refused".
-        if (!isQueuePaused(error)) admissionFailed.current.add(task.id);
-        // The window owns a refusal — it decides between waiting on the blocker, retrying
-        // and failing the row — so the look-ahead steps back and lets the queue move on.
-        requestPump();
-      },
-    );
-    return entry;
-  }, [admitSession, requestPump]);
   // A file stops holding a transfer slot the moment its bytes are placed. The settlement
   // has its own page and its own bound, so waiting for it here would only make the next
   // file's first byte wait for this row's answer.
@@ -1037,457 +1681,84 @@ function createQueue(): QueueOwner {
     requestPump();
   }, [requestPump]);
 
+  /**
+   * The cells and operations `run`'s steps may use. Built once with the engine, so the
+   * maps and sets below are the engine's own cells, shared by reference and never copied;
+   * the two getters read the cells that are reassigned during the tab's lifetime.
+   */
+  const runHost: UploadRunHost = {
+    tasks: tasks.current,
+    admissions: admissions.current,
+    admissionFailed: admissionFailed.current,
+    pathClaims: pathClaims.current,
+    verified: verified.current,
+    deadlines: deadlines.current,
+    partPool: partPool.current,
+    ranks: ranks.current,
+    transferring: transferring.current,
+    owner: () => owner.current,
+    conflictPolicy: () => policyRef.current,
+    patch,
+    complete,
+    skip,
+    applyOperation,
+    admitUpload,
+    askConflict,
+    settleUpload,
+    releaseWindow,
+    acquirePart,
+    releasePart,
+    requestPump,
+  };
+  // One admission per file, whoever asks first: the look-ahead that prepares a page and
+  // the window that starts the file await the same request, so a file can never be admitted
+  // twice — which for one path would end the other session. The mechanics live with the
+  // admission steps; this is only the engine-side name the pump calls.
+  const ensureAdmission = useCallback((task: UploadTask) => ensureUploadAdmission(runHost, task), [runHost]);
+
+  /**
+   * One attempt at one row: the steps below, in the order the server's fences require.
+   *
+   * This function is the sequence and the attempt's lifecycle, nothing else. Each stage owns
+   * its decisions, its requests and its contract comment; the `finally` is the only thing
+   * every outcome shares, because a transfer slot and a running marker belong to the
+   * attempt rather than to any one stage.
+   */
   const run = useCallback(async (id: string, runtime: Runtime) => {
     const signal = runtime.controller.signal;
     try {
-      let task = tasks.current.get(id);
+      // The snapshot this attempt starts from. A stage that changes the row is followed by
+      // a fresh read, so no stage acts on a copy an earlier stage already superseded.
+      const task = tasks.current.get(id);
       if (!task) return;
-      // The stored record is the authority for a wait, never the task's own copy of it:
-      // the page settles a deletion that ended without deleting anything, and a wait
-      // latched on the task would keep this attempt parked behind an Operation nobody is
-      // waiting for anymore. Only the state it already observed is reused, so "Continue"
-      // stays the thing that clears a finished deletion rather than every retry silently
-      // overtaking it.
-      const deletion = pendingFileOperation(task.path);
-      if (deletion) {
-        const known = task.waitingFor?.operationId === deletion.id ? task.waitingFor.state : "running";
-        const waitingFor: FileOperationWait = { ...task.waitingFor, operationId: deletion.id, path: deletion.path, state: known, kind: "delete", from: "record" };
-        patch(id, { status: "waiting", waitingFor, waitMessage: waitMessage(waitingFor) });
-        return;
-      }
-      if (task.operationId) {
-        const op = await api.getOperation(task.operationId, signal);
-        if (!signal.aborted) applyOperation(task, op);
-        return;
-      }
+      if (waitOnRecordedDeletion(runHost, id, task)) return;
+      if (await adoptRecordedOperation(runHost, task, signal)) return;
       if (task.isDir) {
-        let result: Item | FileOperation;
-        try { result = await api.mkdir(task.path); }
-        catch (error) {
-          if (!(error instanceof ApiError) || error.code !== "name_conflict") throw error;
-          result = await api.metadata(task.path);
-          if (result.kind !== "folder") throw error;
-        }
-        if (signal.aborted) return;
-        if (isOperation(result)) { patch(id, { operationId: result.id, status: "finalizing" }); }
-        else { if (result.kind !== "folder") throw new Error("A file occupies the destination folder."); complete(task, result); }
+        await createDirectoryTask(runHost, id, task, signal);
         return;
       }
-      let session: FileUploadSession;
-      // True only when this attempt allocated the session. A session that was just created
-      // reports how much it holds; one this attempt resumed may already carry parts whose
-      // receipts were never seen, so only the first case may trust that count.
-      let allocated = false;
-      // A session the look-ahead prepared is already in hand: starting the file must not
-      // ask the server again. A file with no admission yet is admitted here, so a queue
-      // that has not caught up (or a resumed row) still works — that is the same request,
-      // only later. Clearing the refused mark here re-arms the look-ahead for a file the
-      // window is about to retry, which is the only place a refusal gets a second opinion.
-      admissionFailed.current.delete(id);
-      const admission = task.uploadId && !admissions.current.has(id) ? undefined : admissions.current.get(id) ?? ensureAdmission(task);
-      if (!admission) {
-        session = await api.uploadStatus(task.uploadId!, signal);
-      } else {
-        try { session = await admission.promise; }
-        catch (error) {
-          if (error instanceof ApiError && [400, 401, 403, 409, 413, 422, 507].includes(error.status)) patch(id, { allocationRejected: true });
-          // An upload that holds the path is one that is committing: an open session fences
-          // nothing, and the server ends an older open session for this path itself when it
-          // admits a new one. So the only upload this refusal can name is a publication
-          // already under way, and only that kind needs the session resource. Every other
-          // holder (mkdir, delete, move, copy) is answered by its own Operation, so asking
-          // /uploads/{id} about it was a request that could only ever 404 — one red line and
-          // one round trip per conflict that could not change the outcome. A server that does
-          // not name the kind still gets the probe, because then it is the only way to tell
-          // the two apart.
-          //
-          // An Operation this branch reads is kept for the generic wait below: both ask the
-          // same resource what it is doing, and a second round trip learns nothing.
-          let blockerOperation: FileOperation | undefined;
-          if (error instanceof ApiError && error.code === "operation_in_progress" && error.operationId
-            && (error.operationKind === undefined || error.operationKind === "upload_commit")) {
-            let blocking: FileUploadSession | undefined;
-            try { blocking = await api.uploadStatus(error.operationId, signal); }
-            catch (statusError) {
-              // Only a definitive non-upload identity belongs in generic Operation waiting.
-              if (!(statusError instanceof ApiError) || statusError.status !== 404) throw statusError;
-            }
-            if (signal.aborted) return;
-            if (blocking?.id === error.operationId && relative(blocking.path) === task.path) {
-              if (["aborted", "expired", "failed"].includes(blocking.state)) {
-                const op = await api.getOperation(blocking.id, signal);
-                blockerOperation = op;
-                if (signal.aborted) return;
-                if (op.id === blocking.id && op.state === "cancelled") {
-                  patch(id, { status: "queued", allocationRejected: false });
-                  return;
-                }
-              }
-              if (blocking.state === "committed" && blocking.result) {
-                complete(task, blocking.result);
-                return;
-              }
-              // The path's earlier attempt is already publishing, and a second session over it
-              // could only wait for this one. Adopt it instead: the poll finishes the row from
-              // the same Operation and its own result. No abort and no allocation — which is
-              // also what the contract forbids for committing/outcome_unknown work. Treated as
-              // an unrelated blocker, this was the state that showed "waiting for deletion of
-              // <a file>" and cost a poll interval per file.
-              if (blocking.state === "committing" || blocking.state === "outcome_unknown" || blocking.state === "committed") {
-                if (!signal.aborted) patch(id, { uploadId: blocking.id, operationId: blocking.operationId ?? error.operationId, status: "finalizing", uploaded: true, speed: 0, allocationRejected: false });
-                return;
-              }
-            }
-          }
-          // A non-delete blocker is almost always one of this import's own short-lived steps:
-          // the destination's missing ancestors are created inside another create, so a
-          // sibling's folder creation can refuse this one for milliseconds. Ask once whether
-          // it has already ended and retry; latching a poll for it cost a poll interval per
-          // file and showed the row "waiting for deletion of <a file>" for a deletion that
-          // never existed. A deletion is different: it is long, it is the user's decision,
-          // and it must keep the wait and its own report.
-          if (error instanceof ApiError && error.operationKind && error.operationKind !== "delete" && error.operationId) {
-            // The resource has to be the blocking Operation: another operation's terminal
-            // state, even one this attempt just read, says nothing about this path.
-            const blocker = blockerOperation?.id === error.operationId
-              ? blockerOperation
-              : await api.getOperation(error.operationId, signal).catch(() => undefined);
-            if (signal.aborted) return;
-            if (blocker && blocker.id === error.operationId && ["succeeded", "failed", "cancelled"].includes(blocker.state)) {
-              patch(id, { status: "queued", allocationRejected: false });
-              return;
-            }
-          }
-          if (error instanceof ApiError && error.status === 412 && error.code === "target_changed" && task.overwrite && task.observedRevision) {
-            // The destination the replace condition named is gone — the tree was edited
-            // between the conflict probe and this attempt. Nothing is left to replace, so
-            // the row creates; leaving it failed would turn a deleted file into an import
-            // that has to be answered again.
-            patch(id, { overwrite: false, observedRevision: undefined, intent: undefined, createKey: taskId(), status: "queued" });
-            return;
-          }
-          if (error instanceof ApiError && error.status === 409 && error.code === "name_conflict" && !task.overwrite) {
-            // The refusal already names the revision the server observed at the destination,
-            // which is the only value a replacement can prove it may overwrite: reading the
-            // same file again would spend a round trip per file to learn what this answer
-            // just said. A refusal without it (a provider's own 409, a folder) still reads.
-            const named = error instanceof FileApiError ? error.problem.observedRevision : undefined;
-            const old = named === undefined ? await observedEntry(task.path) : { kind: "file" as const, contentRevision: named };
-            if (!old) { patch(id, { status: "queued", intent: undefined, createKey: taskId() }); return; }
-            if (old.kind === "file") {
-              if (await askConflict(task.path) === "replace") {
-                patch(id, { overwrite: true, observedRevision: old.contentRevision ?? undefined, intent: undefined, createKey: taskId(), status: "queued" }); return;
-              }
-              skip(id); return;
-            }
-          }
-          throw error;
-        }
-        allocated = true;
-        admissions.current.delete(id);
-      }
-      patch(id, { uploadId: session.id, allocationRejected: false });
+      const admission = await admitUploadAttempt(runHost, id, task, signal);
+      if (!admission) return;
+      runHost.patch(id, { uploadId: admission.session.id, allocationRejected: false });
       if (signal.aborted) return;
-      task = tasks.current.get(id)!;
-      if (session.state === "committed") { if (!session.result) throw new Error("The upload result is incomplete."); complete(task, session.result); return; }
-      if (session.state === "committing" || session.state === "outcome_unknown") {
-        patch(id, { operationId: session.operationId, status: "finalizing", uploaded: true }); return;
+      const started = tasks.current.get(id);
+      if (!started) return;
+      const plan = takeUploadSession(runHost, id, started, admission);
+      if (plan.kind === "stop") return;
+      if (plan.kind === "upload") {
+        const moved = await moveUploadParts(runHost, id, plan.session, plan.file, plan.allocated, signal);
+        if (!moved) return;
       }
-      if (session.state !== "open") {
-        if (session.state === "failed" || session.state === "aborted" || session.state === "expired") {
-          if (task.retryRequested && task.file) {
-            patch(id, { status: "queued", uploadId: undefined, operationId: undefined, intent: undefined, observedRevision: undefined, createKey: taskId(), terminalState: undefined, retryRequested: false, uploaded: false, loaded: 0 }); return;
-          }
-          patch(id, { terminalState: session.state });
-        }
-        throw new Error(`Upload ${session.state}; select the file again to start a new session.`);
-      }
-      if (!task.file) { patch(id, { status: "failed", error: t("drive.uploadFileUnavailable"), speed: 0 }); return; }
-      if (task.file.size !== session.size) throw new Error("The selected file has a different size.");
-      // A retried publication whose bytes already landed: the server recognized its own
-      // object at the destination and admitted a session that only has to settle it.
-      // Uploading again would be refused by the create condition, so the row goes straight
-      // to commit — the same trailing steps every other row takes after its bytes are in.
-      if (session.bytesPresent) {
-        patch(id, { status: "finalizing", uploaded: true, loaded: session.size, speed: 0 });
-        releaseWindow(id);
-        const settled = await commitUpload(session.id, signal, settleUpload);
-        if (signal.aborted) return;
-        if (isOperation(settled)) patch(id, { operationId: settled.id });
-        else complete(task, settled);
-        return;
-      }
-      const file = task.file;
-      // The session is in hand, so this file can move bytes and takes a transfer slot now.
-      // Taking it at claim time instead put slots on files that were still waiting for their
-      // create page, and the part pool then had nothing to hand out.
-      transferring.current.add(id);
-      if (!Number.isSafeInteger(session.partSize) || session.partSize < 1 || !Number.isSafeInteger(session.partCount)
-        || session.partCount !== Math.ceil(session.size / session.partSize)
-        || !["any", "ascending"].includes(session.ordering)) throw new Error("Invalid upload session geometry.");
-      const classA = session.class === "A";
-      if (classA && session.transport?.kind !== "presigned-parts") throw new Error("A class A session must advertise its presigned part window.");
-      if (!classA && session.class !== "C") throw new Error("Unsupported upload transfer class.");
-      if (!classA && session.transport?.kind !== "relay") throw new Error("A class C session must advertise its relay URL.");
-      const parallelism = session.ordering === "ascending" ? 1 : PART_POOL_SIZE;
-      const chunkFor = (number: number) => {
-        const start = (number - 1) * session.partSize;
-        return file.slice(start, Math.min(start + session.partSize, session.size));
-      };
-      const known = new Map<number, number>();
-      let verification = verified.current.get(session.id);
-      if (!classA && (!verification || verification.file !== file)) {
-        verification = { file, parts: new Map() };
-        verified.current.set(session.id, verification);
-      }
-      const verifyReceipt = async (receipt: { number: number; size: number; sha256: string }) => {
-        if (!Number.isSafeInteger(receipt.number) || receipt.number < 1 || receipt.number > session.partCount) throw new Error("Invalid part receipt.");
-        const chunk = chunkFor(receipt.number);
-        if (receipt.size !== chunk.size || (verification!.parts.get(receipt.number) !== receipt.sha256 && await sha256(chunk) !== receipt.sha256)) throw new Error(t("drive.reselectedFileChanged"));
-        verification!.parts.set(receipt.number, receipt.sha256);
-      };
-      const readParts = async (requestSignal: AbortSignal) => {
-        const result = new Map<number, number>();
-        let next: string | undefined;
-        let watermark: number | undefined;
-        do {
-          const page = await api.uploadParts(session.id, next, requestSignal);
-          if (!classA && watermark !== undefined && page.watermark !== watermark) throw new Error("The receipt watermark changed.");
-          watermark = page.watermark;
-          for (const part of page.items) {
-            if (result.has(part.number)) throw new Error("Invalid part listing.");
-            const chunk = chunkFor(part.number);
-            if (part.size !== chunk.size) throw new Error("The provider part size changed.");
-            if (classA) {
-              if (!("etag" in part) || typeof part.etag !== "string") throw new Error("Invalid provider part listing.");
-            } else {
-              if (!("sha256" in part)) throw new Error("Invalid part receipt.");
-              await verifyReceipt(part);
-            }
-            result.set(part.number, part.size);
-          }
-          next = page.nextCursor ?? undefined;
-        } while (next);
-        return result;
-      };
-      // A session this attempt created holds exactly what it reported, so an empty one needs
-      // no listing: one request saved per file, a quarter of a 23k-file import's traffic.
-      // Anything else lists, because receipts the client never saw are the only way it can
-      // know what is already durable.
-      if (!allocated || session.receivedParts > 0) {
-        for (const [number, size] of await readParts(signal)) known.set(number, size);
-      }
-      if (signal.aborted) return;
-      let received = [...known.values()].reduce((sum, size) => sum + size, 0);
-      patch(id, { loaded: received, speed: 0 });
-      const missing: number[] = [];
-      // Up to `parallelism` workers drain this file's missing parts; every request also
-      // takes a slot from the global part pool, so the next queued part starts as soon
-      // as any part anywhere finishes.
-      for (let number = 1; number <= session.partCount && (session.ordering !== "ascending" || missing.length < 1); number++) {
-        if (!known.has(number)) missing.push(number);
-      }
-      if (session.ordering === "ascending" && missing.length && session.nextPart !== missing[0]) throw new Error("The next upload part changed.");
-      const grants = new Map<number, FileUploadPartGrant>();
-      if (classA && session.transport?.kind === "presigned-parts") {
-        for (const grant of session.transport.parts) grants.set(grant.number, grant);
-      }
-      let grantChain: Promise<void> = Promise.resolve();
-      const ensureGrants = (from: number): Promise<void> => {
-        const run = grantChain.then(async () => {
-          if (grants.has(from) && Date.parse(grants.get(from)!.expiresAt) > Date.now()) return;
-          const numbers: number[] = [];
-          for (let number = from; number <= session.partCount && numbers.length < 32; number++) {
-            const current = grants.get(number);
-            if (!known.has(number) && (!current || Date.parse(current.expiresAt) <= Date.now())) numbers.push(number);
-          }
-          if (!numbers.length) return;
-          for (const grant of await api.signUploadParts(session.id, numbers, signal)) {
-            if (grant.number < 1 || grant.number > session.partCount || grant.size !== chunkFor(grant.number).size) throw new Error("The signed part geometry changed.");
-            grants.set(grant.number, grant);
-          }
-        });
-        grantChain = run.catch(() => {});
-        return run;
-      };
-      if (classA && missing.length) await ensureGrants(missing[0]);
-      if (missing.length) {
-        const batch = new AbortController();
-        const abortBatch = () => batch.abort();
-        signal.addEventListener("abort", abortBatch, { once: true });
-        const inFlight = new Map<number, number>();
-        const samples: ProgressSample[] = [];
-        const flush = () => {
-          if (signal.aborted || batch.signal.aborted) return;
-          const at = performance.now();
-          const loaded = Math.min(session.size, received + [...inFlight.values()].reduce((sum, bytes) => sum + bytes, 0));
-          samples.push({ at, loaded });
-          while (samples.length > 1 && at - samples[0].at > SPEED_WINDOW_MS) samples.shift();
-          const elapsed = at - samples[0].at;
-          patch(id, { loaded, speed: elapsed > 0 ? Math.max(0, loaded - samples[0].loaded) * 1000 / elapsed : 0 });
-        };
-        // One sample per second, independent of how often XHR reports bytes: the list
-        // stays readable, and a stalled link visibly falls to 0 B/s instead of freezing
-        // on its last value.
-        const ticker = setInterval(flush, PROGRESS_INTERVAL_MS);
-        deadlines.current.add(ticker);
-        const cancelProgress = () => {
-          clearInterval(ticker);
-          deadlines.current.delete(ticker);
-        };
-        const retryDelay = (attempt: number) => new Promise<void>((resolve, reject) => {
-          if (batch.signal.aborted) { reject(new DOMException("Upload canceled", "AbortError")); return; }
-          const abort = () => { clearTimeout(timer); deadlines.current.delete(timer); reject(new DOMException("Upload canceled", "AbortError")); };
-          const timer = setTimeout(() => { deadlines.current.delete(timer); batch.signal.removeEventListener("abort", abort); resolve(); },
-            Math.min(PART_RETRY_MAX_DELAY_MS, PART_RETRY_DELAY_MS * 2 ** attempt));
-          deadlines.current.add(timer);
-          batch.signal.addEventListener("abort", abort, { once: true });
-        });
-        let failure: unknown;
-        try {
-          const pending = [...missing];
-          const uploadOne = async (number: number) => {
-            const chunk = chunkFor(number);
-            try {
-              let attempt = 0;
-              let busy = 0;
-              while (attempt < PART_UPLOAD_ATTEMPTS) {
-                if (batch.signal.aborted) throw new DOMException("Upload canceled", "AbortError");
-                try {
-                  if (classA) {
-                    await ensureGrants(number);
-                    const grant = grants.get(number);
-                    if (!grant) throw new Error("The part grant is unavailable.");
-                    await api.uploadPresignedPart(grant, chunk, batch.signal, (sample) => {
-                      if (batch.signal.aborted || known.has(number)) return;
-                      inFlight.set(number, Math.max(inFlight.get(number) ?? 0, Math.max(0, Math.min(chunk.size, sample.loaded))));
-                    });
-                    grants.delete(number);
-                  } else {
-                    const receipt = await api.uploadPart(session.id, number, chunk, batch.signal, (sample) => {
-                      if (batch.signal.aborted || known.has(number)) return;
-                      inFlight.set(number, Math.max(inFlight.get(number) ?? 0, Math.max(0, Math.min(chunk.size, sample.loaded))));
-                    });
-                    if (receipt.number !== number) throw new Error("The part receipt identity changed.");
-                    await withVerifySlot(() => verifyReceipt(receipt));
-                    known.set(number, receipt.size);
-                  }
-                  if (batch.signal.aborted) return;
-                  if (classA) known.set(number, chunk.size);
-                  received += chunk.size;
-                  inFlight.delete(number);
-                  return;
-                } catch (error) {
-                  if (batch.signal.aborted) throw error;
-                  if (error instanceof ApiError && error.status === 429) {
-                    // The receiver is full with other parts. Waiting is the protocol;
-                    // counting this as a failed attempt would abort the whole file.
-                    if (++busy > PART_BUSY_WAITS) throw error;
-                    inFlight.delete(number);
-                    await retryDelay(Math.min(busy, 3));
-                    continue;
-                  }
-                  const transient = !(error instanceof ApiError) || [0, 403, 408, 425, 500, 502, 503, 504].includes(error.status);
-                  if (!transient) throw error;
-                  // A lost ACK may already represent durable success. Inspect the
-                  // original session and exact byte identity before any replay.
-                  const status = await api.uploadStatus(session.id, batch.signal);
-                  if (status.state !== "open") throw error;
-                  const existing = await readParts(batch.signal);
-                  if (existing.has(number)) {
-                    if (classA) grants.delete(number);
-                    known.set(number, existing.get(number)!);
-                    received = [...known.values()].reduce((sum, size) => sum + size, 0);
-                    inFlight.delete(number);
-                    return;
-                  }
-                  if (classA) grants.delete(number);
-                  if (++attempt === PART_UPLOAD_ATTEMPTS) throw error;
-                  inFlight.delete(number);
-                  await retryDelay(attempt - 1);
-                }
-              }
-            } catch (error) {
-              if (failure === undefined) failure = error;
-              batch.abort();
-            }
-          };
-          const rank = ranks.current.get(id) ?? Number.MAX_SAFE_INTEGER;
-          // Slots this file holds right now, across its workers. A worker keeps its slot
-          // between its own parts, so this count is what the row reads to decide whether
-          // the file is moving.
-          let held = 0;
-          const holdSlot = () => { held++; patch(id, { activeParts: held }); };
-          const yieldSlot = () => { held--; releasePart(); patch(id, { activeParts: held }); };
-          await Promise.all(Array.from({ length: Math.min(parallelism, pending.length) }, async () => {
-            let holding = false;
-            try {
-              for (let number = pending.shift(); number !== undefined && !batch.signal.aborted; number = pending.shift()) {
-                // Keep a held slot unless a part queued by an earlier file, or this file's
-                // own earlier part, is waiting for it.
-                const head = partPool.current.waiters[0];
-                if (holding && head && (head.rank < rank || head.rank === rank && head.number < number)) { holding = false; yieldSlot(); }
-                if (!holding) {
-                  try { await acquirePart(rank, number, batch.signal); }
-                  catch (error) { if (failure === undefined && !signal.aborted) failure = error; return; }
-                  holding = true; holdSlot();
-                }
-                await uploadOne(number);
-              }
-            } finally { if (holding) yieldSlot(); }
-          }));
-        } finally { signal.removeEventListener("abort", abortBatch); cancelProgress(); }
-        if (signal.aborted) return;
-        if (failure !== undefined) { patch(id, { loaded: received }); throw failure; }
-        // Ascending sessions send one new part per turn; requeue for the next one.
-        if (known.size !== session.partCount) { patch(id, { loaded: received, status: "queued", speed: 0 }); return; }
-      }
-      patch(id, { status: "finalizing", uploaded: true, loaded: session.size, speed: 0 });
-      // The bytes are placed. Give the slot back before waiting for the settlement: the
-      // next admitted file starts streaming now, and this row's answer arrives on its own.
-      releaseWindow(id);
-      const result = await commitUpload(session.id, signal, settleUpload);
-      if (signal.aborted) return;
-      if (isOperation(result)) { patch(id, { operationId: result.id }); }
-      else { complete(task, result); }
+      await settleUploadSession(runHost, id, plan.task, plan.session, signal);
     } catch (error) {
-      if (runtime.controller.signal.aborted) return;
-      if (isQueuePaused(error)) {
-        // The page this file was carried by failed as a whole, so this row is not a
-        // failure. It returns to the queue with its session, intent and create key intact —
-        // a settle resumes by asking the server about that session again, and an admission
-        // replays the same idempotent create — while the one message explains the stop.
-        patch(id, { status: "queued", speed: 0 });
-        return;
-      }
-      if (error instanceof ApiError && error.code === "operation_in_progress" && error.operationId) {
-        const task = tasks.current.get(id);
-        const waitingFor: FileOperationWait = { operationId: error.operationId, path: task?.path ?? "", state: "running", kind: waitKind(error.operationKind), from: "conflict" };
-        patch(id, { status: "waiting", waitingFor, waitMessage: waitMessage(waitingFor), speed: 0 });
-      } else if (error instanceof ApiError && error.status === 409 && error.code === "name_conflict" && !(tasks.current.get(id)?.overwrite)) {
-        // A direct publication that lost the race for the destination is the same decision
-        // the create endpoint reports: replace the file, or leave it. The session is over
-        // either way — the provider refused the write — so a skip ends it rather than
-        // leaving an open session nobody will ever commit.
-        const current = tasks.current.get(id);
-        const old = current ? await observedEntry(current.path) : null;
-        if (current && !old) {
-          // The name is free again: the publication lost to a file that is no longer there.
-          patch(id, { uploadId: undefined, intent: undefined, createKey: taskId(), status: "queued", error: undefined, speed: 0 });
-        } else if (current && old && old.kind === "file") {
-          if (await askConflict(current.path) === "replace") {
-            patch(id, { overwrite: true, observedRevision: old.contentRevision ?? undefined, intent: undefined, uploadId: undefined, createKey: taskId(), status: "queued", error: undefined, speed: 0 });
-          } else { skip(id); }
-        } else {
-          patch(id, { status: "failed", error: message(error), speed: 0 });
-        }
-      } else { patch(id, { status: "failed", error: message(error), speed: 0 }); }
+      if (signal.aborted) return;
+      await abandonAttempt(runHost, id, error);
     } finally {
       running.current.delete(id);
       transferring.current.delete(id);
       requestPump();
     }
-  }, [acquirePart, applyOperation, askConflict, complete, ensureAdmission, patch, releasePart, releaseWindow, requestPump, settleUpload, skip]);
+  }, [runHost, requestPump]);
   const pump = useCallback(() => {
     if (!ready.current || !mounted.current) return;
     // A stopped queue starts nothing. Rows already moving may finish their bytes, but a page
@@ -1542,10 +1813,16 @@ function createQueue(): QueueOwner {
     for (const id of pending.current) {
       if (running.current.size + starts.length >= CLAIM_WINDOW) break;
       const task = tasks.current.get(id);
-      if (!task || task.status !== "queued" || task.cancelRequested || running.current.has(id)) {
+      if (!task || task.status !== "queued" || task.cancelRequested) {
         pending.current.delete(id);
         continue;
       }
+      // A row whose own attempt is still unwinding is skipped, not forgotten: answering a
+      // conflict resolves the attempt, and the pump that answer requests may run one
+      // microtask before that attempt reaches its `finally`. Dropping the id here would
+      // then strand a queued row nothing would ever start; keeping it costs one no-op pass
+      // because the attempt's own `finally` asks for the next turn.
+      if (running.current.has(id)) continue;
       if (blockedBy(task.path)) continue;
       starts.push(task);
     }
