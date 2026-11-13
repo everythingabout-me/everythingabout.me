@@ -372,7 +372,7 @@ func TestFilesWorkersPostgresPendingAndCreatorRights(t *testing.T) {
 		if len(pending) != 0 {
 			t.Fatal("fresh ingress became worker input", pending)
 		}
-		if _, err = f.db.Pool().Exec(f.ctx, `update file_operations set snapshot=jsonb_set(snapshot,'{CreatedAt}',to_jsonb($2::text)) where id=$1`, fresh.ID, time.Now().UTC().Add(-time.Minute).Format(time.RFC3339Nano)); err != nil {
+		if _, err = f.db.Pool().Exec(f.ctx, `update file_operations set created_at=$2::timestamptz, snapshot=jsonb_set(snapshot,'{CreatedAt}',to_jsonb($2::timestamptz)) where id=$1`, fresh.ID, time.Now().UTC().Add(-time.Minute)); err != nil {
 			t.Fatal(err)
 		}
 		lease, err := f.journal.Claim(f.ctx, root, actor, fresh.ID, time.Minute)

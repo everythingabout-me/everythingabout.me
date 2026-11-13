@@ -166,7 +166,7 @@ func ResetRoot(ctx context.Context, tx pgx.Tx, owner, namespace string) (Head, e
 	var busy bool
 	if err := tx.QueryRow(ctx, `select exists(select 1 from file_operation_guards where owner_id=$1::uuid)
  or exists(select 1 from file_operations where owner_id=$1::uuid and
- coalesce(snapshot->>'State','') not in ('succeeded','failed','cancelled'))`, owner).Scan(&busy); err != nil {
+ state not in ('succeeded','failed','cancelled'))`, owner).Scan(&busy); err != nil {
 		return Head{}, err
 	}
 	if busy {

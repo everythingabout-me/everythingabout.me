@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"time"
 )
 
 // PendingPageMax is the largest page of pending work one query may return.
@@ -32,10 +33,14 @@ func scanLimit(scan string, limit, max int) error {
 	return nil
 }
 
-// pendingCursor is the last row of a page in the scan's own order. createdAt is the
-// stored text, never a reparsed time: the order is textual, and a reformatted timestamp
-// would compare differently from the row it came from.
-type pendingCursor struct{ createdAt, id string }
+// pendingCursor is the last row of a page in the scan's own order: created_at and id, the
+// same keys the pending index holds. created_at is a real timestamp now, so the cursor is
+// the instant itself and the keyset comparison below is a range on an index rather than a
+// textual comparison over a JSON string.
+type pendingCursor struct {
+	createdAt time.Time
+	id        string
+}
 
 // Pending returns the oldest bounded page of durable work, never permission to repeat a
 // native final effect. Callers must select the exact root and run recovery/authorization.
@@ -80,16 +85,17 @@ func (p *Postgres) pendingPage(ctx context.Context, after pendingCursor, limit i
 		return nil, after, err
 	}
 	// A null id means "from the start"; the first page has no row to continue after.
-	var afterID any
+	var afterID, afterAt any
 	if after.id != "" {
 		afterID = after.id
+		afterAt = after.createdAt
 	}
-	rows, err := p.pool.Query(ctx, `select snapshot,snapshot->>'CreatedAt',id::text from file_operations where snapshot->>'State' in ('queued','running','outcome_unknown')
+	rows, err := p.pool.Query(ctx, `select snapshot,created_at,id::text from file_operations where state in ('queued','running','outcome_unknown')
  and not exists (select 1 from file_uploads u where u.operation_id=file_operations.id and u.state <> 'committing')
- and (snapshot->>'CreatedAt')::timestamptz < clock_timestamp()-interval '30 seconds'
- and (coalesce(snapshot->'Lease'->>'Token','')='' or (snapshot->'Lease'->>'ExpiresAt')::timestamptz <= clock_timestamp())
- and ($2::uuid is null or (snapshot->>'CreatedAt',id) > ($3::text,$2::uuid))
- order by snapshot->>'CreatedAt',id limit $1`, limit, afterID, after.createdAt)
+ and created_at < clock_timestamp()-interval '30 seconds'
+ and (lease_token='' or (lease_expires_at is not null and lease_expires_at <= clock_timestamp()))
+ and ($2::uuid is null or (created_at,id) > ($3::timestamptz,$2::uuid))
+ order by created_at,id limit $1`, limit, afterID, afterAt)
 	if err != nil {
 		return nil, after, err
 	}

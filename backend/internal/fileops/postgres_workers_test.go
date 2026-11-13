@@ -55,7 +55,10 @@ func TestPostgresPendingWalksTheWholeQueueInPages(t *testing.T) {
 		if i >= 4 {
 			created = base.Add(time.Duration(i) * time.Second)
 		}
-		if _, err := pool.Exec(ctx, `update file_operations set snapshot=jsonb_set(snapshot,'{CreatedAt}',to_jsonb($2::text)) where id=$1`, op.ID, created.Format(time.RFC3339Nano)); err != nil {
+		// One typed parameter feeds both places: with a second `$2::text` use PostgreSQL
+		// inferred $2 as timestamptz anyway and wrote its own text rendering into the
+		// document, which is not the RFC 3339 form Operation.CreatedAt unmarshals.
+		if _, err := pool.Exec(ctx, `update file_operations set created_at=$2::timestamptz, snapshot=jsonb_set(snapshot,'{CreatedAt}',to_jsonb($2::timestamptz)) where id=$1`, op.ID, created); err != nil {
 			t.Fatal(err)
 		}
 	}

@@ -1,13 +1,18 @@
 package fileops
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"log/slog"
+	"strings"
 	"time"
 
+	"everythingabout.me/backend/internal/storage"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -47,50 +52,284 @@ func dbNow(ctx context.Context, tx pgx.Tx) (time.Time, error) {
 	return t, err
 }
 
-// readOperationSnapshot reads one operation without locking its row. A read-only transaction
-// cannot take `for update`, and a report of what the journal holds does not need to: the row it
-// reads is the answer it returns.
-func readOperationSnapshot(ctx context.Context, q pgx.Tx, id string) (Operation, error) {
-	var op Operation
-	var b []byte
-	err := q.QueryRow(ctx, `select snapshot from file_operations where id=$1`, id).Scan(&b)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return op, E("not_found", nil)
-	}
-	if err != nil {
-		return op, err
-	}
-	if err = json.Unmarshal(b, &op); err != nil {
-		return op, err
-	}
-	if err = canonicalOperation(&op); err != nil {
-		return op, err
-	}
-	return op, nil
+// journalColumns is the promoted half of one operation row: exactly the fields a SQL
+// predicate is allowed to read. It is derived from the operation document, never stored
+// independently, so the only way the two can disagree is a row written by a binary from
+// before sql/047 (or corruption) — see divergence.
+//
+// The reason the split exists: while these fields lived only inside the whole-document
+// `snapshot`, a predicate compared a JSON field name to a literal. A Go field rename then
+// compiled, passed every test, and stopped recovering every suspended operation without an
+// error anywhere. A column is named in one place (journalColumnList) and its Go value in
+// another (promotedColumns); a rename breaks the writer instead of silently matching nothing.
+type journalColumns struct {
+	State               string
+	Phase               string
+	CreatedAt           time.Time
+	FinishedAt          *time.Time
+	RetainUntil         time.Time
+	CleanupAttemptedAt  *time.Time
+	CleanedAt           *time.Time
+	LeaseToken          string
+	LeaseExpiresAt      *time.Time
+	RootConnectionID    string
+	RootGeneration      int64
+	RootContentRoot     string
+	RootSystemRoot      string
+	RootCaseSensitive   bool
+	RootRetainsVersions bool
+	PurgePath           *string
+	IntentTarget        *string
+	StageSize           *int64
+	StageHandle         []byte
 }
 
-func readOperation(ctx context.Context, tx pgx.Tx, id string) (Operation, error) {
+// journalColumnList names every promoted column once, in scan order. The migration that
+// added them and the queries below refer to the same names.
+const journalColumnList = `state,phase,created_at,finished_at,retain_until,cleanup_attempted_at,cleaned_at,lease_token,lease_expires_at,root_connection_id,root_generation,root_content_root,root_system_root,root_case_sensitive,root_retains_versions,purge_path,intent_target,stage_size,stage_handle`
+
+func journalColumnTargets(c *journalColumns) []any {
+	return []any{
+		&c.State, &c.Phase, &c.CreatedAt, &c.FinishedAt, &c.RetainUntil, &c.CleanupAttemptedAt,
+		&c.CleanedAt, &c.LeaseToken, &c.LeaseExpiresAt, &c.RootConnectionID, &c.RootGeneration,
+		&c.RootContentRoot, &c.RootSystemRoot, &c.RootCaseSensitive, &c.RootRetainsVersions,
+		&c.PurgePath, &c.IntentTarget, &c.StageSize, &c.StageHandle,
+	}
+}
+
+func scanJournalColumns(row pgx.Row, snapshot *[]byte, c *journalColumns) error {
+	return row.Scan(append([]any{snapshot}, journalColumnTargets(c)...)...)
+}
+
+// intentTarget extracts the publication target an upload commit carries in its own typed
+// intent. Only that kind has one: the older predicate was exactly `Intent.Target` and the
+// only reader (the publication-reclaim query) filters action='upload_commit'. A move, copy or
+// delete intent is an ActionRequest with From/To, which is not this field — storing one would
+// invent a value no query asked for and make every pre-047 action row disagree with its
+// document on upgrade.
+func intentTarget(op Operation) *string {
+	if op.Kind != "upload_commit" {
+		return nil
+	}
+	var w storage.WriteIntent
+	if json.Unmarshal(op.Intent, &w) != nil || w.Target == "" {
+		return nil
+	}
+	s := string(w.Target)
+	return &s
+}
+
+// promotedColumns derives the columns from the document. Both the INSERT and the UPDATE go
+// through it, so the two write paths cannot drift from each other or from the struct above.
+func promotedColumns(op Operation) journalColumns {
+	c := journalColumns{
+		State:               string(op.State),
+		Phase:               string(op.Phase),
+		CreatedAt:           op.CreatedAt,
+		FinishedAt:          op.FinishedAt,
+		RetainUntil:         op.RetainUntil,
+		CleanupAttemptedAt:  op.CleanupAttemptedAt,
+		CleanedAt:           op.CleanedAt,
+		LeaseToken:          op.Lease.Token,
+		RootConnectionID:    op.Root.ConnectionID,
+		RootGeneration:      op.Root.Generation,
+		RootContentRoot:     op.Root.ContentRoot,
+		RootSystemRoot:      op.Root.SystemRoot,
+		RootCaseSensitive:   op.Root.CaseSensitive,
+		RootRetainsVersions: op.Root.RetainsVersions,
+		IntentTarget:        intentTarget(op),
+	}
+	if op.Lease.Token != "" {
+		expires := op.Lease.ExpiresAt
+		c.LeaseExpiresAt = &expires
+	}
+	if op.Purge != nil {
+		p := string(op.Purge.Path)
+		c.PurgePath = &p
+	}
+	if op.Stage != nil {
+		size := op.Stage.Size
+		c.StageSize = &size
+		c.StageHandle = op.Stage.Handle
+	}
+	return c
+}
+
+func sameTime(a, b *time.Time) bool {
+	if a == nil || b == nil {
+		return a == nil && b == nil
+	}
+	return a.Equal(*b)
+}
+
+func sameString(a, b *string) bool {
+	if a == nil || b == nil {
+		return a == nil && b == nil
+	}
+	return *a == *b
+}
+
+func sameInt(a, b *int64) bool {
+	if a == nil || b == nil {
+		return a == nil && b == nil
+	}
+	return *a == *b
+}
+
+// divergence reports which promoted columns disagree with the operation document. It is the
+// detection for the one row shape this design cannot prevent: a row written by a pre-split
+// binary (the window between `eam migrate` and the restart) or by corruption. The document
+// is the operation; the columns are its index. A write path repairs the columns from the
+// document, and a prune refuses to delete a disagreeing candidate, so the direction that
+// could destroy work — "the column says terminal while the operation still runs" — is never
+// acted on.
+func divergence(op Operation, got journalColumns) []string {
+	want := promotedColumns(op)
+	var out []string
+	add := func(name string, equal bool) {
+		if !equal {
+			out = append(out, name)
+		}
+	}
+	add("state", got.State == want.State)
+	add("phase", got.Phase == want.Phase)
+	add("created_at", got.CreatedAt.Equal(want.CreatedAt))
+	add("finished_at", sameTime(got.FinishedAt, want.FinishedAt))
+	add("retain_until", got.RetainUntil.Equal(want.RetainUntil))
+	add("cleanup_attempted_at", sameTime(got.CleanupAttemptedAt, want.CleanupAttemptedAt))
+	add("cleaned_at", sameTime(got.CleanedAt, want.CleanedAt))
+	add("lease_token", got.LeaseToken == want.LeaseToken)
+	add("lease_expires_at", sameTime(got.LeaseExpiresAt, want.LeaseExpiresAt))
+	add("root_connection_id", got.RootConnectionID == want.RootConnectionID)
+	add("root_generation", got.RootGeneration == want.RootGeneration)
+	add("root_content_root", got.RootContentRoot == want.RootContentRoot)
+	add("root_system_root", got.RootSystemRoot == want.RootSystemRoot)
+	add("root_case_sensitive", got.RootCaseSensitive == want.RootCaseSensitive)
+	add("root_retains_versions", got.RootRetainsVersions == want.RootRetainsVersions)
+	add("purge_path", sameString(got.PurgePath, want.PurgePath))
+	add("intent_target", sameString(got.IntentTarget, want.IntentTarget))
+	add("stage_size", sameInt(got.StageSize, want.StageSize))
+	add("stage_handle", bytes.Equal(got.StageHandle, want.StageHandle))
+	return out
+}
+
+// readOperationSnapshot reads one operation without locking its row. A read-only transaction
+// cannot take `for update`, and a report of what the journal holds does not need to: the row it
+// reads is the answer it returns. The disagreeing columns are returned rather than repaired
+// because a ReadOnly transaction must not write; the caller reports them.
+func readOperationSnapshot(ctx context.Context, q pgx.Tx, id string) (Operation, []string, error) {
 	var op Operation
 	var b []byte
-	err := tx.QueryRow(ctx, `select snapshot from file_operations where id=$1 for update`, id).Scan(&b)
+	var columns journalColumns
+	err := scanJournalColumns(q.QueryRow(ctx, `select snapshot,`+journalColumnList+` from file_operations where id=$1`, id), &b, &columns)
 	if errors.Is(err, pgx.ErrNoRows) {
-		return op, E("not_found", nil)
+		return op, nil, E("not_found", nil)
 	}
 	if err != nil {
-		return op, err
+		return op, nil, err
+	}
+	if err = json.Unmarshal(b, &op); err != nil {
+		return op, nil, err
+	}
+	if err = canonicalOperation(&op); err != nil {
+		return op, nil, err
+	}
+	diverged := divergence(op, columns)
+	warnOperationDivergence(id, diverged)
+	return op, diverged, nil
+}
+
+func readOperation(ctx context.Context, tx pgx.Tx, id string) (Operation, []string, error) {
+	var op Operation
+	var b []byte
+	var columns journalColumns
+	err := scanJournalColumns(tx.QueryRow(ctx, `select snapshot,`+journalColumnList+` from file_operations where id=$1 for update`, id), &b, &columns)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return op, nil, E("not_found", nil)
+	}
+	if err != nil {
+		return op, nil, err
 	}
 	err = json.Unmarshal(b, &op)
 	if err == nil {
 		err = canonicalOperation(&op)
 	}
-	return op, err
+	if err != nil {
+		return op, nil, err
+	}
+	diverged := divergence(op, columns)
+	warnOperationDivergence(id, diverged)
+	return op, diverged, nil
 }
+
+func warnOperationDivergence(id string, diverged []string) {
+	if len(diverged) == 0 {
+		return
+	}
+	slog.Warn("operation journal columns disagree with the document; the next write repairs them",
+		"operation", id, "columns", diverged)
+}
+
+// operationArgs is the single place where a Go operation becomes the promoted columns. The
+// column names are named once here per statement, through NamedArgs, so a column inserted in
+// the middle of the list cannot silently shift every value after it.
+func operationArgs(op Operation, snapshot []byte) pgx.NamedArgs {
+	c := promotedColumns(op)
+	return pgx.NamedArgs{
+		"id":                    op.ID,
+		"snapshot":              snapshot,
+		"state":                 c.State,
+		"phase":                 c.Phase,
+		"created_at":            c.CreatedAt,
+		"finished_at":           c.FinishedAt,
+		"retain_until":          c.RetainUntil,
+		"cleanup_attempted_at":  c.CleanupAttemptedAt,
+		"cleaned_at":            c.CleanedAt,
+		"lease_token":           c.LeaseToken,
+		"lease_expires_at":      c.LeaseExpiresAt,
+		"root_connection_id":    c.RootConnectionID,
+		"root_generation":       c.RootGeneration,
+		"root_content_root":     c.RootContentRoot,
+		"root_system_root":      c.RootSystemRoot,
+		"root_case_sensitive":   c.RootCaseSensitive,
+		"root_retains_versions": c.RootRetainsVersions,
+		"purge_path":            c.PurgePath,
+		"intent_target":         c.IntentTarget,
+		"stage_size":            c.StageSize,
+		"stage_handle":          c.StageHandle,
+	}
+}
+
+// saveOperation writes the document and the promoted columns in one statement. One statement
+// is the whole reason they cannot disagree for a row this binary wrote: there is no window in
+// which a reader sees the new state in one place and the old state in the other.
 func saveOperation(ctx context.Context, tx pgx.Tx, op Operation) error {
 	b, err := json.Marshal(op)
 	if err != nil {
 		return err
 	}
-	_, err = tx.Exec(ctx, `update file_operations set snapshot=$2 where id=$1`, op.ID, b)
+	_, err = tx.Exec(ctx, `update file_operations set
+		snapshot=@snapshot,
+		state=@state,
+		phase=@phase,
+		created_at=@created_at,
+		finished_at=@finished_at,
+		retain_until=@retain_until,
+		cleanup_attempted_at=@cleanup_attempted_at,
+		cleaned_at=@cleaned_at,
+		lease_token=@lease_token,
+		lease_expires_at=@lease_expires_at,
+		root_connection_id=@root_connection_id,
+		root_generation=@root_generation,
+		root_content_root=@root_content_root,
+		root_system_root=@root_system_root,
+		root_case_sensitive=@root_case_sensitive,
+		root_retains_versions=@root_retains_versions,
+		purge_path=@purge_path,
+		intent_target=@intent_target,
+		stage_size=@stage_size,
+		stage_handle=@stage_handle
+		where id=@id`, operationArgs(op, b))
 	return err
 }
 
@@ -355,6 +594,21 @@ func insertGuards(ctx context.Context, tx pgx.Tx, op Operation) error {
 	return nil
 }
 
+// insertOperationSQL is the one statement that creates a journal row, so the promoted
+// columns and the document are always written together from operationArgs. A test that needs
+// a row shaped exactly like a real one uses it too, instead of rebuilding the column list.
+const insertOperationSQL = `insert into file_operations(
+	id,owner_id,principal_id,action,idempotency_key,fingerprint,snapshot,
+	state,phase,created_at,finished_at,retain_until,cleanup_attempted_at,cleaned_at,
+	lease_token,lease_expires_at,root_connection_id,root_generation,root_content_root,
+	root_system_root,root_case_sensitive,root_retains_versions,purge_path,intent_target,
+	stage_size,stage_handle)
+	values(@id,@owner_id,@principal_id,@action,@idempotency_key,@fingerprint,@snapshot,
+	@state,@phase,@created_at,@finished_at,@retain_until,@cleanup_attempted_at,@cleaned_at,
+	@lease_token,@lease_expires_at,@root_connection_id,@root_generation,@root_content_root,
+	@root_system_root,@root_case_sensitive,@root_retains_versions,@purge_path,@intent_target,
+	@stage_size,@stage_handle)`
+
 // beginTx shares admission with upload sessions under the same owner lock and transaction.
 //
 // fence decides whether the guards become durable now. Every action and the simple PUT
@@ -370,7 +624,7 @@ func (p *Postgres) beginTx(ctx context.Context, tx pgx.Tx, req BeginRequest, fin
 			var id string
 			err := tx.QueryRow(ctx, `select id::text from file_operations where owner_id=$1 and principal_id=$2 and action=$3 and idempotency_key=$4`, req.Root.OwnerID, req.Actor.ID, req.Kind, req.IdempotencyKey).Scan(&id)
 			if err == nil {
-				op, err = readOperation(ctx, tx, id)
+				op, _, err = readOperation(ctx, tx, id)
 				if err != nil {
 					return err
 				}
@@ -421,7 +675,13 @@ func (p *Postgres) beginTx(ctx context.Context, tx pgx.Tx, req BeginRequest, fin
 		if req.IdempotencyKey != "" {
 			key = req.IdempotencyKey
 		}
-		_, err = tx.Exec(ctx, `insert into file_operations(id,owner_id,principal_id,action,idempotency_key,fingerprint,snapshot) values($1,$2,$3,$4,$5,$6,$7)`, op.ID, req.Root.OwnerID, req.Actor.ID, req.Kind, key, fingerprint, b)
+		args := operationArgs(op, b)
+		args["owner_id"] = req.Root.OwnerID
+		args["principal_id"] = req.Actor.ID
+		args["action"] = req.Kind
+		args["idempotency_key"] = key
+		args["fingerprint"] = fingerprint
+		_, err = tx.Exec(ctx, insertOperationSQL, args)
 		if err != nil {
 			return err
 		}
@@ -459,7 +719,7 @@ func (p *Postgres) Get(ctx context.Context, root Root, a Actor, id string) (Oper
 	}
 	err := p.readOnly(ctx, func(tx pgx.Tx) error {
 		var err error
-		op, err = readOperationSnapshot(ctx, tx, id)
+		op, _, err = readOperationSnapshot(ctx, tx, id)
 		if err != nil {
 			return err
 		}
@@ -490,11 +750,29 @@ func (p *Postgres) Claim(ctx context.Context, root Root, a Actor, id string, ttl
 	if !validID(id) || ttl <= 0 || ttl > 24*time.Hour {
 		return op, E("invalid_request", nil)
 	}
+	var repaired []string
 	err := p.transaction(ctx, root.OwnerID, func(tx pgx.Tx) error {
 		var err error
-		op, err = readOperation(ctx, tx, id)
+		var diverged []string
+		op, diverged, err = readOperation(ctx, tx, id)
 		if err != nil {
 			return err
+		}
+		if len(diverged) > 0 {
+			// A row written before the column split (the deploy window between `eam migrate`
+			// and the restart) has a newer document than columns. Rewrite the columns from the
+			// document and commit that repair; nothing is claimed on this call. A terminal
+			// operation must leave the pending index here — returning the usual
+			// invalid_transition would roll the repair back and let the sweep select the same
+			// settled row on every pass, forever. A non-terminal row is repaired and then
+			// claimed normally, because its document is what the worker acts on.
+			if err = saveOperation(ctx, tx, op); err != nil {
+				return err
+			}
+			if op.Terminal() {
+				repaired = diverged
+				return nil
+			}
 		}
 		if err = authorizeOperation(op, root, a, true); err != nil {
 			return err
@@ -525,6 +803,9 @@ func (p *Postgres) Claim(ctx context.Context, root Root, a Actor, id string, ttl
 		}
 		return saveOperation(ctx, tx, op)
 	})
+	if err == nil && len(repaired) > 0 {
+		return op, E("journal_repaired", fmt.Errorf("operation %s had columns disagreeing in %s; repaired from the document, nothing to claim", id, strings.Join(repaired, ",")))
+	}
 	return op, err
 }
 
@@ -543,7 +824,7 @@ func (p *Postgres) leased(ctx context.Context, l Lease, fn func(pgx.Tx, *Operati
 		return err
 	}
 	return p.transaction(ctx, owner, func(tx pgx.Tx) error {
-		op, err := readOperation(ctx, tx, l.OperationID)
+		op, _, err := readOperation(ctx, tx, l.OperationID)
 		if err != nil {
 			return err
 		}
@@ -585,7 +866,7 @@ func (p *Postgres) RequestCancel(ctx context.Context, root Root, a Actor, id str
 	}
 	err := p.transaction(ctx, root.OwnerID, func(tx pgx.Tx) error {
 		var err error
-		op, err = readOperation(ctx, tx, id)
+		op, _, err = readOperation(ctx, tx, id)
 		if err != nil {
 			return err
 		}

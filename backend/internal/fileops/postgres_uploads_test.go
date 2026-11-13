@@ -135,7 +135,9 @@ func TestPostgresUploads(t *testing.T) {
 			t.Fatalf("replay reserved twice: %+v", usage)
 		}
 		// Retained open sessions never enter workers, even after the normal delay.
-		_, err = pool.Exec(ctx, `update file_operations set snapshot=jsonb_set(snapshot,'{CreatedAt}',to_jsonb(clock_timestamp()-interval '1 hour')) where id in ($1,$2)`, u.ID, other.ID)
+		_, err = pool.Exec(ctx, `update file_operations set created_at=stamp.at,
+ snapshot=jsonb_set(snapshot,'{CreatedAt}',to_jsonb(stamp.at))
+ from (select clock_timestamp()-interval '1 hour' as at) stamp where id in ($1,$2)`, u.ID, other.ID)
 		if err != nil {
 			t.Fatal(err)
 		}

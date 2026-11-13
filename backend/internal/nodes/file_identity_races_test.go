@@ -63,7 +63,10 @@ func TestFileIdentityBusyUsesOwnerNativeRulesAndDurableGuards(t *testing.T) {
 	owner, other := actionOwner(t, pool), actionOwner(t, pool)
 	var operation string
 	snapshot, _ := json.Marshal(fileops.Operation{Root: fileops.Root{OwnerID: owner.OwnerID, CaseSensitive: false}})
-	if err := pool.QueryRow(ctx, `insert into file_operations(id,owner_id,principal_id,action,fingerprint,snapshot) values(gen_random_uuid(),$1::uuid,'test','move','fixture',$2) returning id::text`, owner.OwnerID, snapshot).Scan(&operation); err != nil {
+	// FileIdentityBusy compares paths through the operation's case rule, which since
+	// sql/047 is a column; write it from the same Root so the fixture keeps testing
+	// case-insensitive comparison.
+	if err := pool.QueryRow(ctx, `insert into file_operations(id,owner_id,principal_id,action,fingerprint,snapshot,root_case_sensitive) values(gen_random_uuid(),$1::uuid,'test','move','fixture',$2,false) returning id::text`, owner.OwnerID, snapshot).Scan(&operation); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := pool.Exec(ctx, `insert into file_operation_guards(operation_id,owner_id,ordinal,native_path,comparison_path,subtree) values($1::uuid,$2::uuid,0,'Straße','strasse',true),($1::uuid,$2::uuid,1,'Exact','exact',false)`, operation, owner.OwnerID); err != nil {

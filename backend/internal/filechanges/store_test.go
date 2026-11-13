@@ -45,17 +45,18 @@ func changeDatabase(t *testing.T) *pgxpool.Pool {
 	}
 	t.Cleanup(pool.Close)
 	migrations, err := filepath.Glob("../../../sql/*.sql")
-	if err != nil || len(migrations) == 0 {
-		t.Fatal("migration discovery", err)
+	if err != nil || len(migrations) < 17 {
+		t.Fatalf("migration discovery: %d %v", len(migrations), err)
 	}
+	// Every migration, not a prefix: this fixture used to stop at 032, but the package
+	// queries file_operations.state since sql/047 promoted the journal columns, and a
+	// fixture missing a column the code reads turns a schema mismatch into a confusing
+	// runtime error (that is what made this package hang instead of fail). A partial
+	// schema is a second, silent contract; only reuse one when the package provably reads
+	// nothing beyond it.
 	for range 2 {
 		for _, path := range migrations {
 			name := filepath.Base(path)
-			// The package owns root binding and reset across completed feed tables.
-			// Namespace marker helpers need 027's canonical tree functions.
-			if name > "032_zzzz.sql" {
-				continue
-			}
 			data, err := os.ReadFile(path)
 			if err != nil {
 				t.Fatal(err)

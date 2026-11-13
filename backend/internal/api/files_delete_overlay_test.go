@@ -116,9 +116,17 @@ func TestFilesDeleteOverlayHidesAcceptedDeletesPostgres(t *testing.T) {
 	namespace := owner + ":conn-1:7:content:system"
 	insert := func(ownerID, state, path string, generation int) {
 		t.Helper()
-		// Marshal the real operation shape: the concealment query reads these JSON keys.
+		phase := fileops.Admitted
+		switch state {
+		case "succeeded", "failed", "cancelled":
+			phase = fileops.Settled
+		}
+		// Marshal the real operation shape and write the promoted columns from the same
+		// values. The concealment query reads the columns, which are authoritative; a row
+		// with only a document is the pre-047 shape this test no longer produces.
 		snapshot, err := json.Marshal(fileops.Operation{
 			State: fileops.State(state),
+			Phase: phase,
 			Kind:  "delete",
 			Root: fileops.Root{
 				OwnerID: ownerID, ConnectionID: "conn-1", Generation: int64(generation),
@@ -129,9 +137,10 @@ func TestFilesDeleteOverlayHidesAcceptedDeletesPostgres(t *testing.T) {
 			t.Fatal(err)
 		}
 		var id string
-		if err = db.Pool().QueryRow(ctx, `insert into file_operations(id,owner_id,principal_id,action,fingerprint,snapshot)
-			values(gen_random_uuid(),$1::uuid,$2,'delete',$3,$4::jsonb)
-			returning id::text`, ownerID, "owner:"+ownerID, "fp-"+path, snapshot).Scan(&id); err != nil {
+		if err = db.Pool().QueryRow(ctx, `insert into file_operations(id,owner_id,principal_id,action,fingerprint,snapshot,
+			 state,phase,root_connection_id,root_generation,root_content_root,root_system_root)
+			values(gen_random_uuid(),$1::uuid,$2,'delete',$3,$4::jsonb,$5,$6,'conn-1',$7,'content','system')
+			returning id::text`, ownerID, "owner:"+ownerID, "fp-"+path, snapshot, state, string(phase), generation).Scan(&id); err != nil {
 			t.Fatal(err)
 		}
 		if _, err = db.Pool().Exec(ctx, `insert into file_operation_guards(operation_id,owner_id,ordinal,native_path,comparison_path,subtree)
@@ -168,7 +177,7 @@ func TestFilesDeleteOverlayHidesAcceptedDeletesPostgres(t *testing.T) {
 		}
 	}
 	// A failure before the native effect keeps the entry: the path becomes visible again.
-	if _, err = db.Pool().Exec(ctx, `update file_operations set snapshot=jsonb_set(snapshot,'{State}','"failed"') where snapshot->>'State'='queued'`); err != nil {
+	if _, err = db.Pool().Exec(ctx, `update file_operations set state='failed', phase='settled', snapshot=jsonb_set(snapshot,'{State}','"failed"') where state='queued'`); err != nil {
 		t.Fatal(err)
 	}
 	wrapped, err = server.filesDeleteOverlay(ctx, owner, namespace, driver)

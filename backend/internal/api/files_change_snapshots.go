@@ -205,7 +205,7 @@ func filesSnapshotCheckGuards(ctx context.Context, tx pgx.Tx, f *fileRequest, p 
 	err := tx.QueryRow(ctx, `select guard.operation_id::text from file_operation_guards guard
  join file_operations operation on operation.id=guard.operation_id and operation.owner_id=guard.owner_id
  where guard.owner_id=$1::uuid
- and (operation.snapshot->>'State'='outcome_unknown' or operation.snapshot->>'Phase' in ('effect_started','native_applied'))
+ and (operation.state='outcome_unknown' or operation.phase in ('effect_started','native_applied'))
  and (file_identity_comparison(guard.native_path,$4)=file_identity_comparison($2,$4)
  or (guard.subtree and (guard.native_path='' or file_changes_within('/'||guard.native_path,'/'||$2,$4)))
  or ($3::boolean and file_changes_within('/'||$2,'/'||guard.native_path,$4)))

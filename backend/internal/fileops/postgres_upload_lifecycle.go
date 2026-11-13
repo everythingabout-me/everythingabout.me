@@ -272,7 +272,7 @@ func (p *Postgres) ExpireUploads(ctx context.Context, limit int) ([]Upload, erro
 	var out []Upload
 	for _, c := range candidates {
 		err = p.transaction(ctx, c.owner, func(tx pgx.Tx) error {
-			op, err := readOperation(ctx, tx, c.id)
+			op, _, err := readOperation(ctx, tx, c.id)
 			if err != nil {
 				return err
 			}

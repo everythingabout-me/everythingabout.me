@@ -415,7 +415,10 @@ func TestFilesChangeSnapshotGuardIntersectionPostgres(t *testing.T) {
 	// Only the durable snapshot and path guards matter; no native driver is opened.
 	root := map[string]any{"OwnerID": fx.f.Principal.User.ID, "CaseSensitive": true}
 	raw, _ := json.Marshal(map[string]any{"Root": root, "State": "outcome_unknown", "Phase": "effect_started"})
-	err := db.Pool().QueryRow(ctx, `insert into file_operations(id,owner_id,principal_id,action,fingerprint,snapshot) values(gen_random_uuid(),$1::uuid,$2,'move','snapshot-guard',$3::jsonb) returning id::text`, fx.f.Principal.User.ID, filePrincipalID(fx.f.Principal), raw).Scan(&op)
+	// The guard query reads the promoted columns; the document is written from the same
+	// values so the fixture is a row this binary could have produced.
+	err := db.Pool().QueryRow(ctx, `insert into file_operations(id,owner_id,principal_id,action,fingerprint,snapshot,state,phase)
+ values(gen_random_uuid(),$1::uuid,$2,'move','snapshot-guard',$3::jsonb,'outcome_unknown','effect_started') returning id::text`, fx.f.Principal.User.ID, filePrincipalID(fx.f.Principal), raw).Scan(&op)
 	if err != nil {
 		t.Fatal(err)
 	}

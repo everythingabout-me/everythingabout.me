@@ -23,7 +23,7 @@ func (p *Postgres) Release(ctx context.Context, l Lease) error {
 		return err
 	}
 	return p.transaction(ctx, owner, func(tx pgx.Tx) error {
-		op, err := readOperation(ctx, tx, l.OperationID)
+		op, _, err := readOperation(ctx, tx, l.OperationID)
 		if err != nil {
 			return err
 		}

@@ -45,6 +45,21 @@ func resetCommitted(t *testing.T, pool *pgxpool.Pool, owner, namespace string) H
 	return head
 }
 
+// beginOpen starts a transaction the test commits or rolls back explicitly, and registers a
+// safety rollback. Without it a failing assertion exits the test while the transaction still
+// holds its connection, so changeDatabase's pool.Close waits forever at cleanup and the real
+// error is never printed. A test that can hang the package on its own failure hides exactly
+// the bug it was written to report.
+func beginOpen(t *testing.T, pool *pgxpool.Pool) pgx.Tx {
+	t.Helper()
+	tx, err := pool.Begin(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = tx.Rollback(context.Background()) })
+	return tx
+}
+
 func TestPostgresRootBindingAndReset(t *testing.T) {
 	pool := changeDatabase(t)
 	ctx := context.Background()
@@ -57,10 +72,8 @@ func TestPostgresRootBindingAndReset(t *testing.T) {
 	if again := bindCommitted(t, pool, owner, "root:A"); again.RootEpoch != initial.RootEpoch {
 		t.Fatal("ordinary binding rotated epoch")
 	}
-	tx, err := pool.Begin(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
+	tx := beginOpen(t, pool)
+	var err error
 	if _, err = BindRoot(ctx, tx, owner, "root:B"); !errors.Is(err, ErrRootChanged) {
 		t.Fatalf("automatic rebind accepted: %v", err)
 	}
@@ -72,10 +85,7 @@ func TestPostgresRootBindingAndReset(t *testing.T) {
 	}
 	first := createChange(owner, "root-A-effect", "/Notes/a.txt")
 	position := appendCommitted(t, pool, first)
-	tx, err = pool.Begin(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
+	tx = beginOpen(t, pool)
 	if err = MarkChanged(ctx, tx, owner, []string{testEntry}, position, time.Now()); err != nil {
 		t.Fatal(err)
 	}
@@ -95,10 +105,7 @@ func TestPostgresRootBindingAndReset(t *testing.T) {
 		t.Fatal(err)
 	}
 	// A reset is transactional: a dry run must not rotate or clear any state.
-	tx, err = pool.Begin(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
+	tx = beginOpen(t, pool)
 	if _, err = ResetRoot(ctx, tx, owner, "root:B"); err != nil {
 		t.Fatal(err)
 	}
@@ -125,10 +132,7 @@ func TestPostgresRootBindingAndReset(t *testing.T) {
 			t.Fatalf("reset retained active %s %d %v", table, active, err)
 		}
 	}
-	tx, err = pool.Begin(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
+	tx = beginOpen(t, pool)
 	if _, err = BindRoot(ctx, tx, owner, "root:A"); !errors.Is(err, ErrRootChanged) {
 		t.Fatalf("old producer rebound rootA: %v", err)
 	}
@@ -187,7 +191,7 @@ func TestPostgresResetRejectsOutstandingAuthority(t *testing.T) {
 		}
 	}
 	assertBusy()
-	if _, err := pool.Exec(ctx, `update file_operations set snapshot='{"State":"succeeded"}'::jsonb where id=$1::uuid`, operationID); err != nil {
+	if _, err := pool.Exec(ctx, `update file_operations set state='succeeded', phase='settled', snapshot='{"State":"succeeded","Phase":"settled"}'::jsonb where id=$1::uuid`, operationID); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := pool.Exec(ctx, `insert into file_operation_guards(operation_id,owner_id,ordinal,native_path,comparison_path,subtree)

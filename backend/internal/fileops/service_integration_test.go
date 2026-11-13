@@ -679,7 +679,9 @@ func TestServicePostgresLocalCoordinator(t *testing.T) {
 			t.Fatal("native publication checkpoint was not persisted")
 		}
 		// Fault injection expires the old DB claim while its real native flock remains held.
-		if _, err := pool.Exec(ctx, `update file_operations set snapshot=jsonb_set(snapshot,'{Lease,ExpiresAt}',to_jsonb(clock_timestamp()-interval '1 second')) where id=$1`, op.ID); err != nil {
+		if _, err := pool.Exec(ctx, `update file_operations set lease_expires_at=stamp.at,
+ snapshot=jsonb_set(snapshot,'{Lease,ExpiresAt}',to_jsonb(stamp.at))
+ from (select clock_timestamp()-interval '1 second' as at) stamp where id=$1`, op.ID); err != nil {
 			unblock()
 			t.Fatal(err)
 		}

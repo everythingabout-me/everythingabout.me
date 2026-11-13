@@ -115,7 +115,19 @@ func TestReconcilePostgresIdentityDryRunAndAtomicity(t *testing.T) {
     principal_id text not null default 'owner',
     action text not null,
     fingerprint text not null default '',
-    snapshot jsonb not null);
+    snapshot jsonb not null,
+    state text not null default 'queued',
+    phase text not null default 'admitted',
+    created_at timestamptz not null default clock_timestamp(),
+    retain_until timestamptz not null default clock_timestamp(),
+    root_connection_id text not null default '',
+    root_generation bigint not null default 0,
+    root_content_root text not null default '',
+    root_system_root text not null default '',
+    purge_path text,
+    root_namespace text generated always as (
+      owner_id::text || ':' || root_connection_id || ':' || root_generation::text || ':' ||
+      root_content_root || ':' || root_system_root) stored);
   create table fs_jobs(user_id uuid not null,op text not null,status text not null,from_path text not null);
    create table file_content_generations(owner_id uuid not null,root_namespace text not null,path text not null,native_fingerprint bytea not null,content_revision text not null,primary key(owner_id,root_namespace,path));
   insert into users values ('11111111-1111-1111-1111-111111111111'),('22222222-2222-2222-2222-222222222222');
@@ -159,7 +171,8 @@ func TestReconcilePostgresIdentityDryRunAndAtomicity(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if _, err := pool.Exec(ctx, `insert into file_operations(owner_id,action,snapshot) values($1::uuid,'delete',$2::jsonb)`, ownerID, snapshot); err != nil {
+		if _, err := pool.Exec(ctx, `insert into file_operations(owner_id,action,snapshot,state,phase,root_connection_id,root_generation,root_content_root,root_system_root,purge_path)
+ values($1::uuid,'delete',$2::jsonb,$3,'settled','conn',1,'content','system',$4)`, ownerID, snapshot, state, path); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -242,7 +255,7 @@ func TestReconcilePostgresIdentityDryRunAndAtomicity(t *testing.T) {
 	if _, err := nodes.ApplyScan(ctx, pool, owner, allowed, nodes.ScanApplyOptions{DryRun: true}); err != nil {
 		t.Fatalf("similarly named sibling was blocked: %v", err)
 	}
-	if _, err := pool.Exec(ctx, `update file_operations set snapshot=jsonb_set(snapshot,'{Purge,Path}','"parent/gone"')`); err != nil {
+	if _, err := pool.Exec(ctx, `update file_operations set purge_path='parent/gone', snapshot=jsonb_set(snapshot,'{Purge,Path}','"parent/gone"')`); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := nodes.ApplyScan(ctx, pool, owner, scan(prefix+"parent/,0,\n"), nodes.ScanApplyOptions{DryRun: true}); err != nil {
@@ -267,7 +280,7 @@ func TestReconcilePostgresIdentityDryRunAndAtomicity(t *testing.T) {
 	if err := pendingDeleteBlocker(ctx, pool, owner, namespaceOf(owner, "conn")); err == nil || !strings.Contains(err.Error(), "has not finished purging") {
 		t.Fatalf("namespace guard missed an accepted purge in this namespace: %v", err)
 	}
-	if _, err := pool.Exec(ctx, `update file_operations set snapshot=jsonb_set(snapshot,'{Root,ConnectionID}','"another-generation"') where snapshot->>'State'='running' and snapshot->'Root'->>'OwnerID'=$1`, owner); err != nil {
+	if _, err := pool.Exec(ctx, `update file_operations set root_connection_id='another-generation', snapshot=jsonb_set(snapshot,'{Root,ConnectionID}','"another-generation"') where state='running' and owner_id=$1`, owner); err != nil {
 		t.Fatal(err)
 	}
 	if err := pendingDeleteBlocker(ctx, pool, owner, namespaceOf(owner, "conn")); err != nil {

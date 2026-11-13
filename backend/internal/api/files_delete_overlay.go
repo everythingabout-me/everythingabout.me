@@ -72,10 +72,8 @@ func (s *Server) pendingDeleteRoots(ctx context.Context, owner, namespace string
 		from file_operation_guards g
 		join file_operations o on o.id=g.operation_id and o.owner_id=g.owner_id
 		where g.owner_id=$1::uuid and o.action='delete'
-		  and o.snapshot->>'State' in ('queued','running','outcome_unknown')
-		  and concat_ws(':', o.snapshot->'Root'->>'OwnerID', o.snapshot->'Root'->>'ConnectionID',
-		      o.snapshot->'Root'->>'Generation', o.snapshot->'Root'->>'ContentRoot',
-		      o.snapshot->'Root'->>'SystemRoot')=$2`, owner, namespace)
+		  and o.state in ('queued','running','outcome_unknown')
+		  and o.root_namespace=$2`, owner, namespace)
 	if err != nil {
 		return nil, err
 	}
@@ -216,14 +214,12 @@ func (s *Server) filesPendingDeleteCovers(ctx context.Context, f *fileRequest, p
 	if s.db == nil || p == "/" {
 		return false, nil
 	}
-	rows, err := s.db.Pool().Query(ctx, `select distinct o.snapshot->'Purge'->>'Path'
+	rows, err := s.db.Pool().Query(ctx, `select distinct o.purge_path
 		from file_operations o
 		where o.owner_id=$1::uuid and o.action='delete'
-		  and o.snapshot->'Purge' is not null
-		  and o.snapshot->>'State' in ('queued','running','outcome_unknown')
-		  and concat_ws(':', o.snapshot->'Root'->>'OwnerID', o.snapshot->'Root'->>'ConnectionID',
-		      o.snapshot->'Root'->>'Generation', o.snapshot->'Root'->>'ContentRoot',
-		      o.snapshot->'Root'->>'SystemRoot')=$2
+		  and o.purge_path is not null
+		  and o.state in ('queued','running','outcome_unknown')
+		  and o.root_namespace=$2
 		limit $3`, f.Principal.User.ID, f.ContentNamespace, maxPendingPurgeRoots+1)
 	if err != nil {
 		return false, err

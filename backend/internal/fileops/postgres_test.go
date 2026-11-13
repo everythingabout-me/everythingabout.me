@@ -102,7 +102,12 @@ func mustUsage(t *testing.T, p *Postgres, r Root, a Actor) Usage {
 }
 func expireLease(t *testing.T, pool *pgxpool.Pool, id string) {
 	t.Helper()
-	_, err := pool.Exec(context.Background(), `update file_operations set snapshot=jsonb_set(snapshot,'{Lease,ExpiresAt}',to_jsonb(clock_timestamp()-interval '1 second')) where id=$1`, id)
+	// One timestamp expression feeds both the column and the document: two calls would
+	// leave the row's column and its document a few microseconds apart, which the journal
+	// treats as a disagreement and repairs on the next write.
+	_, err := pool.Exec(context.Background(), `update file_operations set lease_expires_at=stamp.at,
+ snapshot=jsonb_set(snapshot,'{Lease,ExpiresAt}',to_jsonb(stamp.at))
+ from (select clock_timestamp()-interval '1 second' as at) stamp where id=$1`, id)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -168,12 +168,17 @@ func TestMigrateBootstrapsAPreVersioningDatabase(t *testing.T) {
 	}
 	// Files after 044 still execute here (the rule cannot tell a history-less full
 	// schema from a history-less partial one), so the stub must carry the relations
-	// those files extend. 045 needs only these three; add more when a later file
-	// references another pre-044 table.
+	// those files extend. 045 needs the timeline tables, 047 promotes columns on the
+	// operation journal and indexes the change feed by the operation that produced a
+	// fact. Add another relation when a later file references a pre-044 table: a stub
+	// that lags the migration it exercises fails as a missing relation, which is a
+	// fixture error, not a bootstrap-rule error.
 	for _, statement := range []string{
 		`create table users (id uuid primary key)`,
 		`create table timeline_assets (user_id uuid not null, node_id uuid not null)`,
 		`create table timeline_jobs (id bigserial primary key, user_id uuid not null, kind text not null, status text not null default 'pending')`,
+		`create table file_operations (id uuid primary key, owner_id uuid not null, action text not null, snapshot jsonb not null)`,
+		`create table file_changes (owner_id uuid not null, operation_id text not null default '')`,
 	} {
 		if _, err := pool.Exec(ctx, statement); err != nil {
 			t.Fatal(err)

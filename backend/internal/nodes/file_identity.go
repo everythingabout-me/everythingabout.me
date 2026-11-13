@@ -60,9 +60,9 @@ func (s *Service) FileIdentityBusy(ctx context.Context, owner, path string) (str
 	err := s.db.Pool().QueryRow(ctx, `select guard.operation_id::text from file_operation_guards guard
  join file_operations operation on operation.id=guard.operation_id and operation.owner_id=guard.owner_id
  cross join lateral (select file_identity_comparison(guard.native_path,
- case when coalesce((operation.snapshot->'Root'->>'CaseSensitive')::boolean,true) then 'nfc-sensitive-v1' else 'nfc-fold-v1' end) as guarded,
+ case when operation.root_case_sensitive then 'nfc-sensitive-v1' else 'nfc-fold-v1' end) as guarded,
  file_identity_comparison($2,
- case when coalesce((operation.snapshot->'Root'->>'CaseSensitive')::boolean,true) then 'nfc-sensitive-v1' else 'nfc-fold-v1' end) as selected) comparison
+ case when operation.root_case_sensitive then 'nfc-sensitive-v1' else 'nfc-fold-v1' end) as selected) comparison
  where guard.owner_id=$1::uuid and (comparison.guarded=comparison.selected
  or (guard.subtree and (comparison.guarded='' or starts_with(comparison.selected,comparison.guarded||'/'))))
  and not exists(select 1 from file_uploads upload where upload.operation_id=guard.operation_id

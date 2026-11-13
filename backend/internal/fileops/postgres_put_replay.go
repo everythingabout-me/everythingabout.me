@@ -31,7 +31,7 @@ func (p *Postgres) ReplayWrite(ctx context.Context, root Root, actor Actor, key 
 		if err != nil {
 			return err
 		}
-		op, err = readOperation(ctx, tx, id)
+		op, _, err = readOperation(ctx, tx, id)
 		if err != nil {
 			return err
 		}

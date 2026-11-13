@@ -37,21 +37,19 @@ type Queryer interface {
 // callers that know the current binding pass it so a purge in another generation
 // cannot block the current tree.
 //
-// The partial index file_operations_pending covers these states, so the read scans
-// only the work in flight, not the journal that retains every terminal row.
+// The partial index file_operations_purge covers this owner/namespace/state set, so the
+// read scans only the purges in flight, not the journal that retains every terminal row.
 func PendingDeleteRoots(ctx context.Context, q Queryer, ownerID, namespace string) ([]string, error) {
 	if q == nil || ownerID == "" {
 		return nil, nil
 	}
-	rows, err := q.Query(ctx, `select distinct o.snapshot->'Purge'->>'Path'
+	rows, err := q.Query(ctx, `select distinct o.purge_path
 		from file_operations o
 		where o.owner_id=$1::uuid
 		  and o.action='delete'
-		  and coalesce(o.snapshot->'Purge'->>'Path','') <> ''
-		  and o.snapshot->>'State' in ('queued','running','outcome_unknown')
-		  and ($2='' or concat_ws(':', o.snapshot->'Root'->>'OwnerID', o.snapshot->'Root'->>'ConnectionID',
-		      o.snapshot->'Root'->>'Generation', o.snapshot->'Root'->>'ContentRoot',
-		      o.snapshot->'Root'->>'SystemRoot')=$2)
+		  and coalesce(o.purge_path,'') <> ''
+		  and o.state in ('queued','running','outcome_unknown')
+		  and ($2='' or o.root_namespace=$2)
 		order by 1`, ownerID, namespace)
 	if err != nil {
 		return nil, err

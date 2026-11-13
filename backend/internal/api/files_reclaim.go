@@ -3,7 +3,6 @@ package api
 import (
 	"bytes"
 	"context"
-	"encoding/base64"
 	"errors"
 	"log/slog"
 
@@ -35,19 +34,19 @@ func (s *Server) filesReclaimsPublication(ctx context.Context, owner, target str
 	}
 	// Only a direct session can leave published bytes behind before settlement: parts of a
 	// multipart session are never visible as an object.
-	rows, err := s.db.Pool().Query(ctx, `select (o.snapshot->'Stage'->>'Size')::bigint, o.snapshot->'Stage'->>'Handle'
+	rows, err := s.db.Pool().Query(ctx, `select o.stage_size, o.stage_handle
 		from file_operations o
 		join file_uploads u on u.operation_id = o.id and u.owner_id = o.owner_id
 		where o.owner_id = $1::uuid
 		  and o.action = 'upload_commit'
-		  and o.snapshot->'Intent'->>'Target' = $2
-		  and o.snapshot->>'State' = 'failed'
+		  and o.intent_target = $2
+		  and o.state = 'failed'
 		  and u.mode = 'direct'
-		  and o.snapshot->'Stage' is not null
+		  and o.stage_handle is not null
 		  -- Only a path the index does not know: an indexed destination is an ordinary
 		  -- conflict, and replacing a known file is the client's decision, not a recovery.
-		  and file_tree_resolve(o.owner_id, o.snapshot->'Intent'->>'Target') is null
-		order by (o.snapshot->>'CreatedAt')::timestamptz desc
+		  and file_tree_resolve(o.owner_id, o.intent_target) is null
+		order by o.created_at desc
 		limit 8`, owner, target)
 	if err != nil {
 		// A proof that cannot be read is not a proof. The retry keeps the ordinary answer.
@@ -58,16 +57,12 @@ func (s *Server) filesReclaimsPublication(ctx context.Context, owner, target str
 	var candidates []filesPublicationCandidate
 	for rows.Next() {
 		var recorded int64
-		var handle string
+		var handle []byte
 		if err := rows.Scan(&recorded, &handle); err != nil {
 			slog.Warn("could not read a failed publication", "target", target, "cause", err)
 			return false
 		}
-		decoded, err := base64.StdEncoding.DecodeString(handle)
-		if err != nil {
-			continue
-		}
-		candidates = append(candidates, filesPublicationCandidate{size: recorded, handle: decoded})
+		candidates = append(candidates, filesPublicationCandidate{size: recorded, handle: handle})
 	}
 	if err := rows.Err(); err != nil && !errors.Is(err, context.Canceled) {
 		slog.Warn("could not read failed publications for a retried upload", "target", target, "cause", err)

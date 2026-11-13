@@ -27,7 +27,7 @@ func (p *Postgres) ReplayAction(ctx context.Context, req ActionRequest) (Operati
 		if err != nil {
 			return err
 		}
-		op, err = readOperation(ctx, tx, id)
+		op, _, err = readOperation(ctx, tx, id)
 		if err != nil {
 			return err
 		}
