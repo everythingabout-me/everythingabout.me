@@ -878,6 +878,7 @@ export function FilesPage() {
     hasActiveUploads,
     enqueue,
     cancel: cancelUpload,
+    discard: discardUpload,
     retry: retryUpload,
     resume: resumeUpload,
     resumeQueue: resumeUploadQueue,
@@ -1162,9 +1163,17 @@ export function FilesPage() {
       deletions.clearStatusError();
       // Drop the row before the listing round trip; the reload then confirms it.
       listing.removePath(target.path, target.kind === "folder");
-      cancelUpload(uploads
+      // The rows this delete covered are history now, so a finished one leaves without a
+      // request. Handing every completed row to `cancel` spent two requests per file — an
+      // abort answered `409 already_committed` and the status read that confirmed it —
+      // against the owner's rate budget at the worst possible moment: 2,000 requests for a
+      // 1,000-file folder immediately after its import. What is genuinely still moving is
+      // cancelled for real, with the server deciding its session's fate.
+      const affected = uploads
         .filter((task) => filePath(task.path) === target.path || filePath(task.path).startsWith(`${target.path}/`))
-        .map((task) => task.id));
+        .map((task) => task.id);
+      const stillLive = discardUpload(affected);
+      if (stillLive.length) cancelUpload(stillLive);
       if (filePath(listing.view().path) === target.path) {
         navigate(filesHref(target.parentPath ?? "/"), { replace: true });
       } else {

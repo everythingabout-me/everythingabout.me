@@ -182,6 +182,16 @@ export interface UploadTask {
    */
   activeParts: number;
   uploaded: boolean;
+  /**
+   * The upload's server-side session is known to be in a terminal state.
+   *
+   * Recorded where the queue can establish it: a session read as `committed`, or a
+   * successful commit, whose published file is that session's terminal outcome. A row that
+   * merely reads `completed` is not evidence by itself — see `isFinishedUpload` — because a
+   * local `discard` must never drop a row while a session it names could still hold the
+   * owner's quota.
+   */
+  sessionTerminal?: boolean;
   uploadId?: string;
   operationId?: string;
   createKey: string;
@@ -242,6 +252,26 @@ export interface UploadQueue {
    * session holds its reservation against the owner's quota until someone ends it.
    */
   cancel(ids: string | string[]): UploadCancelSummary | null;
+  /**
+   * Drop rows whose server-side session is demonstrably finished, without a request.
+   *
+   * A deletion that was already accepted cannot be undone, so the completed rows it covered
+   * are history. Sending each one to `cancel` spent two requests per file — an abort the
+   * server answers `409 already_committed` and the status read that confirms it — just to
+   * remove a row the queue already knew was over: about 2,000 requests for a 1,000-file
+   * folder, against the owner's rate budget at the exact moment a large delete completed.
+   *
+   * `demonstrably` is the rule, not `status === "completed"`: only a completed row whose
+   * session is known terminal (or a completed folder row, which never allocated one) is
+   * dropped. A completed row whose session fate the queue did not establish is left in the
+   * queue and returned in the answer, so the caller can cancel it and let the server decide
+   * instead of guessing. Removing a row changes no pause state and touches no batch entry:
+   * a finished row has no pending admission, settlement or Operation of its own.
+   *
+   * Returns the ids still in the queue that were not dropped, in any order; the caller
+   * decides whether to cancel them.
+   */
+  discard(ids: string | string[]): string[];
   retry(id: string): void;
   /**
    * Why the whole queue is stopped, or null while it is running.
@@ -327,6 +357,20 @@ function compareQueueOrder(a: UploadTask, b: UploadTask): number {
   if (left !== right) return left < right ? -1 : 1;
   return a.path < b.path ? -1 : a.path > b.path ? 1 : 0;
 }
+/**
+ * Whether this row can leave the queue without asking the server anything.
+ *
+ * `status === "completed"` alone is not proof: a completion path that never established
+ * the session's fate would leave `sessionTerminal` unset, and dropping such a row locally
+ * could strand an open session holding the owner's quota. Those rows go through `cancel`,
+ * which asks the server, instead of being guessed away. A completed folder row is the other
+ * safe case: it never allocated a session, so there is nothing to abort or read.
+ */
+export function isFinishedUpload(task: UploadTask): boolean {
+  if (task.status !== "completed") return false;
+  return task.sessionTerminal === true || (task.isDir && !task.uploadId);
+}
+
 let sequence = 0;
 // The only thing the queue asks capabilities for is whether this connection can carry a
 // source modification time — a service-wide flag, not a per-folder one. It was asked for
@@ -737,6 +781,7 @@ async function admitUploadAttempt(host: UploadRunHost, id: string, task: UploadT
           }
         }
         if (blocking.state === "committed" && blocking.result) {
+          host.patch(id, { sessionTerminal: true });
           host.complete(task, blocking.result);
           return null;
         }
@@ -829,6 +874,7 @@ function takeUploadSession(host: UploadRunHost, id: string, task: UploadTask, ad
   const { session } = admission;
   if (session.state === "committed") {
     if (!session.result) throw new Error("The upload result is incomplete.");
+    host.patch(id, { sessionTerminal: true });
     host.complete(task, session.result);
     return { kind: "stop" };
   }
@@ -1134,7 +1180,12 @@ async function settleUploadSession(host: UploadRunHost, id: string, task: Upload
   const result = await commitUpload(session.id, signal, host.settleUpload);
   if (signal.aborted) return;
   if (isOperation(result)) { host.patch(id, { operationId: result.id }); }
-  else { host.complete(task, result); }
+  else {
+    // The commit answered with the published file: whatever the session still staged is now
+    // the file at the destination, so its commit is terminal and no abort can apply.
+    host.patch(id, { sessionTerminal: true });
+    host.complete(task, result);
+  }
 }
 
 /**
@@ -1630,6 +1681,30 @@ function createQueue(): QueueOwner {
     schedulePublish();
   }, [dropAdmission, releaseClaim, schedulePublish]);
   /**
+   * Drop the rows the server has already finished with, and answer the ones it has not.
+   *
+   * The `discard` contract is on `UploadQueue`; this is its implementation. It reuses
+   * `remove`, so every cell that tracks a row — pending starts, transfer slots, the pending
+   * directory index, admissions, path claims — leaves with it in one place, and it publishes
+   * at once because a deletion gesture must be visible on this paint rather than the next.
+   */
+  const discard = useCallback((selected: string | string[]): string[] => {
+    const ids = typeof selected === "string" ? [selected] : selected;
+    const finished: string[] = [];
+    const remaining: string[] = [];
+    for (const id of ids) {
+      const task = tasks.current.get(id);
+      if (!task) continue;
+      if (isFinishedUpload(task)) finished.push(id);
+      else remaining.push(id);
+    }
+    if (finished.length) {
+      remove(finished);
+      publish();
+    }
+    return remaining;
+  }, [publish, remove]);
+  /**
    * Leave an existing destination alone.
    *
    * A skip is the person's answer, not a failure, so the row leaves the sheet the way a
@@ -1661,6 +1736,9 @@ function createQueue(): QueueOwner {
     if (op.id !== task.operationId) throw new Error("The operation identity changed.");
     if (op.state === "succeeded") {
       if (!op.result || !("kind" in op.result)) throw new Error("The operation result is incomplete.");
+      // A succeeded publication is this session's terminal outcome: the file it staged is
+      // now at the destination, so an abort would be a request the server can only refuse.
+      if (!task.isDir) patch(task.id, { sessionTerminal: true });
       complete(task, op.result);
     } else if (op.state === "failed" || op.state === "cancelled") {
       if (task.cancelRequested) {
@@ -2095,7 +2173,7 @@ function createQueue(): QueueOwner {
   const snapshot = (): UploadQueue => ({
     tasks: published,
     hasActiveUploads: published.some((task) => activeStatuses.includes(task.status)),
-    enqueue, cancel, retry, resume, resumeQueue,
+    enqueue, cancel, discard, retry, resume, resumeQueue,
     pauseMessage,
     conflict,
     conflictPolicy: policy,
@@ -2109,7 +2187,7 @@ function createQueue(): QueueOwner {
     get pauseMessage() { return pauseMessage; },
     get conflict() { return conflict; },
     get conflictPolicy() { return policy; },
-    enqueue, cancel, retry, resume, resumeQueue, answerConflict, askForConflicts, beginImport,
+    enqueue, cancel, discard, retry, resume, resumeQueue, answerConflict, askForConflicts, beginImport,
     start, dispose, subscribe, onCompleted, snapshot,
   };
 }

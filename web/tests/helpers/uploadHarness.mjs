@@ -304,7 +304,7 @@ export async function setup(overrides = {}, options = {}) {
     .replace('from "./uploadOwnership"', `from "${ownershipURL}"`)
     .replace('from "./uploadSelection"', `from "${selectionURL}"`);
   const { code } = await transformWithOxc(`${source}\n// harness ${unique}`, "useUploadQueue.ts");
-  const { useUploadQueue, disposeUploadQueue } = await import(moduleURL(code));
+  const { useUploadQueue, disposeUploadQueue, isFinishedUpload } = await import(moduleURL(code));
   const render = () => {
     cursor = 0;
     const queue = useUploadQueue((task, result) => {
@@ -372,5 +372,5 @@ export async function setup(overrides = {}, options = {}) {
     disposeUploadQueue();
   };
   render();
-  return { render, settle, until, tick, timers, storage, locks, ownership, completed, persistence, listeners, dispatchBeforeUnload, navigateAway, unmount, updates: () => stateUpdates, paints: () => paints };
+  return { render, settle, until, tick, timers, storage, locks, ownership, completed, persistence, listeners, dispatchBeforeUnload, navigateAway, unmount, isFinishedUpload, updates: () => stateUpdates, paints: () => paints };
 }
