@@ -1306,13 +1306,18 @@ a file client cannot select a provider through the file API.
 | Method | Route | Purpose |
 |---|---|---|
 | `GET` | `/api/storage` | This account's visible connections (its own plus the deployment default), the retention setting and the last 20 backup runs |
-| `POST` | `/api/storage/connections` | Attach the account's own COS bucket (`name`, `bucket`, `region`, `secretId`, `secretKey`); the backend is fixed to `cos` |
+| `POST` | `/api/storage/connections` | Attach the account's own drive: `backend` `cos` (`bucket`, `region`) or `s3` (`endpoint`, `bucket`, `region`, optional `prefix` and `pathStyle`), with `name`, `secretId`, `secretKey` |
 | `DELETE` | `/api/storage/connections/{id}` | Remove one of the account's own connections |
 | `POST` | `/api/storage/backup` | Start `snapshot`, `prune` or `restore` for one connection; returns `202` and records progress in `backup_runs` |
 
-`POST /api/storage/connections` accepts only `cos`: a `local` row would give an account arbitrary host
-paths and an arbitrary `s3` endpoint would turn the server into an outbound request primitive. Secrets are
-never returned by any of these responses; a mutation replaces the whole credential.
+`POST /api/storage/connections` accepts `cos` and `s3`, never `local`: an account may attach its own
+S3-compatible drive, because pointing the service at storage the account already runs is the feature, and an
+`endpoint` on a private network is the ordinary case (a NAS or a MinIO on the same host). What bounds the
+risk is who can have an account, not which address an account may name: the request is signed with that
+account's own credential, provider response bodies are never echoed to a client, and the deployment decides
+whether registration is open. A `local` row stays refused because it would hand an account the server's own
+filesystem paths, which is a different thing from naming a network endpoint.
+Secrets are never returned by any of these responses; a mutation replaces the whole credential.
 
 `restore` copies the chosen date to `restore-<date>/` on the owner's tree and cannot overwrite a live path.
 Nothing is indexed by a restore: run `eam reconcile --owner <id>` afterwards.
