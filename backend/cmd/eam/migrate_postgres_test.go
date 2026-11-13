@@ -3,12 +3,15 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
+	"everythingabout.me/backend/internal/fileops"
 	"everythingabout.me/backend/internal/testpg"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -237,5 +240,112 @@ func TestMigrateBootstrapsAPreVersioningDatabase(t *testing.T) {
 	}
 	if !strings.Contains(output, "045_migrate_test_extra.sql OK") {
 		t.Fatalf("later migration was not applied after bootstrap:\n%s", output)
+	}
+}
+
+// TestMigrateBackfillsOperationsThatAlreadyHaveDocuments runs the journal schema changes
+// against a database that already holds operations.
+//
+// The other migration tests start from an empty database, so a backfill never sees a row.
+// That is exactly how a backfill that assumed `snapshot->'Entries'` is always an array
+// reached main: a document written by a nil Go slice stores JSON null, and
+// `jsonb_array_length` on it aborted the whole run on a database that had data.
+func TestMigrateBackfillsOperationsThatAlreadyHaveDocuments(t *testing.T) {
+	pool := migrateTestPool(t)
+	ctx := context.Background()
+
+	before := t.TempDir()
+	entries, err := os.ReadDir("../../../sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range entries {
+		name := entry.Name()
+		if entry.IsDir() || !strings.HasSuffix(name, ".sql") || name > "046_" {
+			continue
+		}
+		data, err := os.ReadFile(filepath.Join("../../../sql", name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(before, name), data, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := runTestMigrate(t, pool, before); err != nil {
+		t.Fatalf("migrate to 046: %v", err)
+	}
+
+	owner := "11111111-1111-4111-8111-111111111111"
+	if _, err := pool.Exec(ctx, `insert into users(id,email,created_at) values($1::uuid,$2,now())`,
+		owner, "backfill@example.test"); err != nil {
+		t.Fatalf("seed user: %v", err)
+	}
+	// Seed real Operation documents rather than hand-written JSON: the backfill reads the
+	// document's own field names, and a fixture that invents a shape tests nothing.
+	mkOp := func(id string, entries []fileops.EntryEffect) []byte {
+		op := fileops.Operation{
+			ID:          id,
+			Root:        fileops.Root{OwnerID: owner, ConnectionID: "fixture", Generation: 1, ContentRoot: "/content", SystemRoot: "/system", CaseSensitive: true},
+			PrincipalID: "owner-test",
+			Kind:        "copy",
+			State:       fileops.Queued,
+			Phase:       fileops.Admitted,
+			Fingerprint: "fingerprint-" + id,
+			CreatedAt:   time.Now().UTC(),
+			RetainUntil: time.Now().UTC().Add(time.Hour),
+			Entries:     entries,
+		}
+		data, err := json.Marshal(op)
+		if err != nil {
+			t.Fatalf("marshal operation: %v", err)
+		}
+		return data
+	}
+	// A nil slice marshals to JSON null: that is the shape that broke the first backfill.
+	empty := mkOp("22222222-2222-4222-8222-222222222222", nil)
+	list := mkOp("33333333-3333-4333-8333-333333333333", []fileops.EntryEffect{
+		{ManifestEntry: fileops.ManifestEntry{Number: 1, Action: "copy", Source: "/a", Target: "/b", Size: 3}, State: "pending"},
+		{ManifestEntry: fileops.ManifestEntry{Number: 2, Action: "copy", Source: "/c", Target: "/d", Size: 4}, State: "applied"},
+	})
+	for _, row := range []struct {
+		id  string
+		doc []byte
+	}{{"22222222-2222-4222-8222-222222222222", empty}, {"33333333-3333-4333-8333-333333333333", list}} {
+		if _, err := pool.Exec(ctx, `insert into file_operations(id,owner_id,principal_id,action,fingerprint,snapshot)
+			values ($1::uuid,$2::uuid,'owner-test','copy',$3,$4::jsonb)`, row.id, owner, "f-"+row.id, row.doc); err != nil {
+			t.Fatalf("seed operation %s: %v", row.id, err)
+		}
+	}
+
+	after := t.TempDir()
+	copyMigrations(t, after)
+	if _, err := runTestMigrate(t, pool, after); err != nil {
+		t.Fatalf("migrate with existing rows: %v", err)
+	}
+
+	var emptyCount, listCount int
+	if err := pool.QueryRow(ctx, `select entry_count from file_operations where id='22222222-2222-4222-8222-222222222222'`).Scan(&emptyCount); err != nil {
+		t.Fatal(err)
+	}
+	if err := pool.QueryRow(ctx, `select entry_count from file_operations where id='33333333-3333-4333-8333-333333333333'`).Scan(&listCount); err != nil {
+		t.Fatal(err)
+	}
+	if emptyCount != 0 || listCount != 2 {
+		t.Fatalf("entry_count = %d/%d, want 0/2", emptyCount, listCount)
+	}
+	var rows int
+	if err := pool.QueryRow(ctx, `select count(*) from file_operation_entries where operation_id='33333333-3333-4333-8333-333333333333'`).Scan(&rows); err != nil {
+		t.Fatal(err)
+	}
+	if rows != 2 {
+		t.Fatalf("backfilled %d entries, want 2", rows)
+	}
+	var layout string
+	if err := pool.QueryRow(ctx, `select entries_layout from file_operations where id='33333333-3333-4333-8333-333333333333'`).Scan(&layout); err != nil {
+		t.Fatal(err)
+	}
+	if layout != "document" {
+		t.Fatalf("backfill must leave the row document-backed, got %q", layout)
 	}
 }

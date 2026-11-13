@@ -64,8 +64,12 @@ begin
             select o.id
               from file_operations o
              where o.entries_layout = 'document'
-               and jsonb_typeof(o.snapshot->'Entries') = 'array'
-               and jsonb_array_length(o.snapshot->'Entries') > 0
+               -- The CASE is load-bearing: `jsonb_typeof(...) = 'array' and
+               -- jsonb_array_length(...) > 0` is reorderable, and a document whose
+               -- Entries is JSON null (a nil Go slice marshals to null) made the
+               -- length call abort the whole migration on a database that had rows.
+               and (case when jsonb_typeof(o.snapshot->'Entries') = 'array'
+                         then jsonb_array_length(o.snapshot->'Entries') else 0 end) > 0
                and not exists (
                    select 1 from file_operation_entries e where e.operation_id = o.id)
              order by o.id
@@ -97,7 +101,8 @@ begin
             on conflict (operation_id, number) do nothing
         )
         update file_operations o
-           set entry_count = jsonb_array_length(o.snapshot->'Entries')
+           set entry_count = case when jsonb_typeof(o.snapshot->'Entries') = 'array'
+                                  then jsonb_array_length(o.snapshot->'Entries') else 0 end
           from target t
          where o.id = t.id;
 
