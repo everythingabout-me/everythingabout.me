@@ -213,3 +213,39 @@ test("part progress does not acknowledge bytes until the plain durable receipt a
   xhr.onload();
   assert.deepEqual(await result, receipt);
 });
+
+test("an admission page is one request whose items carry their own key and condition", async (t) => {
+  const { api } = await client();
+  const calls = [];
+  const refused = { ...problem(409, "name_conflict"), observedRevision: "cr_seen" };
+  mockFetch(t, async (input, init) => {
+    const url = new URL(input, "https://drive.example");
+    calls.push({ url, body: init.body === undefined ? undefined : JSON.parse(init.body) });
+    if (url.pathname === "/api/files/me") return json({ csrfToken: "token" });
+    if (url.pathname === "/api/files/uploads/batch") return json({ items: [
+      { upload: { id: "u_1", state: "open", path: "/a.txt", size: 3 } },
+      { error: refused },
+    ] });
+    assert.equal(url.pathname, "/api/files/uploads/commit/batch");
+    return json({ items: [{ result: resource("/a.txt") }, { error: problem(422, "incomplete_upload") }] });
+  });
+  // A standing "replace every existing file" answer names no revision: the server observes
+  // the destination and binds that revision, so the wire carries exactly {mode:"overwrite"}.
+  const created = await api.createUploadBatch([
+    { input: { path: "a.txt", size: 3, mediaType: "text/plain", condition: { mode: "overwrite" } }, key: "key-a" },
+    { input: { path: "b.txt", size: 3, mediaType: "text/plain", condition: { mode: "create" } }, key: "key-b" },
+  ]);
+  assert.deepEqual(calls.at(-1).body, { items: [
+    { path: "/a.txt", size: 3, mediaType: "text/plain", condition: { mode: "overwrite" }, idempotencyKey: "key-a" },
+    { path: "/b.txt", size: 3, mediaType: "text/plain", condition: { mode: "create" }, idempotencyKey: "key-b" },
+  ] });
+  // Each item answers on its own inside the 200: one session, one refusal naming its revision.
+  assert.equal(created[0].upload.id, "u_1");
+  assert.equal(created[1].error.code, "name_conflict");
+  assert.equal(created[1].error.observedRevision, "cr_seen");
+
+  const settled = await api.commitUploadBatch(["u_1", "u+2"]);
+  assert.deepEqual(calls.at(-1).body, { items: [{ id: "u_1" }, { id: "u+2" }] });
+  assert.equal(settled[0].result.path, "/a.txt");
+  assert.equal(settled[1].error.code, "incomplete_upload");
+});

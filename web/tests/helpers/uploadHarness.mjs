@@ -79,6 +79,23 @@ export const operation = (id, state = "running", result = null, kind = "delete")
 // docs describe; a test that simulates a folder-creation race overrides the kind.
 export const conflict = (id = "delete-1", kind = "delete") => new TestApiError("operation in progress", 409, { code: "operation_in_progress", operationId: id, operationKind: kind });
 
+/**
+ * The Problem a refused batch item answers with.
+ *
+ * The page transport answers each item on its own inside a 200, with the single handler's
+ * Problem in `error`; the queue turns that back into a FileApiError. A plain object is what
+ * the wire carries, so the fake models the wire, not the Error the fake server threw.
+ */
+function itemProblem(error) {
+  return {
+    type: `urn:eam:error:${error.code ?? "unknown"}`, title: error.code ?? "Error",
+    status: error.status, code: error.code, detail: error.message, requestId: error.requestId ?? "req_fake",
+    ...(error.operationId ? { operationId: error.operationId } : {}),
+    ...(error.operationKind ? { operationKind: error.operationKind } : {}),
+    ...(error.observedRevision ? { observedRevision: error.observedRevision } : {}),
+  };
+}
+
 /** A durable fake server: ACK loss can change server state before throwing. */
 export function uploadServer(partSize = 2, options = {}) {
   const classA = options.class === "A";
@@ -174,6 +191,38 @@ export function uploadServer(partSize = 2, options = {}) {
     getOperation: async (id) => { calls.push(["operation", id]); return operation(id); },
     cancelOperation: async (id) => { calls.push(["cancelOperation", id]); return operation(id, "cancelled"); },
   };
+  // The page transport the production client always offers. It is opt-in here because a
+  // fake without it exercises the queue's single-file fallback, which is the branch the rest
+  // of the suite pins on purpose; a test that wants the transport production actually uses
+  // asks for it, and only then does the queue assemble pages.
+  if (options.batch) {
+    api.createUploadBatch = async (items) => {
+      calls.push(["createBatch", items.map(({ input, key }) => ({ input: structuredClone(input), key }))]);
+      const answers = [];
+      for (const { input, key } of items) {
+        try { answers.push({ upload: await api.createUpload(input, key) }); }
+        catch (error) {
+          // A per-item refusal is an answer, not a failed page. Anything the item handler
+          // threw that is not a refused request (a transport failure) rejects the whole call.
+          if (!(error instanceof TestApiError)) throw error;
+          answers.push({ error: itemProblem(error) });
+        }
+      }
+      return answers;
+    };
+    api.commitUploadBatch = async (ids) => {
+      calls.push(["commitBatch", [...ids]]);
+      const answers = [];
+      for (const id of ids) {
+        try { answers.push({ result: await api.commitUpload(id) }); }
+        catch (error) {
+          if (!(error instanceof TestApiError)) throw error;
+          answers.push({ error: itemProblem(error) });
+        }
+      }
+      return answers;
+    };
+  }
   return { api, calls, probes, sessions, keys, receipts };
 }
 
@@ -208,10 +257,11 @@ export async function setup(overrides = {}, options = {}) {
     return event;
   };
   const same = (a, b) => a && b && a.length === b.length && a.every((value, i) => Object.is(value, b[i]));
-  // Only the queue's documented waits may be scheduled: the page publish cadence at 100, part retries
-  // 250/500/1000/2000/4000/8000 (capped), receiver-busy backoff, the operation poll at 2000 and the 60 s
-  // status deadline that must outlast a request-budget wait.
-  const allowed = [100, 250, 500, 1000, 2000, 4000, 8000, 60000];
+  // Only the queue's documented waits may be scheduled: the page publish cadence at 100, the
+  // admission page's next-turn flush at 0, part retries 250/500/1000/2000/4000/8000 (capped),
+  // receiver-busy backoff, the operation poll at 2000 and the 60 s status deadline that must
+  // outlast a request-budget wait.
+  const allowed = [0, 100, 250, 500, 1000, 2000, 4000, 8000, 60000];
   const schedule = (callback, delay, repeat) => { assert.ok(allowed.includes(delay), `unexpected timer ${delay}`); timers.set(++timerId, { callback, delay, repeat }); return timerId; };
   const runtime = {
     api: { me: async () => ({ id: owner }), ...overrides }, ApiError: TestApiError, FileApiError: TestFileApiError,
@@ -273,8 +323,19 @@ export async function setup(overrides = {}, options = {}) {
       timer.callback();
     }
   };
+  // An admission page leaves on the next turn of the loop, so a settle runs that turn before
+  // yielding: without it the page a test enqueued would never be sent. Settlement pages wait
+  // for company and are not fired here — `tick(500)` is that turn, and a test that models a
+  // retry at the same delay must keep the two apart.
+  const flushPages = () => {
+    for (const [id, timer] of [...timers]) {
+      if (timer.delay !== 0 || timer.repeat) continue;
+      timers.delete(id);
+      void timer.callback();
+    }
+  };
   const settle = async () => {
-    for (let i = 0; i < 25; i++) await new Promise((resolve) => setImmediate(resolve));
+    for (let i = 0; i < 25; i++) { flushPages(); await new Promise((resolve) => setImmediate(resolve)); }
     paint();
     await new Promise((resolve) => setImmediate(resolve));
     return render();

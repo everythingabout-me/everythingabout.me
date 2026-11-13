@@ -25,7 +25,10 @@ try {
   const capabilities = await capabilityResponse.json();
   assert.equal(capabilities.uploads, true);
   assert.ok(Number.isSafeInteger(capabilities.maxPartBytes) && capabilities.maxPartBytes > 0);
-  assert.ok(capabilities.maxUploadParallelism >= 2, "the interruption scenario requires concurrent parts");
+  // The server publishes no per-session parallelism: the client's part pool is the only
+  // bound, so the scenario is guarded by what remains true of the session it needs — room
+  // for two parts, checked here and by the session's own partCount below.
+  assert.ok(capabilities.maxUploadParts >= 2, "the interruption scenario needs a two-part session");
   const uploadPartBytes = capabilities.maxPartBytes;
   // Normal upload uses a real File input, real CSRF/bootstrap and P5 bytes.
   await page.locator('input[type="file"]').first().setInputFiles({ name: "hello +?#%.txt", mimeType: "text/plain", buffer: Buffer.from("browser upload\n") });
@@ -89,12 +92,12 @@ try {
   assert.deepEqual(secondDialogs, [], "a competing tab reports its conflict inline");
   assert.equal((await (await context.request.get(`${config.url}/api/files/uploads/${interruptedSession}`)).json()).state, "open");
   await second.close();
-  const createsBeforeNavigation = requests.filter((request) => request.method === "POST" && new URL(request.url).pathname === "/api/files/uploads").length;
+  const createsBeforeNavigation = requests.filter((request) => request.method === "POST" && new URL(request.url).pathname === "/api/files/uploads/batch").length;
   await page.getByTitle("Navigation", { exact: true }).click();
   await page.waitForURL(`${config.url}/files/Navigation`);
   await page.getByRole("link", { name: "All files", exact: true }).click();
   await page.getByRole("button", { name: "Cancel upload of interrupted.bin", exact: true }).waitFor();
-  assert.equal(requests.filter((request) => request.method === "POST" && new URL(request.url).pathname === "/api/files/uploads").length, createsBeforeNavigation);
+  assert.equal(requests.filter((request) => request.method === "POST" && new URL(request.url).pathname === "/api/files/uploads/batch").length, createsBeforeNavigation);
   const leavePrompt = page.waitForEvent("dialog").then(async (dialog) => {
     const text = dialog.message();
     await dialog.dismiss();
@@ -168,22 +171,24 @@ try {
   }
   assert.equal((await (await context.request.get(`${config.url}/api/files/uploads/${cancelSession}`)).json()).state, "aborted");
   assert.equal((await metadata("/cancel.bin")).status(), 404);
-  // One rejected file leaves an unrelated successful sibling visible.
-  await page.route("**/api/files/uploads", async (route) => {
-    if (route.request().method() === "POST" && route.request().postDataJSON()?.path === "/fail.txt") {
-      await route.fulfill({ status: 507, contentType: "application/problem+json", body: JSON.stringify({ type: "urn:eam:error:staging_full", title: "Staging full", status: 507, code: "staging_full", detail: "Injected staging limit", requestId: "browser-fixture" }) });
-    } else await route.continue();
+  // One rejected item leaves an unrelated successful sibling visible. The refusal is the
+  // server's own: a folder occupies /fail.txt, so the admission page answers that item with
+  // a Problem while the sibling's item still allocates. A route stub on the single create
+  // endpoint no longer intercepts anything — the client admits files in a page.
+  const conflictCsrf = (await (await context.request.get(`${config.url}/api/files/me`)).json()).csrfToken;
+  const occupied = await context.request.post(`${config.url}/api/files`, {
+    headers: { Origin: origin, "X-CSRF-Token": conflictCsrf }, data: { kind: "folder", path: "/fail.txt" },
   });
+  assert.ok([200, 201].includes(occupied.status()));
   await page.locator('input[type="file"]').first().setInputFiles([
     { name: "fail.txt", mimeType: "text/plain", buffer: Buffer.from("no") },
     { name: "sibling.txt", mimeType: "text/plain", buffer: Buffer.from("yes") },
   ]);
   await waitMetadata("/sibling.txt");
-  await page.getByText("Injected staging limit", { exact: true }).waitFor();
-  assert.equal((await metadata("/fail.txt")).status(), 404);
+  await page.getByText(/A folder occupies the destination/).waitFor();
+  assert.equal((await (await metadata("/fail.txt")).json()).kind, "folder", "the refused file never replaced the folder");
   await page.getByRole("button", { name: "Cancel upload of fail.txt", exact: true }).click();
-  await page.getByText("Injected staging limit", { exact: true }).waitFor({ state: "hidden" });
-  await page.unroute("**/api/files/uploads");
+  await page.getByText(/A folder occupies the destination/).waitFor({ state: "hidden" });
   // Keep an exact deletion status pending even after native deletion settles.
   // The UI must wait for that identity before allocating/sending replacement bytes.
   await page.goto(`${config.url}/files/pixel.png`);
