@@ -1,10 +1,14 @@
 # Operation journal entries: measured cost, and the table that would replace them
 
-> Status: **measured; Release A implemented, Release B proposed.** Phase 1 of this document is
+> Status: **measured; Release A and Release B implemented.** Phase 1 of this document is
 > the measurement the sql/047 header asserted but never took; Phase 2 is the table design that
 > measurement justifies. Release A (schema, shadow writes, backfill, no reader switch) is in
 > `sql/049`, `sql/050` and `internal/fileops/postgres_entries.go`; §4 records its measured cost.
-> Release B (the flip) is not implemented.
+> Release B (the flip: new rows are `entries_layout='table'`, the document carries no entries,
+> settlement loads the rows inside its own transaction, a `'document'` row is upgraded on
+> `Claim`) is in `internal/fileops/postgres_entries.go`, `postgres.go`,
+> `postgres_transitions.go` and `postgres_actions.go`; §5 records what it measured. It is
+> **forward-only** (§2.6).
 >
 > The measured harness is `backend/internal/fileops/journal_entries_cost_test.go`
 > (`TestJournalEntriesDocumentCost`). It drives a real move through `Actions.Prepare` +
@@ -303,7 +307,7 @@ cost, so the design is explicit instead:
 | reader | today | after |
 |---|---|---|
 | `Service.coordinateEntry` / `ApplyEntry` (one entry's effect and resume) | `manifestEffect` scans `op.Entries` for `Number` | `select … from file_operation_entries where operation_id=$1 and owner_id=$2 and number=$3` |
-| `Actions.Run` loop (recover uncertain, then drive pending) | two passes over `op.Entries` | two ordered queries for the numbers: `state in ('started','outcome_unknown')`, then `state='pending'` |
+| `Actions.Run` loop (recover uncertain, then drive pending) | two passes over `op.Entries`, inside a per-entry `Get` that re-read the whole document | **one** ordered load per run, then two passes over the in-memory list; each transition refreshes its own row with one ordered read. The sketch here said "two ordered queries for the numbers", but the run also validates whole-manifest facts (destination verification, mkdir parents, deltas) that need the list anyway, so loading it once per run is the smaller number of reads and still removes the per-entry manifest read the measurement counted |
 | `Postgres.Claim` / `StartEffect` / `SaveApplied` (`uncertainEntries`, `anyApplied`) | scans the document | `exists (select 1 from file_operation_entries where … and state in (…))` |
 | `Postgres.Settle` (`validateActionSettlement`, pending/uncertain/all-applied checks) | scans the document | `exists`/count predicates plus the ordered load of 2.3, then the same checks |
 | `nodes.CommitFileAction` (index + change settlement) | iterates `op.Entries` | the same `[]EntryEffect` built from the settlement load — code unchanged |
@@ -404,13 +408,22 @@ So:
    rows still marked `'document'` are upgraded on `Claim` (2.5). Release B reads both layouts,
    which is what lets the deploy window and the backfill coexist.
 
-Rollback from B to A (or to a pre-A revision) is allowed only with the journal drained: no
-operation with `entries_layout='table'` may be non-terminal when the old binary starts,
-because the old binary cannot read that layout. The operational procedure is the same shape
-as `file-changes-reset`: stop the workers, let non-terminal operations settle (or fail them
-through the explicit recovery commands), then roll back. If that drain is not acceptable
-operationally, do not ship B as a rollback-able release; ship it forward-only and say so in
-the release notes.
+**Accepted decision: Release B is forward-only.** An old binary cannot settle a `'table'`
+row: it decodes the document, sees an operation with no entries, and a move or copy fails
+`invalid_intent` while its guards keep fencing the source and destination paths; any native
+copies it made are adopted only by a reconcile, because the index never learned about them.
+The old binary also cannot upgrade the row — the upgrade exists only in this release — so the
+operation never recovers on its own.
+
+There is therefore no runtime downgrade and no reversing migration (sql/051 is comments
+only). The drain alternative is named here so the next operator knows what a rollback would
+require: stop the writers, let every non-terminal operation settle (or end it through the
+explicit recovery commands), confirm
+`select count(*) from file_operations where entries_layout='table' and state not in
+('succeeded','failed','cancelled')` is zero, and only then start the older binary. That
+procedure is the whole rollback, and it is deliberately *not* automated. The same statement
+is written next to the column (`sql/051`'s column comment), because that is where someone
+about to redeploy an older commit will look.
 
 ### 2.7 Riskiest part
 
@@ -515,14 +528,81 @@ stale or missing shadow; that is safe in Release A (nothing reads it) and Releas
 upgrade overwrites it from the document, which is why §2.5's upgrade overwrites rather than
 inserts-and-ignores.
 
-**Read guard.** `TestJournalEntriesTableIsWriteOnly` fails if a production Go source other than
-`postgres_entries.go` names the table, if any production source reads it
-(`from`/`join file_operation_entries`), or if any production source mentions `entries_layout`. It
-is a textual lint in the style of `TestOperationJournalPredicatesReadColumns`. Release B deletes
-it together with the layout branch that it guards.
+**Read guard.** Release A's `TestJournalEntriesTableIsWriteOnly` required that no production
+source reads the table; Release B inverted it. `TestEntriesTableReadsStayInSettlement` now
+requires that (a) every statement naming the table stays in `postgres_entries.go`, (b) the one
+ordered manifest load (`loadEntries`) is called from `Settle` and from nowhere in `postgres.go`
+— the file that implements `Get`/`readOperation`, which is exactly where the hoist §2.7 forbids
+would land — and (c) `Claim` upgrades a document-backed row and admission writes new rows as
+`'table'`. It is textual, in the style of `TestOperationJournalPredicatesReadColumns`, because
+the spellings it forbids are exactly the ones such a refactor is typed as.
 
-**What Release B still has to do** (§2.3-2.5, unchanged): load the entries inside `Settle`'s
-transaction; turn the per-transition questions into row predicates; upgrade a `'document'` row on
-`Claim`; write new operations as `'table'`; and make `mkdir` / `CommitNativeTreeMove` read
-`entry_count` instead of the document's list.
+The sql/047 predicate lint's allowance for `snapshot->'Entries'` narrowed with the flip:
+production Go may no longer read the key at all; only test fixtures (which must build the old
+document shape to prove the upgrade) and `sql/050` (the backfill) still may.
 
+**Release B is implemented** (§2.3-2.5): settlement loads the entries inside its transaction;
+the per-transition questions are row predicates or one-row reads; `Claim` upgrades a
+`'document'` row; new operations are written as `'table'`; `mkdir` and
+`CommitNativeTreeMove` read `entry_count` (or the list the settlement passed) instead of a
+document; and progress is a count query (`Postgres.EntryProgress`) rather than a load.
+
+
+## 5. Release B: implemented, and the measured payoff
+
+The flip is the change §1.4 justified: a new operation is `entries_layout='table'`, the
+document carries no `Entries`, one entry's transition is one row update plus the ~1.8 KB
+document, settlement loads the rows inside its own transaction (§2.3), a `'document'` row is
+upgraded on `Claim` (§2.5), and progress is `entry_count` plus one count query.
+`TestEntriesTableReadsStayInSettlement` is the inverted read guard (§4): it fails if the
+settlement load moves out of `Settle` or if a new statement names the table outside
+`postgres_entries.go`. `sql/051` is the schema comment that records the forward-only decision
+next to the column.
+
+`FILES=500 make measure-journal`, same machine and fixture as §1.2 and §4:
+
+| | Release A | Release B | delta |
+|---|---:|---:|---:|
+| journal writes | 5,018 | 5,018 | 0 |
+| logical document bytes | 5,248,100,046 | **9,452,419** | −5,238,647,627 (−99.82%) |
+| WAL | 371,480,328 | 6,165,712 | −365,314,616 (−98.34%) |
+| run | 2m49.03s | **12.76s** | −156.27 s (−92.45%) |
+| prepare (the freeze) | 190.6 ms | 158.3 ms | −32.3 ms |
+| peak document | 1,363,536 B | 149,754 B | −89.0% |
+
+The projection is no longer quadratic in practice: document bytes per rewrite went from
+~1.36 MB to ~1.8 KB, and the 5,010 per-entry transitions wrote 9.14 MB together instead of
+5.24 GB. The row work that replaced it is visible in the timing pass: 12,029 statements
+against `file_operation_entries` (row writes at freeze, one conditional update at
+`BeginEntry`, one update and one read at `SaveEntry`, the one-row accessor, and the
+settlement load), 2.84 s = 22.3% of the 12.76 s run. Document writes fell to 1.25 s (9.8%) and
+locked document reads to 1.04 s.
+
+Two numbers deserve their reason rather than a footnote:
+
+- **The remaining peak document is 149,754 B, and it is not entries.** It is the settled
+  operation's aggregated `NativeResult.Evidence` — one JSON array of every applied entry's
+  result, which is the operation's final answer and has to be O(N) once. It is written once at
+  `SaveActionApplied` and once at settlement, not on every transition.
+- **The write count is unchanged (5.01 per entry).** Release B changes what one write costs,
+  not how many there are: the parent document is still rewritten on every transition, because
+  §1.4's contract — a document reads as a whole, and its columns are derived from it in the
+  same statement — was deliberately kept. Rewriting 1.8 KB is not the problem; rewriting
+  10,002 entries was.
+
+What still supports both layouts, and why:
+
+- `Get`, `readOperationSnapshot` and the pending/recovery scans decode whichever the row's
+  `entries_layout` names: a terminal `'document'` row keeps its list and serves progress from
+  it until prune removes it (with any shadow rows by `ON DELETE CASCADE`).
+- `Claim` is the only normal-operation flip. It runs inside the transaction that already holds
+  the parent row lock, overwrites any stale Release A shadow from the document (the authority
+  for that layout), sets `entry_count`, and strips the document before the claim proceeds.
+- `Settle` loads from the row only when the layout says `'table'`; a `'document'` row still
+  settles from its decoded list, exactly as before.
+- Prune, retention and recovery never branch on layout: they are about the parent row and its
+  state, and entry rows follow the parent.
+
+Rollback is **forward-only** (§2.6): the drain procedure is named there and in `sql/051`'s
+column comment, because an old binary would fail `invalid_intent` on every `'table'` row and
+leave its guards behind.

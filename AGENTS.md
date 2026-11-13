@@ -210,6 +210,13 @@ while its tests were skipping. CI (`.github/workflows/test.yml`) runs `make migr
   (`nr_…`, `If-Revision`) gates application mutations and is unrelated to both. Do not call a revision a version.
   Hashed or persisted byte spellings (`native-etag:`, `native-version:`, the `Version` key in content-revision
   evidence) keep their historical form so old records stay comparable.
+- Operation manifest entries live in `file_operation_entries` (Release B of
+  `docs/design/journal-entries.md`): the operation document carries none and `entries_layout`
+  says which layout a row has. Settlement must load them inside the transaction that holds the
+  parent row lock; `loadEntries` is called from `Settle` only, and
+  `TestEntriesTableReadsStayInSettlement` fails if that load moves into `Get`/`readOperation`.
+  This release is **forward-only**: an older binary cannot settle a `'table'` row, so rolling
+  back requires draining every non-terminal operation first (see `sql/051`).
 - Change facts, recursive/namespace markers and confirmed effect audit settle with index/results. No native
   I/O or new index locks after acquiring the short owner-head lock. Retain effect receipts across feed pruning.
   lastChangedAt/changeToken are optional observed-index markers, not native validators or cursors.
