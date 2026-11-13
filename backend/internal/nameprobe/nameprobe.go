@@ -37,9 +37,15 @@
 // This package is a test fixture. It is not imported by production code and
 // must not grow a comparison implementation of its own. The convergence that
 // this audit demanded is one Go key (internal/namecompare.Key), the SQL
-// function it mirrors, and one pipeline at every comparison site. Stored
-// comparison_path values written by the legacy key still need a backfill,
-// because the reference key is exactly the legacy key with one NFC applied.
+// function it mirrors, and one pipeline at every comparison site.
+//
+// Applying NFC once upgrades the legacy key to the reference key (the reference
+// key is exactly NFC after the legacy key), so sql/052 rewrote the stored
+// comparison_path columns: file_operation_guards (write-only), file_uploads and
+// file_credit_claims. Credit-claim primary keys could collide after the rewrite;
+// the migration keeps the earliest operation's claim and drops the duplicates.
+// That release also reads both spellings while the old binary may still be
+// running between `migrate` and the restart; the successor deletes the shim.
 //
 // The per-package tests declare the pipeline they exercise. They are regression
 // tests: they assert ReferencePipeline, and a failure means a call site grew a

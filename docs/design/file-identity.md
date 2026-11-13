@@ -87,6 +87,14 @@ can admit a write the index rejects or deny an index-equal sibling. Providers pe
 equivalent sibling names require explicit conflict resolution, even if their native IDs could distinguish them. Do not silently rename or
 expose an ambiguous native tree only through IDs.
 
+Stored `comparison_path` caches were written by an older release that stopped after the fold. Migration 052
+rewrites them, because the canonical key is exactly the legacy key with one NFC applied. The release that
+applies it also matches stored values through `normalize(comparison_path, NFC)`, so a row the old binary keyed
+with the legacy spelling is still found: `eam migrate` runs before the service restart, and the old binary
+keeps writing legacy keys for those seconds. Without that read shim, a read looking for the canonical spelling
+could miss an open upload session or a credit claim. The following release normalizes the rows written during
+the window once more, drops the shim's expression index, and deletes the shim.
+
 Resolve both selectors under owner isolation and check current native-aware path scope. IDs grant no access
 by possession. Moving outside scope removes access; moving a scope root does not retarget a path grant.
 Move/copy checks source and destination; queued effects and pages recheck current ancestry/rights. Hidden

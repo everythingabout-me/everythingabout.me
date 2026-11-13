@@ -243,7 +243,7 @@ func (p *Postgres) CreateUpload(ctx context.Context, input BeginRequest, options
 // The authority is the creator's write access to the path: whoever may replace the file
 // there may displace an unpublished attempt at it, whichever principal opened that attempt.
 func supersedeOpenUploads(ctx context.Context, tx pgx.Tx, root Root, path string) ([]Upload, error) {
-	rows, err := tx.Query(ctx, `select operation_id::text,principal_id from file_uploads where owner_id=$1 and comparison_path=$2 and state='open' order by created_at,operation_id`, root.OwnerID, path)
+	rows, err := tx.Query(ctx, `select operation_id::text,principal_id from file_uploads where owner_id=$1 and `+comparisonShim("comparison_path")+`=$2 and state='open' order by created_at,operation_id`, root.OwnerID, path)
 	if err != nil {
 		return nil, err
 	}
@@ -373,7 +373,8 @@ func (p *Postgres) ListUploads(ctx context.Context, root Root, actor Actor, limi
 		// The exact root is the namespace plus the two flags the namespace does not spell
 		// out; together they cover every Root field, so this is the same equality the
 		// document comparison used to express, now against columns.
-		rows, err := tx.Query(ctx, `select u.operation_id::text from file_uploads u join file_operations o on o.id=u.operation_id and o.owner_id=u.owner_id where u.owner_id=$1 and ($2='' or u.operation_id>nullif($2,'')::uuid) and (u.principal_id=$3 or $4) and ($6='' or u.comparison_path=$6 or starts_with(u.comparison_path,$6||'/')) and o.root_namespace=$7 and o.root_case_sensitive=$8 and o.root_retains_versions=$9 order by u.operation_id limit $5`, root.OwnerID, after, actor.ID, actor.ManageOwner && actor.ID == "owner:"+root.OwnerID && actor.CanWrite, limit, comparePath(root, actor.Scope), root.Namespace(), root.CaseSensitive, root.RetainsVersions)
+		scope := comparePath(root, actor.Scope)
+		rows, err := tx.Query(ctx, `select u.operation_id::text from file_uploads u join file_operations o on o.id=u.operation_id and o.owner_id=u.owner_id where u.owner_id=$1 and ($2='' or u.operation_id>nullif($2,'')::uuid) and (u.principal_id=$3 or $4) and ($6='' or `+comparisonShim("u.comparison_path")+`=$6 or starts_with(`+comparisonShim("u.comparison_path")+`,$6||'/')) and o.root_namespace=$7 and o.root_case_sensitive=$8 and o.root_retains_versions=$9 order by u.operation_id limit $5`, root.OwnerID, after, actor.ID, actor.ManageOwner && actor.ID == "owner:"+root.OwnerID && actor.CanWrite, limit, scope, root.Namespace(), root.CaseSensitive, root.RetainsVersions)
 		if err != nil {
 			return err
 		}

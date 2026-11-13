@@ -386,8 +386,9 @@ func validateActionSettlement(ctx context.Context, tx pgx.Tx, op Operation, b ac
 	}
 	for _, entry := range op.Entries {
 		if entry.Action == "delete" && entry.Size > 0 {
+			// The read shim matches rows the old binary keyed with the legacy spelling.
 			var exists bool
-			err = tx.QueryRow(ctx, `select exists(select 1 from file_credit_claims where owner_id=$1 and operation_id=$2 and comparison_path=$3 and version=$4)`, op.Root.OwnerID, op.ID, comparePath(op.Root, entry.Source), entry.SourceRevision).Scan(&exists)
+			err = tx.QueryRow(ctx, `select exists(select 1 from file_credit_claims where owner_id=$1 and operation_id=$2 and `+comparisonShim("comparison_path")+`=$3 and version=$4)`, op.Root.OwnerID, op.ID, comparePath(op.Root, entry.Source), entry.SourceRevision).Scan(&exists)
 			if err != nil {
 				return err
 			}
@@ -397,7 +398,7 @@ func validateActionSettlement(ctx context.Context, tx pgx.Tx, op Operation, b ac
 			// Only consumed source-revision credits remain permanent. A cancelled pending
 			// delete must not prevent a future operation from deleting that same source.
 			if entry.State != "applied" {
-				_, err = tx.Exec(ctx, `delete from file_credit_claims where owner_id=$1 and operation_id=$2 and comparison_path=$3 and version=$4`, op.Root.OwnerID, op.ID, comparePath(op.Root, entry.Source), entry.SourceRevision)
+				_, err = tx.Exec(ctx, `delete from file_credit_claims where owner_id=$1 and operation_id=$2 and `+comparisonShim("comparison_path")+`=$3 and version=$4`, op.Root.OwnerID, op.ID, comparePath(op.Root, entry.Source), entry.SourceRevision)
 				if err != nil {
 					return err
 				}

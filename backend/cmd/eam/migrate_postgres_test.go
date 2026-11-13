@@ -182,6 +182,9 @@ func TestMigrateBootstrapsAPreVersioningDatabase(t *testing.T) {
 		`create table timeline_jobs (id bigserial primary key, user_id uuid not null, kind text not null, status text not null default 'pending')`,
 		`create table file_operations (id uuid primary key, owner_id uuid not null, action text not null, snapshot jsonb not null)`,
 		`create table file_changes (owner_id uuid not null, operation_id text not null default '')`,
+		`create table file_operation_guards (comparison_path text not null)`,
+		`create table file_uploads (comparison_path text not null)`,
+		`create table file_credit_claims (owner_id uuid not null, comparison_path text not null, version bytea not null, operation_id uuid not null)`,
 	} {
 		if _, err := pool.Exec(ctx, statement); err != nil {
 			t.Fatal(err)
