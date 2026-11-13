@@ -2,14 +2,11 @@ package mediameta
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/hex"
 	"os"
 	"path/filepath"
 	"testing"
 
 	"everythingabout.me/backend/internal/testpg"
-	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -20,37 +17,17 @@ import (
 // that case. No application config or environment file is loaded.
 func cacheTestDatabase(t *testing.T) *pgxpool.Pool {
 	t.Helper()
-	url := testpg.Require(t)
+	scratch := testpg.CreateDatabase(t, "eam_mediameta_")
 	ctx := context.Background()
-	admin, err := pgx.Connect(ctx, url)
+	cfg, err := pgxpool.ParseConfig(scratch.URL)
 	if err != nil {
 		t.Fatal(err)
 	}
-	var random [12]byte
-	if _, err = rand.Read(random[:]); err != nil {
-		t.Fatal(err)
-	}
-	name := "eam_mediameta_" + hex.EncodeToString(random[:])
-	if _, err = admin.Exec(ctx, "create database "+pgx.Identifier{name}.Sanitize()); err != nil {
-		admin.Close(ctx)
-		t.Fatal(err)
-	}
-	cfg, err := pgxpool.ParseConfig(url)
-	if err != nil {
-		t.Fatal(err)
-	}
-	cfg.ConnConfig.Database = name
 	pool, err := pgxpool.NewWithConfig(ctx, cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() {
-		pool.Close()
-		if _, err := admin.Exec(ctx, "drop database "+pgx.Identifier{name}.Sanitize()+" with (force)"); err != nil {
-			t.Error(err)
-		}
-		admin.Close(ctx)
-	})
+	t.Cleanup(pool.Close)
 	migrations, err := filepath.Glob("../../../sql/*.sql")
 	if err != nil || len(migrations) == 0 {
 		t.Fatalf("no migrations found: %v", err)

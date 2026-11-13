@@ -2,13 +2,11 @@ package main
 
 import (
 	"context"
-	"crypto/rand"
 	"encoding/json"
 	"encoding/xml"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
-	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -26,37 +24,11 @@ import (
 // This is the actual CLI, official S3 SDK and a native HTTP fixture. Provider
 // mutation methods are forbidden; the fixture cannot establish live COS guarantees.
 func TestStorageAdmitObjectsPostgresCLI(t *testing.T) {
-	address := testpg.Require(t)
+	scratch := testpg.CreateDatabase(t, "eam_object_admit_")
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
-	admin, err := pgx.Connect(ctx, address)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer admin.Close(context.Background())
-	var id [8]byte
-	if _, err = rand.Read(id[:]); err != nil {
-		t.Fatal(err)
-	}
-	name := fmt.Sprintf("eam_object_admit_%x", id[:])
-	quoted := pgx.Identifier{name}.Sanitize()
-	if _, err = admin.Exec(ctx, "create database "+quoted); err != nil {
-		t.Fatal(err)
-	}
-	defer func() {
-		cleanup, done := context.WithTimeout(context.Background(), 10*time.Second)
-		defer done()
-		if _, err := admin.Exec(cleanup, "drop database "+quoted+" with (force)"); err != nil {
-			t.Error(err)
-		}
-	}()
-	parsed, err := url.Parse(address)
-	if err != nil {
-		t.Fatal(err)
-	}
-	parsed.Path = "/" + name
-	parsed.RawPath = ""
-	isolated := parsed.String()
+	isolated := scratch.URL
+	var err error
 	root := t.TempDir()
 	spool := filepath.Join(root, "spool")
 	if err = os.Mkdir(spool, 0700); err != nil {
@@ -145,7 +117,7 @@ func TestStorageAdmitObjectsPostgresCLI(t *testing.T) {
 	}
 	defer db.Close(context.Background())
 	var database string
-	if err = db.QueryRow(ctx, "select current_database()").Scan(&database); err != nil || database != name {
+	if err = db.QueryRow(ctx, "select current_database()").Scan(&database); err != nil || database != scratch.Name {
 		t.Fatal("test database isolation failed", err)
 	}
 	if _, err = db.Exec(ctx, `insert into users(id,email) values($1::uuid,'objects@example.test')`, owner); err != nil {

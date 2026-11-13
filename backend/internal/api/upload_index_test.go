@@ -4,9 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
-	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -22,7 +20,6 @@ import (
 	"everythingabout.me/backend/internal/store"
 	"everythingabout.me/backend/internal/testpg"
 	"everythingabout.me/backend/internal/uploadindex"
-	"github.com/jackc/pgx/v5"
 )
 
 // recoveryStorage models unpublished reception separately from final native
@@ -141,30 +138,10 @@ func (r *interruptedUploadReader) Read(out []byte) (int, error) {
 }
 
 func TestBrowserUploadIndexPostgresRecovery(t *testing.T) {
-	address := testpg.Require(t)
+	scratch := testpg.CreateDatabase(t, "eam_browser_recovery_")
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
-	admin, err := pgx.Connect(ctx, address)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer admin.Close(context.Background())
-	name := fmt.Sprintf("eam_browser_recovery_%d", time.Now().UnixNano())
-	quoted := pgx.Identifier{name}.Sanitize()
-	if _, err = admin.Exec(ctx, "create database "+quoted); err != nil {
-		t.Fatal(err)
-	}
-	defer func() {
-		if _, err := admin.Exec(context.Background(), "drop database "+quoted+" with (force)"); err != nil {
-			t.Error(err)
-		}
-	}()
-	parsed, err := url.Parse(address)
-	if err != nil {
-		t.Fatal(err)
-	}
-	parsed.Path = "/" + name
-	db, err := store.Open(ctx, parsed.String())
+	db, err := store.Open(ctx, scratch.URL)
 	if err != nil {
 		t.Fatal(err)
 	}

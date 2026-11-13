@@ -3,11 +3,8 @@ package api
 import (
 	"bytes"
 	"context"
-	"crypto/rand"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -22,7 +19,6 @@ import (
 	"everythingabout.me/backend/internal/storagebackend"
 	"everythingabout.me/backend/internal/store"
 	"everythingabout.me/backend/internal/testpg"
-	"github.com/jackc/pgx/v5"
 )
 
 type fileWorkerFixture struct {
@@ -36,43 +32,17 @@ type fileWorkerFixture struct {
 
 func newFileWorkerFixture(t *testing.T) *fileWorkerFixture {
 	t.Helper()
-	address := testpg.Require(t)
+	scratch := testpg.CreateDatabase(t, "eam_workers_test_")
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	t.Cleanup(cancel)
-	admin, err := pgx.Connect(ctx, address)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = admin.Close(context.Background()) })
-	var entropy [8]byte
-	if _, err = rand.Read(entropy[:]); err != nil {
-		t.Fatal(err)
-	}
-	name := "eam_workers_test_" + hex.EncodeToString(entropy[:])
-	quoted := pgx.Identifier{name}.Sanitize()
-	if _, err = admin.Exec(ctx, "create database "+quoted); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		cleanup, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-		if _, err := admin.Exec(cleanup, "drop database "+quoted+" with (force)"); err != nil {
-			t.Error(err)
-		}
-	})
-	conn, err := url.Parse(address)
-	if err != nil {
-		t.Fatal(err)
-	}
-	conn.Path = "/" + name
-	db, err := store.Open(ctx, conn.String())
+	db, err := store.Open(ctx, scratch.URL)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(db.Close)
 	var actual string
-	if err = db.Pool().QueryRow(ctx, `select current_database()`).Scan(&actual); err != nil || actual != name {
-		t.Fatalf("test database not isolated: %q want %q: %v", actual, name, err)
+	if err = db.Pool().QueryRow(ctx, `select current_database()`).Scan(&actual); err != nil || actual != scratch.Name {
+		t.Fatalf("test database not isolated: %q want %q: %v", actual, scratch.Name, err)
 	}
 	migrations, err := filepath.Glob("../../../sql/*.sql")
 	if err != nil || len(migrations) < 20 {

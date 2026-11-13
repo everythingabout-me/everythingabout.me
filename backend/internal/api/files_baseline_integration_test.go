@@ -3,12 +3,9 @@ package api
 import (
 	"bytes"
 	"context"
-	"crypto/rand"
-	"encoding/hex"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"net/url"
 	"os"
 	"path/filepath"
 	"testing"
@@ -26,34 +23,10 @@ import (
 // content and no index/accounting row. This opt-in suite drives the real HTTP,
 // session/CSRF and Postgres path for that case and for the fail-closed neighbor.
 func TestEmptyOwnerAutomaticBaseline(t *testing.T) {
-	databaseURL := testpg.Require(t)
+	scratch := testpg.CreateDatabase(t, "eam_baseline_test_")
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
-	admin, err := pgx.Connect(ctx, databaseURL)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer admin.Close(context.Background())
-	var entropy [8]byte
-	if _, err = rand.Read(entropy[:]); err != nil {
-		t.Fatal(err)
-	}
-	database := "eam_baseline_test_" + hex.EncodeToString(entropy[:])
-	quoted := pgx.Identifier{database}.Sanitize()
-	if _, err = admin.Exec(ctx, "create database "+quoted); err != nil {
-		t.Fatal(err)
-	}
-	defer func() {
-		if _, e := admin.Exec(context.Background(), "drop database "+quoted+" with (force)"); e != nil {
-			t.Error(e)
-		}
-	}()
-	parsed, err := url.Parse(databaseURL)
-	if err != nil {
-		t.Fatal(err)
-	}
-	parsed.Path = "/" + database
-	db, err := store.Open(ctx, parsed.String())
+	db, err := store.Open(ctx, scratch.URL)
 	if err != nil {
 		t.Fatal(err)
 	}

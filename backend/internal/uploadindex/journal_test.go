@@ -2,49 +2,24 @@ package uploadindex
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/hex"
 	"os"
 	"testing"
 	"time"
 
 	"everythingabout.me/backend/internal/testpg"
-	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 // This test never loads .env or application configuration. An explicitly supplied
 // disposable Postgres gets a private database, removed when the test completes.
 func TestPostgresJournalConformance(t *testing.T) {
-	url := testpg.Require(t)
+	scratch := testpg.CreateDatabase(t, "eam_upload_watch_test_")
 	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 	defer cancel()
-	admin, err := pgx.Connect(ctx, url)
+	poolConfig, err := pgxpool.ParseConfig(scratch.URL)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer admin.Close(context.Background())
-	var suffix [8]byte
-	if _, err := rand.Read(suffix[:]); err != nil {
-		t.Fatal(err)
-	}
-	database := "eam_upload_watch_test_" + hex.EncodeToString(suffix[:])
-	quoted := pgx.Identifier{database}.Sanitize()
-	if _, err := admin.Exec(ctx, "create database "+quoted); err != nil {
-		t.Fatal(err)
-	}
-	defer func() {
-		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cleanupCancel()
-		if _, err := admin.Exec(cleanupCtx, "drop database "+quoted+" with (force)"); err != nil {
-			t.Error(err)
-		}
-	}()
-	poolConfig, err := pgxpool.ParseConfig(url)
-	if err != nil {
-		t.Fatal(err)
-	}
-	poolConfig.ConnConfig.Database = database
 	pool, err := pgxpool.NewWithConfig(ctx, poolConfig)
 	if err != nil {
 		t.Fatal(err)

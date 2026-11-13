@@ -32,42 +32,19 @@ import (
 // applies every migration twice. The parent owns the shared Docker test service.
 func coordinatorDatabase(t *testing.T) *pgxpool.Pool {
 	t.Helper()
-	target := testpg.Require(t)
+	scratch := testpg.CreateDatabase(t, "eam_coordinator_")
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	admin, err := pgx.Connect(ctx, target)
+	cfg, err := pgxpool.ParseConfig(scratch.URL)
 	if err != nil {
 		t.Fatal(err)
 	}
-	name := "eam_coordinator_" + strings.ReplaceAll(coordinatorUUID(t), "-", "")
-	if _, err = admin.Exec(ctx, "create database "+pgx.Identifier{name}.Sanitize()); err != nil {
-		admin.Close(ctx)
-		t.Fatal(err)
-	}
-	var pool *pgxpool.Pool
-	t.Cleanup(func() {
-		if pool != nil {
-			pool.Close()
-		}
-		clean, finish := context.WithTimeout(context.Background(), 10*time.Second)
-		defer finish()
-		if _, err := admin.Exec(clean, "drop database "+pgx.Identifier{name}.Sanitize()+" with (force)"); err != nil {
-			t.Errorf("drop coordinator test database: %v", err)
-		}
-		if err := admin.Close(clean); err != nil {
-			t.Errorf("close coordinator administrator: %v", err)
-		}
-	})
-	cfg, err := pgxpool.ParseConfig(target)
-	if err != nil {
-		t.Fatal(err)
-	}
-	cfg.ConnConfig.Database = name
 	cfg.MaxConns = 12
-	pool, err = pgxpool.NewWithConfig(ctx, cfg)
+	pool, err := pgxpool.NewWithConfig(ctx, cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(pool.Close)
 	migrations, err := filepath.Glob("../../../sql/*.sql")
 	if err != nil || len(migrations) < 17 {
 		t.Fatalf("migration discovery: count=%d err=%v", len(migrations), err)
@@ -83,7 +60,7 @@ func coordinatorDatabase(t *testing.T) *pgxpool.Pool {
 			}
 		}
 	}
-	t.Logf("isolated PostgreSQL database %s; %d migrations applied twice", name, len(migrations))
+	t.Logf("isolated PostgreSQL database %s; %d migrations applied twice", scratch.Name, len(migrations))
 	return pool
 }
 func coordinatorUUID(t *testing.T) string {

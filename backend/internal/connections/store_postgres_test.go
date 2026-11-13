@@ -2,14 +2,9 @@ package connections
 
 import (
 	"context"
-	"crypto/rand"
-	"fmt"
-	"net/url"
 	"os"
 	"path/filepath"
 	"testing"
-
-	"github.com/jackc/pgx/v5"
 
 	"everythingabout.me/backend/internal/store"
 	"everythingabout.me/backend/internal/testpg"
@@ -20,41 +15,9 @@ import (
 // configuration or .env.
 func connectionTestDB(t *testing.T) *store.DB {
 	t.Helper()
-	address := testpg.Require(t)
+	scratch := testpg.CreateDatabase(t, "eam_connections_test_")
 	ctx := context.Background()
-	admin, err := pgx.Connect(ctx, address)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var random [8]byte
-	if _, err := rand.Read(random[:]); err != nil {
-		t.Fatal(err)
-	}
-	name := fmt.Sprintf("eam_connections_test_%x", random[:])
-	quoted := pgx.Identifier{name}.Sanitize()
-	if _, err := admin.Exec(ctx, "create database "+quoted); err != nil {
-		_ = admin.Close(ctx)
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		cleanup := context.Background()
-		if _, err := admin.Exec(cleanup, "drop database "+quoted+" with (force)"); err != nil {
-			t.Errorf("remove disposable database: %v", err)
-		}
-		if err := admin.Close(cleanup); err != nil {
-			t.Errorf("close admin connection: %v", err)
-		}
-	})
-	parsed, err := url.Parse(address)
-	if err != nil {
-		t.Fatal(err)
-	}
-	parsed.Path = "/" + name
-	parsed.RawPath = ""
-	query := parsed.Query()
-	query.Del("search_path")
-	parsed.RawQuery = query.Encode()
-	db, err := store.Open(ctx, parsed.String())
+	db, err := store.Open(ctx, scratch.URL)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -2,8 +2,6 @@ package api
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -24,7 +22,6 @@ import (
 	"everythingabout.me/backend/internal/store"
 	"everythingabout.me/backend/internal/testpg"
 	"everythingabout.me/backend/internal/treescan"
-	"github.com/jackc/pgx/v5"
 )
 
 // This wrapper makes storage data operations fail while retaining the actual
@@ -67,34 +64,10 @@ func (d *unavailableBrowseDriver) Open(context.Context, storage.Path, storage.Re
 // factory and index. It never loads application configuration or a .env file and
 // creates/drops its own database in an explicitly supplied disposable Postgres.
 func TestFilesRuntimePostgresConformance(t *testing.T) {
-	databaseURL := testpg.Require(t)
+	scratch := testpg.CreateDatabase(t, "eam_files_test_")
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
-	admin, err := pgx.Connect(ctx, databaseURL)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer admin.Close(context.Background())
-	var random [8]byte
-	if _, err = rand.Read(random[:]); err != nil {
-		t.Fatal(err)
-	}
-	database := "eam_files_test_" + hex.EncodeToString(random[:])
-	quoted := pgx.Identifier{database}.Sanitize()
-	if _, err = admin.Exec(ctx, "create database "+quoted); err != nil {
-		t.Fatal(err)
-	}
-	defer func() {
-		if _, e := admin.Exec(context.Background(), "drop database "+quoted+" with (force)"); e != nil {
-			t.Error(e)
-		}
-	}()
-	parsed, err := url.Parse(databaseURL)
-	if err != nil {
-		t.Fatal(err)
-	}
-	parsed.Path = "/" + database
-	db, err := store.Open(ctx, parsed.String())
+	db, err := store.Open(ctx, scratch.URL)
 	if err != nil {
 		t.Fatal(err)
 	}

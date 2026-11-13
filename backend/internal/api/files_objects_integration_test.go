@@ -3,7 +3,6 @@ package api
 import (
 	"bytes"
 	"context"
-	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -32,7 +31,6 @@ import (
 	"everythingabout.me/backend/internal/store"
 	"everythingabout.me/backend/internal/testpg"
 	"everythingabout.me/backend/internal/treescan"
-	"github.com/jackc/pgx/v5"
 )
 
 // This provider fixture can retain history independently of application accounting.
@@ -379,40 +377,16 @@ type objectsAPIFixture struct {
 
 func newObjectsAPIFixture(t *testing.T) *objectsAPIFixture {
 	t.Helper()
-	address := testpg.Require(t)
+	scratch := testpg.CreateDatabase(t, "eam_objects_api_")
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	t.Cleanup(cancel)
-	admin, err := pgx.Connect(ctx, address)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = admin.Close(context.Background()) })
-	var random [8]byte
-	if _, err = rand.Read(random[:]); err != nil {
-		t.Fatal(err)
-	}
-	name := "eam_objects_api_" + hex.EncodeToString(random[:])
-	quoted := pgx.Identifier{name}.Sanitize()
-	if _, err = admin.Exec(ctx, "create database "+quoted); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		if _, e := admin.Exec(context.Background(), "drop database "+quoted+" with (force)"); e != nil {
-			t.Error(e)
-		}
-	})
-	parsed, err := url.Parse(address)
-	if err != nil {
-		t.Fatal(err)
-	}
-	parsed.Path = "/" + name
-	db, err := store.Open(ctx, parsed.String())
+	db, err := store.Open(ctx, scratch.URL)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(db.Close)
 	var actual string
-	if err = db.Pool().QueryRow(ctx, "select current_database()").Scan(&actual); err != nil || actual != name {
+	if err = db.Pool().QueryRow(ctx, "select current_database()").Scan(&actual); err != nil || actual != scratch.Name {
 		t.Fatalf("database isolation failed: %s %v", actual, err)
 	}
 	migrations, err := filepath.Glob("../../../sql/*.sql")

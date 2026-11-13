@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -23,35 +22,18 @@ import (
 // reused. All repository migrations run twice in the new database before tests.
 func isolatedPostgres(t *testing.T) *pgxpool.Pool {
 	t.Helper()
-	url := testpg.Require(t)
+	scratch := testpg.CreateDatabase(t, "eam_fileops_")
 	ctx := context.Background()
-	admin, err := pgx.Connect(ctx, url)
+	cfg, err := pgxpool.ParseConfig(scratch.URL)
 	if err != nil {
 		t.Fatal(err)
 	}
-	name := "eam_fileops_" + strings.ReplaceAll(newID(), "-", "")
-	if _, err = admin.Exec(ctx, "create database "+pgx.Identifier{name}.Sanitize()); err != nil {
-		admin.Close(ctx)
-		t.Fatal(err)
-	}
-	cfg, err := pgxpool.ParseConfig(url)
-	if err != nil {
-		t.Fatal(err)
-	}
-	cfg.ConnConfig.Database = name
 	cfg.MaxConns = 16
 	pool, err := pgxpool.NewWithConfig(ctx, cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() {
-		pool.Close()
-		_, err := admin.Exec(ctx, "drop database "+pgx.Identifier{name}.Sanitize()+" with (force)")
-		if err != nil {
-			t.Errorf("drop isolated database %s: %v", name, err)
-		}
-		admin.Close(ctx)
-	})
+	t.Cleanup(pool.Close)
 	files, err := filepath.Glob("../../../sql/*.sql")
 	if err != nil || len(files) < 17 {
 		t.Fatalf("migration discovery: %d %v", len(files), err)
@@ -67,7 +49,7 @@ func isolatedPostgres(t *testing.T) *pgxpool.Pool {
 			}
 		}
 	}
-	t.Logf("PostgreSQL isolated database %s: all %d migrations applied twice", name, len(files))
+	t.Logf("PostgreSQL isolated database %s: all %d migrations applied twice", scratch.Name, len(files))
 	return pool
 }
 func seedOwner(t *testing.T, pool *pgxpool.Pool, base Baseline) (*Postgres, Root, Actor) {

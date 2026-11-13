@@ -2,10 +2,7 @@ package main
 
 import (
 	"context"
-	"crypto/rand"
 	"encoding/json"
-	"fmt"
-	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -119,37 +116,11 @@ func TestAdmissionEvidenceIsBoundedNonemptyJSON(t *testing.T) {
 	}
 }
 func TestStorageAdmitPostgresCLI(t *testing.T) {
-	adminURL := testpg.Require(t)
+	scratch := testpg.CreateDatabase(t, "eam_admit_test_")
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
-	admin, err := pgx.Connect(ctx, adminURL)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer admin.Close(context.Background())
-	var random [8]byte
-	if _, err = rand.Read(random[:]); err != nil {
-		t.Fatal(err)
-	}
-	name := fmt.Sprintf("eam_admit_test_%x", random[:])
-	quoted := pgx.Identifier{name}.Sanitize()
-	if _, err = admin.Exec(ctx, "create database "+quoted); err != nil {
-		t.Fatal(err)
-	}
-	defer func() {
-		cleanup, done := context.WithTimeout(context.Background(), 10*time.Second)
-		defer done()
-		if _, e := admin.Exec(cleanup, "drop database "+quoted+" with (force)"); e != nil {
-			t.Error(e)
-		}
-	}()
-	parsed, err := url.Parse(adminURL)
-	if err != nil {
-		t.Fatal(err)
-	}
-	parsed.Path = "/" + name
-	parsed.RawPath = ""
-	isolated := parsed.String()
+	isolated := scratch.URL
+	var err error
 	root := t.TempDir()
 	content, system := filepath.Join(root, "content"), filepath.Join(root, "system")
 	owner := "11111111-1111-1111-1111-111111111111"

@@ -49,8 +49,9 @@ check-write:
 # so the summary could claim zero skipped tests without having looked.
 test:
 	@skip_log=$$(mktemp "$${TMPDIR:-/tmp}/eam-test-skip.XXXXXX"); \
-	trap 'rm -f "$$skip_log"' EXIT; \
-	( cd backend && EAM_TEST_SKIP_LOG="$$skip_log" $(GO) test -count=1 ./... ); \
+	leak_log=$$(mktemp "$${TMPDIR:-/tmp}/eam-test-leak.XXXXXX"); \
+	trap 'rm -f "$$skip_log" "$$leak_log"' EXIT; \
+	( cd backend && EAM_TEST_SKIP_LOG="$$skip_log" EAM_TEST_LEAK_LOG="$$leak_log" $(GO) test -count=1 ./... ); \
 	status=$$?; \
 	tests=0; \
 	if [ -s "$$skip_log" ]; then \
@@ -62,6 +63,16 @@ test:
 	  echo "         These cover the upload journal, operations and the change stream; run 'make test-pg' to require them."; \
 	else \
 	  echo "Postgres gate: no Postgres-backed tests were skipped."; \
+	fi; \
+	leaks=0; \
+	if [ -s "$$leak_log" ]; then \
+	  leaks=$$(wc -l < "$$leak_log" | tr -d ' '); \
+	fi; \
+	if [ "$$leaks" -gt 0 ]; then \
+	  echo ""; \
+	  echo "WARNING: $$leaks scratch database(s) were left behind because DROP DATABASE failed:"; \
+	  sed 's/^/         /' "$$leak_log"; \
+	  echo "         Drop each with: drop database \"<name>\" with (force);"; \
 	fi; \
 	( cd web && npm run typecheck && npm test ); \
 	frontend=$$?; \
@@ -77,7 +88,21 @@ test-pg:
 	  exit 1; \
 	fi
 	@echo "Running the Postgres-backed suite with EAM_TEST_DATABASE_URL set; skipped suite = failed run."
-	cd backend && EAM_TEST_REQUIRE_DATABASE_URL=1 $(GO) test -count=1 ./...
+	@leak_log=$$(mktemp "$${TMPDIR:-/tmp}/eam-test-leak.XXXXXX"); \
+	trap 'rm -f "$$leak_log"' EXIT; \
+	( cd backend && EAM_TEST_REQUIRE_DATABASE_URL=1 EAM_TEST_LEAK_LOG="$$leak_log" $(GO) test -count=1 ./... ); \
+	status=$$?; \
+	leaks=0; \
+	if [ -s "$$leak_log" ]; then \
+	  leaks=$$(wc -l < "$$leak_log" | tr -d ' '); \
+	fi; \
+	if [ "$$leaks" -gt 0 ]; then \
+	  echo ""; \
+	  echo "WARNING: $$leaks scratch database(s) were left behind because DROP DATABASE failed:"; \
+	  sed 's/^/         /' "$$leak_log"; \
+	  echo "         Drop each with: drop database \"<name>\" with (force);"; \
+	fi; \
+	exit $$status
 
 fmt:
 	cd backend && gofmt -w .

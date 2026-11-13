@@ -2,8 +2,6 @@ package api
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -35,36 +33,13 @@ type changeSnapshotFixture struct {
 
 func changeSnapshotDatabase(t *testing.T) *store.DB {
 	t.Helper()
-	target := testpg.Require(t)
+	scratch := testpg.CreateDatabase(t, "eam_snapshots_")
 	ctx := context.Background()
-	admin, err := pgx.Connect(ctx, target)
+	db, err := store.Open(ctx, scratch.URL)
 	if err != nil {
 		t.Fatal(err)
 	}
-	var nonce [8]byte
-	if _, err = rand.Read(nonce[:]); err != nil {
-		t.Fatal(err)
-	}
-	name := "eam_snapshots_" + hex.EncodeToString(nonce[:])
-	if _, err = admin.Exec(ctx, "create database "+pgx.Identifier{name}.Sanitize()); err != nil {
-		t.Fatal(err)
-	}
-	parsed, err := url.Parse(target)
-	if err != nil {
-		t.Fatal(err)
-	}
-	parsed.Path = "/" + name
-	db, err := store.Open(ctx, parsed.String())
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		db.Close()
-		if _, err := admin.Exec(context.Background(), "drop database "+pgx.Identifier{name}.Sanitize()+" with (force)"); err != nil {
-			t.Error(err)
-		}
-		_ = admin.Close(context.Background())
-	})
+	t.Cleanup(db.Close)
 	migrations, err := filepath.Glob("../../../sql/*.sql")
 	if err != nil {
 		t.Fatal(err)

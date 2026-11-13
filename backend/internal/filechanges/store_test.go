@@ -8,14 +8,12 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	fc "everythingabout.me/backend/internal/filecontract"
 	"everythingabout.me/backend/internal/testpg"
-	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -33,43 +31,19 @@ func testUUID(t *testing.T) string {
 
 func changeDatabase(t *testing.T) *pgxpool.Pool {
 	t.Helper()
-	address := testpg.Require(t)
+	scratch := testpg.CreateDatabase(t, "eam_changes_")
 	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 	defer cancel()
-	admin, err := pgx.Connect(ctx, address)
+	cfg, err := pgxpool.ParseConfig(scratch.URL)
 	if err != nil {
 		t.Fatal(err)
 	}
-	name := "eam_changes_" + strings.ReplaceAll(testUUID(t), "-", "")
-	quoted := pgx.Identifier{name}.Sanitize()
-	if _, err = admin.Exec(ctx, "create database "+quoted); err != nil {
-		_ = admin.Close(ctx)
-		t.Fatal(err)
-	}
-	var pool *pgxpool.Pool
-	t.Cleanup(func() {
-		if pool != nil {
-			pool.Close()
-		}
-		cleanup, done := context.WithTimeout(context.Background(), 10*time.Second)
-		defer done()
-		if _, err := admin.Exec(cleanup, "drop database "+quoted+" with (force)"); err != nil {
-			t.Error(err)
-		}
-		if err := admin.Close(cleanup); err != nil {
-			t.Error(err)
-		}
-	})
-	cfg, err := pgxpool.ParseConfig(address)
-	if err != nil {
-		t.Fatal(err)
-	}
-	cfg.ConnConfig.Database = name
 	cfg.MaxConns = 12
-	pool, err = pgxpool.NewWithConfig(ctx, cfg)
+	pool, err := pgxpool.NewWithConfig(ctx, cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(pool.Close)
 	migrations, err := filepath.Glob("../../../sql/*.sql")
 	if err != nil || len(migrations) == 0 {
 		t.Fatal("migration discovery", err)

@@ -3,13 +3,10 @@ package timeline
 import (
 	"context"
 	"fmt"
-	"net/url"
 	"os"
 	"path/filepath"
 	"testing"
 	"time"
-
-	"github.com/jackc/pgx/v5"
 
 	"everythingabout.me/backend/internal/config"
 	"everythingabout.me/backend/internal/events"
@@ -23,30 +20,10 @@ import (
 
 func changeStreamDB(t *testing.T) (*store.DB, context.Context) {
 	t.Helper()
-	address := testpg.Require(t)
+	scratch := testpg.CreateDatabase(t, "eam_timeline_changes_")
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	t.Cleanup(cancel)
-	admin, err := pgx.Connect(ctx, address)
-	if err != nil {
-		t.Fatal(err)
-	}
-	name := fmt.Sprintf("eam_timeline_changes_%d", time.Now().UnixNano())
-	quoted := pgx.Identifier{name}.Sanitize()
-	if _, err = admin.Exec(ctx, "create database "+quoted); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		if _, err := admin.Exec(context.Background(), "drop database "+quoted+" with (force)"); err != nil {
-			t.Error(err)
-		}
-		_ = admin.Close(context.Background())
-	})
-	parsed, err := url.Parse(address)
-	if err != nil {
-		t.Fatal(err)
-	}
-	parsed.Path = "/" + name
-	db, err := store.Open(ctx, parsed.String())
+	db, err := store.Open(ctx, scratch.URL)
 	if err != nil {
 		t.Fatal(err)
 	}

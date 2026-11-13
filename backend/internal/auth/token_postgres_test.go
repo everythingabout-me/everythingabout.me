@@ -2,9 +2,6 @@ package auth
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/hex"
-	"net/url"
 	"os"
 	"path/filepath"
 	"testing"
@@ -13,42 +10,15 @@ import (
 	"everythingabout.me/backend/internal/config"
 	"everythingabout.me/backend/internal/store"
 	"everythingabout.me/backend/internal/testpg"
-	"github.com/jackc/pgx/v5"
 )
 
 // Each run creates its own database on the explicitly selected disposable service.
 func tokenPostgresService(t *testing.T) (context.Context, *store.DB, *Service, string) {
 	t.Helper()
-	address := testpg.Require(t)
+	scratch := testpg.CreateDatabase(t, "eam_token_test_")
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	t.Cleanup(cancel)
-	admin, err := pgx.Connect(ctx, address)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = admin.Close(context.Background()) })
-	var entropy [8]byte
-	if _, err = rand.Read(entropy[:]); err != nil {
-		t.Fatal(err)
-	}
-	name := "eam_token_test_" + hex.EncodeToString(entropy[:])
-	quoted := pgx.Identifier{name}.Sanitize()
-	if _, err = admin.Exec(ctx, "create database "+quoted); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		cleanup, done := context.WithTimeout(context.Background(), 10*time.Second)
-		defer done()
-		if _, err := admin.Exec(cleanup, "drop database "+quoted+" with (force)"); err != nil {
-			t.Error(err)
-		}
-	})
-	parsed, err := url.Parse(address)
-	if err != nil {
-		t.Fatal(err)
-	}
-	parsed.Path = "/" + name
-	db, err := store.Open(ctx, parsed.String())
+	db, err := store.Open(ctx, scratch.URL)
 	if err != nil {
 		t.Fatal(err)
 	}

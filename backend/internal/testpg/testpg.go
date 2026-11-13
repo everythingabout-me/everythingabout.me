@@ -14,12 +14,18 @@
 //     to miss.
 //   - EAM_TEST_REQUIRE_DATABASE_URL=1 turns a missing URL into a test failure.
 //     make test-pg and CI set it, so a required run cannot pass by skipping.
+//
+// Scratch-database cleanup follows the same rule for the same reason: a drop
+// that cannot finish is appended to EAM_TEST_LEAK_LOG and the Makefile prints
+// it, because a t.Logf warning on a passing test never reaches the terminal.
 package testpg
 
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 )
 
@@ -34,6 +40,11 @@ const (
 	// SkipLogVariable names the file that receives one line per skipped test:
 	// the source file, a tab, then the test name.
 	SkipLogVariable = "EAM_TEST_SKIP_LOG"
+	// LeftoverLogVariable names the file that receives one line per scratch
+	// database that could not be dropped: the database name, a tab, then the
+	// last error. The Makefile prints its contents, so a leak is not silent even
+	// though the test itself stays green (see CreateDatabase's cleanup contract).
+	LeftoverLogVariable = "EAM_TEST_LEAK_LOG"
 )
 
 // Require returns the disposable PostgreSQL URL or stops the test.
@@ -58,14 +69,27 @@ func Require(t testing.TB) string {
 
 // recordSkip appends the calling test's file and name to the skip log. It is
 // best-effort: a counting problem must never turn a skip into a failure.
+//
+// The entry point is Require, but tests usually reach it through
+// CreateDatabase. Walk past this package's own frames so the log names the
+// test's file, not database.go, which is what makes the count useful when
+// investigating a skip.
 func recordSkip(t testing.TB) {
 	path := os.Getenv(SkipLogVariable)
 	if path == "" {
 		return
 	}
 	file := "unknown"
-	if _, caller, _, ok := runtime.Caller(2); ok {
+	for skip := 2; skip < 8; skip++ {
+		_, caller, _, ok := runtime.Caller(skip)
+		if !ok {
+			break
+		}
+		if strings.Contains(filepath.ToSlash(caller), "/internal/testpg/") {
+			continue
+		}
 		file = caller
+		break
 	}
 	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
 	if err != nil {

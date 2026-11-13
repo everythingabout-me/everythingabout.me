@@ -3,10 +3,8 @@ package api
 import (
 	"bytes"
 	"context"
-	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -27,41 +25,16 @@ import (
 	"everythingabout.me/backend/internal/storagebackend"
 	"everythingabout.me/backend/internal/store"
 	"everythingabout.me/backend/internal/testpg"
-	"github.com/jackc/pgx/v5"
 )
 
 // This opt-in suite exercises actual HTTP/authentication, Postgres transactions and
 // admitted native local actions. It creates its own database and empty owner roots;
 // it never loads application environment files or touches an existing user's tree.
 func TestFilesMutationsPostgresLocalConformance(t *testing.T) {
-	databaseURL := testpg.Require(t)
+	scratch := testpg.CreateDatabase(t, "eam_mutations_test_")
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
-	admin, err := pgx.Connect(ctx, databaseURL)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer admin.Close(context.Background())
-	var entropy [8]byte
-	if _, err = rand.Read(entropy[:]); err != nil {
-		t.Fatal(err)
-	}
-	database := "eam_mutations_test_" + hex.EncodeToString(entropy[:])
-	quoted := pgx.Identifier{database}.Sanitize()
-	if _, err = admin.Exec(ctx, "create database "+quoted); err != nil {
-		t.Fatal(err)
-	}
-	defer func() {
-		if _, e := admin.Exec(context.Background(), "drop database "+quoted+" with (force)"); e != nil {
-			t.Error(e)
-		}
-	}()
-	parsed, err := url.Parse(databaseURL)
-	if err != nil {
-		t.Fatal(err)
-	}
-	parsed.Path = "/" + database
-	db, err := store.Open(ctx, parsed.String())
+	db, err := store.Open(ctx, scratch.URL)
 	if err != nil {
 		t.Fatal(err)
 	}

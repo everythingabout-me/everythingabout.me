@@ -3,8 +3,6 @@ package browserupload
 import (
 	"context"
 	"encoding/json"
-	"fmt"
-	"net/url"
 	"os"
 	"sync"
 	"sync/atomic"
@@ -12,35 +10,14 @@ import (
 	"time"
 
 	"everythingabout.me/backend/internal/testpg"
-	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 func TestPostgresJournalLifecycle(t *testing.T) {
-	address := testpg.Require(t)
+	scratch := testpg.CreateDatabase(t, "eam_browser_upload_test_")
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
-	admin, err := pgx.Connect(ctx, address)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer admin.Close(context.Background())
-	name := fmt.Sprintf("browser_upload_test_%d", time.Now().UnixNano())
-	quoted := pgx.Identifier{name}.Sanitize()
-	if _, err = admin.Exec(ctx, "create database "+quoted); err != nil {
-		t.Fatal(err)
-	}
-	defer func() {
-		if _, err := admin.Exec(context.Background(), "drop database "+quoted+" with (force)"); err != nil {
-			t.Error(err)
-		}
-	}()
-	parsed, err := url.Parse(address)
-	if err != nil {
-		t.Fatal(err)
-	}
-	parsed.Path = "/" + name
-	pool, err := pgxpool.New(ctx, parsed.String())
+	pool, err := pgxpool.New(ctx, scratch.URL)
 	if err != nil {
 		t.Fatal(err)
 	}

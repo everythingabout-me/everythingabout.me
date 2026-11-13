@@ -3,15 +3,13 @@ package main
 import (
 	"bytes"
 	"context"
-	"crypto/rand"
-	"encoding/hex"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
-	"github.com/jackc/pgx/v5"
+	"everythingabout.me/backend/internal/testpg"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -20,40 +18,17 @@ import (
 // and never loads application configuration.
 func migrateTestPool(t *testing.T) *pgxpool.Pool {
 	t.Helper()
-	url := os.Getenv("EAM_TEST_DATABASE_URL")
-	if url == "" {
-		t.Skip("EAM_TEST_DATABASE_URL unset; disposable Postgres integration not run")
-	}
+	scratch := testpg.CreateDatabase(t, "eam_migrate_")
 	ctx := context.Background()
-	admin, err := pgx.Connect(ctx, url)
+	cfg, err := pgxpool.ParseConfig(scratch.URL)
 	if err != nil {
 		t.Fatal(err)
 	}
-	var random [12]byte
-	if _, err = rand.Read(random[:]); err != nil {
-		t.Fatal(err)
-	}
-	name := "eam_migrate_" + hex.EncodeToString(random[:])
-	if _, err = admin.Exec(ctx, "create database "+pgx.Identifier{name}.Sanitize()); err != nil {
-		admin.Close(ctx)
-		t.Fatal(err)
-	}
-	cfg, err := pgxpool.ParseConfig(url)
-	if err != nil {
-		t.Fatal(err)
-	}
-	cfg.ConnConfig.Database = name
 	pool, err := pgxpool.NewWithConfig(ctx, cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() {
-		pool.Close()
-		if _, err := admin.Exec(ctx, "drop database "+pgx.Identifier{name}.Sanitize()+" with (force)"); err != nil {
-			t.Error(err)
-		}
-		admin.Close(ctx)
-	})
+	t.Cleanup(pool.Close)
 	return pool
 }
 

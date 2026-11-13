@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"bytes"
 	"context"
-	"crypto/rand"
 	"fmt"
 	"io"
 	"net"
@@ -45,40 +44,10 @@ func TestLocalStorageServerCommand(t *testing.T) {
 // Explicit opt-in: the URL must permit creating a disposable database. Nothing
 // loads .env or inherits application/provider credentials from the parent process.
 func TestLocalStorageServerStartupPostgres(t *testing.T) {
-	databaseURL := testpg.Require(t)
+	scratch := testpg.CreateDatabase(t, "eam_server_test_")
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
-	admin, err := pgx.Connect(ctx, databaseURL)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer admin.Close(context.Background())
-	var random [8]byte
-	if _, err := rand.Read(random[:]); err != nil {
-		t.Fatal(err)
-	}
-	name := fmt.Sprintf("eam_server_test_%x", random[:])
-	quoted := pgx.Identifier{name}.Sanitize()
-	if _, err := admin.Exec(ctx, "create database "+quoted); err != nil {
-		t.Fatal(err)
-	}
-	defer func() {
-		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cleanupCancel()
-		if _, err := admin.Exec(cleanupCtx, "drop database "+quoted+" with (force)"); err != nil {
-			t.Errorf("remove disposable database: %v", err)
-		}
-	}()
-	parsed, err := url.Parse(databaseURL)
-	if err != nil || (parsed.Scheme != "postgres" && parsed.Scheme != "postgresql") {
-		t.Fatal("EAM_TEST_DATABASE_URL must be a postgres URL")
-	}
-	parsed.Path = "/" + name
-	parsed.RawPath = ""
-	query := parsed.Query()
-	query.Del("search_path")
-	parsed.RawQuery = query.Encode()
-	isolatedURL := parsed.String()
+	isolatedURL := scratch.URL
 
 	root := t.TempDir()
 	content, system := filepath.Join(root, "content"), filepath.Join(root, "system")
