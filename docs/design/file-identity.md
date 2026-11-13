@@ -192,12 +192,16 @@ explicit new identities rather than claiming continuity. Additive import must no
 proven recreated/copied file merely because the destination path already has an old row.
 
 Migration 032 also durably binds the owner's change stream to the current root namespace. First use binds
-once; later mismatches do not silently reuse history. After database/mapping restore or every root rebind,
-including A → B → A, stop writers, settle accepted work and run file-changes-reset with the current config
-and --writers-quiesced. Even a same-namespace restore requires epoch rotation. Reset refuses pending guards/
-nonterminal Operations, expires snapshots/subscriptions and clears change markers while retaining IDs,
-positions, deduplication receipts, audit and native bytes. It does not recover lost historical file IDs;
-backup of the identity mapping remains necessary. See the [runbook](file-changes.md#durable-root-binding-and-restorerebind-procedure).
+once; a later bucket, region, prefix or generation change makes startup refuse and name both roots. The service
+does not adopt the configured tree, because it must not read, write or delete the previous one: after copying
+the bytes across, the operator runs `eam storage-rebind --owner-id UUID --from BOUND --to CONFIGURED
+--writers-quiesced`, which moves the budget binding and rotates the change-stream namespace without native I/O.
+After a database/mapping restore on the same root, stop writers, settle accepted work and run file-changes-reset
+with the current config and --writers-quiesced. Even a same-namespace restore requires epoch rotation. Both
+commands refuse pending guards/nonterminal Operations, expire snapshots/subscriptions and clear change markers
+while retaining IDs, positions, deduplication receipts, audit and native bytes. They do not recover lost
+historical file IDs; backup of the identity mapping remains necessary.
+See the [runbook](file-changes.md#durable-root-binding-and-restorerebind-procedure).
 
 Implementation acceptance needs repeated migrations/import, existing event references, persisted root IDs,
 ID/path equivalence, selector errors, parent destinations/redaction, copy/recreation freshness, move/replace

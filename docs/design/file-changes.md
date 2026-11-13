@@ -311,8 +311,32 @@ normal endpoints and repeated migrations do not rebind or rotate a healthy strea
 admission can return 410 reset_required; snapshot creation reports 503 change_root_reset_required. A malformed
 or differently bound old cursor can fail as invalid_cursor before the durable root check.
 
-After database restore, mapping rebuild or any root/configuration rebind, stop all application and external
-writers, settle accepted work, then inspect and apply an explicit reset against the intended current config:
+A bucket, region, prefix or generation change makes the server refuse to start and name each disagreeing field
+with the bound and configured values. The service does not adopt the new root: it never reads, writes or deletes
+the previous tree, and adopting the configured root would leave that tree unreachable and unreported while the
+index described the new one. Two operator paths exist:
+
+1. **Move the bytes, then re-point the index.** Copy and verify the tree at the configured root, stop all
+   application and external writers, settle accepted work, then run:
+
+   ```bash
+   eam storage-rebind --owner-id UUID --from BOUND-CONNECTION --to CONFIGURED-CONNECTION --writers-quiesced --dry-run
+   eam storage-rebind --owner-id UUID --from BOUND-CONNECTION --to CONFIGURED-CONNECTION --writers-quiesced
+   ```
+
+   In one transaction it replaces `file_budgets.root_binding` and resets the change-stream namespace onto the
+   configured root. It lists, copies and deletes nothing; it refuses a pending guard, a nonterminal Operation,
+   a `--from` that is not the bound connection, or a `--to` that names no connection for the owner. When one
+   connection row changed its bucket, region, prefix or generation in place, both names are the same.
+   It rotates the root epoch, sets the retained floor to the existing head, expires subscriptions/snapshots
+   and clears recursive/namespace markers. Positions, effect receipts, file IDs, quota counters and native
+   bytes are unchanged; run `eam reconcile --owner UUID` to verify the copied tree.
+
+2. **Discard the derived index.** Recreate an empty database, run `eam migrate`, and import the configured tree
+   with `eam reconcile --owner UUID`.
+
+After a database restore or mapping rebuild that keeps the same root/configuration, stop all application and
+external writers, settle accepted work, then inspect and apply an explicit reset:
 
 ```bash
 eam file-changes-reset --owner-id UUID --writers-quiesced --dry-run
@@ -324,8 +348,10 @@ operator action; database checks cannot fence an external provider request or rc
 binds the current configured namespace, rotates the root epoch, sets the retained floor to the existing head,
 expires all subscriptions/snapshots and clears recursive/namespace markers. It preserves positions, effect
 receipts, file IDs, audit and file bytes; it does not scan, move or delete native content. Clients must create
-new baselines. Reset even when the restored namespace/APP_SECRET/epoch appear unchanged, and for each rebind
-including A → B → A: returning to an old configuration must not revive old checkpoints.
+new baselines. Reset even when the restored namespace/APP_SECRET/epoch appear unchanged: returning to an old
+configuration must not revive old checkpoints. A root change is not this case — use `storage-rebind`, which
+also moves the budget binding; `file-changes-reset` alone would leave the budget on the old root and every
+mutation would fail with root_conflict.
 
 Producers acquire shared root advisory protection through BindRoot before index write locks, then acquire
 the short ordering-head lock after index/quota work. Reset acquires exclusive root protection before the head.

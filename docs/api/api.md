@@ -1183,14 +1183,17 @@ checkpoints expire with their lease. Change rows default to 90-day expiry. The a
 retains effect/deduplication receipts. There is no automatic scheduler or HTTP prune endpoint.
 
 Migration 032 durably binds the owner stream to its current native root/configuration on first use. Later
-mismatches are rejected, not silently rebound: root admission/pull can report 410 reset_required and snapshot
-creation 503 change_root_reset_required. An old differently bound cursor can fail invalid_cursor first. After
-DB restore or every root rebind, including A → B → A, the operator must stop application/external writers,
-settle accepted Operations and run `eam file-changes-reset --owner-id UUID --writers-quiesced [--dry-run]`
-against the intended current configuration. It refuses remaining guards/nonterminal Operations. Reset rotates
-epoch, sets retained floor=head, expires subscriptions/snapshots and clears markers while retaining monotonic
-positions, file IDs, effect receipts, audit and native bytes. Even same-namespace restores need a reset;
-restored secrets/epochs must not revive old cursors. Clients then bootstrap new snapshots. Dry-run rolls back.
+mismatches are rejected, not silently rebound: a bucket, region, prefix or generation change makes the server
+refuse to start and name both roots; root admission/pull can report 410 reset_required and snapshot creation
+503 change_root_reset_required. An old differently bound cursor can fail invalid_cursor first. After the bytes
+are copied to the configured root, the operator stops application/external writers, settles accepted
+Operations and runs `eam storage-rebind --owner-id UUID --from BOUND --to CONFIGURED --writers-quiesced
+[--dry-run]`, which updates the budget binding and rotates the change-stream namespace without native I/O.
+After a DB restore on the same root, use `eam file-changes-reset --owner-id UUID --writers-quiesced
+[--dry-run]` instead. A → B → A is two rebinds, each rotating the epoch. Both refuse remaining guards/nonterminal Operations and rotate epoch,
+set retained floor=head, expire subscriptions/snapshots and clear markers while retaining monotonic positions,
+file IDs, effect receipts, audit and native bytes. Even same-namespace restores need a reset; restored
+secrets/epochs must not revive old cursors. Clients then bootstrap new snapshots. Dry-run rolls back.
 See the [root lifecycle procedure](../design/file-changes.md#durable-root-binding-and-restorerebind-procedure).
 
 ## 11. Durable file subscriptions and SSE

@@ -518,6 +518,7 @@ go run ./cmd/eam file-changes-prune --owner-id UUID [--dry-run]
 go run ./cmd/eam file-audit-prune --owner-id UUID --before DATE [--dry-run]  # delete audit rows older than an explicit cutoff
 go run ./cmd/eam file-operations-prune --owner-id UUID [--dry-run]  # delete terminal operations past retention; referenced or live ones stay
 go run ./cmd/eam file-changes-reset --owner-id UUID --writers-quiesced [--dry-run]
+go run ./cmd/eam storage-rebind --owner-id UUID --from BOUND --to CONFIGURED --writers-quiesced [--dry-run]  # accept a moved root after the bytes are copied; never touches storage
 go run ./cmd/eam claim --email … [--dry-run] [--keep-source]
 go run ./cmd/eam token create --email … --name … [--prefix …] [--write=false] [--changes] [--subscribe]
 go run ./cmd/eam token list   --email …
@@ -535,12 +536,17 @@ No automatic scheduler is wired. File audit has no default cutoff either: `file-
 rows observed strictly before an explicit `--before`, because the audit is the only durable record of denied
 and completed reads and of a settled effect's actor. The recommended window is one year; see
 [the retention rule](docs/design/file-changes.md#retention).
-Migration 032 binds each stream to one durable root/configuration namespace on first use; later mismatches
-reject access rather than silently rebind. After database restore or any root rebind, including A → B → A,
-stop application/external writers and settle accepted work before file-changes-reset. It refuses remaining
-mutation guards or nonterminal Operations, rotates the epoch, sets retained floor=head, expires old snapshots/
-subscriptions and clears markers without changing file IDs or native bytes. Dry-run rolls back. New clients
-must bootstrap again; even same-namespace restores need reset to invalidate restored checkpoints. See the
+Migration 032 binds each stream to one durable root/configuration namespace on first use. A bucket, region,
+prefix or generation change makes the server refuse to start and name both roots; it never adopts the
+configured root, because that would leave the previous tree unreachable and unreported. After the bytes are
+copied and writers are stopped, `eam storage-rebind --owner-id UUID --from BOUND --to CONFIGURED
+--writers-quiesced` updates the budget binding and rotates the change-stream namespace without listing,
+copying or deleting a bucket. The other accepted path is to discard the index (empty database, migrate,
+`eam reconcile`). After a database restore on the same root, use file-changes-reset instead. Every A → B → A
+move is a rebind, whose namespace rotation already makes the old epoch unusable. Both commands refuse remaining
+mutation guards or nonterminal Operations; a namespace rotation sets retained floor=head, expires old
+snapshots/subscriptions and clears markers without changing file IDs or native bytes. Dry-run rolls back. New clients must bootstrap again; even same-namespace restores need reset to
+invalidate restored checkpoints. See the
 [root lifecycle runbook](docs/design/file-changes.md#durable-root-binding-and-restorerebind-procedure).
 
 `make` has matching targets:

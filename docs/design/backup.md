@@ -110,8 +110,10 @@ snapshot job and read-only to everything else.
 
 1. Quiesce writers and settle accepted work.
 2. Materialize the snapshot into a new root on the authority connection and verify it (walk + names).
-3. Bind that root and bump the generation; rotate the change-stream namespace
-   (`file-changes-reset --writers-quiesced`).
+3. Point the owner's connection row at that root and bump its generation, then run
+   `eam storage-rebind --owner-id UUID --from BOUND-CONNECTION --to CONFIGURED-CONNECTION
+   --writers-quiesced`; it moves the budget binding and rotates the change-stream namespace. The server
+   refuses to start on the changed root until this explicit step.
 4. `reconcile` to rebuild the index from the native tree.
 
 Paths, names and bytes are preserved. Service IDs change; that is accepted, because the tree is the truth
@@ -121,7 +123,8 @@ and the index is the cache.
 
 Implemented as `eam backup restore --owner ... --date ... [--to restore-<date>]`: it copies the
 snapshot into a new path on the authority connection and refuses to overwrite anything, then points the
-operator at `reconcile`. Rebinding that path as the owner's content root is still an operator step.
+operator at `reconcile`. Rebinding that path as the owner's content root is still an operator step:
+configure the connection row's location and generation, then run `eam storage-rebind` before `reconcile`.
 
 **The snapshot is never the live tree.** Restore materializes a separate copy and binds that; binding the
 live tree directly to the backup directory would let one bug write into history. Materializing by hardlink
@@ -152,9 +155,10 @@ Rules, each answering a specific failure:
 - **Uniqueness is on `identity`, not on `(backend, bucket)`.** Two prefixes in one bucket are two trees;
   rotating a credential is still the same tree. This is the rule `Binding` already enforces, kept rather
   than reinvented.
-- **A row's location never changes in place.** A new endpoint, bucket or prefix is a new generation or a new
-  row. The change-stream namespace embeds connection, generation and both roots, so an in-place edit would
-  let an old cursor continue on a different tree.
+- **A row's location never changes silently.** A new endpoint, bucket or prefix is a new generation (or a new
+  row). The change-stream namespace embeds connection, generation and both roots; startup compares the
+  persisted binding with the configured root and refuses to serve until the operator runs
+  `eam storage-rebind`, so an in-place edit cannot let an old cursor continue on a different tree.
 - **Evidence is per row and carries its identity.** A second object connection that inherits the first
   row's "atomic publish" would reintroduce the exact failure that once cost hours: evidence for one bucket
   applied to another. A mismatch means *unproven*, and unproven disables writes on that connection while

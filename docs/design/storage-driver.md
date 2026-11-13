@@ -432,10 +432,14 @@ Generic flat-key moves still need per-entry native effects. Dynamic ancestry/sea
 scale with candidates, depth or subtree size; service identity is not a universal O(1) claim.
 
 Migration 032 durably binds the service's change stream to a root/configuration namespace. Changing driver
-binding is not permission to silently reuse that stream. The service rejects mismatches; operators must stop
-writers, settle accepted work and use file-changes-reset after restore/rebind, even A → B → A. Reset preserves
-native bytes and rejects pending guards/nonterminal Operations; it does not strengthen native fencing or
-recover lost identity mappings. Producer/read/reset lock ordering is owned by the service, not the driver.
+binding is not permission to silently reuse that stream, and the service does not adopt a new root: a bucket,
+region, prefix or generation change refuses to start and names both roots. After moving the bytes, operators
+stop writers, settle accepted work and run `eam storage-rebind --from BOUND --to CONFIGURED --writers-quiesced`
+to move the budget binding and rotate the stream; a same-root restore uses file-changes-reset. Every
+A → B → A move is a rebind, whose namespace rotation also makes the old epoch unusable.
+Both preserve native bytes and reject pending guards/nonterminal Operations; they do not strengthen native
+fencing or recover lost identity mappings. Producer/read/reset lock ordering is owned by the service, not the
+driver.
 
 The service publishes confirmed change facts and marker updates during index settlement, after native evidence
 is established. A subtree move can be one logical coverage=subtree event without a descendant event per file.

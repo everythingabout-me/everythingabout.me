@@ -141,7 +141,7 @@ while its tests were skipping. CI (`.github/workflows/test.yml`) runs `make migr
 
 | Path | Contents |
 |---|---|
-| `backend/cmd/eam/` | Single entrypoint: `server` / `migrate` / `doctor` / `reconcile` / `claim` / `token` |
+| `backend/cmd/eam/` | Single entrypoint: `server` / `migrate` / `doctor` / `reconcile` / `storage-rebind` / `claim` / `token` |
 | `backend/internal/api/` | Routes and handlers: web `/api/*`, the unified file API, `/events`; retired `/api/fs/*` and root file routes answer 410 |
 | `backend/internal/nodes/` | Canonical parent/name index, dynamic current paths and transactional identity/change settlement; never bytes |
 | `backend/internal/filechanges/` | Commit-safe owner change facts, recursive markers, projection and durable file audit |
@@ -235,13 +235,19 @@ while its tests were skipping. CI (`.github/workflows/test.yml`) runs `make migr
   audit keeps read/denial evidence and a settled effect's actor, and the recommended one-year window is a
   policy choice (docs/design/file-changes.md §7).
 - Migration 032 binds the change stream's root namespace on first use only. Configuration selects the root: a
-  bucket, region, prefix or generation change is adopted at startup (re-probe write capability, rebind the owner
-  budget, rotate the change-stream namespace, log all three), because the native tree is authoritative and the
-  index is a derived view. A mismatch appearing while running still rejects access, never rebinds silently.
-  After DB restore/mapping rebuild, stop writers/settle work and use file-changes-reset --owner-id UUID
-  --writers-quiesced [--dry-run]. Pending guards/nonterminal
-  Operations block reset. It rotates epoch/floor=head, expires snapshots/subscriptions and clears markers;
-  it never changes file IDs/native bytes or drops effect receipts. Same-namespace restore still needs reset.
+  bucket, region, prefix or generation change **refuses to start**, naming each disagreeing field with the bound
+  and configured values. Adoption was dropped because the operator moves the bytes: the service never reads,
+  writes or deletes the previous tree, and silently adopting the configured root would leave that tree
+  unreachable and unreported while the index described the new one. With the bytes already copied, stop
+  writers/settle work and run `eam storage-rebind --owner-id UUID --from <bound connection> --to <configured
+  connection> --writers-quiesced`; it updates `file_budgets.root_binding` and rotates the change-stream
+  namespace without listing, copying or deleting a bucket, and refuses pending guards/nonterminal Operations.
+  The other accepted path is to discard the derived index (empty database, migrate, import with
+  `eam reconcile --owner UUID`). `eam doctor` reports the same refusal read-only. A mismatch appearing while
+  running still rejects access, never rebinds silently. After a DB restore/mapping rebuild on the same root,
+  use file-changes-reset --owner-id UUID --writers-quiesced [--dry-run]. Pending guards/nonterminal Operations
+  block reset. It rotates epoch/floor=head, expires snapshots/subscriptions and clears markers; it never
+  changes file IDs/native bytes or drops effect receipts. Same-namespace restore still needs reset.
   Producers call BindRoot with shared root protection before index locks, then the short head after index/quota.
   Repeatable-read consumers protect the root at session level BEFORE beginning their MVCC snapshot; reset
   takes exclusive root protection. Database checks do not replace actual native-writer quiescence.

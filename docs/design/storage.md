@@ -400,15 +400,23 @@ native watcher health and external-writer budget resynchronization remain separa
 observation limits are in [file changes](file-changes.md) and the [API](../api/api.md).
 
 Migration 032 durably binds the change stream to the current configured root namespace on first use.
-Configuration selects the root: at startup the server adopts a changed root by rebinding each owner budget and
-rotating the change-stream namespace, and logs what it adopted. A mismatch that appears while running still
-rejects access instead of silently rebinding. Producers take shared root protection before index
-locks and the short ordering head afterward; repeatable-read consumers take session root protection before
-their MVCC snapshot. Reset takes exclusive root protection. After database restore/mapping rebuild or every
-rebind, including A → B → A, stop writers, settle accepted work and explicitly run file-changes-reset with
---writers-quiesced. It refuses pending guards/nonterminal Operations, rotates epoch, sets floor=head, expires
-baselines/subscriptions and clears markers while preserving positions, receipts, IDs, audit and native bytes.
-A same-namespace restore still requires reset. See the [root runbook](file-changes.md#durable-root-binding-and-restorerebind-procedure).
+Configuration selects the root, and a bucket, region, prefix or generation change **refuses to start**: the
+comparison names each disagreeing field with the bound and configured values. Adoption was removed because the
+operator, not the service, moves the bytes. A silently adopted root would leave the previous tree unreachable
+and unreported while the index described the new one, and making the new root work must never require the
+service to read, write or delete the previous tree. After copying the tree and stopping writers, the operator
+runs `eam storage-rebind --owner-id UUID --from <bound connection> --to <configured connection>
+--writers-quiesced`: it updates `file_budgets.root_binding` and rotates the change-stream namespace in one
+transaction, lists/copies/deletes nothing, and refuses pending guards or nonterminal Operations. The other
+accepted path is to discard the derived index (empty database, `eam migrate`, import with `eam reconcile`).
+A mismatch that appears while running still rejects access instead of silently rebinding.
+Producers take shared root protection before index locks and the short ordering head afterward; repeatable-read
+consumers take session root protection before their MVCC snapshot. Reset takes exclusive root protection.
+After a database restore/mapping rebuild that keeps the same root, stop writers, settle accepted work and
+explicitly run file-changes-reset with --writers-quiesced. It refuses pending guards/nonterminal Operations,
+rotates epoch, sets floor=head, expires baselines/subscriptions and clears markers while preserving positions,
+receipts, IDs, audit and native bytes. A same-namespace restore still requires reset.
+See the [root runbook](file-changes.md#durable-root-binding-and-restorerebind-procedure).
 
 ## 8. Acceptance and implementation
 
