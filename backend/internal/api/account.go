@@ -317,7 +317,9 @@ func (s *Server) handleSetPassword(w http.ResponseWriter, r *http.Request) error
 	if err != nil {
 		return err
 	}
-	updated, err := s.auth.SetUserPassword(r.Context(), row.ID, &hash)
+	// Keep this session, drop every other one: a cookie stolen before the password
+	// was changed would otherwise keep working after the owner's recovery step.
+	updated, _, err := s.auth.SetUserPassword(r.Context(), row.ID, &hash, s.auth.SessionToken(r))
 	if err != nil {
 		return err
 	}
@@ -360,7 +362,9 @@ func (s *Server) handleRemovePassword(w http.ResponseWriter, r *http.Request) er
 		return httpx.Unauthorized("current password is incorrect")
 	}
 
-	updated, err := s.auth.SetUserPassword(r.Context(), row.ID, nil)
+	// Removing the password is a credential change too; end the sessions it did not
+	// create, for the same reason a password change does.
+	updated, _, err := s.auth.SetUserPassword(r.Context(), row.ID, nil, s.auth.SessionToken(r))
 	if err != nil {
 		return err
 	}
@@ -529,7 +533,9 @@ func (s *Server) handleChangeEmail(w http.ResponseWriter, r *http.Request) error
 		return err
 	}
 
-	updated, err := s.auth.UpdateUserEmail(r.Context(), current.ID, email)
+	// The codes prove control of both mailboxes; revoking the rest is what carries that
+	// proof to the sessions, because a stolen cookie never had to answer a code.
+	updated, _, err := s.auth.UpdateUserEmail(r.Context(), current.ID, email, s.auth.SessionToken(r))
 	if err != nil {
 		if auth.IsUniqueViolation(err) {
 			return httpx.Conflict("this email is already used by another account")

@@ -157,6 +157,7 @@ make dev
 - The session is an httpOnly cookie (`eam_session`); the database stores only the token's SHA-256, and it expires after 30 days by default. The token format also matches the old version, so existing sessions survive the migration.
 - Files are isolated by `owner_id`, and each user gets a separate prefix in COS, `drive/<userID>/`, so different accounts can have paths with the same name.
 - `/account` lets you change the email (which takes **two verification codes, one for the current address and one for the new one**) and set or remove a password; the page only shows the email and the signup date.
+- **A password change or an email change ends every other session** and keeps the one that made the change: the rows deleted are the account's `sessions` rows except the cookie sending the request. A reused or stolen cookie stops working at the moment the owner recovers the account, instead of surviving until it expires.
 - Registration is open by default; on a personal instance, once you have registered yourself it is worth putting `ALLOW_REGISTRATION=false` in `.env` and restarting.
 
 ## Why not "just use S3"

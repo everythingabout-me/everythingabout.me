@@ -7,6 +7,8 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgconn"
+
 	"everythingabout.me/backend/internal/config"
 	"everythingabout.me/backend/internal/httpx"
 	"everythingabout.me/backend/internal/store"
@@ -63,7 +65,10 @@ func (s *Service) CreateSession(ctx context.Context, userID, userAgent, ip strin
 	return token, expiresAt, nil
 }
 
-func (s *Service) sessionToken(r *http.Request) string {
+// SessionToken returns the raw session cookie value of the request, or "" when the
+// request carries no session cookie. Callers that must name the session they are acting
+// in (revoking the others) use it; the hash is what the database stores.
+func (s *Service) SessionToken(r *http.Request) string {
 	cookie, err := r.Cookie(SessionCookie)
 	if err != nil {
 		return ""
@@ -73,7 +78,7 @@ func (s *Service) sessionToken(r *http.Request) string {
 
 // SessionUser returns the signed-in user, or (nil, nil) when nobody is signed in.
 func (s *Service) SessionUser(ctx context.Context, r *http.Request) (*User, error) {
-	token := s.sessionToken(r)
+	token := s.SessionToken(r)
 	if token == "" {
 		return nil, nil
 	}
@@ -135,9 +140,43 @@ func (s *Service) DestroySession(ctx context.Context, token string) error {
 	return err
 }
 
+// execer is the part of pgxpool.Pool and pgx.Tx one statement needs, so a credential
+// change can revoke sessions inside the transaction that changes the credential.
+type execer interface {
+	Exec(ctx context.Context, sql string, arguments ...any) (pgconn.CommandTag, error)
+}
+
+// revokeOtherSessions deletes the account's login sessions except the one that made the
+// current request, and returns how many rows it removed.
+//
+// The rows deleted are all rows of sessions with this user_id whose token_hash is not the
+// SHA-256 of currentToken: the stolen or forgotten cookies, with their user_agent and ip.
+// The row behind currentToken is exempt because it is the session that performed this
+// change — the browser tab the owner is standing in and the only session they still
+// demonstrably control. Deleting it would log them out of the action they just took,
+// which teaches people to avoid password changes instead of protecting them.
+//
+// Why revoke at all: a stolen cookie is the credential an attacker keeps after the owner
+// resets the password or moves the account to a new email address. The recovery action is
+// only a recovery if it ends those sessions; otherwise the attacker stays signed in on
+// the old token for the rest of SESSION_TTL_DAYS. An empty currentToken matches no stored
+// hash, so it fails closed and revokes every session; the account handlers only reach
+// here behind RequireUser, which already required a valid session cookie.
+func revokeOtherSessions(ctx context.Context, q execer, userID, currentToken string) (int64, error) {
+	tag, err := q.Exec(ctx,
+		`delete from sessions
+		  where user_id = $1::uuid
+		    and token_hash <> $2`,
+		userID, hashToken(currentToken))
+	if err != nil {
+		return 0, err
+	}
+	return tag.RowsAffected(), nil
+}
+
 // Logout deletes the session row and clears the cookie.
 func (s *Service) Logout(ctx context.Context, r *http.Request, w http.ResponseWriter) error {
-	if token := s.sessionToken(r); token != "" {
+	if token := s.SessionToken(r); token != "" {
 		if err := s.DestroySession(ctx, token); err != nil {
 			return err
 		}

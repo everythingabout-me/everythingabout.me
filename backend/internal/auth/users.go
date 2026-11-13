@@ -110,18 +110,50 @@ func (s *Service) CreateUser(ctx context.Context, email string, passwordHash *st
 		 returning `+userColumns(""), email, passwordHash))
 }
 
-func (s *Service) SetUserPassword(ctx context.Context, id string, passwordHash *string) (*UserRow, error) {
-	return scanUserRow(s.db.Pool().QueryRow(ctx,
+// SetUserPassword sets or clears the password and revokes the account's other sessions
+// in the same transaction, so a failed revocation rolls the credential change back
+// instead of leaving a new password guarded by cookies the owner meant to kill.
+// currentToken names the session that stays; see revokeOtherSessions.
+func (s *Service) SetUserPassword(ctx context.Context, id string, passwordHash *string, currentToken string) (*UserRow, int64, error) {
+	return s.updateUserAndRevoke(ctx, id, currentToken,
 		`update users set password_hash = $1, updated_at = now()
 		  where id = $2::uuid
-		  returning `+userColumns(""), passwordHash, id))
+		  returning `+userColumns(""), passwordHash, id)
 }
 
-func (s *Service) UpdateUserEmail(ctx context.Context, id, email string) (*UserRow, error) {
-	return scanUserRow(s.db.Pool().QueryRow(ctx,
+// UpdateUserEmail changes the address and revokes the account's other sessions in the
+// same transaction. Changing the address already needs codes for both the old and the
+// new mailbox; abandoning every other session is the companion step, because an
+// attacker holding a session cookie was exactly what the codes cannot see.
+func (s *Service) UpdateUserEmail(ctx context.Context, id, email, currentToken string) (*UserRow, int64, error) {
+	return s.updateUserAndRevoke(ctx, id, currentToken,
 		`update users set email = $1, updated_at = now(), email_changed_at = now()
 		  where id = $2::uuid
-		  returning `+userColumns(""), email, id))
+		  returning `+userColumns(""), email, id)
+}
+
+// updateUserAndRevoke runs one users update and the session revocation together: the
+// agent who steals a cookie is not stopped by a credential change they never had to
+// present, so the two effects must not be separable by a crash between them.
+func (s *Service) updateUserAndRevoke(ctx context.Context, id, currentToken, statement string, args ...any) (*UserRow, int64, error) {
+	tx, err := s.db.Pool().Begin(ctx)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	row, err := scanUserRow(tx.QueryRow(ctx, statement, args...))
+	if err != nil {
+		return nil, 0, err
+	}
+	revoked, err := revokeOtherSessions(ctx, tx, id, currentToken)
+	if err != nil {
+		return nil, 0, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, 0, err
+	}
+	return row, revoked, nil
 }
 
 func (s *Service) TouchLastLogin(ctx context.Context, id string) error {

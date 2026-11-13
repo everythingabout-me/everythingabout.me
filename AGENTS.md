@@ -493,7 +493,10 @@ Variants: `Committed locally main@abc1234, not pushed` / `Not committed (tests f
   finite fallback. Outside tool moves followed by additive reconcile do not automatically preserve public IDs or
   prune old rows.
 - Changing the email address requires two verification codes, for **both the current and the new address**;
-  a session alone cannot do it.
+  a session alone cannot do it. Both an email change and a password change (including removing the password)
+  delete every `sessions` row of the account except the cookie that sent the request, in the same transaction
+  as the credential change: a stolen cookie is the credential neither the codes nor the old password can see,
+  so the recovery step has to end it.
 - The timeline follows the change feed within one poll interval (about five seconds), so an upload through
   `/api/files` appears without waiting for a sweep. A **subtree** move is one folder change fact and does not
   re-analyze every descendant; their stored path still resolves through the current index, but path-derived
