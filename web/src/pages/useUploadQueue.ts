@@ -163,7 +163,15 @@ export interface UploadTask {
    * changed in between is refused, never silently replaced.
    */
   observedRevision?: string;
-  /** The upload creates missing ancestor folders instead of waiting for their tasks. */
+  /**
+   * The file came from a dropped tree, so its create may materialize missing ancestors.
+   *
+   * The folder it names is part of the tree the person enumerated, not a typo, and the
+   * import that should have created it may have been cancelled. The flag travels in the
+   * create request itself (`parents: true`), which is what lets a retry of the same request
+   * succeed instead of replaying `409 parent_missing`. Empty folders still get their own
+   * task, because a file's create cannot represent one.
+   */
   parents: boolean;
   status: UploadStatus;
   loaded: number;
@@ -659,8 +667,14 @@ async function prepareUploadSession(host: UploadRunHost, task: UploadTask, signa
     }
     const sourceModifiedAt = await supportsSourceModifiedAt();
     if (signal.aborted) throw new DOMException("Upload canceled", "AbortError");
+    // A file from a dropped tree names ancestors the caller meant to create: the server
+    // materializes any missing ones with the same mkdir an explicit folder create would use.
+    // A replacement is the one mode that does not ask: the file it replaces proves the parent
+    // exists, and the server materializes nothing for it. This is what makes a retry the same
+    // request: the flag travels in the create, so a folder an earlier import never made is
+    // created by the retry itself instead of answering parent_missing again.
     intent = { path: task.path, size: task.size, mediaType: task.file?.type || "application/octet-stream", condition,
-      ...(task.parents && condition.mode === "create" ? { parents: true as const } : {}),
+      ...(task.parents && condition.mode !== "replace" ? { parents: true as const } : {}),
       ...(sourceModifiedAt && task.modifiedAt !== undefined ? { sourceModifiedAt: new Date(task.modifiedAt).toISOString() } : {}) };
     // Retain the exact intent/key in memory before allocation, including a lost create ACK.
     host.patch(task.id, { intent });
@@ -1996,8 +2010,15 @@ function createQueue(): QueueOwner {
     // A retry that starts a new session must not resume the old one, and a retry that keeps
     // its key must still get a fresh look (the prepare may have been refused before).
     if (task?.terminalState) dropAdmission(id);
+    // An intent frozen before this queue asked for its destination's ancestors must not be
+    // replayed as-is: the retry would resend the request that already answered
+    // `parent_missing`. A refused create allocated no session (that is what
+    // `allocationRejected` records), so rebuilding the intent and its key is free and makes
+    // the retry carry `parents: true` like every create this queue sends now.
+    const staleParents = !!task && !!task.intent && task.parents && task.allocationRejected === true
+      && !("parents" in task.intent && task.intent.parents === true);
     patch(id, { status: "queued", error: undefined, speed: 0, retryRequested: true,
-      ...(task?.terminalState ? { uploadId: undefined, operationId: undefined, intent: undefined, observedRevision: undefined, createKey: taskId(), terminalState: undefined, uploaded: false, loaded: 0 } : {}) });
+      ...(task?.terminalState || staleParents ? { uploadId: undefined, operationId: undefined, intent: undefined, observedRevision: undefined, createKey: taskId(), terminalState: undefined, uploaded: false, loaded: 0 } : {}) });
     publish();
     pumpRef.current();
   }, [cancel, dropAdmission, patch, publish]);
