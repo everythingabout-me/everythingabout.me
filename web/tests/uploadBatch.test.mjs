@@ -47,11 +47,12 @@ test("one refused admission fails only its row while the rest of the page comple
   assert.equal(refused.uploadId, undefined, "a refused admission has no session to recover");
   assert.equal(refused.allocationRejected, true, "a permanent refusal is not retried by the page");
   assert.equal(queue.tasks.find((task) => task.path === "sibling").status, "completed");
+  assert.equal(queue.pauseMessage, null, "one item's Problem is not a queue-level failure");
   assert.equal(harness.completed.length, 1, "only the admitted sibling reached the file list");
   assert.equal(server.sessions.size, 1, "the refused item allocated nothing");
 });
 
-test("a failed admission page rejects every item, and an explicit retry replays its key", async (t) => {
+test("a failed admission page pauses the queue with one message and resumes", async (t) => {
   const server = uploadServer(2, { batch: true });
   const transport = server.api.createUploadBatch;
   const pages = [];
@@ -62,21 +63,49 @@ test("a failed admission page rejects every item, and an explicit retry replays 
   };
   const harness = await mount(t, server.api);
   enqueue(harness, [entry("a"), entry("b")]);
-  let queue = await harness.until((queue) => queue.tasks.length === 2 && queue.tasks.every((task) => task.status === "failed"), "a failed page fails every row it carried");
-  assert.deepEqual(queue.tasks.map((task) => task.error), ["connection lost", "connection lost"]);
+  let queue = await harness.until((queue) => queue.pauseMessage !== null, "a failed page pauses the queue");
+  // The failure is one request-level event, so it is reported once and no row carries it:
+  // the rows stay queued, with their intent and idempotency keys, until the cause clears.
+  assert.equal(queue.pauseMessage, "connection lost");
+  assert.deepEqual(queue.tasks.map(({ status, error }) => [status, error]), [["queued", undefined], ["queued", undefined]],
+    "a page-level failure fails no row");
+  assert.equal(harness.completed.length, 0);
+  // Nothing else leaves while the queue is stopped: the pump does not start the rows, and
+  // the stopped page is not retried on a timer the person cannot see.
+  await harness.tick(2000);
+  assert.equal(pages.length, 1, "the stopped page is not retried on a timer");
   assert.equal(server.sessions.size, 0, "a page that never reached the server allocated nothing");
   assert.equal(callsOf(server, "part").length, 0);
-  // Nothing a page failure says is specific to one file, so there is no partial success to
-  // preserve: the rows wait for the person, and each one's own Retry replays its own key.
-  const [first, second] = queue.tasks;
-  queue.retry(first.id);
-  await advance(harness, (queue) => queue.tasks.find((task) => task.id === first.id)?.status === "completed");
-  queue.retry(second.id);
+  queue.resumeQueue();
+  queue = await advance(harness, (queue) => queue.tasks.every((task) => task.status === "completed"));
+  assert.equal(queue.pauseMessage, null, "resuming clears the one message");
+  assert.deepEqual(pages.slice(1).flat().map(({ input, key }) => [input.path, key]).sort(),
+    pages[0].map(({ input, key }) => [input.path, key]).sort(), "a resumed page replays the keys the failed page carried");
+  assert.equal(harness.completed.length, 2);
+  assert.equal(server.sessions.size, 2);
+});
+
+test("a failed settlement page pauses the queue without failing the files it carried", async (t) => {
+  const server = uploadServer(2, { batch: true });
+  const transport = server.api.commitUploadBatch;
+  let attempts = 0;
+  server.api.commitUploadBatch = async (ids) => {
+    if (attempts++ === 0) throw new TestApiError("bad gateway", 502, { code: "temporarily_unavailable" });
+    return transport(ids);
+  };
+  const harness = await mount(t, server.api);
+  enqueue(harness, [entry("a"), entry("b")]);
+  let queue = await advance(harness, (queue) => queue.pauseMessage !== null, "the settlement page pauses the queue");
+  assert.equal(queue.pauseMessage, "bad gateway");
+  assert.equal(queue.tasks.every((task) => task.status === "queued"), true,
+    "the settled session stays with its row and nothing is failed");
+  assert.equal(harness.completed.length, 0);
+  queue.resumeQueue();
   queue = await advance(harness, (queue) => queue.tasks.every((task) => task.status === "completed"));
   assert.equal(harness.completed.length, 2);
-  assert.deepEqual(pages.slice(1).flat().map(({ input, key }) => [input.path, key]).sort(),
-    pages[0].map(({ input, key }) => [input.path, key]).sort(), "a retry replays the key the failed page carried");
   assert.equal(server.sessions.size, 2);
+  assert.equal(callsOf(server, "part").length, 2, "a settlement pause resends no bytes");
+  assert.ok(attempts >= 2, "the resumed settlement page is sent again");
 });
 
 test("a standing replace reaches the admission page as an overwrite condition", async (t) => {

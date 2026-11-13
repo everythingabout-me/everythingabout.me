@@ -227,7 +227,7 @@ export function uploadServer(partSize = 2, options = {}) {
 }
 
 export async function setup(overrides = {}, options = {}) {
-  const { storage = memoryStorage(), owner = "owner-a" } = options;
+  const { storage = memoryStorage(), owner = "owner-a", onUploaded } = options;
   const locks = Object.hasOwn(options, "locks") ? options.locks : memoryLocks();
   const navigator = { locks };
   const slots = [], effects = [], timers = new Map(), completed = [], listeners = new Map();
@@ -307,7 +307,12 @@ export async function setup(overrides = {}, options = {}) {
   const { useUploadQueue } = await import(moduleURL(code));
   const render = () => {
     cursor = 0;
-    const queue = useUploadQueue((task, result) => completed.push({ task, item: result }));
+    const queue = useUploadQueue((task, result) => {
+      completed.push({ task, item: result });
+      // The page's own settle handler is what keeps folder state current; a test that
+      // exercises that wiring supplies it here without mounting React.
+      onUploaded?.(task, result);
+    });
     if (mounted) while (effects.length) effects.shift()();
     return queue;
   };

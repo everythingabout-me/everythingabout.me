@@ -95,6 +95,9 @@ async function commitUpload(id: string, signal: AbortSignal | undefined, settle:
     try { return await settle(id, signal); }
     catch (error) {
       if (signal?.aborted) throw error;
+      // A page-level failure is the queue's to retry, not this file's: retrying it here
+      // would re-enqueue the row in a queue that is already paused, once per attempt.
+      if (isQueuePaused(error)) throw error;
       // A 4xx other than the transient set is the server's answer about the file itself
       // (incomplete coverage, a moved parent), and retrying it would only repeat it.
       const transient = !(error instanceof ApiError) || [0, 408, 425, 429, 500, 502, 503, 504].includes(error.status);
@@ -228,6 +231,24 @@ export interface UploadQueue {
   cancel(ids: string | string[]): UploadCancelSummary | null;
   retry(id: string): void;
   /**
+   * Why the whole queue is stopped, or null while it is running.
+   *
+   * One message for one cause: a page-level failure (the server unreachable, a whole batch
+   * answering 5xx/401/403/429, an answer that omitted an item) is the queue's condition,
+   * not a file's. The rows it carried stay queued, so the page shows this sentence once
+   * instead of a wall of identical row failures.
+   */
+  pauseMessage: string | null;
+  /**
+   * Retry the page that stopped the queue.
+   *
+   * This is where a queue-level failure's retry lives now. A per-file failure is still
+   * answered by that row's `retry`, because it names a file and its own decision; a page
+   * failure names no row, so the only action is to send the stopped page again — the rows
+   * it carried were never failed, and files parked behind the pause resume with it.
+   */
+  resumeQueue(): void;
+  /**
    * Clear a wait whose deletion ended without deleting anything.
    *
    * A terminal delete released its guards, so the path is writable again, but the browser
@@ -306,6 +327,26 @@ function problemText(problem: FileProblem): string {
 function message(error: unknown): string {
   if (error instanceof FileApiError) return problemText(error.problem);
   return error instanceof Error ? error.message : t("error.unknown");
+}
+/**
+ * A page failed as a whole, so no row may claim it.
+ *
+ * The batch transport carries up to 32 admissions or 16 settlements in one request, and the
+ * request either answers every item or fails once: the connection was lost, the whole page
+ * answered 5xx (or 401/403 after the session expired, or 429), or the answer did not
+ * describe every item. That failure says nothing about any single file's destination, and
+ * attributing it to each carried file turned one outage into a page of red rows, each of
+ * which had to be retried by hand even after the cause cleared. It is carried as its own
+ * error so the row's attempt can put itself back in the queue instead of failing.
+ */
+class QueuePaused extends Error {
+  constructor(text: string) {
+    super(text);
+    this.name = "QueuePaused";
+  }
+}
+function isQueuePaused(error: unknown): error is QueuePaused {
+  return error instanceof QueuePaused;
 }
 function isOperation(value: Item | FileOperation): value is FileOperation { return "state" in value && "progress" in value; }
 /**
@@ -428,6 +469,20 @@ export function useUploadQueue(onUploaded: (task: UploadTask, item: Item) => voi
   // behaviour stays covered by the existing suite.
   const createBatch = useRef<BatchState<PendingCreate>>({ items: [] });
   const settleBatch = useRef<BatchState<PendingSettle>>({ items: [] });
+  // A page-level failure stops the queue until someone resumes it. The ref is what the
+  // flush loops and the pump read; the state is the one message the page renders.
+  const paused = useRef<{ message: string } | null>(null);
+  const [pauseMessage, setPauseMessage] = useState<string | null>(null);
+
+  // The rule this records: a failure is queue-level exactly when it is not one file's
+  // answer — the page itself was rejected (transport failure, a non-2xx page status such as
+  // 5xx/401/403/429, or an incomplete 200) rather than a successful page carrying an item's
+  // Problem. The first kind is recorded here once; the second still reaches that item's row.
+  const pauseQueue = useCallback((error: unknown) => {
+    if (paused.current) return;
+    paused.current = { message: message(error) };
+    if (mounted.current) setPauseMessage(paused.current.message);
+  }, []);
 
   // Every filled page leaves at once; a partial one leaves on the next turn of the loop,
   // which is what a look-ahead that fills a page synchronously produces anyway.
@@ -442,6 +497,9 @@ export function useUploadQueue(onUploaded: (task: UploadTask, item: Item) => voi
   // them. The settlement path has the same shape for the same reason.
   const flushCreates = useCallback(() => {
     const state = createBatch.current;
+    // A paused queue keeps its items rather than sending them into the failure that just
+    // stopped it; `resumeQueue` flushes them once the cause is gone.
+    if (paused.current) return;
     while (state.items.length) {
       const batch = state.items.splice(0, CREATE_BATCH_SIZE);
       void (async () => {
@@ -452,16 +510,26 @@ export function useUploadQueue(onUploaded: (task: UploadTask, item: Item) => voi
             const result = results[index];
             if (result?.upload) item.resolve(result.upload);
             else if (result?.error) item.reject(new FileApiError(result.error));
-            else item.reject(new Error("The admission page was incomplete."));
+            else {
+              // A page that answered 200 must describe every item it carried. One that did
+              // not left this file with no answer, which is the page's failure to answer —
+              // still not something the file's own destination did.
+              const incomplete = new Error("The admission page was incomplete.");
+              pauseQueue(incomplete);
+              item.reject(new QueuePaused(message(incomplete)));
+            }
           });
         } catch (error) {
-          batch.forEach((item) => { if (!item.cancelled) item.reject(error); });
+          // The page never answered: pause once and hand every carried item the paused
+          // error, so each attempt returns to the queue instead of failing its row.
+          pauseQueue(error);
+          batch.forEach((item) => { if (!item.cancelled) item.reject(new QueuePaused(message(error))); });
         } finally {
           if (state.items.length) flushCreates();
         }
       })();
     }
-  }, []);
+  }, [pauseQueue]);
 
   // One admission call per file when the client has no batch transport (the test double),
   // otherwise a page of them: the URL is signed locally, so a page costs what one costs.
@@ -491,6 +559,7 @@ export function useUploadQueue(onUploaded: (task: UploadTask, item: Item) => voi
   // pool is the server reporting saturation, not something a client constant should mask.
   const flushSettles = useCallback(() => {
     const state = settleBatch.current;
+    if (paused.current) return;
     while (state.items.length) {
       const batch = state.items.splice(0, COMMIT_BATCH_SIZE);
       void (async () => {
@@ -501,16 +570,24 @@ export function useUploadQueue(onUploaded: (task: UploadTask, item: Item) => voi
             const result = results[index];
             if (result?.result) item.resolve(result.result);
             else if (result?.error) item.reject(new FileApiError(result.error));
-            else item.reject(new Error("The settlement page was incomplete."));
+            else {
+              const incomplete = new Error("The settlement page was incomplete.");
+              pauseQueue(incomplete);
+              item.reject(new QueuePaused(message(incomplete)));
+            }
           });
         } catch (error) {
-          batch.forEach((item) => { if (!item.cancelled) item.reject(error); });
+          // A settlement page is the same page-level shape as an admission page: the
+          // publication it was reporting is untouched, so pausing loses no bytes and a
+          // resume asks the same session again.
+          pauseQueue(error);
+          batch.forEach((item) => { if (!item.cancelled) item.reject(new QueuePaused(message(error))); });
         } finally {
           if (state.items.length) flushSettles();
         }
       })();
     }
-  }, []);
+  }, [pauseQueue]);
 
   const settleUpload = useCallback((id: string, signal?: AbortSignal) => new Promise<FileResource | FileOperation>((resolve, reject) => {
     if (typeof api.commitUploadBatch !== "function") { api.commitUpload(id, signal).then(resolve, reject); return; }
@@ -573,6 +650,21 @@ export function useUploadQueue(onUploaded: (task: UploadTask, item: Item) => voi
     pumpQueued.current = true;
     queueMicrotask(() => { pumpQueued.current = false; pumpRef.current(); });
   }, []);
+  /**
+   * The queue's retry: send the page a queue-level failure stopped, once the cause is gone.
+   *
+   * A page failure names no file, so no row's `retry` can answer it. The rows it carried
+   * were never failed — they went back to "queued" — and pages queued behind the pause were
+   * kept rather than sent, so resuming is only clearing the stop and flushing them again.
+   */
+  const resumeQueue = useCallback(() => {
+    if (!paused.current) return;
+    paused.current = null;
+    if (mounted.current) setPauseMessage(null);
+    flushCreates();
+    flushSettles();
+    requestPump();
+  }, [flushCreates, flushSettles, requestPump]);
   /**
    * Ask about one existing destination, or answer from the standing decision.
    *
@@ -812,11 +904,14 @@ export function useUploadQueue(onUploaded: (task: UploadTask, item: Item) => voi
         // that is not moving bytes.
         requestPump();
       },
-      () => {
+      (error) => {
         if (admissions.current.get(task.id) === entry) admissions.current.delete(task.id);
+        // A paused page is not this destination's refusal: the look-ahead must be free to
+        // prepare this file again once the queue resumes, so the paused error does not make
+        // it "already refused".
+        if (!isQueuePaused(error)) admissionFailed.current.add(task.id);
         // The window owns a refusal — it decides between waiting on the blocker, retrying
         // and failing the row — so the look-ahead steps back and lets the queue move on.
-        admissionFailed.current.add(task.id);
         requestPump();
       },
     );
@@ -1245,6 +1340,14 @@ export function useUploadQueue(onUploaded: (task: UploadTask, item: Item) => voi
       else { complete(task, result); }
     } catch (error) {
       if (runtime.controller.signal.aborted) return;
+      if (isQueuePaused(error)) {
+        // The page this file was carried by failed as a whole, so this row is not a
+        // failure. It returns to the queue with its session, intent and create key intact —
+        // a settle resumes by asking the server about that session again, and an admission
+        // replays the same idempotent create — while the one message explains the stop.
+        patch(id, { status: "queued", speed: 0 });
+        return;
+      }
       if (error instanceof ApiError && error.code === "operation_in_progress" && error.operationId) {
         const task = tasks.current.get(id);
         const waitingFor: FileOperationWait = { operationId: error.operationId, path: task?.path ?? "", state: "running", kind: waitKind(error.operationKind), from: "conflict" };
@@ -1275,6 +1378,10 @@ export function useUploadQueue(onUploaded: (task: UploadTask, item: Item) => voi
   }, [acquirePart, applyOperation, askConflict, complete, ensureAdmission, patch, releasePart, releaseWindow, requestPump, settleUpload, skip]);
   const pump = useCallback(() => {
     if (!ready.current || !mounted.current) return;
+    // A stopped queue starts nothing. Rows already moving may finish their bytes, but a page
+    // that failed for a whole batch is not something a new file should walk into, and the
+    // parked rows must stay queued until someone resumes.
+    if (paused.current) return;
     // A question on screen is the queue's turn to wait. Files already moving keep moving —
     // the question is about a destination, not about stopping bytes — but nothing new is
     // started, so the person answers the conflict they can see instead of one from a stack
@@ -1592,6 +1699,6 @@ export function useUploadQueue(onUploaded: (task: UploadTask, item: Item) => voi
     window.addEventListener("beforeunload", beforeUnload);
     return () => window.removeEventListener("beforeunload", beforeUnload);
   }, [hasActiveUploads]);
-  return { tasks: published, hasActiveUploads, enqueue, cancel, retry, resume,
+  return { tasks: published, hasActiveUploads, enqueue, cancel, retry, resume, resumeQueue, pauseMessage,
     conflict, conflictPolicy: policy, answerConflict, askForConflicts, beginImport };
 }

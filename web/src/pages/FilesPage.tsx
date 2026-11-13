@@ -36,6 +36,7 @@ import { formatNumber, intlLocale, resultsText, t } from "../i18n";
 import { formatRelativeTime } from "../i18n/format";
 import { useUploadQueue, type ConflictChoice, type UploadStatus, type UploadTask } from "./useUploadQueue";
 import { resolveDeleteBlocker } from "./deleteBlocker";
+import { FolderRevision, withinFolder } from "./uploadRevision";
 import { droppedUploadEntries, filesToUploadEntries, foldersWithoutFiles } from "./uploadSelection";
 import { buildUploadRows, failedTasks, isUploadDirectory, isUploadRowActive, type UploadRowEntry } from "./uploadRows";
 import { pendingFileOperations, setUploadOwner, settleFileOperation, subscribeFileOperations, trackFileOperation } from "./uploadPersistence";
@@ -443,6 +444,40 @@ const UploadFailures = memo(function UploadFailures({
     task.id === next.tasks[index]?.id && task.error === next.tasks[index]?.error));
 
 /**
+ * One sentence for a queue that stopped, instead of one red row per carried file.
+ *
+ * A page-level failure — the server unreachable, a whole batch answering 5xx, the session
+ * expiring, a rate limit — is not a fact about any destination, so the rows keep their
+ * place in the queue and this is the only thing that failed. The Retry that used to exist
+ * per row cannot answer it, because no row owns it: the action belongs to the queue, and
+ * it sends the stopped page again once the person says the cause is gone.
+ */
+const UploadPaused = memo(function UploadPaused({
+  message,
+  onResume,
+}: {
+  message: string;
+  onResume: () => void;
+}) {
+  return (
+    <div className={styles.uploadPaused} role="status">
+      <div className={styles.uploadPausedText}>
+        <span className={styles.uploadPausedTitle}>{t("drive.uploadQueuePaused")}</span>
+        <span className={styles.uploadPausedReason} title={message}>{message}</span>
+        <p className={styles.uploadPausedDetail}>{t("drive.uploadQueuePausedDetail")}</p>
+      </div>
+      <button
+        className={styles.textBtn}
+        onClick={onResume}
+        title={t("drive.uploadQueueResumeHint")}
+      >
+        {t("drive.uploadQueueResume")}
+      </button>
+    </div>
+  );
+});
+
+/**
  * The question is the whole decision: confirming closes the dialog and hands the request
  * to the page. A recursive delete spends its whole request enumerating the subtree
  * natively (one listing per folder, then a second pass that re-reads every identity), so
@@ -812,6 +847,14 @@ export function FilesPage() {
   listingRef.current = { path, searching: Boolean(activeQuery) };
   // The mounted view to reload after a background deletion changes the truth on screen.
   const reloadView = useRef<() => void>(() => {});
+  // The revision of the folder this listing shows, and whether an upload has made it stale.
+  // A folder's revision covers its direct children, so every settle inside the folder
+  // invalidates the value the page loaded with. The settle answer names the published file,
+  // never the parent folder, so the new revision is read back from metadata — lazily, when
+  // the import ends or a mutation needs it, instead of once per completed file.
+  const folderRevision = useRef<{ path: string; tracker: FolderRevision } | null>(null);
+  // Set by a settle and consumed when the uploads finish: the folder is stale then.
+  const settleInvalidated = useRef(false);
   const panelRef = useRef<HTMLElement>(null);
   // The card's height just before a switch, so it can resize instead of jumping.
   const heightFrom = useRef<{ key: string; height: number } | null>(null);
@@ -915,6 +958,14 @@ export function FilesPage() {
         setActiveQuery("");
         setQuery("");
         setLoadedPath(target);
+        // The listing is the new truth for this folder, so it also seeds the revision the
+        // next mutation will name — an upload that settles later invalidates it again.
+        const tracker = new FolderRevision(async () => {
+          const item = await api.metadata(target);
+          return item.kind === "folder" ? item : null;
+        });
+        tracker.seed(data.node?.revision ?? null);
+        folderRevision.current = { path: target, tracker };
       } catch (error) {
         if (requestId.current !== request) return;
         if (error instanceof ApiError && error.status === 401) {
@@ -930,13 +981,46 @@ export function FilesPage() {
     [navigate, rememberPanelHeight],
   );
 
+  /**
+   * Read back the open folder's revision after an upload changed it.
+   *
+   * The commit answers with the published file, not with the folder it landed in, so the
+   * folder's new revision has to be read. `FolderRevision` coalesces that read: the import
+   * marks the folder stale on every settle, and this is called once when the queue empties,
+   * so a 23k-file import costs one metadata request at the end rather than one per file.
+   */
+  const refreshFolderRevision = useCallback(async () => {
+    const listing = folderRevision.current;
+    if (!listing || listing.path !== listingRef.current.path) return;
+    const revision = await listing.tracker.revision();
+    if (!revision || folderRevision.current !== listing) return;
+    setCurrent((existing) => existing && existing.kind === "folder" && existing.revision !== revision
+      ? { ...existing, revision }
+      : existing);
+  }, []);
+
+  /**
+   * The revision a mutation of this folder must carry.
+   *
+   * Rename, move and delete of the folder send `If-Revision`, and the value the page holds
+   * is the one it loaded before any upload settled inside the folder. Waiting for the
+   * refresh here is what makes the next mutation use the new value: a retry with the stale
+   * revision answers 412 again, and no retry can ever recover from it.
+   */
+  const revisionForMutation = useCallback(async (target: Item): Promise<string> => {
+    const listing = folderRevision.current;
+    if (target.kind !== "folder" || !listing || listing.path !== target.path) return target.revision;
+    return (await listing.tracker.revision()) ?? target.revision;
+  }, []);
+
   /** Move or copy one entry into a folder chosen in the dialog. A move changes the current URL. */
   const applyTransfer = useCallback(
     async (mode: TransferMode, item: Item, destination: string) => {
       const target = destination === "/" ? `/${item.name}` : `${destination}/${item.name}`;
+      const revision = await revisionForMutation(item);
       const result = mode === "move"
-        ? await api.move(item.path, target, item.revision)
-        : await api.copy(item.path, target, item.revision);
+        ? await api.move(item.path, target, revision)
+        : await api.copy(item.path, target, revision);
       if (isFileOperation(result) && result.state !== "succeeded") {
         if (result.state === "failed" || result.state === "cancelled") {
           throw new Error(result.error?.detail || t("drive.transferFailed"));
@@ -956,7 +1040,7 @@ export function FilesPage() {
       if (mode === "move") navigate(filesHref(target), { replace: true });
       else void load(path);
     },
-    [load, navigate, path, showToast],
+    [load, navigate, path, revisionForMutation, showToast],
   );
 
   /** Cancel while the move/copy is still running: the operation stops between entries. */
@@ -1004,6 +1088,17 @@ export function FilesPage() {
     completedUploads.current += 1;
     // A file that landed is no longer something the walk is still feeding.
     uploadWalk.current?.ids.delete(task.id);
+    // The folder's revision covers its direct children, so a settle inside the open folder
+    // makes the value this page loaded with stale. It has to be read back, not derived: the
+    // settle answer names the published file and never the parent folder. The read waits
+    // until the import ends (`refreshFolderRevision` below) or until a mutation needs it,
+    // so a large import does not spend one request per file on it.
+    const listing = folderRevision.current;
+    if (!listingRef.current.searching && listing && listing.path === listingRef.current.path
+      && withinFolder(item.path, listing.path)) {
+      listing.tracker.invalidate();
+      settleInvalidated.current = true;
+    }
     if (listingRef.current.searching || filePath(listingRef.current.path) !== item.parentPath) return;
     setItems((currentItems) => {
       const next = currentItems.filter((existing) => existing.path !== item.path);
@@ -1020,12 +1115,23 @@ export function FilesPage() {
     cancel: cancelUpload,
     retry: retryUpload,
     resume: resumeUpload,
+    resumeQueue: resumeUploadQueue,
+    pauseMessage: uploadPauseMessage,
     conflict,
     conflictPolicy,
     answerConflict,
     askForConflicts,
     beginImport,
   } = useUploadQueue(handleUploaded);
+
+  // An import that just finished left the folder's revision stale behind it. Read it now,
+  // once, so the next rename, move or delete of the folder does not have to wait — and so a
+  // 412 from a stale value is never the first answer the person sees.
+  useEffect(() => {
+    if (hasActiveUploads || !settleInvalidated.current) return;
+    settleInvalidated.current = false;
+    void refreshFolderRevision();
+  }, [hasActiveUploads, refreshFolderRevision]);
 
   // The queue's latest published state, for a gesture that is a prop of every row: reading it
   // from the render would rebuild the callback on every publish, ten times a second, and throw
@@ -1308,10 +1414,14 @@ export function FilesPage() {
     deletesInFlight.current.add(target.path);
     setDeletingPaths((paths) => [...paths, target.path]);
     try {
+      // A folder that just received files has a new revision; its loaded one would answer
+      // 412 for every attempt. `revisionForMutation` waits for the read-back the upload
+      // scheduled, so the delete names the state the folder is actually in.
+      const revision = await revisionForMutation(target);
       let operation: FileOperation | void;
       for (let attempt = 0; ; attempt++) {
         try {
-          operation = await api.deletePath(target.path, target.kind === "folder", target.revision);
+          operation = await api.deletePath(target.path, target.kind === "folder", revision);
           break;
         } catch (error) {
           if (!(error instanceof ApiError) || error.code !== "operation_in_progress"
@@ -1345,6 +1455,11 @@ export function FilesPage() {
       if (error instanceof ApiError && error.status === 401) {
         navigate("/login", { replace: true });
         return;
+      }
+      // A 412 is the server saying the folder changed again: the next attempt must read it
+      // rather than repeat the value that was just refused.
+      if (error instanceof ApiError && error.status === 412 && target.kind === "folder") {
+        folderRevision.current?.tracker.invalidate();
       }
       // The reason has to outlive a glance: it names the upload or operation that still
       // holds this path, and the item it refers to is still on screen behind the toast.
@@ -1432,7 +1547,9 @@ export function FilesPage() {
     if (to === from) return;
     try {
       if (!current) return;
-      const result = await api.move(from, to, current.revision);
+      // The same stale revision a delete would send: renaming after an upload into this
+      // folder must name its current state, not the one the page loaded with.
+      const result = await api.move(from, to, await revisionForMutation(current));
       if (!isFileOperation(result) || result.state === "succeeded") {
         finishRename(to);
         return;
@@ -1445,7 +1562,14 @@ export function FilesPage() {
       pollRename(result.id, to);
     } catch (error) {
       if (error instanceof ApiError && error.operationId) pollRename(error.operationId, to);
-      else failRename(error instanceof Error ? error.message : t("drive.renameFailed"));
+      else {
+        // The folder changed between the read and the rename: re-read it before the
+        // person's next attempt instead of repeating the refused revision.
+        if (error instanceof ApiError && error.status === 412 && current?.kind === "folder") {
+          folderRevision.current?.tracker.invalidate();
+        }
+        failRename(error instanceof Error ? error.message : t("drive.renameFailed"));
+      }
     }
   };
 
@@ -1878,6 +2002,10 @@ export function FilesPage() {
 
               {conflictPolicy !== "ask" && hasActiveUploads && (
                 <ConflictPolicyNote policy={conflictPolicy} onAskAgain={askForConflicts} />
+              )}
+
+              {uploadPauseMessage !== null && (
+                <UploadPaused message={uploadPauseMessage} onResume={resumeUploadQueue} />
               )}
 
               <UploadFailures tasks={failed} onRetry={retryUpload} onCancel={cancelUploadRow} />

@@ -1135,6 +1135,45 @@ a.crumb:hover {
   .readingDot { animation: none; }
 }
 
+/* One message for a queue that stopped: a page-level failure is the queue's condition, not
+   a file's, so it takes one row of the sheet instead of one per carried file. */
+.uploadPaused {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--border);
+  background: color-mix(in srgb, var(--hover) 55%, var(--surface));
+}
+
+.uploadPausedText {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.uploadPausedTitle {
+  color: var(--text-2);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.uploadPausedReason {
+  color: var(--text-2);
+  font-size: 12px;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+
+.uploadPausedDetail {
+  margin: 0;
+  color: var(--text-3);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
 /* The list sits above the rows, inside the sheet, so it is reachable from any folder: the
    files it names may be nowhere near the directory a person is looking at. Its own height is
    bounded because a bad link can fail hundreds of files, and the sheet must stay scrollable. */
