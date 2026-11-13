@@ -151,7 +151,8 @@ func checkNativeStorage(ctx context.Context, cfg *config.Config, checks *doctor,
 
 // checkStorageRoots surfaces at `eam doctor` time what the server refuses to start
 // with: admission evidence that belongs to another connection, and owner roots that
-// no longer match the tree the current configuration selects.
+// no longer match the tree the current configuration selects. It never adopts or
+// records anything; doctor is read-only.
 func checkStorageRoots(ctx context.Context, cfg *config.Config, db *store.DB, checks *doctor) {
 	backend, err := storagebackend.NewForServing(cfg)
 	if err != nil {
@@ -170,8 +171,8 @@ func checkStorageRoots(ctx context.Context, cfg *config.Config, db *store.DB, ch
 	}
 	resolver := connections.NewResolver(*cfg, connections.NewPostgresStore(db))
 	defer resolver.Close()
-	if err := inspectStorageRoots(ctx, db, resolver); err != nil {
-		checks.warn(err.Error() + " (the server adopts the configured tree at startup)")
+	if err := inspectStorageRoots(ctx, newRootStore(db), resolver); err != nil {
+		checks.bad("owner roots match the database index", err, "the server refuses to start while this disagrees; migrate the bytes and run the storage-rebind command above, or rebuild an empty index from the configured tree")
 		return
 	}
 	checks.ok("owner roots match the database index", "")

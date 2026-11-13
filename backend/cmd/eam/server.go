@@ -62,21 +62,6 @@ func runServer(args []string) error {
 	}
 	defer db.Close()
 
-	// Refresh measured write capability for this exact connection. Evidence cannot
-	// be carried across a bucket or region change, and re-running the probe here
-	// keeps configuration in charge instead of making an operator redo it by hand.
-	if err := storagebackend.EnsureAdmission(ctx, cfg); err != nil {
-		slog.Warn("object admission probe failed; coordinated object writes stay disabled", "error", err)
-	}
-	backend, err := storagebackend.NewForServing(cfg)
-	if err != nil {
-		return fmt.Errorf("failed to initialize storage backend: %w", err)
-	}
-	defer backend.Close()
-	if problem := backend.ObjectWritesProblem(); problem != nil {
-		slog.Warn("coordinated object writes are disabled", "reason", problem)
-	}
-
 	// Connections are data. The environment seeds the first authority row of a fresh
 	// database and is not consulted again for an owner that already has a binding, so
 	// adding a provider is an INSERT instead of a deployment edit.
@@ -100,11 +85,28 @@ func runServer(args []string) error {
 	if err := resolver.AdoptObjectPaths(ctx); err != nil {
 		return fmt.Errorf("adopt storage connection paths: %w", err)
 	}
-	// The row a binding names is authoritative: when it changed, adopt it and
-	// invalidate the derived view instead of refusing to start. This is a constant
-	// number of statements per changed owner, with no native enumeration.
-	if err := adoptStorageRoots(ctx, db, resolver); err != nil {
+	// Refuse a changed root before any probe can touch the configured bucket. A
+	// bucket, region, prefix or generation change is a tree move, not a
+	// configuration change the service may accept on its own: adopting it would
+	// leave the previous tree unreachable and unreported. The comparison is only
+	// values; no native I/O happens here.
+	if err := refuseStorageRoots(ctx, newRootStore(db), resolver); err != nil {
 		return err
+	}
+
+	// Refresh measured write capability for this exact connection. Evidence cannot
+	// be carried across a bucket or region change, and re-running the probe here
+	// keeps configuration in charge instead of making an operator redo it by hand.
+	if err := storagebackend.EnsureAdmission(ctx, cfg); err != nil {
+		slog.Warn("object admission probe failed; coordinated object writes stay disabled", "error", err)
+	}
+	backend, err := storagebackend.NewForServing(cfg)
+	if err != nil {
+		return fmt.Errorf("failed to initialize storage backend: %w", err)
+	}
+	defer backend.Close()
+	if problem := backend.ObjectWritesProblem(); problem != nil {
+		slog.Warn("coordinated object writes are disabled", "reason", problem)
 	}
 
 	apiServer := api.New(cfg, db, backend.Legacy(), webui.New(cfg.WebDir))
