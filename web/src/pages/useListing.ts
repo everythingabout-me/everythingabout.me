@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useReducer, useRef } from "react";
 import { useNavigate } from "react-router";
-import { ApiError, api, openListing, type Item, type ListingStream } from "../api/client";
+import { ApiError, api, filePath, openListing, type Item, type ListingStream } from "../api/client";
 import { t } from "../i18n";
 import { crumbsForPath, initialListingState, listingKey, listingReducer, type ListingState } from "./listingState";
 import { FolderRevision, withinFolder } from "./uploadRevision";
@@ -58,8 +58,8 @@ export interface ListingController {
    * the next one loads.
    */
   view(): { path: string; searching: boolean };
-  /** An upload settled inside the open folder: the revision this page holds is stale. */
-  noteSettle(itemPath: string): void;
+  /** An upload settled inside the open folder. */
+  noteSettle(item: Item): void;
   /** Read the stale revision, once, when the import has stopped changing the folder. */
   refreshSettled(): Promise<void>;
   /** The revision a mutation of `target` must name. */
@@ -82,9 +82,10 @@ export function useListing({ path, rememberHeight, showToast }: ListingOptions):
   const stream = useRef<ListingStream | null>(null);
   // The revision of the folder this listing shows, and whether an upload has made it
   // stale. A folder's revision covers its direct children, so every settle inside the
-  // folder invalidates the value the page loaded with. The settle answer names the
-  // published file, never the parent folder, so the new revision is read back from
-  // metadata — lazily, when the import ends or a mutation needs it.
+  // folder invalidates the value the page loaded with. A settle answer that names the
+  // folder's new revision is adopted directly; a settle that does not leaves the folder
+  // stale, and the new revision is read back from metadata — lazily, when the import ends
+  // or a mutation needs it.
   const revision = useRef<{ path: string; tracker: FolderRevision } | null>(null);
   // Set by a settle and consumed when the uploads finish: the folder is stale then.
   const settleInvalidated = useRef(false);
@@ -92,9 +93,10 @@ export function useListing({ path, rememberHeight, showToast }: ListingOptions):
   /**
    * Read back the open folder's revision after an upload changed it.
    *
-   * `FolderRevision` coalesces that read: the import marks the folder stale on every
-   * settle, and this is called once when the queue empties, so a 23k-file import costs one
-   * metadata request at the end rather than one per file.
+   * `FolderRevision` coalesces that read: settles that did not carry the folder's revision
+   * mark it stale, and this is called once when the queue empties, so an import costs one
+   * metadata request at the end rather than one per file — and none at all when every
+   * commit answer carried the revision.
    */
   const refreshFolderRevision = useCallback(async () => {
     const listing = revision.current;
@@ -199,9 +201,24 @@ export function useListing({ path, rememberHeight, showToast }: ListingOptions):
     searching: Boolean(stateRef.current.query),
   }), []);
 
-  const noteSettle = useCallback((itemPath: string) => {
+  /**
+   * A settle landed inside the folder this page shows.
+   *
+   * The commit answer names the folder's revision after its own settle, so a file that
+   * landed directly in the open folder adopts it and the page keeps working without a
+   * read. A deeper settle (an upload that created folders on its way in changes an
+   * ancestor's direct membership too), or an answer from a server that does not carry the
+   * revision, still leaves the value stale for the coalesced read.
+   */
+  const noteSettle = useCallback((item: Item) => {
     const listing = revision.current;
-    if (stateRef.current.query || !listing || listing.path !== pathRef.current || !withinFolder(itemPath, listing.path)) return;
+    if (stateRef.current.query || !listing || listing.path !== pathRef.current || !withinFolder(item.path, listing.path)) return;
+    if (item.parentPath === filePath(listing.path) && item.parentRevision && listing.tracker.adopt(item.parentRevision)) {
+      // The adopted value is also what the page shows for this folder, so the renderer's
+      // copy follows without the read this page no longer has to make.
+      dispatch({ type: "revision", revision: item.parentRevision });
+      return;
+    }
     listing.tracker.invalidate();
     settleInvalidated.current = true;
   }, []);

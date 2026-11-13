@@ -61,7 +61,11 @@ test("a failed read keeps the last value and stays stale for the next mutation",
   assert.equal(await tracker.revision(), "nr_new", "the next mutation retries instead of trusting the stale value");
 });
 
-test("a stale folder revision is refreshed after an upload so the next mutation does not 412", async (t) => {
+/**
+ * One settled import into /Photos whose commit answers carry the folder's revision, as a
+ * current server's do. `parentRevision` is omitted to model an answer that does not.
+ */
+async function importIntoPhotos(t, { carriesRevision }) {
   // The server is the judge: the folder's revision advances when the upload settles into
   // it, exactly as the index's direct-child membership does, and a mutation naming an old
   // value is refused with 412 — the failure this page must not send.
@@ -72,14 +76,16 @@ test("a stale folder revision is refreshed after an upload so the next mutation 
   server.api.commitUpload = async (id) => {
     const result = await commit(id);
     folderRevision = "nr_after_upload";
-    return result;
+    return carriesRevision ? { ...result, parentPath: "/Photos", parentRevision: folderRevision } : result;
   };
   const tracker = new FolderRevision(() => server.api.metadata("/Photos"));
   tracker.seed("nr_loaded");
-  // The page's settle handler: the upload landed inside the folder it shows.
+  // The page's settle handler: a settle directly in the open folder adopts the revision its
+  // commit answer named; an answer without one leaves the folder stale.
   const harness = await setup(server.api, {
     onUploaded: (_task, result) => {
-      if (withinFolder(result.path, "/Photos")) tracker.invalidate();
+      if (withinFolder(result.path, "/Photos") && result.parentPath === "/Photos" && tracker.adopt(result.parentRevision)) return;
+      tracker.invalidate();
     },
   });
   t.after(harness.unmount);
@@ -92,14 +98,33 @@ test("a stale folder revision is refreshed after an upload so the next mutation 
   }
   assert.equal(queue.tasks[0]?.status, "completed");
   assert.equal(harness.completed.length, 1);
+  return { server, tracker, folderRevision: () => folderRevision };
+}
 
-  // The loaded value is what the page held before the upload; sending it is the reported
-  // 412. The refreshed one is what the next rename or delete of the folder must send.
+test("a commit answer that names the folder revision costs no metadata read", async (t) => {
+  const { server, tracker, folderRevision } = await importIntoPhotos(t, { carriesRevision: true });
+  // The next rename or delete sends the value the commit answered; the pre-import value is
+  // the reported 412, and nothing read the folder back to learn the new one.
   const mutate = async (revision) => {
-    if (revision !== folderRevision) throw new TestApiError("metadata changed", 412, { code: "precondition_failed" });
+    if (revision !== folderRevision()) throw new TestApiError("metadata changed", 412, { code: "precondition_failed" });
     return "renamed";
   };
   await assert.rejects(mutate("nr_loaded"), { status: 412 });
+  assert.equal(await tracker.revision(), "nr_after_upload", "the settle answer is the folder's new revision");
+  assert.equal(await mutate(await tracker.revision()), "renamed");
+  assert.deepEqual(server.calls.filter(([kind]) => kind === "metadata"), [],
+    "the commit answer is the read this field replaces");
+});
+
+test("an answer without the revision still reads the folder back once", async (t) => {
+  // An older server, or a response that omits the field: the coalesced read remains the
+  // fallback, and it still costs one request for the whole import rather than one per file.
+  const { server, tracker, folderRevision } = await importIntoPhotos(t, { carriesRevision: false });
+  const mutate = async (revision) => {
+    if (revision !== folderRevision()) throw new TestApiError("metadata changed", 412, { code: "precondition_failed" });
+    return "renamed";
+  };
+  assert.equal(await tracker.revision(), "nr_after_upload");
   assert.equal(await mutate(await tracker.revision()), "renamed");
   assert.deepEqual(server.calls.filter(([kind]) => kind === "metadata").map(([, path]) => path), ["/Photos"],
     "one folder read for the whole import, not one per settled file");

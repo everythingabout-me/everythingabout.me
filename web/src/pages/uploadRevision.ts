@@ -10,17 +10,18 @@ import type { Item } from "../api/client";
  * the state it had before the upload and meets 412. Retrying then sends the same stale
  * value, so the folder can never be renamed or deleted from that page again.
  *
- * The settle answer cannot refresh it: a commit answers with the published file (or the
- * Operation still publishing it), and a settle page item carries exactly that. The parent
- * folder is not in the answer, so its new revision has to be read back, and a read is what
- * this holds. A settle only marks the folder stale; one metadata request at a time re-reads
- * it, and a mutation waits for that answer instead of racing it. If the read fails the
- * folder stays stale, so the next mutation retries rather than settling on a value already
- * known to be old.
+ * A commit now answers with the folder's revision after its own settle, so a settle that
+ * lands directly in the open folder hands the page its next value and schedules no read at
+ * all. The read remains the fallback for an answer that does not carry it — an older
+ * server, a deeper settle, or an Operation the page has not read yet — and such a settle
+ * only marks the folder stale: one metadata request at a time re-reads it, and a mutation
+ * waits for that answer instead of racing it. If the read fails the folder stays stale, so
+ * the next mutation retries rather than settling on a value already known to be old.
  */
 export class FolderRevision {
   private latest: string | null = null;
   private stale = false;
+  private adopted = 0;
   private reading: Promise<void> | null = null;
   private readonly read: () => Promise<Item | null>;
 
@@ -37,6 +38,22 @@ export class FolderRevision {
   /** The folder changed under this value: a settle landed inside it. */
   invalidate(): void {
     this.stale = true;
+  }
+
+  /**
+   * Adopt a revision a settle answer named for this folder.
+   *
+   * A commit answers with the folder's revision after its own settle, which is exactly the
+   * value a metadata read would return; adopting it is what keeps an import at zero reads.
+   * Returns whether the answer carried one: a response that does not leaves the caller to
+   * invalidate, and the coalesced read then answers as before.
+   */
+  adopt(revision: string | null | undefined): boolean {
+    if (!revision) return false;
+    this.latest = revision;
+    this.stale = false;
+    this.adopted += 1;
+    return true;
   }
 
   /**
@@ -66,6 +83,7 @@ export class FolderRevision {
         // server's If-Revision answers it — which is what makes the next attempt re-read.
         for (let reads = 0; reads < 2; reads++) {
           this.stale = false;
+          const adopted = this.adopted;
           let item: Item | null;
           try {
             item = await this.read();
@@ -75,7 +93,9 @@ export class FolderRevision {
             this.stale = true;
             return;
           }
-          if (item) this.latest = item.revision;
+          // A settle answer that arrived during this read may be newer than the read's
+          // snapshot; it wins, because the transaction that produced it already committed.
+          if (item && this.adopted === adopted) this.latest = item.revision;
           if (!this.stale) return;
         }
       } finally {
@@ -89,9 +109,10 @@ export class FolderRevision {
 /**
  * Whether `path` is the folder itself or sits below it.
  *
- * Route paths use "" for the root, while file paths are always absolute.
+ * File paths are always absolute, while a route path carries no leading slash and uses ""
+ * for the root; the folder argument is normalized so both spellings compare the same way.
  */
 export function withinFolder(path: string, folder: string): boolean {
-  const base = folder === "" ? "/" : folder;
+  const base = folder === "" ? "/" : folder.startsWith("/") ? folder : `/${folder}`;
   return base === "/" || path === base || path.startsWith(`${base}/`);
 }

@@ -861,9 +861,10 @@ export function FilesPage() {
     // A file that landed is no longer something the walk is still feeding.
     uploadWalk.current?.ids.delete(task.id);
     // The folder's revision covers its direct children, so a settle inside the open folder
-    // makes the value this page loaded with stale. The listing coalesces the read-back: one
-    // metadata request when the import ends, or when a mutation needs it first.
-    listing.noteSettle(item.path);
+    // makes the value this page loaded with stale. A commit answer names the folder's new
+    // revision, so a file that landed directly in the open folder needs no read at all; the
+    // listing keeps the coalesced read for the answers that do not carry it.
+    listing.noteSettle(item);
     const view = listing.view();
     if (view.searching || filePath(view.path) !== item.parentPath) return;
     listing.upsertItem(item);
@@ -890,9 +891,11 @@ export function FilesPage() {
     beginImport,
   } = useUploadQueue(handleUploaded);
 
-  // An import that just finished left the folder's revision stale behind it. Read it now,
-  // once, so the next rename, move or delete of the folder does not have to wait — and so a
-  // 412 from a stale value is never the first answer the person sees.
+  // An import that just finished may have left the folder's revision stale behind it. Read it
+  // now, once, so the next rename, move or delete of the folder does not have to wait — and so
+  // a 412 from a stale value is never the first answer the person sees. Settles whose commit
+  // answers carried the revision already adopted it, so this request is only made when some
+  // answer did not.
   useEffect(() => {
     if (hasActiveUploads) return;
     void listing.refreshSettled();
