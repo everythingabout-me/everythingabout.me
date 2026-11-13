@@ -217,6 +217,27 @@ when it stopped between allocating and committing, and the folder holding them a
       the rows in the same transaction, so index absence already conceals the subtree and the guard query only
       has to cover the admission window. Dropping the now-unread `fs_jobs` table follows the separate removal
       of its last writer, the legacy `internal/jobs` runner.
+- [x] The pending-delete read filter is bounded by the captured subtree, not the drive. The browse
+      reads applied concealment as a path comparison on every candidate row
+      (`file_identity_comparison(path, version) = root or starts_with(path, root||'/')`), and
+      `file_entries.path` is derived per row by `file_tree_path()`, so that predicate cannot use an
+      index: it paid two ancestry walks for every entry a whole-owner read scanned. On a 50k-entry
+      owner with one 99-entry pending delete, `GET /api/files/me` scanned 49,500 rows in 1,223ms and
+      1,487,973 buffer hits, and the recursive change snapshot took 2,908ms. The reads that scan the
+      owner's entries (`usage`, `search`, recursive snapshot) now resolve each captured root to its
+      index row with `file_tree_resolve` and walk down the canonical parent link once per query —
+      100 rows here, the subtree being deleted — then ask a set-membership question per candidate
+      row (`nodes.id not in (select id from hidden)`): the same reads cost 6ms/3,188 buffers and
+      1,654ms. The walk uses `nodes_owner_parent_comparison_uniq(owner_id, parent_id)`, so no index
+      is added and no write pays for it. The anchored reads (one entry's metadata, one folder's
+      members) keep the path comparison: their candidates are the rows they already fetch, so their
+      concealment is bounded by the answer rather than the drive (metadata and listing measured
+      unchanged). Concealment is unchanged and now expressed in identity: exactly the captured
+      subtree, because the walk follows the same parent link and name comparison the index resolves
+      paths with; a path re-created after acceptance is a new row the walk never covers; a root the
+      index no longer resolves conceals nothing, which is what index absence already meant. The
+      change feed and the native overlay were already bounded — by the cursor's change window and by
+      the native page — and are untouched.
 - [ ] Tombstone object (`__eam_system__/<owner>/tombstones/<operation>`) so a rebuild after index loss does not
       resurrect a half-purged delete. Same predicate as the worker; the tombstone is the durable copy.
 - [ ] `move`/`copy` keep the frozen manifest: their effects are conditional on both endpoints and a re-walk

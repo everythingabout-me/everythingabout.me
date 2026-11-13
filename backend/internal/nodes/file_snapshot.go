@@ -7,6 +7,15 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
+// browseSnapshotQuery lists a snapshot's descendants. Like the whole-owner browse reads it
+// is prefixed with browseHidden and applies browseVisible, because its recursive arm scans
+// the owner's entries.
+const browseSnapshotQuery = `select ` + browseColumns + ` from file_entries nodes
+ where owner_id=$1::uuid and ` + browseVisible + ` and id<>$4::uuid
+ and (($5::boolean and file_changes_within('/'||$6,'/'||path,` + browseVersion + `))
+ or (not $5 and parent_id=$4::uuid))
+ order by normalize(path,NFC) collate "C",id limit $7`
+
 // CaptureFileSnapshot reads a complete bounded indexed baseline in the caller's
 // transaction. The selected entry comes first, followed by its direct children or
 // all descendants in canonical path order. It never observes native storage or
@@ -33,11 +42,7 @@ func CaptureFileSnapshot(ctx context.Context, tx pgx.Tx, owner, namespace, selec
 	if !root.Row.IsDir {
 		return items, nil
 	}
-	rows, err := tx.Query(ctx, `select `+browseColumns+` from file_entries nodes
- where owner_id=$1::uuid and `+browseVisible+` and id<>$4::uuid
- and (($5::boolean and file_changes_within('/'||$6,'/'||path,`+browseVersion+`))
- or (not $5 and parent_id=$4::uuid))
- order by normalize(path,NFC) collate "C",id limit $7`, owner, namespace, hiddenRoots, root.Row.ID, recursive, selectedPath, limit)
+	rows, err := tx.Query(ctx, browseHidden+browseSnapshotQuery, owner, namespace, hiddenRoots, root.Row.ID, recursive, selectedPath, limit)
 	if err != nil {
 		return nil, err
 	}
