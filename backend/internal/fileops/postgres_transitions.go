@@ -529,6 +529,26 @@ func (p *Postgres) Settle(ctx context.Context, l Lease, s Settlement, commit Ind
 		if err != nil {
 			return err
 		}
+		// A replacement's credit is a fence, and this commit is the end of the window in
+		// which it can be spent: the operation is terminal, its delta is in the budget,
+		// and it can never publish again. Keeping the row would make identical content
+		// unreplaceable, because identical bytes carry the identical native revision and
+		// the next replacement must be allowed to claim that revision (it credits bytes
+		// that still exist, so it is not a second refund). The release is in this
+		// transaction precisely so a crash between the native write and this settlement
+		// cannot open that window: until this COMMIT the claim and the operation's phase
+		// stay as they were, and recovery settles through this same statement.
+		//
+		// Only a succeeded settlement may release it. A non-action settlement always
+		// follows a recorded native publication, so a failed or cancelled one means the
+		// old revision was consumed while the accounting is not the ordinary replacement
+		// delta; that claim stays (fail closed), and deletion claims are never touched
+		// here — validateActionSettlement owns them and keeps the applied ones.
+		if !action && s.State == Succeeded && req.OldBytes > 0 {
+			if _, err = tx.Exec(ctx, `delete from file_credit_claims where owner_id=$1 and operation_id=$2 and `+comparisonShim("comparison_path")+`=$3 and version=$4`, op.Root.OwnerID, op.ID, comparePath(op.Root, req.CreditPath), req.CreditVersion); err != nil {
+				return err
+			}
+		}
 		op.ChargedLogical = s.LogicalDelta
 		op.ChargedPhysical = s.PhysicalDelta
 		finish(op, s.State, now)

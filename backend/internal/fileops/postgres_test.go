@@ -482,7 +482,7 @@ func TestPostgresJournal(t *testing.T) {
 			t.Fatal(u)
 		}
 	})
-	t.Run("exclusive version credit consumed once", func(t *testing.T) {
+	t.Run("replacement credit is exclusive in flight and released at settlement", func(t *testing.T) {
 		p, r, a := seedOwner(t, pool, provenBaseline(8, 8, 10, 100))
 		req := replacementRequest(r, a, "file", 10, 8, []byte("native-v1"))
 		op := mustClaim(t, p, mustBegin(t, p, req), a)
@@ -511,8 +511,12 @@ func TestPostgresJournal(t *testing.T) {
 			t.Fatal(err)
 		}
 		req = replacementRequest(r, a, "file", 8, 8, []byte("native-v1"))
-		_, _, err = p.Begin(ctx, req)
-		requireCode(t, err, "credit_conflict")
+		// The first replacement spent its credit and settled, so the fence is gone
+		// (credit.go): identical bytes carry the identical native revision, and a
+		// re-import of the same file must be admitted against that revision again.
+		if _, replay, err := p.Begin(ctx, req); err != nil || replay {
+			t.Fatalf("a settled replacement still fences its revision: replay=%v %v", replay, err)
+		}
 		fresh := replacementRequest(r, a, "unused", 3, 3, []byte("unused-v1"))
 		unused := mustClaim(t, p, mustBegin(t, p, fresh), a)
 		if err = p.FinishWithoutEffect(ctx, unused.Lease, Failed, nil); err != nil {
@@ -568,5 +572,242 @@ func TestPostgresJournal(t *testing.T) {
 			t.Fatal(u)
 		}
 		mustBegin(t, p, genericRequest(r, a, "file", 4))
+	})
+}
+
+// requireUsage checks the two budgets independently: logical bytes follow file sizes,
+// physical bytes follow native generations, and a reserved byte is liability still held.
+func requireUsage(t *testing.T, p *Postgres, r Root, a Actor, logical, logicalReserved, physical, physicalReserved int64) {
+	t.Helper()
+	u := mustUsage(t, p, r, a)
+	if u.LogicalBytes != logical || u.LogicalReserved != logicalReserved || u.PhysicalBytes != physical || u.PhysicalReserved != physicalReserved {
+		t.Fatalf("usage logical=%d+%d physical=%d+%d, want logical=%d+%d physical=%d+%d",
+			u.LogicalBytes, u.LogicalReserved, u.PhysicalBytes, u.PhysicalReserved,
+			logical, logicalReserved, physical, physicalReserved)
+	}
+}
+
+// requireClaims counts the credit rows an owner holds, which is what decides whether the
+// next operation can claim a revision.
+func requireClaims(t *testing.T, pool *pgxpool.Pool, owner string, want int) {
+	t.Helper()
+	var got int
+	if err := pool.QueryRow(context.Background(), `select count(*) from file_credit_claims where owner_id=$1`, owner).Scan(&got); err != nil {
+		t.Fatal(err)
+	}
+	if got != want {
+		t.Fatalf("credit claims = %d, want %d", got, want)
+	}
+}
+
+// applyReplacement drives one replacement through the journal the way the upload commit
+// does: admit (taking the credit), stage the published bytes, record the native result,
+// then settle with the delta the accounting contract derives from the two sizes.
+func applyReplacement(t *testing.T, p *Postgres, r Root, a Actor, path storage.Path, newBytes, oldBytes int64, version []byte) Operation {
+	t.Helper()
+	op := mustClaim(t, p, mustBegin(t, p, replacementRequest(r, a, path, newBytes, oldBytes, version)), a)
+	return finishReplacement(t, p, op, newBytes, oldBytes)
+}
+
+// finishReplacement completes a claimed replacement: the staged bytes, the native result,
+// then the settlement that spends the credit.
+func finishReplacement(t *testing.T, p *Postgres, op Operation, newBytes, oldBytes int64) Operation {
+	t.Helper()
+	ctx := context.Background()
+	var intent storage.WriteIntent
+	if err := json.Unmarshal(op.Intent, &intent); err != nil {
+		t.Fatal(err)
+	}
+	intent.ID = op.ID
+	if err := p.SaveStage(ctx, op.Lease, storage.Staged{Intent: intent, Size: intent.Size, Handle: []byte("stage-" + op.ID)}); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.StartEffect(ctx, op.Lease); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.SaveApplied(ctx, op.Lease, storage.MutationResult{
+		Entry:    &storage.Entry{Path: intent.Target, Kind: storage.File, Size: intent.Size},
+		Evidence: []byte("native replace " + op.ID),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	delta := newBytes - oldBytes
+	settled, err := p.Settle(ctx, op.Lease, Settlement{State: Succeeded, LogicalDelta: delta, PhysicalDelta: delta}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return settled
+}
+
+// deleteRequest admits a deletion action, the shape an accepted delete is stored in.
+func deleteRequest(t *testing.T, r Root, a Actor, path storage.Path) BeginRequest {
+	t.Helper()
+	intent, err := json.Marshal(ActionRequest{Root: r, Actor: a, Kind: "delete", From: path})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return BeginRequest{Root: r, Actor: a, Kind: "delete", Intent: intent, Guards: []Guard{{Path: path}}}
+}
+
+// freezeDelete takes the deletion credit for one captured source revision. It returns the
+// error unmodified so a caller can require the credit_conflict of a second attempt.
+func freezeDelete(t *testing.T, p *Postgres, r Root, a Actor, path storage.Path, size int64, version []byte) (Operation, error) {
+	t.Helper()
+	ctx := context.Background()
+	op := mustClaim(t, p, mustBegin(t, p, deleteRequest(t, r, a, path)), a)
+	source := storage.Entry{Path: path, Kind: storage.File, Size: size, Revision: version, NativeRef: []byte("inode-" + string(version))}
+	target := source
+	manifest := []ManifestEntry{{Number: 0, Action: "delete", Source: path, SourceRevision: version, SourceEntry: &target, Size: size}}
+	return op, p.FreezeAction(ctx, op.Lease, actionBinding{Sources: []storage.Entry{source}}, manifest, ReservationRequest{OldBytes: size})
+}
+
+// appliedDelete proves the entry's native removal and settles the refund it earned.
+func appliedDelete(t *testing.T, p *Postgres, op Operation, size int64) {
+	t.Helper()
+	ctx := context.Background()
+	evidence := []byte("native removal verified")
+	result, err := json.Marshal(storage.MutationResult{Evidence: evidence})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := p.BeginEntry(ctx, op.Lease, 0); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.SaveEntry(ctx, op.Lease, 0, "started", []byte("checkpoint"), nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.SaveEntry(ctx, op.Lease, 0, "applied", []byte("checkpoint"), evidence, result); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.SaveApplied(ctx, op.Lease, storage.MutationResult{Evidence: []byte("subtree removed")}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := p.Settle(ctx, op.Lease, Settlement{State: Succeeded, LogicalDelta: -size, PhysicalDelta: -size}, nil); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestPostgresCreditClaims pins the lifetime rule in credit.go: a replacement's claim is
+// a fence that ends at settlement, a deletion's claim is a receipt that never ends, and
+// the quota after each case is exactly the arithmetic the rule promises.
+func TestPostgresCreditClaims(t *testing.T) {
+	pool := isolatedPostgres(t)
+	ctx := context.Background()
+	version := []byte("native-etag:unchanged")
+
+	t.Run("identical bytes replace twice in a row", func(t *testing.T) {
+		// Arithmetic: 100 B replaced by 100 B reserves max(100-100,0)=0 and settles
+		// 100-100=0; doing it twice still leaves exactly the 100 B that is on disk.
+		p, r, a := seedOwner(t, pool, provenBaseline(100, 100, 1000, 1000))
+		first := applyReplacement(t, p, r, a, "same/file", 100, 100, version)
+		if first.State != Succeeded {
+			t.Fatalf("first replacement: %+v", first.State)
+		}
+		requireUsage(t, p, r, a, 100, 0, 100, 0)
+		requireClaims(t, pool, r.OwnerID, 0)
+		second := applyReplacement(t, p, r, a, "same/file", 100, 100, version)
+		if second.State != Succeeded {
+			t.Fatalf("second replacement: %+v", second.State)
+		}
+		requireUsage(t, p, r, a, 100, 0, 100, 0)
+		requireClaims(t, pool, r.OwnerID, 0)
+	})
+
+	t.Run("different bytes replace twice in a row", func(t *testing.T) {
+		// Arithmetic: 100 -> 200 reserves 100 and settles +100; 200 -> 60 reserves 0 and
+		// settles -140. The budget ends at 60, exactly the file on disk.
+		p, r, a := seedOwner(t, pool, provenBaseline(100, 100, 1000, 1000))
+		applyReplacement(t, p, r, a, "diff/file", 200, 100, version)
+		requireUsage(t, p, r, a, 200, 0, 200, 0)
+		requireClaims(t, pool, r.OwnerID, 0)
+		applyReplacement(t, p, r, a, "diff/file", 60, 200, []byte("native-etag:grown"))
+		requireUsage(t, p, r, a, 60, 0, 60, 0)
+		requireClaims(t, pool, r.OwnerID, 0)
+	})
+
+	t.Run("a concurrent replacement of one revision still conflicts", func(t *testing.T) {
+		// An open session holds the credit but no path guard (sessions fence at commit).
+		// That is exactly the window the claim exists for: two publications of the same
+		// old revision could both credit its 100 B.
+		p, r, a := seedOwner(t, pool, provenBaseline(100, 100, 1000, 1000))
+		client := storage.WriteIntent{Target: "busy/file", Size: 100, ClientCondition: "replace:cr_observed", MediaType: "text/plain"}
+		captured := client
+		captured.Conditions = storage.Conditions{ExpectedRevision: version}
+		intent, err := json.Marshal(captured)
+		if err != nil {
+			t.Fatal(err)
+		}
+		session, replay, err := p.CreateUpload(ctx, BeginRequest{Root: r, Actor: a, Kind: "upload_commit", IdempotencyKey: "concurrent-replacement", Intent: intent,
+			Reservation: ReservationRequest{NewBytes: 100, OldBytes: 100, CreditPath: "busy/file", CreditVersion: version, PhysicalBytes: 100}},
+			UploadOptions{PartSize: 100, ClientIntent: client})
+		if err != nil || replay {
+			t.Fatalf("replacement session: replay=%v %v", replay, err)
+		}
+		_, _, err = p.Begin(ctx, replacementRequest(r, a, "busy/file", 100, 100, version))
+		requireCode(t, err, "credit_conflict")
+		var holder string
+		if err := pool.QueryRow(ctx, `select operation_id::text from file_credit_claims where owner_id=$1`, r.OwnerID).Scan(&holder); err != nil || holder != session.ID {
+			t.Fatalf("credit holder %q, want the open session %s: %v", holder, session.ID, err)
+		}
+		requireUsage(t, p, r, a, 100, 0, 100, 100)
+	})
+
+	t.Run("a native write that has not settled keeps its fence", func(t *testing.T) {
+		// The window between the publication and the settlement is the one a crash lands
+		// in. The claim must still be there (and the delta must not be applied) so that
+		// recovery settles the same operation, and no second replacement can spend the
+		// same revision in the meantime.
+		p, r, a := seedOwner(t, pool, provenBaseline(100, 100, 1000, 1000))
+		req := replacementRequest(r, a, "crash/file", 100, 100, version)
+		op := mustClaim(t, p, mustBegin(t, p, req), a)
+		var intent storage.WriteIntent
+		if err := json.Unmarshal(req.Intent, &intent); err != nil {
+			t.Fatal(err)
+		}
+		intent.ID = op.ID
+		if err := p.SaveStage(ctx, op.Lease, storage.Staged{Intent: intent, Size: intent.Size, Handle: []byte("stage")}); err != nil {
+			t.Fatal(err)
+		}
+		if err := p.StartEffect(ctx, op.Lease); err != nil {
+			t.Fatal(err)
+		}
+		if err := p.SaveApplied(ctx, op.Lease, storage.MutationResult{Entry: &storage.Entry{Path: intent.Target, Kind: storage.File, Size: intent.Size}, Evidence: []byte("published")}); err != nil {
+			t.Fatal(err)
+		}
+		requireClaims(t, pool, r.OwnerID, 1)
+		requireUsage(t, p, r, a, 100, 0, 100, 100)
+		_, _, err := p.Begin(ctx, replacementRequest(r, a, "crash/file", 100, 100, version))
+		requireCode(t, err, "operation_in_progress")
+		requireClaims(t, pool, r.OwnerID, 1)
+		if _, err = p.Settle(ctx, op.Lease, Settlement{State: Succeeded, LogicalDelta: 0, PhysicalDelta: 0}, nil); err != nil {
+			t.Fatal(err)
+		}
+		requireClaims(t, pool, r.OwnerID, 0)
+		requireUsage(t, p, r, a, 100, 0, 100, 0)
+		applyReplacement(t, p, r, a, "crash/file", 100, 100, version)
+		requireUsage(t, p, r, a, 100, 0, 100, 0)
+	})
+
+	t.Run("a delete credit is a receipt and blocks another claim", func(t *testing.T) {
+		// Arithmetic: the delete refunds its 100 B once. A second delete of the same
+		// revision would subtract bytes that no longer exist, and a replacement must not
+		// inherit that receipt either.
+		p, r, a := seedOwner(t, pool, provenBaseline(100, 100, 1000, 1000))
+		op, err := freezeDelete(t, p, r, a, "gone/file", 100, version)
+		if err != nil {
+			t.Fatal(err)
+		}
+		appliedDelete(t, p, op, 100)
+		requireUsage(t, p, r, a, 0, 0, 0, 0)
+		requireClaims(t, pool, r.OwnerID, 1)
+		second, err := freezeDelete(t, p, r, a, "gone/file", 100, version)
+		requireCode(t, err, "credit_conflict")
+		if err := p.FinishWithoutEffect(ctx, second.Lease, Failed, nil); err != nil {
+			t.Fatal(err)
+		}
+		_, _, err = p.Begin(ctx, replacementRequest(r, a, "gone/file", 100, 100, version))
+		requireCode(t, err, "credit_conflict")
+		requireUsage(t, p, r, a, 0, 0, 0, 0)
+		requireClaims(t, pool, r.OwnerID, 1)
 	})
 }

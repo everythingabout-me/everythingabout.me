@@ -740,12 +740,10 @@ func (p *Postgres) beginTx(ctx context.Context, tx pgx.Tx, req BeginRequest, fin
 			}
 		}
 		if req.Reservation.OldBytes > 0 {
-			tag, err := tx.Exec(ctx, `insert into file_credit_claims(owner_id,comparison_path,version,operation_id) values($1,$2,$3,$4) on conflict do nothing`, req.Root.OwnerID, comparePath(req.Root, req.Reservation.CreditPath), req.Reservation.CreditVersion, op.ID)
-			if err != nil {
+			// A replacement credit is a fence drained at settlement, not a receipt; see
+			// credit.go for why its identity is (path, revision) and what may adopt it.
+			if err = claimCredit(ctx, tx, req.Root.OwnerID, req.Root, req.Reservation.CreditPath, req.Reservation.CreditVersion, op.ID); err != nil {
 				return err
-			}
-			if tag.RowsAffected() != 1 {
-				return E("credit_conflict", nil)
 			}
 		}
 		rb, _ := json.Marshal(req.Reservation)

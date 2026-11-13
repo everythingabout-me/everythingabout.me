@@ -1015,8 +1015,10 @@ logical file sizes (including copies), track reservations independently from sta
 replacement conditions at commit. On failure/abort/expiry, release only unused reservations after indexing
 and charging all proven native partial results; retain liability for unresolved effects. Concurrent sessions
 must not overbook the account. Replacements reserve worst-case additional liability without allowing multiple
-writers to spend the same old file's size credit. Temporary upload data and retained provider versions use
-a separate physical budget. Missing index entries alone never make ordinary native files garbage.
+writers to spend the same old file's size credit; that claim lasts until the replacement settles, so
+identical bytes — which carry the same revision — can be replaced again by a re-import, while a deletion's
+claim is permanent because it records bytes that are gone. Temporary upload data and retained provider
+versions use a separate physical budget. Missing index entries alone never make ordinary native files garbage.
 
 Idempotency keys are scoped by owner, principal, route/action and canonical request fingerprint. Same key with
 different intent returns `409 idempotency_conflict`. The fingerprint covers what the client asked for, never what

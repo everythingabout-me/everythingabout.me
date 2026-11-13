@@ -36,10 +36,12 @@ type PruneResult struct {
 //   - no change fact in the feed: a change row names the operation that produced it, and a
 //     client replaying that cursor must still be able to read the operation. Facts expire on
 //     their own (90 days), so this delays a prune; it does not leak rows.
-//   - no credit claim: a claim records that a native revision's size credit was consumed, and
-//     it is deliberately retained after the operation's guards are released (sql/017).
-//     Deleting the claim to free the operation would let the same revision be credited twice;
-//     keeping the operation is the cheaper side of that trade.
+//   - no credit claim: a deletion claim records that a native revision was removed and is
+//     deliberately retained after the operation's guards are released (sql/017); deleting
+//     it to free the operation would let the same revision be refunded twice. A
+//     replacement claim is released at settlement (credit.go), so it never delays a
+//     prune by itself; one that still points at a terminal replacement is a row written
+//     before that rule, and keeping it here is what lets admission adopt it later.
 //   - no live child session: an upload session in state 'open' may still commit, and a session
 //     inside its own expires_at window is still the idempotent answer to a client retry.
 //

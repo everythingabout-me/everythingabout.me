@@ -276,6 +276,39 @@ effort and cannot return a definitive aborted state while the native result is u
 publication is reconciled as committed, not hidden only in the database. Temporary cleanup never removes a
 committed path merely because its final database result was lost.
 
+### Replacement and deletion credits
+
+Logical quota is the sum of the sizes the index currently holds. A replacement reserves
+`max(new − old, 0)` and settles `new − old`; a deletion reserves nothing and refunds the removed sizes when
+its index settlement commits. Both depend on crediting one *old native revision* at most once, which
+`file_credit_claims` enforces with its primary key `(owner, comparison_path, revision)`: two operations
+spending the same revision would subtract the same bytes twice. The row's lifetime depends on what the credit
+is.
+
+- **A replacement credit is a concurrency fence.** It is held from admission — an upload session takes it at
+  creation, a direct write at admission — until the operation settles, and `Settle` deletes it in the
+  transaction that applies the delta. Settlement is the last moment the operation could spend it, and
+  identical bytes carry the identical native revision: re-importing an unchanged file replaces revision R
+  with R, so the next replacement must be able to claim R again. That is not a second refund, because the
+  bytes it credits are still there; without the release every re-import of an unchanged folder failed with
+  `credit_conflict`. The fence is not redundant with the native condition: a provider that ignores `If-Match`
+  (COS) still lets an in-flight publication overwrite, so two operations that could both credit revision R
+  must be excluded in the database as well. A crash between the native publication and the settlement cannot
+  open the window: the claim, the operation's `native_applied` phase and the delta commit together, and
+  recovery settles through the same statement.
+- **A deletion credit is a permanent receipt.** A delete, or the removal half of a move, is what removed the
+  revision; once the bytes are gone the same `(path, revision)` pair must not fund a second refund. The row
+  survives settlement, and `prune` keeps its operation. A replacement never inherits one.
+
+Quota for a 100 B file on a non-version-retaining root (logical 100 before):
+
+| Case | Reserved | Settled delta | Logical after |
+|---|---|---|---|
+| replace 100 B with identical 100 B, twice | 0 + 0 | 0 + 0 | 100 |
+| replace 100 B with 200 B, then 200 B with 60 B | 100 + 0 | +100 then −140 | 60 |
+| delete 100 B twice concurrently | 0; the second is refused | −100 | 0 |
+| delete 100 B, then delete the same revision again | 0; the second is refused | −100 once | 0 |
+
 ## 6. Performance within the portability boundary
 
 Prefer local streaming/range seeks, native rename, server-side copy/reflink, connection reuse, bounded

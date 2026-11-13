@@ -99,12 +99,11 @@ func (p *Postgres) FreezeAction(ctx context.Context, l Lease, b actionBinding, m
 		}
 		for _, e := range manifest {
 			if e.Action == "delete" && e.Size > 0 {
-				tag, err := tx.Exec(ctx, `insert into file_credit_claims(owner_id,comparison_path,version,operation_id) values($1,$2,$3,$4) on conflict do nothing`, op.Root.OwnerID, comparePath(op.Root, e.Source), e.SourceRevision, op.ID)
-				if err != nil {
+				// A deletion credit is a permanent receipt (credit.go). The row it inserts
+				// may still be a settled replacement's, which adoption turns into this
+				// operation's receipt when that replacement's revision is the captured source.
+				if err := claimCredit(ctx, tx, op.Root.OwnerID, op.Root, e.Source, e.SourceRevision, op.ID); err != nil {
 					return err
-				}
-				if tag.RowsAffected() != 1 {
-					return E("credit_conflict", nil)
 				}
 			}
 			op.Entries = append(op.Entries, EntryEffect{ManifestEntry: e, State: "pending"})
@@ -395,8 +394,9 @@ func validateActionSettlement(ctx context.Context, tx pgx.Tx, op Operation, b ac
 			if !exists {
 				return E("credit_conflict", nil)
 			}
-			// Only consumed source-revision credits remain permanent. A cancelled pending
-			// delete must not prevent a future operation from deleting that same source.
+			// A deletion credit is a receipt, so only an applied entry keeps it. A cancelled
+			// or not-applied delete must not prevent a future operation from deleting that
+			// same source, and replacement credits never reach this loop (credit.go).
 			if entry.State != "applied" {
 				_, err = tx.Exec(ctx, `delete from file_credit_claims where owner_id=$1 and operation_id=$2 and `+comparisonShim("comparison_path")+`=$3 and version=$4`, op.Root.OwnerID, op.ID, comparePath(op.Root, entry.Source), entry.SourceRevision)
 				if err != nil {
