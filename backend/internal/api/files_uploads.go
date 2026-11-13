@@ -13,6 +13,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	fc "everythingabout.me/backend/internal/filecontract"
@@ -128,6 +129,13 @@ type filesCreateUploadRequest struct {
 	// Parents creates the missing ancestor folders of a full-path destination as
 	// part of this request. The folder rows are the same mkdir a client could send;
 	// this only saves a round trip per folder when a whole tree is imported.
+	//
+	// It is the caller saying it is importing a tree it enumerated: the ancestors are
+	// part of that tree, not a typo in one path, and an earlier import may have been
+	// cancelled before it created them. The same request must therefore be able to
+	// succeed on a retry instead of answering 409 parent_missing forever; a client that
+	// does not set the flag still gets the refusal, because only the caller knows
+	// whether the missing folder is one it meant to create.
 	Parents bool `json:"parents"`
 }
 
@@ -211,6 +219,67 @@ func (s *Server) filesResolveUploadTarget(ctx context.Context, f *fileRequest, r
 	}
 }
 
+// parentChainCalls shares one ancestor materialization between the items of one admission
+// page.
+//
+// A page carries up to 32 files of a dropped tree, and a re-import can place all of them
+// under a folder that an earlier, cancelled import never created. Every item would otherwise
+// run the same mkdir chain: the native folder is still created once (mkdir is idempotent, and
+// a conflicting operation is waited out), but the provider requests and the operation rows are
+// paid once per file. The map lives in the request context, so a single create — one item —
+// runs unguarded, and a page's items share one call per path.
+type parentChainCalls struct {
+	mu    sync.Mutex
+	calls map[string]*parentChainCall
+}
+
+type parentChainCall struct {
+	done chan struct{}
+	err  error
+}
+
+// run executes fn once per key and hands its result to every later caller, including a
+// failure: one item's blocked chain is the whole page's answer for that path. A panic is
+// closed out too — an item's recoverer would otherwise answer its own request while every
+// waiter on this path hung — and re-raised so the item that ran fn keeps its own answer.
+func (c *parentChainCalls) run(key string, fn func() error) (err error) {
+	c.mu.Lock()
+	if call, ok := c.calls[key]; ok {
+		c.mu.Unlock()
+		<-call.done
+		return call.err
+	}
+	if c.calls == nil {
+		c.calls = map[string]*parentChainCall{}
+	}
+	call := &parentChainCall{done: make(chan struct{})}
+	c.calls[key] = call
+	c.mu.Unlock()
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			call.err = fc.NewProblem(500, "internal_error", "The destination folder chain could not be materialized.")
+			close(call.done)
+			panic(recovered)
+		}
+		call.err = err
+		close(call.done)
+	}()
+	return fn()
+}
+
+type parentChainCallsKey struct{}
+
+// withParentChainCalls marks an admission page's request: its items materialize a shared
+// ancestor chain once instead of once per file.
+func withParentChainCalls(ctx context.Context) context.Context {
+	return context.WithValue(ctx, parentChainCallsKey{}, &parentChainCalls{})
+}
+
+func parentChainCallsFor(ctx context.Context) *parentChainCalls {
+	calls, _ := ctx.Value(parentChainCallsKey{}).(*parentChainCalls)
+	return calls
+}
+
 // filesEnsureParents materializes the folders above an upload destination that asked
 // for missing parents. It runs the same mkdir action a client would have sent, so
 // identity, change facts and audit stay identical; only the round trip moves from the
@@ -223,6 +292,15 @@ func (s *Server) filesEnsureParents(ctx context.Context, r *http.Request, f *fil
 	if target == "" {
 		return nil
 	}
+	if calls := parentChainCallsFor(ctx); calls != nil {
+		return calls.run(string(target), func() error {
+			return s.ensureParentChain(ctx, r, f, native, root, actor, target)
+		})
+	}
+	return s.ensureParentChain(ctx, r, f, native, root, actor, target)
+}
+
+func (s *Server) ensureParentChain(ctx context.Context, r *http.Request, f *fileRequest, native fileops.NativeActions, root fileops.Root, actor fileops.Actor, target storage.Path) error {
 	entry, err := native.Stat(ctx, target)
 	if err == nil {
 		if entry.Kind != storage.Folder {

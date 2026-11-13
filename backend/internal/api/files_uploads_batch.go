@@ -89,6 +89,10 @@ func (s *Server) handleFilesCreateUploadBatch(w http.ResponseWriter, r *http.Req
 	}
 	items := make([]any, len(req.Items))
 	slots := make(chan struct{}, min(filesUploadBatchParallel, len(req.Items)))
+	// One page is one dropped tree. Its items share the ancestor materialization, so a page
+	// under one missing folder creates that chain once instead of once per file; the single
+	// endpoint has one item and needs no guard.
+	r = r.WithContext(withParentChainCalls(r.Context()))
 	var page sync.WaitGroup
 	for i, body := range req.Items {
 		// The idempotency key moves into the header the single handler reads. Everything
