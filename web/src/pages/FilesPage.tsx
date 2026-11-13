@@ -11,7 +11,7 @@ import {
   type ReactNode,
 } from "react";
 import { Link, useBlocker, useLoaderData, useLocation, useNavigate } from "react-router";
-import { ApiError, api, filePath, isFileOperation, isNativeAbsent, openListing, prefetchListing, type AuthUser, type Crumb, type FileMediaMetadata, type Item, type FileOperation, type ListingStream } from "../api/client";
+import { ApiError, api, filePath, isFileOperation, isNativeAbsent, prefetchListing, type AuthUser, type Crumb, type FileMediaMetadata, type Item, type FileOperation } from "../api/client";
 import { AppHeader } from "../components/AppHeader";
 import { StorageNotice } from "../components/StorageNotice";
 import {
@@ -30,19 +30,24 @@ import {
   UploadIcon,
 } from "../components/icons";
 import { canPreviewFile } from "../components/preview/supported";
-import { TransferDialog, type TransferMode } from "../components/TransferDialog";
+import { TransferDialog } from "../components/TransferDialog";
 import { filesHref, filesRoutePath } from "../filesPath";
 import { formatNumber, intlLocale, resultsText, t } from "../i18n";
 import { formatRelativeTime } from "../i18n/format";
 import { useUploadQueue, type ConflictChoice, type UploadStatus, type UploadTask } from "./useUploadQueue";
 import { resolveDeleteBlocker } from "./deleteBlocker";
-import { FolderRevision, withinFolder } from "./uploadRevision";
 import { droppedUploadEntries, filesToUploadEntries, foldersWithoutFiles } from "./uploadSelection";
 import { buildUploadRows, failedTasks, isUploadDirectory, isUploadRowActive, type UploadRowEntry } from "./uploadRows";
-import { pendingFileOperations, setUploadOwner, settleFileOperation, subscribeFileOperations, trackFileOperation } from "./uploadPersistence";
+import { trackFileOperation } from "./uploadPersistence";
 import { formatBytes, formatPreciseBytes, formatSize, formatSpeed } from "./sizeFormat";
-import { chunkRows, growRowCount, LIST_CHUNK_SIZE, visibleRowCount } from "./listChunk";
+import { chunkRows } from "./listChunk";
 import { cameraText, capturedAtText, coordinatesText, dimensionsText, durationText, exposureText, mayHaveMediaMetadata } from "./mediaMetadataFormat";
+import { useDeletionTracker } from "./useDeletionTracker";
+import { useListing } from "./useListing";
+import { useRenameJob } from "./useRenameJob";
+import { useTransferJob } from "./useTransferJob";
+import { waitForOperation } from "./operationWait";
+import { crumbsForPath, joinPath } from "./listingState";
 import styles from "./FilesPage.module.css";
 
 /**
@@ -51,37 +56,6 @@ import styles from "./FilesPage.module.css";
  */
 const FilePreview = lazy(() => import("../components/preview/FilePreview"));
 
-function joinPath(dir: string, name: string): string {
-  return dir ? `${dir}/${name}` : name;
-}
-
-/** Matches the backend: directories first, the rest sorted by lowercased name. */
-function compareNames(a: string, b: string): number {
-  const left = a.toLowerCase();
-  const right = b.toLowerCase();
-  if (left === right) return a < b ? -1 : a > b ? 1 : 0;
-  return left < right ? -1 : 1;
-}
-
-function compareItems(a: Item, b: Item): number {
-  if (a.kind !== b.kind) return a.kind === "folder" ? -1 : 1;
-  return compareNames(a.name, b.name);
-}
-
-/**
- * Append a streamed page to the rows already on screen.
- *
- * The keyset cursor should never repeat an entry, but an upload can settle into the
- * folder while the rest loads, and a retried page can overlap; replacing by ID keeps a
- * newer revision without moving the row or duplicating a key.
- */
-function mergeListingItems(previous: Item[], page: Item[]): Item[] {
-  if (page.length === 0) return previous;
-  const merged = new Map(previous.map((item) => [item.id, item] as const));
-  for (const item of page) merged.set(item.id, item);
-  return [...merged.values()];
-}
-
 /**
  * How often a delete re-sends itself after the operation that refused it has already ended.
  * Each retry answers one short-lived holder — a commit or a folder creation that finished
@@ -89,25 +63,6 @@ function mergeListingItems(previous: Item[], page: Item[]): Item[] {
  * a stream of them (an import still publishing into the folder) from spinning forever.
  */
 const DELETE_BLOCKER_ATTEMPTS = 32;
-
-async function waitForOperation(
-  operation: FileOperation,
-  onProgress?: (progress: FileOperation["progress"]) => void,
-): Promise<void> {
-  let current = operation;
-  onProgress?.(current.progress);
-  while (current.state !== "succeeded") {
-    if (current.state === "cancelled") {
-      throw new Error(current.error?.detail || t("drive.transferCancelled"));
-    }
-    if (current.state === "failed") {
-      throw new Error(current.error?.detail || t("error.saveFailed"));
-    }
-    await new Promise<void>((resolve) => window.setTimeout(resolve, 1000));
-    current = await api.getOperation(current.id);
-    onProgress?.(current.progress);
-  }
-}
 
 function uploadStatusText(status: UploadStatus): string {
   switch (status) {
@@ -141,18 +96,6 @@ function uploadStatusClass(status: UploadStatus): string {
 /** The frontend names the root breadcrumb; the backend's "all files" string is API data only. */
 function crumbName(crumb: Crumb): string {
   return crumb.path === "/" ? t("drive.root") : crumb.name;
-}
-
-/** A local trail for the first paint (and for a path the API has no breadcrumb for yet). */
-function crumbsForPath(path: string): Crumb[] {
-  const trail: Crumb[] = [{ name: "", path: "/" }];
-  let cursor = "";
-  for (const segment of path.split("/")) {
-    if (!segment) continue;
-    cursor += `/${segment}`;
-    trail.push({ name: segment, path: cursor });
-  }
-  return trail;
 }
 
 function fileTypeName(item: Item): string {
@@ -797,14 +740,6 @@ export function FilesPage() {
   const navigate = useNavigate();
   const path = filesRoutePath(location.pathname);
 
-  const [items, setItems] = useState<Item[]>([]);
-  const [current, setCurrent] = useState<Item | null>(null);
-  const [crumbTrail, setCrumbTrail] = useState<Crumb[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [loadedPath, setLoadedPath] = useState<string | null>(null);
-  const [loadError, setLoadError] = useState<string | null>(null);
-  const [query, setQuery] = useState("");
-  const [activeQuery, setActiveQuery] = useState("");
   const [creating, setCreating] = useState(false);
   const [newName, setNewName] = useState("");
   const [toast, setToast] = useState<{ text: string; kind: "info" | "error" } | null>(null);
@@ -817,81 +752,29 @@ export function FilesPage() {
   const [menuOpen, setMenuOpen] = useState(false);
   const [downloadError, setDownloadError] = useState<string | null>(null);
   const [downloadMissing, setDownloadMissing] = useState(false);
-  const downloadFile = async () => {
-    setDownloadError(null);
-    setDownloadMissing(false);
-    try { await api.download(file?.path ?? path); }
-    catch (error) {
-      if (isNativeAbsent(error)) setDownloadMissing(true);
-      else setDownloadError(error instanceof Error ? error.message : t("error.unknown"));
-    }
-  };
   const [uploadMenuOpen, setUploadMenuOpen] = useState(false);
-  const [renaming, setRenaming] = useState(false);
-  const [renameName, setRenameName] = useState("");
-  const [renameJob, setRenameJob] = useState<FileOperation | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<Item | null>(null);
   // Paths whose delete request is in flight. The dialog is already gone, and this is what
   // marks the item on screen while the server enumerates a large subtree.
   const [deletingPaths, setDeletingPaths] = useState<string[]>([]);
-  const [transfer, setTransfer] = useState<{ mode: TransferMode; item: Item } | null>(null);
-  const [transferProgress, setTransferProgress] = useState<FileOperation["progress"] | null>(null);
-  const [transferCancelling, setTransferCancelling] = useState(false);
-  const transferOperation = useRef<string | null>(null);
-  const [trackedDeletions, setTrackedDeletions] = useState<{ operation: FileOperation; path: string }[]>([]);
-  const [deletionStatusError, setDeletionStatusError] = useState(false);
-  const deletionRequest = useRef(0);
-  const notifiedDeleteFailures = useRef(new Set<string>());
-  // `deletingPaths` is what the screen shows; this set answers synchronously, so a second
-  // click in the same tick cannot start a duplicate request.
-  const deletesInFlight = useRef(new Set<string>());
-  const menuTrigger = useRef<HTMLButtonElement>(null);
 
   const fileInput = useRef<HTMLInputElement>(null);
   const folderInput = useRef<HTMLInputElement>(null);
   const searchInput = useRef<HTMLInputElement>(null);
   const renameInput = useRef<HTMLInputElement>(null);
-  const renameTimer = useRef<number | null>(null);
   const toastTimer = useRef<number | null>(null);
   const dragDepth = useRef(0);
   const completedUploads = useRef(0);
-  // Every list / search request gets a ticket; a response older than the newest ticket is dropped.
-  const requestId = useRef(0);
-  // The upload callback is async: by completion the user may have moved to another directory.
-  const listingRef = useRef({ path, searching: false });
-  listingRef.current = { path, searching: Boolean(activeQuery) };
-  // The mounted view to reload after a background deletion changes the truth on screen.
-  const reloadView = useRef<() => void>(() => {});
-  // The revision of the folder this listing shows, and whether an upload has made it stale.
-  // A folder's revision covers its direct children, so every settle inside the folder
-  // invalidates the value the page loaded with. The settle answer names the published file,
-  // never the parent folder, so the new revision is read back from metadata — lazily, when
-  // the import ends or a mutation needs it, instead of once per completed file.
-  const folderRevision = useRef<{ path: string; tracker: FolderRevision } | null>(null);
-  // Set by a settle and consumed when the uploads finish: the folder is stale then.
-  const settleInvalidated = useRef(false);
   const panelRef = useRef<HTMLElement>(null);
   // The card's height just before a switch, so it can resize instead of jumping.
   const heightFrom = useRef<{ key: string; height: number } | null>(null);
   // A first paint has no previous listing to grow from.
   const loadedPathRef = useRef<string | null>(null);
-  loadedPathRef.current = loadedPath;
-  // The listing read in progress. A new folder cancels its continuation, so a page the
-  // person already left cannot keep reading or append to the new folder's rows.
-  const listingStream = useRef<ListingStream | null>(null);
-  // Rows mounted from the streamed listing; the sentinel below grows this by one chunk.
-  const [renderedRows, setRenderedRows] = useState(LIST_CHUNK_SIZE);
-  // The listing that count belongs to. A different one starts from one chunk on the very
-  // render that shows it, not one effect later: switching between two large listings must
-  // not mount the new one's rows at the old count even for a frame.
-  const [renderedKey, setRenderedKey] = useState<string | null>(null);
   const sentinelRef = useRef<HTMLDivElement | null>(null);
-
-  const rememberPanelHeight = useCallback((key: string) => {
-    const panel = panelRef.current;
-    if (!panel || loadedPathRef.current === null) return;
-    heightFrom.current = { key, height: panel.getBoundingClientRect().height };
-  }, []);
+  // `deletingPaths` is what the screen shows; this set answers synchronously, so a second
+  // click in the same tick cannot start a duplicate request.
+  const deletesInFlight = useRef(new Set<string>());
+  const menuTrigger = useRef<HTMLButtonElement>(null);
 
   const showToast = useCallback(
     (text: string, kind: "info" | "error" = "info", sticky = false) => {
@@ -902,224 +785,64 @@ export function FilesPage() {
     [],
   );
 
-  // Accepted deletions are not user-facing work: the path disappears from the listing
-  // at once and the native purge runs invisibly. Only an operation that ends without
-  // deleting anything is worth reporting, because that row is back (or may be).
-  const refreshDeletions = useCallback(async () => {
-    const request = ++deletionRequest.current;
-    const known = pendingFileOperations();
-    const active: { operation: FileOperation; path: string }[] = [];
-    let failed = false;
-    // One operation's failure must not hide the others, and a record the server no
-    // longer knows is settled rather than reported.
-    await Promise.all(known.map(async (entry) => {
-      try {
-        const operation = await api.getOperation(entry.id);
-        const ended = operation.state === "failed" || operation.state === "cancelled" || operation.state === "outcome_unknown";
-        // A record is dropped by whatever settles its Operation, whatever kind it was: the
-        // record names a path, and `pendingFileOperation` matches by path alone, so one
-        // left behind by a move or a commit blocks every later upload there just as a
-        // delete would. Only the report is specific to deletions, the work this page shows.
-        const settled = operation.state === "succeeded" || ended;
-        if (settled) settleFileOperation(operation.id);
-        if (operation.kind === "delete" && ended) {
-          if (!notifiedDeleteFailures.current.has(operation.id)) {
-            notifiedDeleteFailures.current.add(operation.id);
-            showToast(t("drive.deleteIncomplete", { path: entry.path }), "error");
-            reloadView.current();
-          }
-          return;
-        }
-        if (settled) return;
-        active.push({ operation, path: entry.path });
-      } catch (error) {
-        if (error instanceof ApiError && (error.status === 404 || error.status === 410)) {
-          settleFileOperation(entry.id);
-          return;
-        }
-        failed = true;
-      }
-    }));
-    if (request !== deletionRequest.current) return;
-    setTrackedDeletions(active.filter(({ operation }) => operation.kind === "delete"));
-    setDeletionStatusError(failed);
-  }, [showToast, t]);
-
-  useEffect(() => {
-    setUploadOwner(user.id);
-    void refreshDeletions();
-    const unsubscribe = subscribeFileOperations(() => { void refreshDeletions(); });
-    return () => { deletionRequest.current += 1; unsubscribe(); };
-  }, [user.id, refreshDeletions]);
-
-  const activeDeletions = trackedDeletions.some(({ operation }) =>
-    operation.state === "queued" || operation.state === "running" || operation.state === "outcome_unknown");
-  useEffect(() => {
-    if (!activeDeletions && !deletionStatusError) return;
-    let stopped = false;
-    let timer: number;
-    // Poll while a deletion is running. When the status cannot be read the retry
-    // backs off instead of hammering the API in a three-second loop.
-    const tick = async () => {
-      await refreshDeletions();
-      if (!stopped) timer = window.setTimeout(tick, deletionStatusError ? 30_000 : 3_000);
-    };
-    timer = window.setTimeout(tick, deletionStatusError ? 30_000 : 3_000);
-    return () => { stopped = true; window.clearTimeout(timer); };
-  }, [activeDeletions, deletionStatusError, refreshDeletions]);
-
-  const load = useCallback(
-    async (target: string) => {
-      const request = ++requestId.current;
-      // Leaving a folder stops its cursor chain. The page already in flight is discarded by
-      // the request check below, so it cannot append to the next folder's rows.
-      listingStream.current?.cancel();
-      const stream = openListing(target);
-      listingStream.current = stream;
-      setLoading(true);
-      setLoadError(null);
-      try {
-        // Metadata and the first page were requested together. Waiting for both is the
-        // whole first paint; the cursor chain below is not part of it.
-        const data = await stream.first;
-        if (requestId.current !== request) {
-          stream.cancel();
-          return;
-        }
-        rememberPanelHeight(`${target}|`);
-        setItems(data.items);
-        setCurrent(data.node);
-        setCrumbTrail(data.breadcrumb);
-        setActiveQuery("");
-        setQuery("");
-        setLoadedPath(target);
-        setLoading(false);
-        // The listing is the new truth for this folder, so it also seeds the revision the
-        // next mutation will name — an upload that settles later invalidates it again.
-        const tracker = new FolderRevision(async () => {
-          const item = await api.metadata(target);
-          return item.kind === "folder" ? item : null;
-        });
-        tracker.seed(data.node?.revision ?? null);
-        folderRevision.current = { path: target, tracker };
-        // The rest streams in behind the rows already on screen. A failed continuation
-        // keeps what loaded and reports itself; it does not replace the folder with an
-        // error, because the first page proved the folder is readable.
-        void stream.rest((page) => {
-          if (requestId.current !== request) return;
-          setItems((existing) => mergeListingItems(existing, page));
-        }).catch((error: unknown) => {
-          if (requestId.current !== request) return;
-          showToast(error instanceof Error ? error.message : t("drive.loadMoreFailed"), "error");
-        });
-      } catch (error) {
-        if (requestId.current !== request) return;
-        if (error instanceof ApiError && error.status === 401) {
-          navigate("/login", { replace: true });
-          return;
-        }
-        setLoadError(error instanceof Error ? error.message : t("error.loadFailed"));
-        setLoadedPath(target);
-      } finally {
-        if (requestId.current === request) setLoading(false);
-      }
-    },
-    [navigate, rememberPanelHeight, showToast],
-  );
-
-  /**
-   * Read back the open folder's revision after an upload changed it.
-   *
-   * The commit answers with the published file, not with the folder it landed in, so the
-   * folder's new revision has to be read. `FolderRevision` coalesces that read: the import
-   * marks the folder stale on every settle, and this is called once when the queue empties,
-   * so a 23k-file import costs one metadata request at the end rather than one per file.
-   */
-  const refreshFolderRevision = useCallback(async () => {
-    const listing = folderRevision.current;
-    if (!listing || listing.path !== listingRef.current.path) return;
-    const revision = await listing.tracker.revision();
-    if (!revision || folderRevision.current !== listing) return;
-    setCurrent((existing) => existing && existing.kind === "folder" && existing.revision !== revision
-      ? { ...existing, revision }
-      : existing);
+  const rememberPanelHeight = useCallback((key: string) => {
+    const panel = panelRef.current;
+    if (!panel || loadedPathRef.current === null) return;
+    heightFrom.current = { key, height: panel.getBoundingClientRect().height };
   }, []);
 
-  /**
-   * The revision a mutation of this folder must carry.
-   *
-   * Rename, move and delete of the folder send `If-Revision`, and the value the page holds
-   * is the one it loaded before any upload settled inside the folder. Waiting for the
-   * refresh here is what makes the next mutation use the new value: a retry with the stale
-   * revision answers 412 again, and no retry can ever recover from it.
-   */
-  const revisionForMutation = useCallback(async (target: Item): Promise<string> => {
-    const listing = folderRevision.current;
-    if (target.kind !== "folder" || !listing || listing.path !== target.path) return target.revision;
-    return (await listing.tracker.revision()) ?? target.revision;
-  }, []);
+  // The rows on screen, the request that produced them and the folder revision an upload
+  // leaves stale. The hook owns the request tickets, the cursor chain and the search that
+  // stands in for a folder, so the page only reads the state it renders.
+  const listing = useListing({ path, rememberHeight: rememberPanelHeight, showToast });
+  const {
+    items,
+    current,
+    crumbs: crumbTrail,
+    loading,
+    error: loadError,
+    query: activeQuery,
+    search: query,
+    rows: mountedRows,
+    path: loadedPath,
+  } = listing.state;
+  loadedPathRef.current = loadedPath;
 
-  /** Move or copy one entry into a folder chosen in the dialog. A move changes the current URL. */
-  const applyTransfer = useCallback(
-    async (mode: TransferMode, item: Item, destination: string) => {
-      const target = destination === "/" ? `/${item.name}` : `${destination}/${item.name}`;
-      const revision = await revisionForMutation(item);
-      const result = mode === "move"
-        ? await api.move(item.path, target, revision)
-        : await api.copy(item.path, target, revision);
-      if (isFileOperation(result) && result.state !== "succeeded") {
-        if (result.state === "failed" || result.state === "cancelled") {
-          throw new Error(result.error?.detail || t("drive.transferFailed"));
-        }
-        transferOperation.current = result.id;
-        setTransferProgress(result.progress);
-        try {
-          await waitForOperation(result, setTransferProgress);
-        } catch (caught) {
-          throw caught instanceof Error ? caught : new Error(t("drive.transferFailed"));
-        } finally {
-          transferOperation.current = null;
-        }
-      }
-      setTransfer(null);
-      showToast(t(mode === "move" ? "drive.moved" : "drive.copied", { name: item.name }));
-      if (mode === "move") navigate(filesHref(target), { replace: true });
-      else void load(path);
-    },
-    [load, navigate, path, revisionForMutation, showToast],
-  );
-
-  /** Cancel while the move/copy is still running: the operation stops between entries. */
-  const cancelTransfer = useCallback(async () => {
-    const id = transferOperation.current;
-    if (!id) return;
-    setTransferCancelling(true);
-    try {
-      await api.cancelOperation(id);
-    } catch (error) {
-      showToast(error instanceof Error ? error.message : t("drive.transferFailed"), "error");
+  const downloadFile = async () => {
+    setDownloadError(null);
+    setDownloadMissing(false);
+    try { await api.download(file?.path ?? path); }
+    catch (error) {
+      if (isNativeAbsent(error)) setDownloadMissing(true);
+      else setDownloadError(error instanceof Error ? error.message : t("error.unknown"));
     }
-  }, [showToast]);
+  };
 
-  // The path is the URL (/files/Photos/2024), so back/forward and direct visits open the right place.
-  useEffect(() => {
-    void load(path);
-  }, [path, load]);
+  // Accepted deletions and the poll that reports one which deleted nothing. The tracker owns
+  // the durable records, their subscription and the backoff, so no deletion state leaks into
+  // the render.
+  const deletions = useDeletionTracker({ owner: user.id, showToast, reload: listing.reload });
 
-  // A browser-level navigation must not leave a cursor chain reading for a page that is gone.
-  useEffect(() => () => { listingStream.current?.cancel(); }, []);
+  // A rename only ever changes the last segment, so the parent stays put.
+  const parentPath = path.includes("/") ? path.slice(0, path.lastIndexOf("/")) : "";
 
-  useEffect(() => {
-    setRenaming(false);
-    setMenuOpen(false);
-    setDeleteTarget(null);
-  }, [path]);
+  // The inline rename editor and the Operation a large rename settles through.
+  const rename = useRenameJob({
+    path,
+    current,
+    parentPath,
+    revisionForMutation: listing.revisionForMutation,
+    invalidateRevision: listing.invalidateRevision,
+    showToast,
+  });
 
-  // Progress belongs to the dialog that is open now, never to the previous transfer.
-  useEffect(() => {
-    setTransferProgress(null);
-    setTransferCancelling(false);
-  }, [transfer]);
+  // The move/copy dialog and the Operation it follows while the server works.
+  const transfer = useTransferJob({
+    path,
+    load: listing.load,
+    revisionForMutation: listing.revisionForMutation,
+    showToast,
+  });
 
   /**
    * The tree a drop is still reading.
@@ -1138,24 +861,13 @@ export function FilesPage() {
     // A file that landed is no longer something the walk is still feeding.
     uploadWalk.current?.ids.delete(task.id);
     // The folder's revision covers its direct children, so a settle inside the open folder
-    // makes the value this page loaded with stale. It has to be read back, not derived: the
-    // settle answer names the published file and never the parent folder. The read waits
-    // until the import ends (`refreshFolderRevision` below) or until a mutation needs it,
-    // so a large import does not spend one request per file on it.
-    const listing = folderRevision.current;
-    if (!listingRef.current.searching && listing && listing.path === listingRef.current.path
-      && withinFolder(item.path, listing.path)) {
-      listing.tracker.invalidate();
-      settleInvalidated.current = true;
-    }
-    if (listingRef.current.searching || filePath(listingRef.current.path) !== item.parentPath) return;
-    setItems((currentItems) => {
-      const next = currentItems.filter((existing) => existing.path !== item.path);
-      next.push(item);
-      next.sort(compareItems);
-      return next;
-    });
-  }, []);
+    // makes the value this page loaded with stale. The listing coalesces the read-back: one
+    // metadata request when the import ends, or when a mutation needs it first.
+    listing.noteSettle(item.path);
+    const view = listing.view();
+    if (view.searching || filePath(view.path) !== item.parentPath) return;
+    listing.upsertItem(item);
+  }, [listing.noteSettle, listing.upsertItem, listing.view]);
 
   // The queue is module-owned and outlives this page: an unmount only detaches this
   // subscription, so a navigation (including the failure list's fix link) keeps the rows and
@@ -1181,10 +893,9 @@ export function FilesPage() {
   // once, so the next rename, move or delete of the folder does not have to wait — and so a
   // 412 from a stale value is never the first answer the person sees.
   useEffect(() => {
-    if (hasActiveUploads || !settleInvalidated.current) return;
-    settleInvalidated.current = false;
-    void refreshFolderRevision();
-  }, [hasActiveUploads, refreshFolderRevision]);
+    if (hasActiveUploads) return;
+    void listing.refreshSettled();
+  }, [hasActiveUploads, listing.refreshSettled]);
 
   // The queue's latest published state, for a gesture that is a prop of every row: reading it
   // from the render would rebuild the callback on every publish, ten times a second, and throw
@@ -1236,8 +947,8 @@ export function FilesPage() {
     // The rows are gone, and the folder they were describing may have existed only as those
     // rows: the listing is what shows it with the files that did land, so read it again
     // instead of leaving the destination with nothing in it.
-    reloadView.current();
-  }, [cancelUpload, showToast]);
+    listing.reload();
+  }, [cancelUpload, listing.reload, showToast]);
 
   useEffect(() => {
     if (uploadBlocker.state !== "blocked") return;
@@ -1255,12 +966,17 @@ export function FilesPage() {
   }, [unfinishedUploadCount, showToast]);
 
   useEffect(() => {
+    setMenuOpen(false);
+    setDeleteTarget(null);
+  }, [path]);
+
+  useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
         setCreating(false);
         setMenuOpen(false);
         setUploadMenuOpen(false);
-        setRenaming(false);
+        rename.cancel();
         setToast(null);
       }
     };
@@ -1290,76 +1006,10 @@ export function FilesPage() {
 
   // Focus and pre-select the name, so a rename starts from the current name, not an empty box.
   useEffect(() => {
-    if (!renaming) return;
+    if (!rename.editing) return;
     renameInput.current?.focus();
     renameInput.current?.select();
-  }, [renaming]);
-
-  // A rename keeps polling after the page unmounts without this.
-  useEffect(
-    () => () => {
-      if (renameTimer.current) window.clearTimeout(renameTimer.current);
-    },
-    [],
-  );
-
-  const runSearch = async (keyword: string) => {
-    const value = keyword.trim();
-    if (!value) {
-      void load(path);
-      return;
-    }
-    // Search results replace the folder rows, so its cursor chain has nothing left to feed.
-    listingStream.current?.cancel();
-    listingStream.current = null;
-    const request = ++requestId.current;
-    setLoading(true);
-    setLoadError(null);
-    try {
-      const data = await api.search(value);
-      if (requestId.current !== request) return;
-      rememberPanelHeight(`${path}|${value}`);
-      setItems(data.items);
-      setActiveQuery(value);
-      // Search results stand in for the folder listing; mark the path settled so the skeleton
-      // does not stay up if the search won a race against the first load.
-      setCrumbTrail(crumbsForPath(path));
-      setLoadedPath(path);
-    } catch (error) {
-      if (requestId.current !== request) return;
-      if (error instanceof ApiError && error.status === 401) {
-        navigate("/login", { replace: true });
-        return;
-      }
-      showToast(error instanceof Error ? error.message : t("error.searchFailed"), "error");
-      // A failed search should fall back to the folder, not to an endless skeleton.
-      void load(path);
-    } finally {
-      if (requestId.current === request) setLoading(false);
-    }
-  };
-  // A failed delete must put the restored row back; a search is not the folder listing.
-  reloadView.current = () => {
-    if (activeQuery) void runSearch(activeQuery);
-    else void load(listingRef.current.path);
-  };
-
-  const createFolder = async () => {
-    const name = newName;
-    if (!name) {
-      setCreating(false);
-      return;
-    }
-    try {
-      const result = await api.mkdir(joinPath(path, name));
-      if (isFileOperation(result)) await waitForOperation(result);
-      setCreating(false);
-      setNewName("");
-      await load(path);
-    } catch (error) {
-      showToast(error instanceof Error ? error.message : t("error.saveFailed"), "error");
-    }
-  };
+  }, [rename.editing]);
 
   // A switch keeps the outgoing listing on screen until the next one arrives, so the card never
   // collapses into a skeleton; a reload of the same directory must not dim what is already there.
@@ -1383,17 +1033,7 @@ export function FilesPage() {
   // Retry is a transfer action, not a folder action: the list above the rows owns it.
   const failed = useMemo(() => failedTasks(uploads), [uploads]);
   const uploadDirectory = isUploadDirectory(uploads, path);
-
-  const listKey = `${loadedPath ?? ""}|${activeQuery}`;
-
-  // A listing starts with one chunk mounted; streaming continuation pages add items behind
-  // the rows already on screen, and the sentinel decides when mounting more is worth it.
-  const mountedRows = renderedKey === listKey ? renderedRows : LIST_CHUNK_SIZE;
-  useEffect(() => {
-    if (renderedKey === listKey) return;
-    setRenderedKey(listKey);
-    setRenderedRows(LIST_CHUNK_SIZE);
-  }, [listKey, renderedKey]);
+  const listKey = listing.key;
 
   const shownEntries = useMemo(() => chunkRows(entries, mountedRows), [entries, mountedRows]);
 
@@ -1402,16 +1042,16 @@ export function FilesPage() {
     if (!sentinel || shownEntries.length >= entries.length) return;
     // Without an observer (an old engine), showing the list beats leaving rows unreachable.
     if (typeof IntersectionObserver === "undefined") {
-      setRenderedRows(visibleRowCount(entries.length, entries.length));
+      listing.showAllRows(entries.length);
       return;
     }
     const observer = new IntersectionObserver((records) => {
       if (!records.some((record) => record.isIntersecting)) return;
-      setRenderedRows(growRowCount(mountedRows, entries.length));
+      listing.growRows(entries.length);
     }, { rootMargin: "600px 0px" });
     observer.observe(sentinel);
     return () => observer.disconnect();
-  }, [entries.length, mountedRows, shownEntries.length]);
+  }, [entries.length, listing.growRows, listing.showAllRows, mountedRows, shownEntries.length]);
 
   // A folder switch changes the card's height by whole rows (six folders to an empty state is
   // over 200px), and that jump reads as a blink even when the rows fade. Resize the card along
@@ -1465,8 +1105,6 @@ export function FilesPage() {
   const canUpload =
     !pending && !loadError && !file && !notFound && !(current !== null && current.kind !== "folder");
 
-  // A rename only ever changes the last segment, so the parent stays put.
-  const parentPath = path.includes("/") ? path.slice(0, path.lastIndexOf("/")) : "";
   const hasUnfinishedUploads = (target: string) => uploads.some((task) =>
     (filePath(task.path) === filePath(target) || filePath(task.path).startsWith(`${filePath(target)}/`)) && task.status !== "completed",
   );
@@ -1500,7 +1138,7 @@ export function FilesPage() {
       // A folder that just received files has a new revision; its loaded one would answer
       // 412 for every attempt. `revisionForMutation` waits for the read-back the upload
       // scheduled, so the delete names the state the folder is actually in.
-      const revision = await revisionForMutation(target);
+      const revision = await listing.revisionForMutation(target);
       let operation: FileOperation | void;
       for (let attempt = 0; ; attempt++) {
         try {
@@ -1516,23 +1154,21 @@ export function FilesPage() {
             : t("drive.deleteBlockedByOther"));
         }
       }
-      deletionRequest.current += 1;
+      deletions.accepted();
       // The accepted delete is already the user's final answer; only the native purge
       // is still running, and it is tracked only so a failure can be reported.
       if (operation && operation.state !== "succeeded") trackFileOperation(operation, target.path);
       showToast(t("drive.deleted", { name: target.name }));
-      setDeletionStatusError(false);
+      deletions.clearStatusError();
       // Drop the row before the listing round trip; the reload then confirms it.
-      setItems((current) => current.filter((item) => target.kind === "folder"
-        ? item.path !== target.path && !item.path.startsWith(`${target.path}/`)
-        : item.path !== target.path));
+      listing.removePath(target.path, target.kind === "folder");
       cancelUpload(uploads
         .filter((task) => filePath(task.path) === target.path || filePath(task.path).startsWith(`${target.path}/`))
         .map((task) => task.id));
-      if (filePath(listingRef.current.path) === target.path) {
+      if (filePath(listing.view().path) === target.path) {
         navigate(filesHref(target.parentPath ?? "/"), { replace: true });
       } else {
-        reloadView.current();
+        listing.reload();
       }
     } catch (error) {
       if (error instanceof ApiError && error.status === 401) {
@@ -1542,7 +1178,7 @@ export function FilesPage() {
       // A 412 is the server saying the folder changed again: the next attempt must read it
       // rather than repeat the value that was just refused.
       if (error instanceof ApiError && error.status === 412 && target.kind === "folder") {
-        folderRevision.current?.tracker.invalidate();
+        listing.invalidateRevision();
       }
       // The reason has to outlive a glance: it names the upload or operation that still
       // holds this path, and the item it refers to is still on screen behind the toast.
@@ -1567,92 +1203,23 @@ export function FilesPage() {
 
   const startRename = () => {
     setMenuOpen(false);
-    setRenameName(currentName);
-    setRenaming(true);
+    rename.start(currentName);
   };
 
-  const cancelRename = () => {
-    setRenaming(false);
-    setRenameName("");
-  };
-
-  const clearRenameTimer = () => {
-    if (renameTimer.current) window.clearTimeout(renameTimer.current);
-    renameTimer.current = null;
-  };
-
-  const finishRename = (to: string) => {
-    clearRenameTimer();
-    setRenameJob(null);
-    cancelRename();
-    showToast(t("drive.renamed", { name: to.split("/").pop() ?? to }));
-    // The path is the identity: the new URL reloads the listing through the route effect.
-    navigate(filesHref(to), { replace: true });
-  };
-
-  const failRename = (message: string) => {
-    clearRenameTimer();
-    setRenameJob(null);
-    showToast(message, "error");
-  };
-
-  /** Poll the common Operation until the native rename settles. */
-  const pollRename = (id: string, to: string) => {
-    const tick = async () => {
-      try {
-        const job = await api.getOperation(id);
-        setRenameJob(job);
-        if (job.state === "succeeded") {
-          finishRename(to);
-          return;
-        }
-        if (job.state === "failed" || job.state === "cancelled") {
-          failRename(job.error?.detail || t("drive.renameFailed"));
-          return;
-        }
-        renameTimer.current = window.setTimeout(tick, 1200);
-      } catch (error) {
-        failRename(error instanceof Error ? error.message : t("drive.renameFailed"));
-      }
-    };
-    renameTimer.current = window.setTimeout(tick, 600);
-  };
-
-  const applyRename = async () => {
-    const name = renameName;
+  const createFolder = async () => {
+    const name = newName;
     if (!name) {
-      cancelRename();
+      setCreating(false);
       return;
     }
-    const from = path;
-    const to = joinPath(parentPath, name);
-    setRenaming(false);
-    if (to === from) return;
     try {
-      if (!current) return;
-      // The same stale revision a delete would send: renaming after an upload into this
-      // folder must name its current state, not the one the page loaded with.
-      const result = await api.move(from, to, await revisionForMutation(current));
-      if (!isFileOperation(result) || result.state === "succeeded") {
-        finishRename(to);
-        return;
-      }
-      if (result.state === "failed" || result.state === "cancelled") {
-        failRename(result.error?.detail || t("drive.renameFailed"));
-        return;
-      }
-      setRenameJob(result);
-      pollRename(result.id, to);
+      const result = await api.mkdir(joinPath(path, name));
+      if (isFileOperation(result)) await waitForOperation(result);
+      setCreating(false);
+      setNewName("");
+      await listing.load(path);
     } catch (error) {
-      if (error instanceof ApiError && error.operationId) pollRename(error.operationId, to);
-      else {
-        // The folder changed between the read and the rename: re-read it before the
-        // person's next attempt instead of repeating the refused revision.
-        if (error instanceof ApiError && error.status === 412 && current?.kind === "folder") {
-          folderRevision.current?.tracker.invalidate();
-        }
-        failRename(error instanceof Error ? error.message : t("drive.renameFailed"));
-      }
+      showToast(error instanceof Error ? error.message : t("error.saveFailed"), "error");
     }
   };
 
@@ -1780,18 +1347,18 @@ export function FilesPage() {
                         >
                           {crumbName(crumb)}
                         </Link>
-                      ) : renaming ? (
+                      ) : rename.editing ? (
                         <input
                           ref={renameInput}
                           className={styles.renameInput}
-                          value={renameName}
+                          value={rename.name}
                           aria-label={t("drive.renamePlaceholder")}
                           placeholder={t("drive.renamePlaceholder")}
-                          onChange={(event) => setRenameName(event.target.value)}
-                          onBlur={cancelRename}
+                          onChange={(event) => rename.setName(event.target.value)}
+                          onBlur={rename.cancel}
                           onKeyDown={(event) => {
-                            if (event.key === "Enter") void applyRename();
-                            if (event.key === "Escape") cancelRename();
+                            if (event.key === "Enter") rename.submit();
+                            if (event.key === "Escape") rename.cancel();
                           }}
                         />
                       ) : (
@@ -1854,7 +1421,7 @@ export function FilesPage() {
                               className={styles.menuItem}
                               role="menuitem"
                               onClick={startRename}
-                              disabled={Boolean(renameJob)}
+                              disabled={Boolean(rename.job)}
                             >
                               <PencilIcon size={14} />
                               {t("drive.rename")}
@@ -1865,10 +1432,10 @@ export function FilesPage() {
                               <button
                                 className={styles.menuItem}
                                 role="menuitem"
-                                disabled={Boolean(renameJob)}
+                                disabled={Boolean(rename.job)}
                                 onClick={() => {
                                   setMenuOpen(false);
-                                  setTransfer({ mode: "move", item: current });
+                                  transfer.open("move", current);
                                 }}
                               >
                                 <FolderIcon size={14} />
@@ -1877,10 +1444,10 @@ export function FilesPage() {
                               <button
                                 className={styles.menuItem}
                                 role="menuitem"
-                                disabled={Boolean(renameJob)}
+                                disabled={Boolean(rename.job)}
                                 onClick={() => {
                                   setMenuOpen(false);
-                                  setTransfer({ mode: "copy", item: current });
+                                  transfer.open("copy", current);
                                 }}
                               >
                                 <CopyIcon size={14} />
@@ -1893,7 +1460,7 @@ export function FilesPage() {
                               className={`${styles.menuItem} ${styles.deleteBtn}`}
                               role="menuitem"
                               onClick={() => startDelete(current)}
-                              disabled={Boolean(renameJob) || deleteBlocked}
+                              disabled={Boolean(rename.job) || deleteBlocked}
                               title={deleteBlocked ? t("drive.deleteUploadBlocked") : undefined}
                             >
                               <TrashIcon size={14} />
@@ -1909,7 +1476,7 @@ export function FilesPage() {
             )}
 
             {activeQuery && (
-              <button className={styles.clearLink} onClick={() => void load(path)}>
+              <button className={styles.clearLink} onClick={() => void listing.load(path)}>
                 {t("drive.clear")}
               </button>
             )}
@@ -1928,18 +1495,18 @@ export function FilesPage() {
                   aria-label={t("drive.searchPlaceholder")}
                   value={query}
                   onChange={(event) => {
-                    setQuery(event.target.value);
-                    if (!event.target.value && activeQuery) void load(path);
+                    listing.setSearchText(event.target.value);
+                    if (!event.target.value && activeQuery) void listing.load(path);
                   }}
                   onBlur={() => {
                     if (!query) setSearchOpen(false);
                   }}
                   onKeyDown={(event) => {
-                    if (event.key === "Enter") void runSearch(query);
+                    if (event.key === "Enter") listing.search(query);
                     if (event.key === "Escape") {
                       setSearchOpen(false);
-                      setQuery("");
-                      if (activeQuery) void load(path);
+                      listing.setSearchText("");
+                      if (activeQuery) void listing.load(path);
                       event.currentTarget.blur();
                     }
                   }}
@@ -2006,14 +1573,14 @@ export function FilesPage() {
           </div>
         </div>
 
-        {renameJob && (
+        {rename.job && (
           <div className={styles.jobRow} role="status">
             <span className={styles.jobLabel}>
               {t("drive.renaming", { name: currentName })}
             </span>
-            {(renameJob.progress.total ?? 0) > 0 && (
+            {(rename.job.progress.total ?? 0) > 0 && (
               <span className={styles.jobCount}>
-                {renameJob.progress.completed} / {renameJob.progress.total}
+                {rename.job.progress.completed} / {rename.job.progress.total}
               </span>
             )}
             <span className={styles.jobBar}>
@@ -2021,7 +1588,7 @@ export function FilesPage() {
                 className={styles.jobBarFill}
                 style={{
                   width: `${
-                    (renameJob.progress.total ?? 0) > 0 ? Math.round((renameJob.progress.completed / (renameJob.progress.total || 1)) * 100) : 0
+                    (rename.job.progress.total ?? 0) > 0 ? Math.round((rename.job.progress.completed / (rename.job.progress.total || 1)) * 100) : 0
                   }%`,
                 }}
               />
@@ -2034,7 +1601,7 @@ export function FilesPage() {
             <div className={styles.empty}>
               <span className={styles.emptyTitle}>{t("error.loadFailed")}</span>
               <span className={styles.emptyText}>{loadError}</span>
-              <button className={styles.secondaryBtn} onClick={() => void load(path)}>
+              <button className={styles.secondaryBtn} onClick={() => void listing.load(path)}>
                 {t("common.retry")}
               </button>
             </div>
@@ -2048,7 +1615,7 @@ export function FilesPage() {
             <FileDetail
               file={file}
               onDelete={() => startDelete(file)}
-              deleteDisabled={pending || Boolean(renameJob) || deleteBlocked
+              deleteDisabled={pending || Boolean(rename.job) || deleteBlocked
                 || deletingPaths.includes(file.path)}
               deleteHint={deleteBlocked ? t("drive.deleteUploadBlocked")
                 : deletingPaths.includes(file.path) ? t("drive.deletingNow") : undefined}
@@ -2197,16 +1764,16 @@ export function FilesPage() {
         </div>
       )}
 
-      {transfer && (
+      {transfer.transfer && (
         <TransferDialog
-          key={`${transfer.mode}:${transfer.item.path}`}
-          mode={transfer.mode}
-          item={transfer.item}
-          progress={transferProgress}
-          cancelling={transferCancelling}
-          onCancel={() => setTransfer(null)}
-          onCancelOperation={() => void cancelTransfer()}
-          onConfirm={(destination) => applyTransfer(transfer.mode, transfer.item, destination)}
+          key={`${transfer.transfer.mode}:${transfer.transfer.item.path}`}
+          mode={transfer.transfer.mode}
+          item={transfer.transfer.item}
+          progress={transfer.progress}
+          cancelling={transfer.cancelling}
+          onCancel={() => transfer.close()}
+          onCancelOperation={() => void transfer.cancel()}
+          onConfirm={(destination) => transfer.confirm(destination)}
         />
       )}
 
