@@ -119,8 +119,8 @@ func browseBuffers(t *testing.T, ctx context.Context, db *store.DB, owner, hidde
 		roots = []string{hidden}
 	}
 	var raw []byte
-	sql := `explain (analyze, buffers, format json) ` + browseHidden + browseUsageQuery
-	if err := db.Pool().QueryRow(ctx, sql, owner, "", roots, EscapeLike("")+"/%").Scan(&raw); err != nil {
+	sql := `explain (analyze, buffers, format json) ` + browseUsageHidden + browseUsageQuery
+	if err := db.Pool().QueryRow(ctx, sql, owner, roots).Scan(&raw); err != nil {
 		t.Fatalf("explain usage: %v", err)
 	}
 	var explained []struct {

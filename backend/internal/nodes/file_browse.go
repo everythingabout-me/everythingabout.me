@@ -106,11 +106,13 @@ const browseColumns = nodeColumns + `,
 const browsePathVisible = `not exists(select 1 from unnest($3::text[]) hidden(root)
  where file_identity_comparison(nodes.path,` + browseVersion + `)=file_identity_comparison(hidden.root,` + browseVersion + `) or starts_with(file_identity_comparison(nodes.path,` + browseVersion + `),file_identity_comparison(hidden.root,` + browseVersion + `)||'/'))`
 
-// browseHidden resolves the pending-delete roots to the index rows they name (one
+// browseHiddenCTE resolves the pending-delete roots to the index rows they name (one
 // file_tree_resolve per root, an index probe per path segment) and walks down the
-// canonical parent link to every descendant. $1 must be the owner and $3 the
-// root-relative root list, which is the parameter layout every browse query already
-// uses for those two values.
+// canonical parent link to every descendant. $1 is always the owner; roots names the
+// parameter position carrying the root-relative root list, and gate is spliced between
+// the seed and the walk. The browse queries take the roots at $3; usage takes them at $2
+// because its next parameter is the scope path. Both call the same builder so the walk
+// cannot drift between layouts.
 //
 // Why whole-owner reads cannot use browsePathVisible: file_entries.path is derived per
 // row by file_tree_path(), a walk up the ancestry, so comparing it cannot use an index
@@ -132,29 +134,34 @@ const browsePathVisible = `not exists(select 1 from unnest($3::text[]) hidden(ro
 // gone) conceals nothing, which is what index absence already meant. An empty root is
 // skipped: "" is the relative spelling of the root, whose subtree is the whole drive, and
 // callers never pass it (the overlay filters it).
-const browseHiddenSeed = `select resolve.id from unnest($3::text[]) root
-   cross join lateral (select file_tree_resolve($1::uuid, root) as id) resolve
-  where root<>'' and resolve.id is not null`
-const browseHiddenWalk = ` union
+func browseHiddenCTE(roots, gate string) string {
+	return `with recursive hidden(id) as (
+ select resolve.id from unnest(` + roots + `::text[]) root
+  cross join lateral (select file_tree_resolve($1::uuid, root) as id) resolve
+ where root<>'' and resolve.id is not null` + gate + `
+ union
  select child.id from nodes child join hidden on child.parent_id=hidden.id
-  where child.owner_id=$1::uuid
-) `
-const browseHidden = `with recursive hidden(id) as (
- ` + browseHiddenSeed + browseHiddenWalk
+  where child.owner_id=$1::uuid) `
+}
+
+var browseHidden = browseHiddenCTE("$3", "")
+
 const browseVisible = `nodes.id not in (select id from hidden)`
 
 // A list is anchored to one folder, so the identity walk would charge it for the whole
 // pending subtree while its candidates are only that folder's members; it keeps the path
 // predicate. A search ($5 false) walks the owner's entries and needs the set. The seed is
 // gated the same way so a list builds no hidden set at all.
-const browsePageHidden = `with recursive hidden(id) as (
- ` + browseHiddenSeed + ` and not $5` + browseHiddenWalk
+var browsePageHidden = browseHiddenCTE("$3", " and not $5")
+
 const browsePageVisible = `(($5::bool and ` + browsePathVisible + `) or (not $5 and ` + browseVisible + `))`
 
-// The reads below share the $1=owner, $3=hidden-root parameter layout. They are package
-// constants rather than inline strings so a test can EXPLAIN exactly what production runs,
-// which is what keeps a regression to a per-row path predicate visible (see
-// TestPendingDeleteConcealmentIsBoundedByTheDeletedSubtree).
+// The reads below share the $1=owner layout. They are package-level strings so a test can
+// EXPLAIN exactly what production runs, which is what keeps a regression to a per-row
+// path predicate visible (see TestPendingDeleteConcealmentIsBoundedByTheDeletedSubtree).
+// Metadata and the page keep the pending-delete roots at $3; usage passes them at $2 and
+// (for a subfolder scope) resolves the anchor from $3, so its statements are prefixed
+// with browseUsageHidden instead.
 const browseMetadataQuery = `select ` + browseColumns + ` from file_entries nodes where owner_id=$1::uuid and id=file_tree_resolve($1::uuid,$4) and ` + browsePathVisible + ` limit 2`
 
 const browsePageQuery = `select ` + browseColumns + ` from file_entries nodes
@@ -171,9 +178,42 @@ const browsePageQuery = `select ` + browseColumns + ` from file_entries nodes
  order by case when is_dir then 0 else 1 end,normalize(name,NFC) collate "C",normalize(path,NFC) collate "C"
  limit $14`
 
+// Usage takes the pending-delete roots at $2 (its handle queries have no namespace
+// parameter), so both statements below are prefixed with this CTE instead of browseHidden.
+var browseUsageHidden = browseHiddenCTE("$2", "")
+
+// browseUsageQuery is the whole-owner usage read: "/" means the owner's drive, so this
+// read scans every entry by definition and only the pending-delete set narrows it.
 const browseUsageQuery = `select coalesce(sum(size),0),count(*) from file_entries nodes where owner_id=$1::uuid and not is_dir
- and ($2='' or file_identity_comparison(path,` + browseVersion + `)=file_identity_comparison($2,` + browseVersion + `) or file_identity_comparison(path,` + browseVersion + `) like file_identity_comparison($4,` + browseVersion + `))
  and ` + browseVisible
+
+// browseUsageScopeQuery sums exactly one resolved subtree, by walking the canonical parent
+// link from the scope anchor at $3 and carrying size/is_dir along the walk. It never reads
+// the owner's other entries.
+//
+// Why not keep the path predicate: file_entries.path is derived per row by
+// file_tree_path(), so comparing it cannot use an index and pays ancestry walks for every
+// entry of the owner. On a seeded 50k-entry owner, GET /api/files/me?path=/f0000 (25
+// files) scanned 50,000 rows in 1,620ms and 1,181,208 shared buffer hits; the anchored
+// walk visits the 26 rows of the subtree in 0.8ms and 115 buffers. The walk uses
+// nodes_pkey for the anchor and nodes_owner_parent_comparison_uniq(owner_id, parent_id)
+// for the children, so no index is added and no write pays for it.
+//
+// The semantics are the path predicate's, expressed in identity: file_tree_resolve
+// applies the owner's name comparison, so the anchor is the same row a path match would
+// select, and the parent link is the identity the unique sibling index uses. A file scope
+// counts that file (the anchor is included and `not is_dir` decides), a missing anchor
+// counts nothing, and the pending-delete set is applied per row exactly as for the
+// whole-owner read. A row whose canonical ancestry is broken is not in the tree either,
+// and the cached path that let the old predicate match it was never authoritative.
+const browseUsageScopeQuery = `, scope(id,size,is_dir) as (
+ select nodes.id,nodes.size,nodes.is_dir from nodes
+  where nodes.owner_id=$1::uuid and nodes.id=file_tree_resolve($1::uuid,$3)
+ union all
+ select child.id,child.size,child.is_dir from nodes child join scope on child.parent_id=scope.id
+  where child.owner_id=$1::uuid)
+select coalesce(sum(size),0),count(*) from scope
+ where not is_dir and id not in (select id from hidden)`
 
 type browseScanRow struct {
 	pgx.Row
@@ -255,6 +295,10 @@ func keywordPattern(keyword string) string {
 	return "%" + EscapeLike(strings.ToLower(norm.NFC.String(keyword))) + "%"
 }
 func (s *Service) FileBrowseUsage(ctx context.Context, owner, path string, hiddenRoots ...string) (bytes, files int64, err error) {
-	err = s.db.Pool().QueryRow(ctx, browseHidden+browseUsageQuery, owner, path, hiddenRoots, EscapeLike(norm.NFC.String(path))+"/%").Scan(&bytes, &files)
+	if path == "" {
+		err = s.db.Pool().QueryRow(ctx, browseUsageHidden+browseUsageQuery, owner, hiddenRoots).Scan(&bytes, &files)
+		return
+	}
+	err = s.db.Pool().QueryRow(ctx, browseUsageHidden+browseUsageScopeQuery, owner, hiddenRoots, path).Scan(&bytes, &files)
 	return
 }

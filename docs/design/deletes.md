@@ -223,9 +223,9 @@ when it stopped between allocating and committing, and the folder holding them a
       `file_entries.path` is derived per row by `file_tree_path()`, so that predicate cannot use an
       index: it paid two ancestry walks for every entry a whole-owner read scanned. On a 50k-entry
       owner with one 99-entry pending delete, `GET /api/files/me` scanned 49,500 rows in 1,223ms and
-      1,487,973 buffer hits, and the recursive change snapshot took 2,908ms. The reads that scan the
-      owner's entries (`usage`, `search`, recursive snapshot) now resolve each captured root to its
-      index row with `file_tree_resolve` and walk down the canonical parent link once per query —
+      1,487,973 buffer hits, and the recursive change snapshot took 2,908ms. The reads that scanned
+      the owner's entries (`/` usage, `search`, recursive snapshot) now resolve each captured root to
+      its index row with `file_tree_resolve` and walk down the canonical parent link once per query —
       100 rows here, the subtree being deleted — then ask a set-membership question per candidate
       row (`nodes.id not in (select id from hidden)`): the same reads cost 6ms/3,188 buffers and
       1,654ms. The walk uses `nodes_owner_parent_comparison_uniq(owner_id, parent_id)`, so no index
@@ -238,6 +238,20 @@ when it stopped between allocating and committing, and the folder holding them a
       index no longer resolves conceals nothing, which is what index absence already meant. The
       change feed and the native overlay were already bounded — by the cursor's change window and by
       the native page — and are untouched.
+
+      Usage had a second, independent whole-owner scan in its *scope* predicate: it compared the
+      derived path per row (`path = scope or starts_with(path, scope||'/')`), so
+      `GET /api/files/me?path=/f0000` scanned all 50,000 files of the seeded owner to sum the 25
+      under that folder, with no deletion involved: 50,000 rows, 1,181,208 buffer hits and 1,620ms.
+      A subfolder scope now resolves its anchor with `file_tree_resolve` and carries `size`/`is_dir`
+      down the same canonical-parent walk, so it visits exactly the subtree: 26 rows, 115 buffers
+      and 0.8ms. `/` is the whole owner by definition and keeps the owner scan, narrowed only by the
+      concealment set. The semantics stay the predicate's, expressed in identity: the anchor is
+      resolved with the owner's name comparison (an NFD spelling reaches the NFC row), a file scope
+      counts that file, a missing anchor counts nothing, and a path re-created after a delete is a
+      new id outside any captured root. `TestFileBrowseUsageScopeIsBoundedByTheSubtree` bounds the
+      rows any `nodes` scan may visit for a subfolder scope, so a return to the path predicate fails
+      whichever scan operator the planner picks.
 - [ ] Tombstone object (`__eam_system__/<owner>/tombstones/<operation>`) so a rebuild after index loss does not
       resurrect a half-purged delete. Same predicate as the worker; the tombstone is the durable copy.
 - [ ] `move`/`copy` keep the frozen manifest: their effects are conditional on both endpoints and a re-walk
