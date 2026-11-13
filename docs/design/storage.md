@@ -391,7 +391,9 @@ recorded; incomplete completion telemetry is explicit and never proof of client 
 
 Rows have a 90-day change expiry and an explicit file-changes-prune CLI that removes only an expired
 contiguous feed prefix while retaining effect receipts. No automatic retention scheduler is wired. Audit
-history currently remains indefinitely; no 365-day deletion policy is implemented. Scan/import records external creations and updates; `--sync` additionally removes index entries the
+history has no default cutoff either: `eam file-audit-prune --owner-id UUID --before DATE [--dry-run]` deletes
+only rows observed strictly before an explicit cutoff (recommended: one year; see
+[the retention rule](file-changes.md#retention)). Scan/import records external creations and updates; `--sync` additionally removes index entries the
 native tree no longer has, writing one audit record and one deleted change fact per removal; it never guesses
 rename continuity, and unchanged scans emit no facts. Audit export/automatic retention, external deletion repair,
 native watcher health and external-writer budget resynchronization remain separate work. Full contracts and

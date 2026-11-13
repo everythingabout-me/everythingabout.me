@@ -237,8 +237,33 @@ authentication failures use bounded platform logs rather than fabricated account
 
 No tokens, cookies, passwords, file bodies, raw search text, signed transfer URLs, request headers or raw
 provider error payloads belong in audit records. The older audit_log/account activity path still handles
-Connect/account/event activity; it is separate from the new file_audit owner collection. There is no claimed
-365-day audit deletion scheduler, tamper-proof compliance, publisher verification or complete audit export.
+Connect/account/event activity; it is separate from the new file_audit owner collection. There is no
+tamper-proof compliance, publisher verification or complete audit export claim.
+
+### Retention
+
+`file_audit` answers one owner's question — who touched my files, under which credential, was it allowed,
+and did it complete — and only that owner can read it (`GET /api/audit` with a cookie session; no app or
+file-read grant authorizes it). It is also the only durable record of reads and denials: the change feed has
+no row for a denied read, and the operation journal is pruned on its own window. That is why its retention
+is an explicit operator decision, never a constant in the binary:
+
+```bash
+eam file-audit-prune --owner-id UUID --before 2025-11-13 --dry-run
+eam file-audit-prune --owner-id UUID --before 2025-11-13T00:00:00Z
+```
+
+`--before` accepts a `YYYY-MM-DD` UTC date or an RFC 3339 timestamp; the command echoes the resolved instant
+in UTC. Rows observed strictly before it are deleted, rows exactly at it and every newer row stay, so a
+second run with the same cutoff is a no-op. A dry run reports the same count and writes nothing. Batches of
+1000 rows run in their own transactions under the existing `(owner_id, observed_at desc, id desc)` index, so
+an interrupted run loses at most the batch in flight and no second index is needed. There is deliberately no
+default cutoff: upgrading must not start deleting audit rows.
+
+Recommended cutoff: `now - 365 days`. The reader is a recent-first page without filters or export, so its
+practical horizon is months, not years; a year still covers an ordinary annual review while bounding the
+table to one year of request volume. A shorter window is the operator's policy call with the same command;
+what it gives up is the sole account of who was refused access and which sync removed an entry.
 
 ## 8. Persistence, observation and remaining work
 
@@ -262,9 +287,10 @@ eam file-changes-prune --owner-id UUID
 
 Dry-run rolls back the maintenance transaction. There is no automatic maintenance scheduler; operators must
 schedule/monitor the explicit command. Ninety days is the row lifetime, not an automatic disk-reclamation SLA.
-Pruning does not delete audit history, reset identity or remove unexpired feed rows. File audit currently
-retains history indefinitely; no 365-day retention/deletion guarantee is implemented. Feed resumes below the
-retained floor or with an expired epoch return 410 cursor_expired. Snapshot expiry is 410 snapshot_expired.
+Pruning does not delete audit history, reset identity or remove unexpired feed rows. Audit history is kept
+until an explicit `eam file-audit-prune --owner-id UUID --before DATE` (see [Retention](#retention)); there
+is no scheduler and no default window. Feed resumes below the retained floor or with an expired epoch return
+410 cursor_expired. Snapshot expiry is 410 snapshot_expired.
 
 ### The timeline is an internal consumer
 

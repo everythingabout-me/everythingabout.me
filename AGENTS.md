@@ -232,7 +232,10 @@ while its tests were skipping. CI (`.github/workflows/test.yml`) runs `make migr
   PolicyVersion advances on actual policy edits/revoke, never name-only edits. SSE wakeups do not acknowledge
   consumer progress. Webhooks are deferred. GET /api/audit requires owner cookie, not app permissions.
   Default change-row expiry is 90 days; file-changes-prune removes only expired contiguous feed rows and
-  retains dedup receipts. No automatic scheduler is wired; file audit currently remains indefinitely.
+  retains dedup receipts. No automatic scheduler is wired. File audit is retained until an operator runs
+  `eam file-audit-prune --owner-id UUID --before DATE [--dry-run]`; there is no default cutoff, because only
+  audit keeps read/denial evidence and a settled effect's actor, and the recommended one-year window is a
+  policy choice (docs/design/file-changes.md §7).
 - Migration 032 binds the change stream's root namespace on first use only. Configuration selects the root: a
   bucket, region, prefix or generation change is adopted at startup (re-probe write capability, rebind the owner
   budget, rotate the change-stream namespace, log all three), because the native tree is authoritative and the

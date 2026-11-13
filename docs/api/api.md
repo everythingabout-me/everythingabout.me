@@ -1252,8 +1252,11 @@ when persistence fails. Confirmed mutation effects record audit transactionally 
 success when database settlement fails. Completion bytesWritten counts bytes accepted by the server writer,
 not proof of delivery. A crash can leave admission without completion. Known-owner denials are recorded;
 unknown-owner authentication failures go to platform logs. Never store secrets, bodies, raw search text, signed
-URLs or raw provider errors. Audit history currently remains indefinitely; no 365-day deletion scheduler, audit-retention deletion SLA
-or tamper-proof compliance claim is provided.
+URLs or raw provider errors. Audit history has no automatic deletion scheduler and no default retention
+window; an operator bounds it explicitly with `eam file-audit-prune --owner-id UUID --before DATE [--dry-run]`,
+whose recommended cutoff is one year (see [the retention rule](../design/file-changes.md#retention)). Rows
+observed before the cutoff stop being returned by this endpoint. There is no audit-retention deletion SLA or
+tamper-proof compliance claim.
 
 Connect/account/event APIs retain their existing envelopes and session-only management boundary. POST
 /api/connect/tokens and PATCH /api/connect/tokens/{id} accept explicit changes/subscribe booleans alongside

@@ -515,6 +515,7 @@ go run ./cmd/eam reconcile --owner … [--inventory …] [--dry-run]
 go run ./cmd/eam storage-resolve-upload --operation-id … [--dry-run]  # operator fallback: release a discarded upload whose abort answer was lost
 go run ./cmd/eam storage-ledger-prune --owner-id UUID [--dry-run]  # reclaim expired settled intent records; non-terminal records stay
 go run ./cmd/eam file-changes-prune --owner-id UUID [--dry-run]
+go run ./cmd/eam file-audit-prune --owner-id UUID --before DATE [--dry-run]  # delete audit rows older than an explicit cutoff
 go run ./cmd/eam file-operations-prune --owner-id UUID [--dry-run]  # delete terminal operations past retention; referenced or live ones stay
 go run ./cmd/eam file-changes-reset --owner-id UUID --writers-quiesced [--dry-run]
 go run ./cmd/eam claim --email … [--dry-run] [--keep-source]
@@ -530,7 +531,10 @@ disagree with its document is repaired and kept rather than deleted.
 Intent-ledger pruning removes only records whose operation already settled and whose 24-hour retention has
 passed; a non-terminal record is never removed, because its native effect may still land. Admission needs no
 empty spool, so a lost-index rebuild does not depend on this command or on hand-deleting driver evidence.
-No automatic scheduler is wired. Change audit remains indefinitely; no 365-day deletion promise is made.
+No automatic scheduler is wired. File audit has no default cutoff either: `file-audit-prune` deletes only
+rows observed strictly before an explicit `--before`, because the audit is the only durable record of denied
+and completed reads and of a settled effect's actor. The recommended window is one year; see
+[the retention rule](docs/design/file-changes.md#retention).
 Migration 032 binds each stream to one durable root/configuration namespace on first use; later mismatches
 reject access rather than silently rebind. After database restore or any root rebind, including A → B → A,
 stop application/external writers and settle accepted work before file-changes-reset. It refuses remaining
