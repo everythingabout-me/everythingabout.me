@@ -27,8 +27,9 @@ func TestSQLComparisonMatchesReference(t *testing.T) {
 }
 
 // TestSQLIndexCollision proves the uniqueness index merges the four divergent
-// pairs: inserting the second spelling as a sibling fails with 23505 even
-// though the Go fence and token scope treat it as a different name.
+// pairs: inserting the second spelling as a sibling fails with 23505. The Go
+// fence and scope checks now compute the same key, so this is the contract both
+// sides must keep, not a divergence the fence has to be told about.
 func TestSQLIndexCollision(t *testing.T) {
 	db, ctx := observationTestDB(t)
 	pool := db.Pool()
