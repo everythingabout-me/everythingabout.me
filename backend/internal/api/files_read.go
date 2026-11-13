@@ -310,11 +310,17 @@ func (s *Server) handleFilesMe(w http.ResponseWriter, r *http.Request, f *fileRe
 		return err
 	}
 	quota, reservations := filesUsageFields(accounting, f.Scope == "/")
-	result := map[string]any{"principal": map[string]any{"kind": kind}, "scope": map[string]any{"path": f.Scope}, "read": true, "write": ready, "usage": map[string]any{"bytes": bytes, "files": files, "indexed": true}, "quota": quota, "reservations": reservations}
-	result["changes"] = f.Principal.Token == nil || f.Principal.Token.CanChanges
-	result["subscribe"] = f.Principal.Token == nil || (f.Principal.Token.CanChanges && f.Principal.Token.CanSubscribe)
-	if f.CSRFToken != "" {
-		result["csrfToken"] = f.CSRFToken
+	result := filesPrincipalResource{
+		Principal:    filesPrincipalKind{Kind: kind},
+		Scope:        filesPrincipalScope{Path: f.Scope},
+		Read:         true,
+		Write:        ready,
+		Changes:      f.Principal.Token == nil || f.Principal.Token.CanChanges,
+		Subscribe:    f.Principal.Token == nil || (f.Principal.Token.CanChanges && f.Principal.Token.CanSubscribe),
+		Usage:        filesPrincipalUsage{Bytes: bytes, Files: files, Indexed: true},
+		Quota:        quota,
+		Reservations: reservations,
+		CSRFToken:    f.CSRFToken,
 	}
 	return writeFilesJSON(w, 200, result)
 }
@@ -359,9 +365,10 @@ func (s *Server) handleFilesCapabilities(w http.ResponseWriter, r *http.Request,
 		}
 		checksums = []string{"sha-256"}
 	}
-	var retention any
+	var retention *int64
 	if ready {
-		retention = 86400
+		value := int64(86400)
+		retention = &value
 	}
 	uploadsReady := ready
 	if class == storage.TransferPresignedParts {
@@ -371,29 +378,46 @@ func (s *Server) handleFilesCapabilities(w http.ResponseWriter, r *http.Request,
 	} else if numbered, ok := f.Driver.(storage.NumberedUploadWriter); ok && numbered.UploadMaxFileBytes() == 0 {
 		uploadsReady = false
 	}
-	var partBytes, idleExpiry, maxLifetime any
+	var partBytes, idleExpiry, maxLifetime *int64
 	if uploadsReady {
-		partBytes, idleExpiry, maxLifetime = filesUploadPartSize, 86400, 604800
+		partSize, idle, lifetime := filesUploadPartSize, int64(86400), int64(604800)
+		partBytes, idleExpiry, maxLifetime = &partSize, &idle, &lifetime
 		if native, ok := filesUnderlyingDriver(f.Driver).(fileops.NativeActions); ok {
 			n := filesUploadMaxSize(native)
 			maxFile = &n
 		}
 	}
 	quota, reservations := filesUsageFields(usage, f.Scope == "/" && actual == "/")
-	return writeFilesJSON(w, 200, map[string]any{
-		"identity":       map[string]any{"id": true, "path": true, "uniquePaths": true},
-		"changeTracking": map[string]any{"available": true, "read": f.Principal.Token == nil || f.Principal.Token.CanChanges, "subscribe": f.Principal.Token == nil || (f.Principal.Token.CanChanges && f.Principal.Token.CanSubscribe), "delivery": []string{"sse"}, "retentionSeconds": int64(90 * 24 * 60 * 60), "subscriptionLifetimeSeconds": int64(7 * 24 * 60 * 60), "snapshotLifetimeSeconds": int64(24 * 60 * 60), "snapshotMaxEntries": 100000, "snapshotMaxBytes": int64(64 << 20), "observation": "indexed", "externalChanges": "explicit-reconcile"},
-		"path":           actual, "read": true, "write": ready, "range": d.RangeRead, "pinnedRead": d.PinnedRead, "strongContentValidators": d.PinnedRead,
-		"transferClass": s.filesTransferClassLabel(), "transferKind": s.filesTransferKind(), "transferClasses": d.TransferClasses,
-		"atomicCreate": d.AtomicCreate, "downloads": downloadsReady,
-		"thumbnails": false, "uploads": uploadsReady, "checksums": checksums, "sourceModifiedAt": ready && s.cfg.BackendName() == "local",
-		"maxFileBytes": maxFile, "maxSinglePutBytes": singlePut, "maxPartBytes": partBytes,
-		"pagination": map[string]any{"defaultLimit": filesDefaultLimit, "maxLimit": filesMaxLimit},
+	principal := f.Principal
+	changesRead := principal.Token == nil || principal.Token.CanChanges
+	subscribeRead := principal.Token == nil || (principal.Token.CanChanges && principal.Token.CanSubscribe)
+	return writeFilesJSON(w, 200, filesCapabilitiesResource{
+		Identity: filesIdentityCapabilities{ID: true, Path: true, UniquePaths: true},
+		ChangeTracking: filesChangeTrackingCapabilities{
+			Available: true, Read: changesRead, Subscribe: subscribeRead,
+			Delivery:                    []string{"sse"},
+			RetentionSeconds:            int64(90 * 24 * 60 * 60),
+			SubscriptionLifetimeSeconds: int64(7 * 24 * 60 * 60),
+			SnapshotLifetimeSeconds:     int64(24 * 60 * 60),
+			SnapshotMaxEntries:          100000,
+			SnapshotMaxBytes:            int64(64 << 20),
+			Observation:                 "indexed",
+			ExternalChanges:             "explicit-reconcile",
+		},
+		Path: actual, Read: true, Write: ready,
+		Range: d.RangeRead, PinnedRead: d.PinnedRead, StrongContentValidators: d.PinnedRead,
+		TransferClass: s.filesTransferClassLabel(), TransferKind: s.filesTransferKind(), TransferClasses: d.TransferClasses,
+		AtomicCreate: d.AtomicCreate, Downloads: downloadsReady,
+		Thumbnails: false, Uploads: uploadsReady, Checksums: checksums, SourceModifiedAt: ready && s.cfg.BackendName() == "local",
+		MaxFileBytes: maxFile, MaxSinglePutBytes: singlePut, MaxPartBytes: partBytes,
+		Pagination: filesPaginationCapabilities{DefaultLimit: filesDefaultLimit, MaxLimit: filesMaxLimit},
 		// The budget a bulk client has to stay under, so an importer can pace itself instead
 		// of discovering it from 429s. See filesRatePerMinute for why it is this large.
-		"rateLimit":            map[string]any{"perMinute": filesRatePerMinute},
-		"names":                map[string]any{"caseSensitive": d.Names.CaseSensitive, "maxSegmentBytes": d.Names.MaxSegmentBytes, "maxPathBytes": d.Names.MaxPathBytes, "maxDepth": d.Names.MaxDepth},
-		"sessionExpirySeconds": idleExpiry, "sessionMaxLifetimeSeconds": maxLifetime, "maxUploadParts": filesUploadMaxParts, "terminalRetentionSeconds": retention, "quota": quota, "reservations": reservations,
+		RateLimit:            filesRateLimitCapabilities{PerMinute: filesRatePerMinute},
+		Names:                filesNameCapabilities{CaseSensitive: d.Names.CaseSensitive, MaxSegmentBytes: d.Names.MaxSegmentBytes, MaxPathBytes: d.Names.MaxPathBytes, MaxDepth: d.Names.MaxDepth},
+		SessionExpirySeconds: idleExpiry, SessionMaxLifetimeSeconds: maxLifetime,
+		MaxUploadParts: filesUploadMaxParts, TerminalRetentionSeconds: retention,
+		Quota: quota, Reservations: reservations,
 	})
 }
 

@@ -43,7 +43,7 @@ func downloadGrantFixture(t *testing.T, key string) (*grantingReferenceDriver, *
 	return d, s, f
 }
 
-func runDownloadGrant(t *testing.T, s *Server, f *fileRequest) (map[string]any, error) {
+func runDownloadGrant(t *testing.T, s *Server, f *fileRequest) (*filesDownloadGrantResource, error) {
 	t.Helper()
 	r := httptest.NewRequest(http.MethodPost, "/api/files/downloads", nil)
 	item, _, _, err := s.filesDownloadGrant(r, f, fc.EntrySelector{Path: "/file"}, "attachment", storage.TransferPresignedParts, time.Now().Add(time.Minute))
@@ -63,7 +63,7 @@ func TestDownloadGrantObservesTheNativeObjectBeforeSigning(t *testing.T) {
 	if len(d.granted) != 1 || d.granted[0] != "file" {
 		t.Fatalf("granted paths: %v", d.granted)
 	}
-	if item["kind"] != "url" || item["url"] != "https://storage.test/file" {
+	if item.Kind != "url" || item.URL != "https://storage.test/file" {
 		t.Fatalf("grant item: %+v", item)
 	}
 }
@@ -94,7 +94,7 @@ func TestDownloadGrantKeepsWorkingWhenTheKeyCannotBeProven(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(d.granted) != 1 || item["kind"] != "url" {
+	if len(d.granted) != 1 || item.Kind != "url" {
 		t.Fatalf("stale key refused a grant: %v %+v", d.granted, item)
 	}
 }

@@ -101,8 +101,8 @@ func TestUploadTransportForClassAAndC(t *testing.T) {
 	if payload["kind"] != storage.TransferPresignedParts {
 		t.Fatalf("unexpected transport %+v", payload)
 	}
-	part := payload["parts"].([]any)[0].(map[string]any)
-	if !strings.HasPrefix(part["url"].(string), filesTransferPrefix) {
+	part := payload["parts"].([]*filesPartGrant)[0]
+	if !strings.HasPrefix(part.URL, filesTransferPrefix) {
 		t.Fatalf("edge relay did not rewrite provider URL: %v", part)
 	}
 

@@ -62,10 +62,10 @@ func (s *Server) handleFilesDownloads(w http.ResponseWriter, r *http.Request, f 
 		}
 		items = append(items, item)
 	}
-	return writeFilesJSON(w, 200, map[string]any{"items": items})
+	return writeFilesJSON(w, 200, filesDownloadGrantPage{Items: items})
 }
 
-func (s *Server) filesDownloadGrant(r *http.Request, f *fileRequest, selector fc.EntrySelector, disposition, class string, expiry time.Time) (map[string]any, fc.Path, string, error) {
+func (s *Server) filesDownloadGrant(r *http.Request, f *fileRequest, selector fc.EntrySelector, disposition, class string, expiry time.Time) (*filesDownloadGrantResource, fc.Path, string, error) {
 	if err := selector.Validate(); err != nil {
 		return nil, "", "", err
 	}
@@ -140,13 +140,10 @@ func (s *Server) filesDownloadGrant(r *http.Request, f *fileRequest, selector fc
 		conditions = append(conditions, grant.Conditions...)
 		expiry = grant.ExpiresAt
 	}
-	item := map[string]any{
-		"id": metadata.ID, "kind": kind, "url": urlValue, "headers": headers,
-		"expiresAt": expiry.UTC(), "size": size, "contentType": mediaType,
-		"acceptRanges": descriptor.RangeRead, "conditions": conditions,
-	}
-	if etag != "" {
-		item["etag"] = etag
+	item := &filesDownloadGrantResource{
+		ID: metadata.ID, Kind: kind, URL: urlValue, Headers: headers,
+		ExpiresAt: expiry.UTC(), Size: size, ContentType: mediaType,
+		AcceptRanges: descriptor.RangeRead, ETag: etag, Conditions: conditions,
 	}
 	return item, metadata.Path, metadata.ID, nil
 }

@@ -24,7 +24,7 @@ func writeFilesOperation(w http.ResponseWriter, op fileops.Operation, status int
 // keeps failing. It is the only place a client can learn that an operation is not
 // slow but stuck: without it the resource looks identical to one that is merely
 // still running, and only the server log knows the difference.
-func writeFilesOperationWithRetry(w http.ResponseWriter, op fileops.Operation, status int, retrying map[string]any, scopes ...*fileRequest) error {
+func writeFilesOperationWithRetry(w http.ResponseWriter, op fileops.Operation, status int, retrying *filesOperationRetry, scopes ...*fileRequest) error {
 	if len(scopes) > 0 {
 		op.Result = filesScopedResult(op.Result, scopes[0])
 	}
@@ -45,7 +45,7 @@ func writeFilesOperationWithRetry(w http.ResponseWriter, op fileops.Operation, s
 			}
 		}
 	}
-	var total any = op.EntryTotal()
+	total := int64(op.EntryTotal())
 	unit := "entries"
 	switch {
 	case op.Kind == "upload_commit":
@@ -71,18 +71,22 @@ func writeFilesOperationWithRetry(w http.ResponseWriter, op fileops.Operation, s
 			// acceptance — is not work the operation still owes. Reporting the last walk's
 			// extent here would end a finished deletion on "480 of 520", which its reader
 			// cannot tell apart from a bug.
-			total = completed
+			total = int64(completed)
 		case op.Purge.Total > 0:
 			total = op.Purge.Total
 		default:
-			total = nil
+			total = -1
 		}
+	}
+	var progressTotal *int64
+	if total >= 0 {
+		progressTotal = &total
 	}
 	var result any
 	if len(op.Result) > 0 {
 		result = json.RawMessage(op.Result)
 	}
-	var problem any
+	var problem *fc.Problem
 	if len(op.Problem) > 0 {
 		var p struct {
 			Code   string `json:"code"`
@@ -98,7 +102,12 @@ func writeFilesOperationWithRetry(w http.ResponseWriter, op fileops.Operation, s
 	}
 	// Only public workflow data crosses this boundary. Native checkpoints, intents,
 	// guard paths and principal/root identities remain in the journal.
-	return writeFilesJSON(w, status, map[string]any{"id": op.ID, "kind": op.Kind, "state": op.State, "progress": map[string]any{"completed": completed, "total": total, "unit": unit}, "result": result, "error": problem, "cancelRequested": op.CancelRequested, "retrying": retrying, "createdAt": op.CreatedAt.UTC(), "finishedAt": op.FinishedAt})
+	return writeFilesJSON(w, status, filesOperationResource{
+		ID: op.ID, Kind: string(op.Kind), State: string(op.State),
+		Progress: filesOperationProgress{Completed: int64(completed), Total: progressTotal, Unit: unit},
+		Result:   result, Error: problem, CancelRequested: op.CancelRequested, Retrying: retrying,
+		CreatedAt: op.CreatedAt.UTC(), FinishedAt: op.FinishedAt,
+	})
 }
 func filesOperationFailure(op fileops.Operation) error {
 	var saved struct {
@@ -173,7 +182,7 @@ func (s *Server) writeFilesOperation(ctx context.Context, w http.ResponseWriter,
 			slog.Warn("operation progress could not be read", "operation", op.ID, "cause", errorCauseChain(err))
 		}
 	}
-	var retrying map[string]any
+	var retrying *filesOperationRetry
 	if !op.Terminal() {
 		retrying = s.fileOperationRetry(op.ID)
 	}

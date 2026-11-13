@@ -471,7 +471,7 @@ func (s *Server) handleFilesListSubscriptions(w http.ResponseWriter, r *http.Req
 	if len(items) > 100 {
 		return fc.NewProblem(503, "temporarily_unavailable", "The subscription collection exceeds the supported limit.")
 	}
-	return writeFilesJSON(w, http.StatusOK, map[string]any{"items": items})
+	return writeFilesJSON(w, http.StatusOK, filesSubscriptionList{Items: items})
 }
 func (s *Server) handleFilesDeleteSubscription(w http.ResponseWriter, r *http.Request, f *fileRequest) error {
 	if err := f.requireChanges(true); err != nil {
@@ -538,7 +538,7 @@ func (s *Server) handleFilesSubscriptionEvents(w http.ResponseWriter, r *http.Re
 			if _, err = s.filesLoadSubscription(ctx, f, sub.ID); err != nil {
 				return err
 			}
-			data, _ := json.Marshal(map[string]string{"subscriptionId": sub.ID, "type": "changes_available", "notificationId": sub.notificationID})
+			data, _ := json.Marshal(filesChangeNotification{SubscriptionID: sub.ID, Type: "changes_available", NotificationID: sub.notificationID})
 			if _, err = fmt.Fprintf(w, "id: %s\nevent: changes\ndata: %s\n\n", sub.notificationID, data); err != nil {
 				return err
 			}

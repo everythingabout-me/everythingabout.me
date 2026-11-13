@@ -28,11 +28,11 @@ func (s *Server) filesWriteReadiness(ctx context.Context, f *fileRequest) (bool,
 	allowed := f.Principal.Token == nil || f.Principal.Token.CanWrite
 	return allowed, &usage, nil
 }
-func filesUsageFields(usage *fileops.Usage, wholeOwner bool) (any, any) {
+func filesUsageFields(usage *fileops.Usage, wholeOwner bool) (*filesQuota, *filesReservations) {
 	if usage == nil || !wholeOwner {
 		return nil, nil
 	}
-	quota := map[string]any{"logicalBytes": usage.LogicalBytes, "logicalLimitBytes": usage.LogicalLimit, "physicalBytes": usage.PhysicalBytes, "physicalLimitBytes": usage.PhysicalLimit}
-	reservations := map[string]any{"logicalBytes": usage.LogicalReserved, "physicalBytes": usage.PhysicalReserved}
+	quota := &filesQuota{LogicalBytes: usage.LogicalBytes, LogicalLimitBytes: usage.LogicalLimit, PhysicalBytes: usage.PhysicalBytes, PhysicalLimitBytes: usage.PhysicalLimit}
+	reservations := &filesReservations{LogicalBytes: usage.LogicalReserved, PhysicalBytes: usage.PhysicalReserved}
 	return quota, reservations
 }

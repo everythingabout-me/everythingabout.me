@@ -73,7 +73,7 @@ func filesUploadEnded(u fileops.Upload, err error) error {
 	}
 	return p
 }
-func (s *Server) filesUploadResource(u fileops.Upload, scopes ...*fileRequest) map[string]any {
+func (s *Server) filesUploadResource(u fileops.Upload, scopes ...*fileRequest) *filesUploadSession {
 	if len(scopes) > 0 {
 		u.Operation.Result = filesScopedResult(u.Operation.Result, scopes[0])
 	}
@@ -83,16 +83,23 @@ func (s *Server) filesUploadResource(u fileops.Upload, scopes ...*fileRequest) m
 	if len(u.Operation.Result) > 0 {
 		result = json.RawMessage(u.Operation.Result)
 	}
-	resource := map[string]any{"class": s.filesTransferClassLabel(), "id": u.ID, "path": "/" + string(intent.Target), "state": u.State, "size": intent.Size, "partSize": u.PartSize, "partCount": u.PartCount, "ordering": "any", "nextPart": nil, "receivedParts": u.ReceivedParts, "receivedBytes": u.ReceivedBytes, "createdAt": u.CreatedAt.UTC(), "expiresAt": u.ExpiresAt.UTC(), "partsUrl": "/api/files/uploads/" + u.ID + "/parts", "commitUrl": "/api/files/uploads/" + u.ID + "/commit", "operationId": u.Operation.ID, "result": result}
+	resource := &filesUploadSession{
+		Class: s.filesTransferClassLabel(), ID: u.ID, Path: "/" + string(intent.Target), State: string(u.State),
+		Size: intent.Size, PartSize: u.PartSize, PartCount: u.PartCount, Ordering: "any", NextPart: nil,
+		ReceivedParts: u.ReceivedParts, ReceivedBytes: u.ReceivedBytes,
+		CreatedAt: u.CreatedAt.UTC(), ExpiresAt: u.ExpiresAt.UTC(),
+		PartsURL: fc.Base + "/uploads/" + u.ID + "/parts", CommitURL: fc.Base + "/uploads/" + u.ID + "/commit",
+		OperationID: u.Operation.ID, Result: result,
+	}
 	if s.filesTransferClass() == storage.TransferPresignedParts {
-		resource["signUrl"] = "/api/files/uploads/" + u.ID + "/parts/sign"
+		resource.SignURL = fc.Base + "/uploads/" + u.ID + "/parts/sign"
 	}
 	return resource
 }
-func filesUploadReceipt(p fileops.PartReceipt) map[string]any {
+func filesUploadReceipt(p fileops.PartReceipt) filesUploadReceiptResource {
 	// Class C receipts carry the server-computed SHA-256. They are not a
 	// provider digest and never a client assertion.
-	return map[string]any{"number": p.Number, "size": p.Size, "sha256": p.SHA256}
+	return filesUploadReceiptResource{Number: p.Number, Size: p.Size, SHA256: p.SHA256}
 }
 func filesUploadMaxSize(native fileops.NativeActions) int64 {
 	max := int64(filesUploadMaxParts) * filesUploadPartSize
@@ -392,7 +399,7 @@ func (s *Server) handleFilesCreateUpload(w http.ResponseWriter, r *http.Request,
 		}
 		resource := s.filesUploadResource(old, f)
 		if filesUploadExpired(old) != nil {
-			resource["state"] = "expired"
+			resource.State = "expired"
 		}
 		if old.State == "open" && filesUploadExpired(old) == nil {
 			// A replayed create answers with the transport that session actually uses. A
@@ -408,7 +415,7 @@ func (s *Server) handleFilesCreateUpload(w http.ResponseWriter, r *http.Request,
 			if e != nil {
 				return e
 			}
-			resource["transport"] = transport
+			resource.Transport = transport
 		}
 		w.Header().Set("Location", "/api/files/uploads/"+old.ID)
 		return writeFilesJSON(w, 200, resource)
@@ -557,7 +564,7 @@ func (s *Server) handleFilesCreateUpload(w http.ResponseWriter, r *http.Request,
 		// The client must not PUT these bytes again: the object is already the publication,
 		// and a create condition would refuse the overwrite. It commits, and the commit
 		// verifies the same revision before settling it into the index.
-		resource["bytesPresent"] = true
+		resource.BytesPresent = true
 	} else {
 		var transport any
 		if u.Mode == fileops.UploadModeDirect {
@@ -573,7 +580,7 @@ func (s *Server) handleFilesCreateUpload(w http.ResponseWriter, r *http.Request,
 			s.discardUnusableUpload(r.Context(), root, actor, u)
 			return err
 		}
-		resource["transport"] = transport
+		resource.Transport = transport
 	}
 	w.Header().Set("Location", "/api/files/uploads/"+u.ID)
 	return writeFilesJSON(w, 201, resource)
@@ -723,7 +730,7 @@ func (s *Server) handleFilesGetUpload(w http.ResponseWriter, r *http.Request, f 
 	}
 	resource := s.filesUploadResource(u, f)
 	if filesUploadExpired(u) != nil {
-		resource["state"] = "expired"
+		resource.State = "expired"
 	}
 	if u.State == "open" && filesUploadExpired(u) == nil {
 		if s.filesTransferClass() == storage.TransferPresignedParts {
@@ -735,13 +742,13 @@ func (s *Server) handleFilesGetUpload(w http.ResponseWriter, r *http.Request, f 
 			for _, part := range parts {
 				bytes += part.Size
 			}
-			resource["receivedParts"], resource["receivedBytes"] = len(parts), bytes
+			resource.ReceivedParts, resource.ReceivedBytes = len(parts), bytes
 		}
 		transport, e := s.filesUploadTransport(r.Context(), native, u)
 		if e != nil {
 			return e
 		}
-		resource["transport"] = transport
+		resource.Transport = transport
 	}
 	return writeFilesJSON(w, 200, resource)
 }
@@ -767,19 +774,20 @@ func (s *Server) handleFilesListUploads(w http.ResponseWriter, r *http.Request, 
 	if err != nil {
 		return filesMutationProblem(err)
 	}
-	var next any
+	var next *string
 	if len(items) > q.Limit {
 		items = items[:q.Limit]
-		next, err = s.filesEncodeCursor(filesSortKey{Path: items[len(items)-1].ID, Name: items[len(items)-1].ID}, binding)
-		if err != nil {
-			return err
+		cursor, e := s.filesEncodeCursor(filesSortKey{Path: items[len(items)-1].ID, Name: items[len(items)-1].ID}, binding)
+		if e != nil {
+			return e
 		}
+		next = &cursor
 	}
-	resources := make([]any, 0, len(items))
+	resources := make([]*filesUploadSession, 0, len(items))
 	for _, u := range items {
 		resources = append(resources, s.filesUploadResource(u, f))
 	}
-	return writeFilesJSON(w, 200, map[string]any{"items": resources, "nextCursor": next})
+	return writeFilesJSON(w, 200, fc.NewCollection(resources, next))
 }
 func (s *Server) handleFilesUploadPart(w http.ResponseWriter, r *http.Request, f *fileRequest) error {
 	if s.filesTransferClass() != storage.TransferRelay {
@@ -936,19 +944,20 @@ func (s *Server) handleFilesUploadParts(w http.ResponseWriter, r *http.Request, 
 	if err != nil {
 		return filesMutationProblem(err)
 	}
-	var next any
+	var next *string
 	if len(parts) > q.Limit {
 		parts = parts[:q.Limit]
-		next, err = s.filesEncodeCursor(filesSortKey{Path: strconv.FormatInt(parts[len(parts)-1].Sequence, 10) + "/" + strconv.FormatInt(watermark, 10), Name: strconv.FormatInt(watermark, 10)}, binding)
-		if err != nil {
-			return err
+		cursor, e := s.filesEncodeCursor(filesSortKey{Path: strconv.FormatInt(parts[len(parts)-1].Sequence, 10) + "/" + strconv.FormatInt(watermark, 10), Name: strconv.FormatInt(watermark, 10)}, binding)
+		if e != nil {
+			return e
 		}
+		next = &cursor
 	}
 	resources := make([]any, 0, len(parts))
 	for _, p := range parts {
 		resources = append(resources, filesUploadReceipt(p))
 	}
-	return writeFilesJSON(w, 200, map[string]any{"items": resources, "nextCursor": next, "watermark": watermark})
+	return writeFilesJSON(w, 200, filesUploadPartsPage{Items: resources, NextCursor: next, Watermark: &watermark})
 }
 func (s *Server) handleFilesPlannedUploadParts(w http.ResponseWriter, r *http.Request, f *fileRequest, native fileops.NativeActions, u fileops.Upload) error {
 	q, err := parseFilesReadQuery(r, f.Scope, false)
@@ -983,18 +992,19 @@ func (s *Server) handleFilesPlannedUploadParts(w http.ResponseWriter, r *http.Re
 			return filesMutationProblem(err)
 		}
 	}
-	var next any
+	var next *string
 	if more && len(parts) > 0 {
-		next, err = s.filesEncodeCursor(filesSortKey{Path: strconv.Itoa(parts[len(parts)-1].Number)}, binding)
-		if err != nil {
-			return err
+		cursor, e := s.filesEncodeCursor(filesSortKey{Path: strconv.Itoa(parts[len(parts)-1].Number)}, binding)
+		if e != nil {
+			return e
 		}
+		next = &cursor
 	}
 	items := make([]any, 0, len(parts))
 	for _, part := range parts {
-		items = append(items, map[string]any{"number": part.Number, "size": part.Size, "etag": part.ETag})
+		items = append(items, filesProviderPart{Number: part.Number, Size: part.Size, ETag: part.ETag})
 	}
-	return writeFilesJSON(w, 200, map[string]any{"items": items, "nextCursor": next})
+	return writeFilesJSON(w, 200, filesUploadPartsPage{Items: items, NextCursor: next})
 }
 
 func (s *Server) handleFilesCommitUpload(w http.ResponseWriter, r *http.Request, f *fileRequest) error {

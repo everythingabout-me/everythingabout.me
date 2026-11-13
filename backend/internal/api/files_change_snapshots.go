@@ -529,11 +529,7 @@ func (s *Server) handleFilesGetChangeSnapshot(w http.ResponseWriter, r *http.Req
 	if err = tx.Commit(r.Context()); err != nil {
 		return err
 	}
-	return writeFilesJSON(w, http.StatusOK, struct {
-		filesChangeSnapshot
-		Items      []fc.Metadata `json:"items"`
-		NextCursor *string       `json:"nextCursor"`
-	}{snapshot, items, next})
+	return writeFilesJSON(w, http.StatusOK, filesChangeSnapshotPage{filesChangeSnapshot: snapshot, Items: items, NextCursor: next})
 }
 func (s *Server) handleFilesDeleteChangeSnapshot(w http.ResponseWriter, r *http.Request, f *fileRequest) error {
 	if err := f.requireChanges(false); err != nil {

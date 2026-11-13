@@ -50,7 +50,7 @@ func filesUnderlyingDriver(driver storage.Driver) storage.Driver {
 // filesPartGrantPayload writes one class A grant. The provider URL is exposed
 // only through this single-session grant; the optional edge relay rewrites it
 // to the reserved same-origin prefix without decoding the native key.
-func (s *Server) filesPartGrantPayload(grant storage.SignedPartGrant) (map[string]any, error) {
+func (s *Server) filesPartGrantPayload(grant storage.SignedPartGrant) (*filesPartGrant, error) {
 	value := grant.URL
 	if len(grant.Form) > 0 && s.cfg != nil && s.cfg.EdgeOneUploadIngress() {
 		// The edge ingress rewrites a provider URL to a same-origin path that serves PUT
@@ -71,16 +71,16 @@ func (s *Server) filesPartGrantPayload(grant storage.SignedPartGrant) (map[strin
 	if headers == nil {
 		headers = map[string]string{}
 	}
-	payload := map[string]any{"number": grant.Number, "size": grant.Size, "method": grant.Method, "url": value, "headers": headers, "expiresAt": grant.ExpiresAt.UTC()}
+	payload := &filesPartGrant{Number: grant.Number, Size: grant.Size, Method: grant.Method, URL: value, Headers: headers, ExpiresAt: grant.ExpiresAt.UTC()}
 	if len(grant.Form) > 0 {
 		// A form upload carries every signed value in the body, so the edge relay cannot
 		// rewrite it and the browser must not attach any header: the fields are the grant.
-		fields := make([]any, 0, len(grant.Form))
+		fields := make([]filesFormField, 0, len(grant.Form))
 		for _, field := range grant.Form {
-			fields = append(fields, map[string]any{"name": field.Name, "value": field.Value})
+			fields = append(fields, filesFormField{Name: field.Name, Value: field.Value})
 		}
-		payload["fields"] = fields
-		payload["fileField"] = grant.FileField
+		payload.Fields = fields
+		payload.FileField = grant.FileField
 	}
 	return payload, nil
 }

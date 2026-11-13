@@ -69,15 +69,15 @@ func TestFileOperationRetainedRecordsAndBacksOff(t *testing.T) {
 	if first == nil {
 		t.Fatal("no retry record after a failed attempt")
 	}
-	if first["attempts"] != 1 || first["code"] != "recovery_required" {
+	if first.Attempts != 1 || first.Code != "recovery_required" {
 		t.Fatalf("retry record = %v", first)
 	}
 	server.fileOperationRetained(op, err)
 	second := server.fileOperationRetry(op.ID)
-	if second["attempts"] != 2 {
-		t.Fatalf("attempts = %v, want 2", second["attempts"])
+	if second.Attempts != 2 {
+		t.Fatalf("attempts = %v, want 2", second.Attempts)
 	}
-	if !second["nextAttemptAt"].(time.Time).After(first["nextAttemptAt"].(time.Time)) {
+	if !second.NextAttemptAt.After(first.NextAttemptAt) {
 		t.Fatal("the second failure did not back off further")
 	}
 

@@ -59,7 +59,7 @@ func (s *Server) filesBeginPlannedUpload(ctx context.Context, native fileops.Nat
 	if plan.PartSize != u.PartSize {
 		return nil, fc.NewProblem(503, "temporarily_unavailable", "The upload part geometry no longer matches the session.")
 	}
-	parts := make([]any, 0, len(plan.Parts))
+	parts := make([]*filesPartGrant, 0, len(plan.Parts))
 	for _, grant := range plan.Parts {
 		payload, err := s.filesPartGrantPayload(grant)
 		if err != nil {
@@ -125,7 +125,7 @@ func (s *Server) handleFilesSignUploadParts(w http.ResponseWriter, r *http.Reque
 	if err != nil {
 		return filesMutationProblem(err)
 	}
-	parts := make([]any, 0, len(grants))
+	parts := make([]*filesPartGrant, 0, len(grants))
 	for _, grant := range grants {
 		payload, err := s.filesPartGrantPayload(grant)
 		if err != nil {
@@ -133,7 +133,7 @@ func (s *Server) handleFilesSignUploadParts(w http.ResponseWriter, r *http.Reque
 		}
 		parts = append(parts, payload)
 	}
-	return writeFilesJSON(w, 200, map[string]any{"parts": parts, "expiresAt": expires.UTC()})
+	return writeFilesJSON(w, 200, filesSignedParts{Parts: parts, ExpiresAt: expires.UTC()})
 }
 
 // filesPlannedParts returns every part the provider actually holds for a class A

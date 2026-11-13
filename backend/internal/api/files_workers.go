@@ -356,7 +356,7 @@ func errorCauseChain(err error) string {
 
 // fileOperationRetry exposes the retry state on the operation resource, so a stuck
 // operation is visible to a client instead of only to whoever reads the server log.
-func (s *Server) fileOperationRetry(id string) map[string]any {
+func (s *Server) fileOperationRetry(id string) *filesOperationRetry {
 	worker := s.workers()
 	worker.mu.Lock()
 	defer worker.mu.Unlock()
@@ -364,7 +364,7 @@ func (s *Server) fileOperationRetry(id string) map[string]any {
 	if retry == nil {
 		return nil
 	}
-	return map[string]any{"attempts": retry.attempts, "code": retry.code, "lastAttemptAt": retry.lastAt.UTC(), "nextAttemptAt": retry.nextTry.UTC()}
+	return &filesOperationRetry{Attempts: retry.attempts, Code: retry.code, LastAttemptAt: retry.lastAt.UTC(), NextAttemptAt: retry.nextTry.UTC()}
 }
 func (s *Server) runFileOperation(ctx context.Context, op fileops.Operation) error {
 	driver, err := s.trees.Open(ctx, op.Root.OwnerID)
