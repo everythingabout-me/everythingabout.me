@@ -95,6 +95,59 @@ func (r *Resolver) Binding(ownerID string) (storage.Config, error) {
 	return e.backend.Binding(ownerID)
 }
 
+// BindingFor derives the root a named connection selects for one owner. An empty
+// name is the owner's resolved connection, which is what the running server
+// serves; a name lets an operator command describe the connection the owner is
+// about to use, before the binding names it.
+//
+// It builds no driver and loads no admission evidence, so a startup comparison or
+// a rebind can ask where a tree would live without opening it or changing what the
+// serving resolver has cached.
+func (r *Resolver) BindingFor(ctx context.Context, ownerID, name string) (storage.Config, error) {
+	c, err := r.connectionRow(ctx, ownerID, name)
+	if err != nil {
+		return storage.Config{}, err
+	}
+	effective, err := c.ApplyEnvironment(r.base)
+	if err != nil {
+		return storage.Config{}, err
+	}
+	return storagebackend.BindingFor(&effective, ownerID)
+}
+
+// ConnectionFor is the row behind BindingFor, so an operator-facing comparison can
+// name the bucket and region the binding is moving to.
+func (r *Resolver) ConnectionFor(ctx context.Context, ownerID, name string) (Connection, error) {
+	return r.connectionRow(ctx, ownerID, name)
+}
+
+// connectionRow resolves the row an owner's binding names, or a row selected by
+// name, without constructing a driver.
+func (r *Resolver) connectionRow(ctx context.Context, ownerID, name string) (Connection, error) {
+	if name == "" {
+		resolved, err := r.ownerConnection(ctx, ownerID)
+		if err != nil {
+			return Connection{}, err
+		}
+		name = resolved
+	}
+	c, ok, err := r.store.ByName(ctx, ownerID, name)
+	if err != nil {
+		return Connection{}, err
+	}
+	if !ok {
+		return Connection{}, fmt.Errorf("storage connection %q: %w", name, ErrNotFound)
+	}
+	if !c.Enabled {
+		return Connection{}, fmt.Errorf("storage connection %q is disabled; enable it before serving owners bound to it", name)
+	}
+	if c.Role != RoleAuthority {
+		return Connection{}, fmt.Errorf("owner %s is bound to storage connection %q, which has role %q: only an authority connection can back an owner's tree",
+			ownerID, c.Name, c.Role)
+	}
+	return c, nil
+}
+
 // OpenConnection opens a named connection for an owner without going through the
 // owner's binding. Backup runs use it to reach a destination the owner does not
 // live on.

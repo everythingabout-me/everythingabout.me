@@ -371,3 +371,32 @@ func TestValidateRejectsRootAtBucketWhereItCannotWork(t *testing.T) {
 		t.Fatal("a local row was allowed to root at the bucket")
 	}
 }
+
+// The operator-facing derivation must agree with the binding the serving path
+// persists, or a rebind could record a root the file API never serves.
+func TestBindingForMatchesTheServingBinding(t *testing.T) {
+	cfg := localConfig(t)
+	authority, err := FromConfig(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := newFakeStore(authority)
+	resolver := NewResolver(cfg, store)
+	defer resolver.Close()
+	served, err := resolver.Binding("owner-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"", authority.Name} {
+		pure, err := resolver.BindingFor(context.Background(), "owner-a", name)
+		if err != nil {
+			t.Fatalf("BindingFor(%q): %v", name, err)
+		}
+		if pure != served {
+			t.Fatalf("BindingFor(%q) = %+v, serving binding = %+v", name, pure, served)
+		}
+	}
+	if _, err := resolver.BindingFor(context.Background(), "owner-a", "missing"); err == nil {
+		t.Fatal("a missing connection was derived as a binding")
+	}
+}

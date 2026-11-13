@@ -199,43 +199,54 @@ func validateObjectPrefixes(content, system string, rootAtBucket bool) error {
 // Binding is safe to persist; it deliberately contains neither secrets nor signed
 // URLs. Its connection identity includes actual endpoint/bucket/root configuration.
 func (b *Backend) Binding(ownerID string) (storage.Config, error) {
+	return BindingFor(&b.cfg, ownerID)
+}
+
+// BindingFor derives the root identity a configuration selects for one owner,
+// without constructing a driver, loading admission evidence or touching a
+// provider. The startup root comparison and the operator rebind command use it so
+// they can agree on where the tree would live without opening it.
+func BindingFor(cfg *config.Config, ownerID string) (storage.Config, error) {
+	if cfg == nil {
+		return storage.Config{}, storage.NewError("invalid_config", "", nil)
+	}
 	if err := storage.ValidatePath(storage.Path(ownerID)); err != nil || ownerID == "" || strings.Contains(ownerID, "/") || strings.TrimSpace(ownerID) != ownerID || ownerID == "." || ownerID == ".." {
 		return storage.Config{}, storage.NewError("invalid_config", "", nil)
 	}
-	cfg := storage.Config{OwnerID: ownerID, Generation: b.cfg.Storage.Generation}
+	loc := storage.Config{OwnerID: ownerID, Generation: cfg.Storage.Generation}
 	// A shared connection holds one tree per account, so the account segment is what
 	// keeps two accounts' trees apart in one bucket. An owner-scoped connection holds
 	// exactly one account's tree, so that segment would be a directory nobody can
 	// explain; its root is the configured prefix, or the bucket itself. The private
 	// system root keeps the segment either way: it is invisible, and keeping it
 	// preserves disjointness from user content without inventing a second naming rule.
-	if b.cfg.Storage.RootAtBucket && !b.cfg.Storage.OwnerScoped {
+	if cfg.Storage.RootAtBucket && !cfg.Storage.OwnerScoped {
 		return storage.Config{}, storage.NewError("invalid_config", "", nil)
 	}
-	cfg.RootAtBucket = b.cfg.Storage.RootAtBucket
-	switch b.cfg.BackendName() {
+	loc.RootAtBucket = cfg.Storage.RootAtBucket
+	switch cfg.BackendName() {
 	case "local":
 		// localstorage.OpenOwner requires the exact <base>/<owner> child, so a local
 		// connection is always per-owner at the filesystem level.
-		if cfg.RootAtBucket {
+		if loc.RootAtBucket {
 			return storage.Config{}, storage.NewError("invalid_config", "", nil)
 		}
-		cfg.ContentRoot = filepath.Join(b.cfg.Storage.Local.ContentRoot, ownerID)
-		cfg.SystemRoot = filepath.Join(b.cfg.Storage.Local.SystemRoot, ownerID)
+		loc.ContentRoot = filepath.Join(cfg.Storage.Local.ContentRoot, ownerID)
+		loc.SystemRoot = filepath.Join(cfg.Storage.Local.SystemRoot, ownerID)
 	case "cos":
 		switch {
-		case cfg.RootAtBucket:
+		case loc.RootAtBucket:
 			// The tree is the bucket; ContentRoot stays empty and RootAtBucket says why.
-		case b.cfg.Storage.OwnerScoped:
-			cfg.ContentRoot = "drive/"
+		case cfg.Storage.OwnerScoped:
+			loc.ContentRoot = "drive/"
 		default:
-			cfg.ContentRoot = "drive/" + ownerID + "/"
+			loc.ContentRoot = "drive/" + ownerID + "/"
 		}
-		cfg.SystemRoot = "__eam_system__/" + ownerID + "/"
+		loc.SystemRoot = "__eam_system__/" + ownerID + "/"
 	case "s3":
-		prefixes := []string{b.cfg.Storage.S3.SystemPrefix}
-		if !cfg.RootAtBucket {
-			prefixes = append(prefixes, b.cfg.Storage.S3.ContentPrefix)
+		prefixes := []string{cfg.Storage.S3.SystemPrefix}
+		if !loc.RootAtBucket {
+			prefixes = append(prefixes, cfg.Storage.S3.ContentPrefix)
 		}
 		for _, prefix := range prefixes {
 			if !strings.HasSuffix(prefix, "/") || storage.ValidatePath(storage.Path(strings.TrimSuffix(prefix, "/"))) != nil {
@@ -243,39 +254,39 @@ func (b *Backend) Binding(ownerID string) (storage.Config, error) {
 			}
 		}
 		switch {
-		case cfg.RootAtBucket:
-		case b.cfg.Storage.OwnerScoped:
-			cfg.ContentRoot = b.cfg.Storage.S3.ContentPrefix
+		case loc.RootAtBucket:
+		case cfg.Storage.OwnerScoped:
+			loc.ContentRoot = cfg.Storage.S3.ContentPrefix
 		default:
-			cfg.ContentRoot = b.cfg.Storage.S3.ContentPrefix + ownerID + "/"
+			loc.ContentRoot = cfg.Storage.S3.ContentPrefix + ownerID + "/"
 		}
-		cfg.SystemRoot = b.cfg.Storage.S3.SystemPrefix + ownerID + "/"
+		loc.SystemRoot = cfg.Storage.S3.SystemPrefix + ownerID + "/"
 	}
 	// Credential rotation never changes this digest. Any endpoint/region/root change does.
 	identity := struct {
 		Name, Backend, Bucket, Region, Endpoint, Content, System string
 		PathStyle, CaseSensitive                                 bool
-	}{Name: b.cfg.Storage.ConnectionID, Backend: b.cfg.BackendName(), Content: cfg.ContentRoot, System: cfg.SystemRoot}
-	if b.cfg.BackendName() == "cos" {
-		identity.Bucket = b.cfg.COS.Bucket
-		identity.Region = b.cfg.COS.Region
+	}{Name: cfg.Storage.ConnectionID, Backend: cfg.BackendName(), Content: loc.ContentRoot, System: loc.SystemRoot}
+	if cfg.BackendName() == "cos" {
+		identity.Bucket = cfg.COS.Bucket
+		identity.Region = cfg.COS.Region
 	}
-	if b.cfg.BackendName() == "s3" {
-		identity.Bucket = b.cfg.Storage.S3.Bucket
-		identity.Region = b.cfg.Storage.S3.Region
-		identity.Endpoint = b.cfg.Storage.S3.Endpoint
-		identity.PathStyle = b.cfg.Storage.S3.PathStyle
+	if cfg.BackendName() == "s3" {
+		identity.Bucket = cfg.Storage.S3.Bucket
+		identity.Region = cfg.Storage.S3.Region
+		identity.Endpoint = cfg.Storage.S3.Endpoint
+		identity.PathStyle = cfg.Storage.S3.PathStyle
 	}
-	if b.cfg.BackendName() == "local" {
-		identity.CaseSensitive = b.cfg.Storage.Local.CaseSensitive
+	if cfg.BackendName() == "local" {
+		identity.CaseSensitive = cfg.Storage.Local.CaseSensitive
 	}
 	data, _ := json.Marshal(identity)
 	digest := sha256.Sum256(data)
-	cfg.ConnectionID = b.cfg.Storage.ConnectionID + ":" + hex.EncodeToString(digest[:])
-	if err := storage.ValidateBinding(cfg); err != nil {
+	loc.ConnectionID = cfg.Storage.ConnectionID + ":" + hex.EncodeToString(digest[:])
+	if err := storage.ValidateBinding(loc); err != nil {
 		return storage.Config{}, err
 	}
-	return cfg, nil
+	return loc, nil
 }
 func (b *Backend) Open(ctx context.Context, ownerID string) (storage.Driver, error) {
 	b.mu.RLock()
