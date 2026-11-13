@@ -1,5 +1,18 @@
-/** Upload tasks and File references live only in the current page. */
-import { useCallback, useEffect, useRef, useState } from "react";
+/**
+ * Upload tasks and File references live for the whole tab, not for one page.
+ *
+ * The queue used to be page state, and the page unmounting took three things with it: an
+ * in-flight selection became unreachable, a failure list disappeared the moment its "fix"
+ * link navigated to the account page, and a mount-time `/api/auth/me` failure left every row
+ * "queued" with nothing that could ever retry it. Owning the queue at module level fixes all
+ * three at once: the engine is created on the first page that uses it and lives until the tab
+ * closes, so a mount is a subscription and a navigation is only a detach.
+ *
+ * A module singleton rather than a context provider above the router: this SPA has no
+ * providers, the queue's lifetime is the tab's rather than a route subtree's, and a plain
+ * owner is exercisable without a DOM (the test harness drives the hook directly).
+ */
+import { useEffect, useState } from "react";
 import { ApiError, FileApiError, api, type FileProblem, type FileResource, type Item, type FileOperation, type FileUploadInput, type FileUploadPartGrant, type FileUploadSession } from "../api/client";
 import { t } from "../i18n";
 import { foldersWithoutFiles, type UploadEntry } from "./uploadSelection";
@@ -282,6 +295,20 @@ export interface UploadQueue {
    */
   beginImport(): void;
 }
+/**
+ * The engine behind the exported hook: the queue API plus the few lifecycle and ownership
+ * operations only the hook and the test harness need.
+ */
+interface QueueOwner extends UploadQueue {
+  /** Attach the first page and start the tab-lifetime work; idempotent across remounts. */
+  start(): void;
+  /** End the tab: abort everything and drop the ownership claims. Never called by the SPA. */
+  dispose(): void;
+  subscribe(listener: () => void): () => void;
+  /** A page's settle handler, present only while that page is mounted. */
+  onCompleted(handler: (task: UploadTask, item: Item) => void): () => void;
+  snapshot(): UploadQueue;
+}
 interface Runtime { controller: AbortController; }
 interface PartWaiter { rank: number; number: number; resolve: () => void; }
 const relative = (path: string) => path.replace(/^\/+|\/+$/g, "");
@@ -416,7 +443,54 @@ interface BatchState<T> {
 interface PendingCreate { input: FileUploadInput; key: string; resolve: (session: FileUploadSession) => void; reject: (error: unknown) => void; cancelled: boolean }
 interface PendingSettle { id: string; resolve: (result: FileResource | FileOperation) => void; reject: (error: unknown) => void; cancelled: boolean }
 
-export function useUploadQueue(onUploaded: (task: UploadTask, item: Item) => void): UploadQueue {
+function createQueue(): QueueOwner {
+  // The engine outlives every page, so its cells are plain closure state rather than hook
+  // slots. The two shims below keep `useRef`/`useCallback` spellings at the call sites, which
+  // is what lets the transfer code below stay byte-for-byte the implementation it was.
+  const useRef = <T>(value: T): { current: T } => ({ current: value });
+  const useCallback = <T>(callback: T, _dependencies?: unknown[]): T => callback;
+  const subscribers = new Set<() => void>();
+  const completionHandlers = new Set<(task: UploadTask, item: Item) => void>();
+  const notify = () => { for (const listener of subscribers) listener(); };
+  const subscribe = (listener: () => void) => {
+    subscribers.add(listener);
+    return () => { subscribers.delete(listener); };
+  };
+  const onCompleted = (handler: (task: UploadTask, item: Item) => void) => {
+    completionHandlers.add(handler);
+    return () => { completionHandlers.delete(handler); };
+  };
+  // The published snapshot is the queue's only rendered state: one array on a cadence, not
+  // one hook slot per field, so the page re-renders exactly as often as it did when the
+  // queue was page state.
+  let published: UploadTask[] = [];
+  let policy: ConflictPolicy = "ask";
+  let conflict: string | null = null;
+  let pauseMessage: string | null = null;
+  const setPolicy = (next: ConflictPolicy) => { policy = next; notify(); };
+  const setConflict = (next: string | null) => { conflict = next; notify(); };
+  const setPauseMessage = (next: string | null) => { pauseMessage = next; notify(); };
+  // Native tab-close guard. It belongs to the engine, not to a page, so it is attached while
+  // bytes are outstanding and never removed by a navigation.
+  let guardAttached = false;
+  const beforeUnload = (event: BeforeUnloadEvent) => {
+    event.preventDefault();
+    event.returnValue = "";
+  };
+  const activeStatuses: UploadStatus[] = ["queued", "waiting", "uploading", "finalizing"];
+  const syncBeforeUnload = () => {
+    const active = published.some((task) => activeStatuses.includes(task.status));
+    if (active === guardAttached) return;
+    guardAttached = active;
+    if (active) window.addEventListener("beforeunload", beforeUnload);
+    else window.removeEventListener("beforeunload", beforeUnload);
+  };
+  const setPublished = (next: UploadTask[]) => {
+    published = next;
+    syncBeforeUnload();
+    notify();
+  };
+
   // Task state is authoritative here, in a Map, and reaches React as a snapshot on a
   // cadence. One file performs several updates (queued, started, allocated, parts,
   // committed); publishing each of them re-derives the row projection over every task
@@ -442,14 +516,11 @@ export function useUploadQueue(onUploaded: (task: UploadTask, item: Item) => voi
   // answering "is an ancestor still a pending directory" by scanning every task would
   // make each start O(tasks).
   const openDirs = useRef(new Set<string>());
-  const [published, setPublished] = useState<UploadTask[]>([]);
   // The standing answer and the questions waiting behind it. The ref is what the queue
   // reads (a conflict is answered from inside an async attempt, never from a render), the
-  // state is only what the sheet shows.
+  // published field is only what the sheet shows.
   const policyRef = useRef<ConflictPolicy>("ask");
-  const [policy, setPolicy] = useState<ConflictPolicy>("ask");
   const conflicts = useRef<{ path: string; resolve: (choice: "replace" | "skip") => void }[]>([]);
-  const [conflict, setConflict] = useState<string | null>(null);
   const conflictOpen = useRef(false);
   const flushTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const owner = useRef("");
@@ -459,7 +530,6 @@ export function useUploadQueue(onUploaded: (task: UploadTask, item: Item) => voi
   const running = useRef(new Map<string, Runtime>());
   const pumpRef = useRef<() => void>(() => {});
   const pumpQueued = useRef(false);
-  const finishRef = useRef(onUploaded);
   const verified = useRef(new Map<string, { file: File; parts: Map<number, string> }>());
   const pollBusy = useRef(false);
   // Admission and settlement pages. These collapse the two control requests a task would
@@ -470,9 +540,11 @@ export function useUploadQueue(onUploaded: (task: UploadTask, item: Item) => voi
   const createBatch = useRef<BatchState<PendingCreate>>({ items: [] });
   const settleBatch = useRef<BatchState<PendingSettle>>({ items: [] });
   // A page-level failure stops the queue until someone resumes it. The ref is what the
-  // flush loops and the pump read; the state is the one message the page renders.
+  // flush loops and the pump read; the published field is the one message the page renders.
   const paused = useRef<{ message: string } | null>(null);
-  const [pauseMessage, setPauseMessage] = useState<string | null>(null);
+  // One session check at a time: the banner's Resume may be pressed while the previous
+  // retry is still in flight.
+  const resuming = useRef(false);
 
   // The rule this records: a failure is queue-level exactly when it is not one file's
   // answer — the page itself was rejected (transport failure, a non-2xx page status such as
@@ -613,7 +685,6 @@ export function useUploadQueue(onUploaded: (task: UploadTask, item: Item) => voi
   const partPool = useRef({ active: 0, waiters: [] as PartWaiter[] });
   const ranks = useRef(new Map<string, number>());
   const nextRank = useRef(0);
-  finishRef.current = onUploaded;
   const releasePart = useCallback(() => {
     const pool = partPool.current;
     const next = pool.waiters.shift();
@@ -651,14 +722,53 @@ export function useUploadQueue(onUploaded: (task: UploadTask, item: Item) => voi
     queueMicrotask(() => { pumpQueued.current = false; pumpRef.current(); });
   }, []);
   /**
+   * Resolve the authenticated owner, the gate every queued byte waits behind.
+   *
+   * A failed read (or a null answer) used to be swallowed, which left every row at "queued"
+   * forever with no action that could retry it. It is thrown instead: the caller turns it
+   * into the queue-level pause, and Resume asks again after the session is restored.
+   */
+  const resolveOwner = async (): Promise<boolean> => {
+    if (ready.current) return true;
+    const user = await api.me();
+    if (!mounted.current) return false;
+    if (!user) throw new Error(t("drive.uploadQueueSignedOut"));
+    owner.current = user.id;
+    setUploadOwner(user.id);
+    try { localStorage.removeItem(`eam.uploads.v1:${user.id}`); }
+    catch { /* Obsolete records are never read, even when storage is unavailable. */ }
+    ready.current = true;
+    return true;
+  };
+  /**
    * The queue's retry: send the page a queue-level failure stopped, once the cause is gone.
    *
    * A page failure names no file, so no row's `retry` can answer it. The rows it carried
    * were never failed — they went back to "queued" — and pages queued behind the pause were
    * kept rather than sent, so resuming is only clearing the stop and flushing them again.
+   * The one stop whose cause is checked elsewhere is the mount-time session read: there
+   * resuming first retries that read, because no page can be sent without an owner.
    */
   const resumeQueue = useCallback(() => {
     if (!paused.current) return;
+    // The mount-time session check is part of the queue's start, not a file's attempt: until
+    // it succeeds there is no owner, so resuming means retrying that check first. Only its
+    // success clears the stop; a still-broken session leaves the same banner up with the
+    // newest reason instead of letting the pump run into another 401.
+    if (!ready.current) {
+      if (resuming.current) return;
+      resuming.current = true;
+      void resolveOwner().then((resolved) => {
+        resuming.current = false;
+        if (resolved && mounted.current) resumeQueue();
+      }, (error) => {
+        resuming.current = false;
+        if (!mounted.current || !paused.current) return;
+        paused.current = { message: message(error) };
+        setPauseMessage(paused.current.message);
+      });
+      return;
+    }
     paused.current = null;
     if (mounted.current) setPauseMessage(null);
     flushCreates();
@@ -802,7 +912,9 @@ export function useUploadQueue(onUploaded: (task: UploadTask, item: Item) => voi
       patch(task.id, { status: "completed", loaded: task.size, file: null, speed: 0, error: undefined });
       releaseClaim(task.id);
     }
-    finishRef.current(task, item);
+    // A page that is not mounted has no handler: its listing is stale anyway when it
+    // returns, and the row above already records that the file landed.
+    for (const handler of completionHandlers) handler(task, item);
   }, [patch, releaseClaim, remove]);
   const applyOperation = useCallback((task: UploadTask, op: FileOperation) => {
     if (op.id !== task.operationId) throw new Error("The operation identity changed.");
@@ -1603,19 +1715,26 @@ export function useUploadQueue(onUploaded: (task: UploadTask, item: Item) => voi
     // the source instead of cancelling the page it had reached.
     return added.map((task) => task.id);
   }, [dropAdmission, insert, patch, publish]);
-  useEffect(() => {
+  // The tab's lifetime work starts with the first page that uses the queue and survives that
+  // page. `start` is idempotent, so every remount is a no-op here; `dispose` is the one real
+  // end (a closed tab), which nothing in the SPA calls.
+  let started = false;
+  let pollController: AbortController | null = null;
+  let pollTimer: ReturnType<typeof setInterval> | null = null;
+  const start = () => {
+    if (started) return;
+    started = true;
     mounted.current = true;
     const controller = new AbortController();
-    void api.me().then((user) => {
-      if (!mounted.current || !user) return;
-      owner.current = user.id;
-      setUploadOwner(user.id);
-      try { localStorage.removeItem(`eam.uploads.v1:${user.id}`); }
-      catch { /* Obsolete records are never read, even when storage is unavailable. */ }
-      ready.current = true;
-      pumpRef.current();
-    }).catch(() => { /* Authentication failures keep queued bytes unsent. */ });
-    const timer = setInterval(() => {
+    pollController = controller;
+    void resolveOwner().then((resolved) => {
+      if (resolved) pumpRef.current();
+    }, (error) => {
+      // A mount-time session check that fails is the queue's condition, not each file's: the
+      // rows stay queued and the banner's Resume retries the check before sending a byte.
+      if (mounted.current) pauseQueue(error);
+    });
+    pollTimer = setInterval(() => {
       if (pollBusy.current || !mounted.current) return;
       const candidates = [...tasks.current.values()].filter((task) => task.waitingFor || task.operationId && task.status === "finalizing");
       if (!candidates.length) return;
@@ -1665,40 +1784,87 @@ export function useUploadQueue(onUploaded: (task: UploadTask, item: Item) => voi
         } finally { pollBusy.current = false; requestPump(); }
       })();
     }, 2000);
-    return () => {
-      mounted.current = false; ready.current = false; controller.abort(); clearInterval(timer);
-      if (flushTimer.current !== undefined) { clearTimeout(flushTimer.current); deadlines.current.delete(flushTimer.current); flushTimer.current = undefined; }
-      // Progress tickers are intervals, so they need clearInterval even though they
-      // share the deadline set with timeouts.
-      for (const deadline of deadlines.current) { clearTimeout(deadline); clearInterval(deadline); }
-      deadlines.current.clear();
-      for (const runtime of running.current.values()) runtime.controller.abort();
-      running.current.clear();
-      transferring.current.clear();
-      // Prepared sessions have no row to outlive: leaving the page drops them the way it
-      // dropped every other in-memory promise, and their idle window expires them.
-      for (const admission of admissions.current.values()) admission.controller.abort();
-      admissions.current.clear();
-      admissionFailed.current.clear();
-      for (const release of pathClaims.current.values()) release();
-      pathClaims.current.clear();
-      // A question nobody is left to answer must not leave its file awaiting a promise that
-      // can no longer settle: leaving the page answers every one of them with the answer
-      // that writes nothing.
-      for (const waiter of conflicts.current.splice(0)) waiter.resolve("skip");
-      conflictOpen.current = false;
-    };
-  }, [applyOperation, patch, publish, remove]);
-  const hasActiveUploads = published.some((task) => ["queued", "waiting", "uploading", "finalizing"].includes(task.status));
+  };
+  const dispose = () => {
+    if (!started) return;
+    started = false;
+    mounted.current = false;
+    ready.current = false;
+    pollController?.abort();
+    if (pollTimer !== null) clearInterval(pollTimer);
+    if (flushTimer.current !== undefined) { clearTimeout(flushTimer.current); deadlines.current.delete(flushTimer.current); flushTimer.current = undefined; }
+    // Progress tickers are intervals, so they need clearInterval even though they
+    // share the deadline set with timeouts.
+    for (const deadline of deadlines.current) { clearTimeout(deadline); clearInterval(deadline); }
+    deadlines.current.clear();
+    for (const runtime of running.current.values()) runtime.controller.abort();
+    running.current.clear();
+    transferring.current.clear();
+    // Prepared sessions have no row to outlive a closed tab: they are aborted here and the
+    // idle window expires them. A navigation never reaches this, which is what keeps a
+    // selected session available to the page that comes back.
+    for (const admission of admissions.current.values()) admission.controller.abort();
+    admissions.current.clear();
+    admissionFailed.current.clear();
+    for (const release of pathClaims.current.values()) release();
+    pathClaims.current.clear();
+    // A question nobody is left to answer must not leave its file awaiting a promise that
+    // can no longer settle: closing the tab answers every one of them with the answer
+    // that writes nothing.
+    for (const waiter of conflicts.current.splice(0)) waiter.resolve("skip");
+    conflictOpen.current = false;
+    if (guardAttached) { window.removeEventListener("beforeunload", beforeUnload); guardAttached = false; }
+  };
+  const snapshot = (): UploadQueue => ({
+    tasks: published,
+    hasActiveUploads: published.some((task) => activeStatuses.includes(task.status)),
+    enqueue, cancel, retry, resume, resumeQueue,
+    pauseMessage,
+    conflict,
+    conflictPolicy: policy,
+    answerConflict,
+    askForConflicts,
+    beginImport,
+  });
+  return {
+    get tasks() { return published; },
+    get hasActiveUploads() { return published.some((task) => activeStatuses.includes(task.status)); },
+    get pauseMessage() { return pauseMessage; },
+    get conflict() { return conflict; },
+    get conflictPolicy() { return policy; },
+    enqueue, cancel, retry, resume, resumeQueue, answerConflict, askForConflicts, beginImport,
+    start, dispose, subscribe, onCompleted, snapshot,
+  };
+}
+
+let queueOwner: QueueOwner | null = null;
+function uploadQueueOwner(): QueueOwner {
+  queueOwner ??= createQueue();
+  return queueOwner;
+}
+/**
+ * End the queue the way a closed tab does. Nothing in the SPA calls this: the whole point of
+ * owning the queue at module level is that a page navigation does not end it. The test
+ * harness calls it to model the one teardown that still aborts in-flight work.
+ */
+export function disposeUploadQueue(): void {
+  queueOwner?.dispose();
+}
+/**
+ * Subscribe the calling page to the tab-lifetime queue.
+ *
+ * The engine is created by the first page that uses it and outlives every page after that,
+ * so an unmount only removes this subscription and its settle handler. A failed or absent
+ * owner is not a render concern: it pauses the queue and the banner offers Resume.
+ */
+export function useUploadQueue(onUploaded: (task: UploadTask, item: Item) => void): UploadQueue {
+  const queue = uploadQueueOwner();
+  const [, bump] = useState(0);
   useEffect(() => {
-    if (!hasActiveUploads) return;
-    const beforeUnload = (event: BeforeUnloadEvent) => {
-      event.preventDefault();
-      event.returnValue = "";
-    };
-    window.addEventListener("beforeunload", beforeUnload);
-    return () => window.removeEventListener("beforeunload", beforeUnload);
-  }, [hasActiveUploads]);
-  return { tasks: published, hasActiveUploads, enqueue, cancel, retry, resume, resumeQueue, pauseMessage,
-    conflict, conflictPolicy: policy, answerConflict, askForConflicts, beginImport };
+    const unsubscribe = queue.subscribe(() => bump((value) => value + 1));
+    const stop = queue.onCompleted(onUploaded);
+    queue.start();
+    return () => { unsubscribe(); stop(); };
+  }, [queue, onUploaded]);
+  return queue.snapshot();
 }

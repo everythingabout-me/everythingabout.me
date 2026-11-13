@@ -1108,6 +1108,10 @@ export function FilesPage() {
     });
   }, []);
 
+  // The queue is module-owned and outlives this page: an unmount only detaches this
+  // subscription, so a navigation (including the failure list's fix link) keeps the rows and
+  // their records. `handleUploaded` is re-attached on the next mount and updates whichever
+  // listing is on screen then; anything that settled while away is already in the new listing.
   const {
     tasks: uploads,
     hasActiveUploads,

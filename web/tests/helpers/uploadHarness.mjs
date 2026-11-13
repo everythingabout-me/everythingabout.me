@@ -297,14 +297,14 @@ export async function setup(overrides = {}, options = {}) {
   const selectionCode = (await transformWithOxc(`${selectionSource}\n// harness ${unique}`, "uploadSelection.ts")).code;
   const selectionURL = moduleURL(selectionCode);
   const source = queueSource
-    .replace(/import \{ useCallback, useEffect, useRef, useState \} from "react";/, "const { useCallback, useEffect, useRef, useState, setTimeout, clearTimeout, setInterval, clearInterval, localStorage, crypto, window } = globalThis.__uploadHarness;")
+    .replace(/import \{ useEffect, useState \} from "react";/, "const { useEffect, useState, setTimeout, clearTimeout, setInterval, clearInterval, localStorage, crypto, window } = globalThis.__uploadHarness;")
     .replace(/import \{ ApiError, FileApiError, api,[^\n]+from "\.\.\/api\/client";/, "const { ApiError, FileApiError, api } = globalThis.__uploadHarness;")
     .replace('import { t } from "../i18n";', 'const t = (key) => key;')
     .replace('from "./uploadPersistence"', `from "${persistenceURL}"`)
     .replace('from "./uploadOwnership"', `from "${ownershipURL}"`)
     .replace('from "./uploadSelection"', `from "${selectionURL}"`);
   const { code } = await transformWithOxc(`${source}\n// harness ${unique}`, "useUploadQueue.ts");
-  const { useUploadQueue } = await import(moduleURL(code));
+  const { useUploadQueue, disposeUploadQueue } = await import(moduleURL(code));
   const render = () => {
     cursor = 0;
     const queue = useUploadQueue((task, result) => {
@@ -356,11 +356,21 @@ export async function setup(overrides = {}, options = {}) {
     }
     return settle();
   };
+  // A page navigation: the consumer effect detaches, but the module-owned queue keeps
+  // running. This is the seam the old harness could not model, because the queue *was* the
+  // page's effect.
+  const navigateAway = () => {
+    if (!mounted) return;
+    for (let i = 0; i < slots.length; i++) { slots[i]?.cleanup?.(); slots[i] = undefined; }
+  };
+  // The real end of the queue: the tab closes and the engine aborts its in-flight work.
+  // Navigation must never take this path; that is the defect this harness distinguishes.
   const unmount = () => {
     if (!mounted) return;
+    navigateAway();
     mounted = false;
-    for (const slot of slots) slot?.cleanup?.();
+    disposeUploadQueue();
   };
   render();
-  return { render, settle, until, tick, timers, storage, locks, ownership, completed, persistence, listeners, dispatchBeforeUnload, unmount, updates: () => stateUpdates, paints: () => paints };
+  return { render, settle, until, tick, timers, storage, locks, ownership, completed, persistence, listeners, dispatchBeforeUnload, navigateAway, unmount, updates: () => stateUpdates, paints: () => paints };
 }

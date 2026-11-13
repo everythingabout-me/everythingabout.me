@@ -767,17 +767,35 @@ test("authentication resolution gates all queued bytes and a different-size rese
   assertGuard(harness, false);
 });
 
-test("failed authentication leaves queued Files local and cannot restore another owner", async (t) => {
+test("failed authentication pauses the queue and never restores another owner's session", async (t) => {
   const server = uploadServer();
-  server.api.me = async () => { throw new TestApiError("signed out", 401); };
+  let signedIn = false;
+  server.api.me = async () => {
+    if (!signedIn) throw new TestApiError("signed out", 401);
+    return { id: "owner-a" };
+  };
   const harness = await mount(t, server.api);
   const selected = entry("private");
   enqueue(harness, [selected]);
-  const queue = await harness.settle();
+  let queue = await harness.settle();
   assert.equal(queue.tasks[0].status, "queued");
   assert.equal(queue.tasks[0].file, selected.file);
+  // The failed mount is the queue's condition, not a permanent "queued" state: the banner
+  // names it and every queued byte waits for the session rather than for an impossible click.
+  assert.equal(queue.pauseMessage, "signed out");
   assert.equal(server.calls.length, 0);
   assert.equal(harness.storage.getItem("eam.uploads.v1:owner-a"), null);
+  queue.resumeQueue();
+  queue = await harness.settle();
+  assert.equal(queue.pauseMessage, "signed out", "a still-broken session keeps the same stop");
+  assert.equal(server.calls.length, 0);
+  // Once the session is back, Resume retries it and only then sends the queued bytes.
+  signedIn = true;
+  queue.resumeQueue();
+  queue = await harness.until(allComplete);
+  assert.equal(queue.pauseMessage, null);
+  assert.equal(queue.tasks[0].file, null);
+  assert.equal(callsOf(server, "create").length, 1);
 });
 
 for (const phase of ["open", "committing"]) {
