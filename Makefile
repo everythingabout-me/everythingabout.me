@@ -3,7 +3,7 @@ SHELL := /bin/bash
 GO ?= go
 EAM = cd backend && $(GO) run ./cmd/eam
 
-.PHONY: install dev server build web-build migrate check check-write test test-pg fmt
+.PHONY: install dev server build web-build migrate check check-write test test-pg measure-journal fmt
 
 # Install dependencies after a fresh clone
 install:
@@ -77,6 +77,23 @@ test:
 	( cd web && npm run typecheck && npm test ); \
 	frontend=$$?; \
 	if [ "$$status" -ne 0 ] || [ "$$frontend" -ne 0 ]; then exit 1; fi
+
+# Phase 1 measurement for docs/design/journal-entries.md: drives a real move through
+# the settlement path and prints the journal's document write volume, writes per entry
+# and the traced time inside journal statements. Needs a disposable CREATEDB service.
+# FILES defaults to 500 (about six minutes). A full 5,000-file settlement would write
+# roughly 500 GB of JSON, so measure that size with FREEZE=1 (admission and manifest
+# freeze only), which is what the design doc reports.
+measure-journal:
+	@if [ -z "$$EAM_TEST_DATABASE_URL" ]; then \
+	  echo "error: EAM_TEST_DATABASE_URL is not set; the measurement needs a disposable PostgreSQL service." >&2; \
+	  echo "       Example: EAM_TEST_DATABASE_URL=postgres://postgres:postgres@127.0.0.1:5432/postgres?sslmode=disable make measure-journal" >&2; \
+	  exit 1; \
+	fi
+	cd backend && EAM_JOURNAL_COST_MEASUREMENT=1 \
+	  EAM_JOURNAL_COST_FILES="$${FILES:-500}" \
+	  EAM_JOURNAL_COST_FREEZE_ONLY="$${FREEZE:-0}" \
+	  $(GO) test ./internal/fileops -run TestJournalEntriesDocumentCost -count=1 -v -timeout 1800s
 
 # The release gate for journal, upload, operation and change-stream changes.
 # A missing URL is a failure here, never a skip.
