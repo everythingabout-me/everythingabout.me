@@ -7,6 +7,7 @@
 //	eam storage-admit --owner-id UUID --writers-quiesced --evidence proof.json [--dry-run]
 //	eam storage-baseline --owner-id UUID --output new-baseline.json
 //	eam storage-resolve-upload --operation-id UUID [--dry-run]
+//	eam storage-rebind --owner-id UUID --from CONNECTION --to CONNECTION --writers-quiesced [--dry-run]
 //	eam claim --email email [--dry-run] [--keep-source]
 package main
 
@@ -54,6 +55,8 @@ func main() {
 		err = runStorageBaseline(args)
 	case "storage-resolve-upload":
 		err = runStorageResolveUpload(args)
+	case "storage-rebind":
+		err = runStorageRebind(args)
 	case "storage-ledger-prune":
 		err = runStorageLedgerPrune(args)
 	case "file-changes-prune":
@@ -103,6 +106,8 @@ usage:
   eam storage-baseline --owner-id UUID --output new-baseline.json [--writers-quiesced]
   eam storage-baseline --input baseline.json --output recheck.json [--quota-bytes N]
   eam storage-resolve-upload --operation-id UUID [--dry-run]  resolve a terminal upload stuck on an unconfirmed part receipt
+  eam storage-rebind --owner-id UUID --from CONNECTION --to CONNECTION --writers-quiesced [--dry-run]
+      re-point the index and change stream after the bytes moved; never touches storage
   eam storage-ledger-prune --owner-id UUID [--dry-run]  remove expired settled intent records, keep non-terminal evidence
   eam file-changes-prune --owner-id UUID [--dry-run]  remove expired change rows, retain deduplication receipts
   eam file-audit-prune --owner-id UUID --before DATE [--dry-run]  remove audit rows older than an explicit cutoff
