@@ -477,16 +477,34 @@ func Run(t *testing.T, construct func(*httptest.Server) (storage.Factory, error)
 		for _, test := range []struct {
 			name    string
 			objects map[string][]byte
-		}{{"file_folder", map[string][]byte{"drive/alice/same": []byte("file"), "drive/alice/same/child": []byte("child")}}, {"unicode", map[string][]byte{"drive/alice/é": {}, "drive/alice/e\u0301": {}}}} {
+			exact   storage.Path
+			kind    storage.Kind
+		}{
+			{"file_folder", map[string][]byte{"drive/alice/same": []byte("file"), "drive/alice/same/child": []byte("child")}, "same", storage.File},
+			{"unicode", map[string][]byte{"drive/alice/é": {}, "drive/alice/e\u0301": {}}, "é", storage.File},
+		} {
 			t.Run(test.name, func(t *testing.T) {
 				native, _, driver := setup(t)
 				native.mu.Lock()
 				native.objects = test.objects
 				native.mu.Unlock()
+				// A listing materializes a directory, so it is where a duplicate name is
+				// reported: the complete scan that builds the index must fail instead of
+				// recording an ambiguous sibling set.
 				_, err := driver.List(context.Background(), "", storage.PageRequest{Limit: 1})
 				code(t, err, "ambiguous_path")
-				_, err = driver.Stat(context.Background(), "same")
-				code(t, err, "ambiguous_path")
+				// A path-addressed observation answers for the exact key it names and never
+				// lists the parent, so a colliding sibling is not something it can discover.
+				// It must still return the entry that key selects, not an error and not the
+				// other spelling. See "A path costs what the path names" in
+				// storage-driver.md for why the listing is the place that reports duplicates.
+				entry, err := driver.Stat(context.Background(), test.exact)
+				if err != nil {
+					t.Fatalf("Stat(%q) = %v, want the entry that key names", test.exact, err)
+				}
+				if entry.Path != test.exact || entry.Kind != test.kind {
+					t.Fatalf("Stat(%q) = %s %q, want %s", test.exact, entry.Kind, entry.Path, test.kind)
+				}
 			})
 		}
 		for _, mode := range []string{"missing_cursor", "repeat_cursor", "empty_truncated", "empty_advancing"} {

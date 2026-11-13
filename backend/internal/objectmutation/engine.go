@@ -269,6 +269,18 @@ func (d *Driver) Stat(ctx context.Context, p storage.Path) (storage.Entry, error
 	if !storage.IsCode(headErr, "not_found") {
 		return storage.Entry{}, headErr
 	}
+	// Both byte-exact probes above already proved this path has neither a marker
+	// object nor a file, so the only remaining native folder is a prefix folder: it
+	// exists exactly while it has a child. Ask the tree for that one bounded listing
+	// instead of re-observing the two keys that just answered 404 — that was three
+	// more HEADs plus the same listing, per observation.
+	if probe, ok := d.tree.(prefixFolderReader); ok {
+		if _, err := probe.PrefixFolder(ctx, p); err != nil {
+			return storage.Entry{}, err
+		}
+		// A prefix folder has no marker object, so it has no revision and no body.
+		return storage.Entry{Path: p, Kind: storage.Folder, NativeRef: []byte(d.binding.ContentRoot + string(p))}, nil
+	}
 	e, err := d.tree.Stat(ctx, p)
 	if err != nil {
 		return storage.Entry{}, err
@@ -278,6 +290,13 @@ func (d *Driver) Stat(ctx context.Context, p storage.Path) (storage.Entry, error
 	}
 	// A folder marker is a real object, so it still carries a revision.
 	return d.observe(ctx, e)
+}
+
+// prefixFolderReader is the optional single-prefix probe objecttree.Tree offers.
+// The mutation driver's own two HEADs are the whole observation except for this
+// case; drivers that do not declare it fall back to the path-addressed Stat.
+type prefixFolderReader interface {
+	PrefixFolder(context.Context, storage.Path) (storage.Entry, error)
 }
 
 // observe attaches the current native revision. A prefix folder without a marker

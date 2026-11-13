@@ -240,3 +240,64 @@ func TestPathDepthObservationCost(t *testing.T) {
 		t.Logf("depth=%d Stat(file)=%dreq/%dlist  Open(file)=%dreq/%dlist", depth, stat.calls, stat.lists, open.calls, open.lists)
 	}
 }
+
+// TestPathObservationDoesNotScaleWithTheDirectory pins the cost that the parent
+// listing used to impose: observing one path is one byte-exact probe (or two, or
+// the bounded prefix probe), whatever the directory holds and however deep the
+// path is. This is the regression guard for the measurement above.
+func TestPathObservationDoesNotScaleWithTheDirectory(t *testing.T) {
+	ctx := context.Background()
+	for _, siblings := range []int{1, 1000, 5000} {
+		for _, depth := range []int{1, 6} {
+			var dir string
+			for i := 0; i < depth; i++ {
+				dir += fmt.Sprintf("level-%d/", i)
+			}
+			paths := []string{"drive/alice/" + dir + "target"}
+			for i := 0; i < siblings; i++ {
+				paths = append(paths, fmt.Sprintf("drive/alice/%ssibling-%05d", dir, i))
+			}
+			tree, backend := newCostTree(t, paths)
+			stat := backend.costOf(func() {
+				if _, err := tree.Stat(ctx, storage.Path(dir+"target")); err != nil {
+					t.Fatal(err)
+				}
+			})
+			open := backend.costOf(func() {
+				read, err := tree.Open(ctx, storage.Path(dir+"target"), storage.ReadOptions{})
+				if err != nil {
+					t.Fatal(err)
+				}
+				read.Body.Close()
+			})
+			if stat.calls != 1 || stat.lists != 0 || stat.entries != 0 || stat.response != 0 {
+				t.Fatalf("siblings=%d depth=%d: Stat(file) = %+v, want one HEAD and nothing else", siblings, depth, stat)
+			}
+			if open.calls != 2 || open.lists != 0 {
+				t.Fatalf("siblings=%d depth=%d: Open(file) = %+v, want one HEAD and one GET", siblings, depth, open)
+			}
+		}
+	}
+	// A prefix folder has no object of its own, so its existence needs one listing
+	// page; it must not need a second page or a parent listing.
+	tree, backend := newCostTree(t, []string{"drive/alice/prefix/child"})
+	probe := backend.costOf(func() {
+		if _, err := tree.Stat(ctx, "prefix"); err != nil {
+			t.Fatal(err)
+		}
+	})
+	if probe.calls != 3 || probe.lists != 1 {
+		t.Fatalf("Stat(prefix folder) = %+v, want two absent probes and one bounded listing", probe)
+	}
+	// One folder listing is its own prefix listing; it used to be this plus a
+	// listing of its parent.
+	tree, backend = newCostTree(t, []string{"drive/alice/folder/child"})
+	list := backend.costOf(func() {
+		if _, err := tree.List(ctx, "folder", storage.PageRequest{Limit: 100}); err != nil {
+			t.Fatal(err)
+		}
+	})
+	if list.calls != 1 || list.lists != 1 {
+		t.Fatalf("List(folder) = %+v, want one listing", list)
+	}
+}

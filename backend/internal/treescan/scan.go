@@ -320,6 +320,17 @@ func Scan(ctx context.Context, tree storage.Tree, opts Options) (*Result, error)
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
+		// Re-observing the directory proves it is still the folder whose page was just
+		// consumed. Only a driver with a folder revision can prove anything more, and
+		// only that observation is worth a native request: an object tree reports no
+		// folder revision, so the re-observation compared two nils, while it made a
+		// cluster of HEADs (a folder Stat is one or two byte-exact probes there) or a
+		// parent listing part of every directory of every scan. The page that was just
+		// enumerated is itself the existence proof, and a listing that returned a
+		// folder entry cannot have been a file.
+		if len(dir.Revision) == 0 {
+			continue
+		}
 		after, err := tree.Stat(ctx, dir.Path)
 		if err != nil {
 			return nil, fmt.Errorf("verify directory %q: %w", dir.Path, err)
@@ -327,7 +338,7 @@ func Scan(ctx context.Context, tree storage.Tree, opts Options) (*Result, error)
 		if after.Path != dir.Path || after.Kind != storage.Folder || after.Size != 0 {
 			return nil, issue("changed", dir.Path, "", "directory changed during scan")
 		}
-		if len(dir.Revision) > 0 && !bytes.Equal(dir.Revision, after.Revision) {
+		if !bytes.Equal(dir.Revision, after.Revision) {
 			return nil, issue("changed", dir.Path, "", "directory version changed during enumeration")
 		}
 	}

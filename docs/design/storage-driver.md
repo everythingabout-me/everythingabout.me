@@ -314,12 +314,20 @@ that two spellings denote the same object.
 ### A path costs what the path names
 
 Path-addressed `Stat` stays constant-cost: an object-store adapter settles one path with at most three
-byte-exact probes — the folder marker key (`key + "/"`), the file key, and one parent listing for a prefix
-folder that has no marker — and never walks the ancestor chain. Depth is a property of the tree, not of the
+byte-exact probes — the file key, the folder marker key (`key + "/"`), and one bounded listing of the
+folder's own prefix for a prefix folder that has no marker — and never walks the ancestor chain. The listing
+is of the path's own prefix, not of its parent: a parent listing returns every sibling, so it would cost a
+function of the directory instead of a function of the entry being observed, which is the cost this rule
+exists to forbid. `Open` makes the same observation before its one transfer, and `List` uses one prefix
+listing as both the existence proof and the enumeration. Depth is a property of the tree, not of the
 cost of observing one entry; a manifest rewrite that re-observes every captured identity before and after
-each entry would otherwise pay the depth again for every step. The consequence is explicit: a path whose
-ancestors include a file is not rejected during observation. Keeping the index free of that shape is the
-index's job, and an outside writer that produces it is a reconciliation finding, not a read error.
+each entry would otherwise pay the depth again for every step. The consequences are explicit: a path whose
+ancestors include a file is not rejected during observation, and a key that exists both as a file and as a
+prefix folder is observed as its file, because that is the key that can carry bytes. Duplicate spellings
+that normalize to one name are the same case: the observation returns the exact key asked for and only a
+listing can report the sibling. Keeping the index free of these shapes is the index's job — the complete
+scan fails the listing instead of indexing an ambiguous directory — and an outside writer that produces
+them is a reconciliation finding, not a read error.
 
 Callers order the calls as observation → condition → transfer, so a 304 or a HEAD costs one native request and
 nothing is opened. `OpenReference` transfers exactly the requested range once; it must not open a full object
@@ -341,7 +349,9 @@ not justify duplicate equivalent names. Root identity is persisted separately fr
 NameRules are not enough to describe every provider restriction: adapters also validate all reserved names,
 normalization collisions, punctuation and trailing-character rules before mutation. Unsupported names return
 invalid_name/name_conflict, never an anonymous or escaped native filename. Duplicate native names that make a
-path ambiguous return ambiguous_path. Any destination conversion during export to a different filesystem must
+path ambiguous return ambiguous_path from the listing that materializes the directory; a single path
+observation answers for the exact key it names instead, because only a listing can see the sibling that
+collides. Any destination conversion during export to a different filesystem must
 be explicit, reversible when offered, and must not silently overwrite.
 
 AtomicCreate/AtomicReplace describe tested single-file native visibility, not arbitrary directory transactions.

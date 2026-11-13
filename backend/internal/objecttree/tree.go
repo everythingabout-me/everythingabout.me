@@ -183,21 +183,29 @@ func fail(code string, path storage.Path) error { return storage.NewError(code, 
 // children consumes every native page before returning results, so collisions
 // across page boundaries and incomplete/progress-free listings fail closed.
 // Memory is proportional to the immediate directory, not its descendants.
-func (t *Tree) children(ctx context.Context, path storage.Path) ([]storage.Entry, error) {
+// children consumes every native page before returning results, so collisions
+// across page boundaries and incomplete/progress-free listings fail closed.
+// Memory is proportional to the immediate directory, not its descendants. The
+// second result reports whether the path's own marker object was part of the
+// listing, which is what proves a marked folder exists without a separate probe.
+func (t *Tree) children(ctx context.Context, path storage.Path) ([]storage.Entry, bool, error) {
 	prefix := t.key(path)
 	if path != "" {
 		prefix += "/"
 	}
 	entries := map[string]storage.Entry{}
 	spellings := map[string]string{}
+	marker := false
 	add := func(key string, folder bool, obj Object) error {
 		if !strings.HasPrefix(key, prefix) {
 			return fail("invalid_backend_response", path)
 		}
 		relative := strings.TrimPrefix(key, prefix)
 		// The entry's own marker is not a child, whatever body it carries: a folder
-		// reasserted during a purge holds a small token so its ETag moves.
+		// reasserted during a purge holds a small token so its ETag moves. It still
+		// proves the folder exists.
 		if relative == "" && folder {
+			marker = true
 			return nil
 		}
 		if folder {
@@ -257,36 +265,36 @@ func (t *Tree) children(ctx context.Context, path storage.Path) ([]storage.Entry
 	seen := map[string]bool{"": true}
 	for pageCount := 0; ; pageCount++ {
 		if pageCount >= maxNativePages {
-			return nil, fail("resource_limit", path)
+			return nil, false, fail("resource_limit", path)
 		}
 		if err := ctx.Err(); err != nil {
-			return nil, err
+			return nil, false, err
 		}
 		page, err := t.backend.List(ctx, prefix, cursor)
 		if err != nil {
-			return nil, err
+			return nil, false, err
 		}
 		for _, obj := range page.Objects {
 			// A key ending in "/" is a folder marker; its body is not content, and a
 			// reasserted marker carries a service token.
 			folder := strings.HasSuffix(obj.Key, "/")
 			if err := add(obj.Key, folder, obj); err != nil {
-				return nil, err
+				return nil, false, err
 			}
 		}
 		for _, key := range page.Prefixes {
 			if err := add(key, true, Object{}); err != nil {
-				return nil, err
+				return nil, false, err
 			}
 		}
 		if !page.Truncated {
 			if page.Next != "" {
-				return nil, fail("invalid_backend_response", path)
+				return nil, false, fail("invalid_backend_response", path)
 			}
 			break
 		}
 		if page.Next == "" || seen[page.Next] || len(page.Objects)+len(page.Prefixes) == 0 {
-			return nil, fail("incomplete_listing", path)
+			return nil, false, fail("incomplete_listing", path)
 		}
 		seen[page.Next] = true
 		cursor = page.Next
@@ -296,43 +304,23 @@ func (t *Tree) children(ctx context.Context, path storage.Path) ([]storage.Entry
 		result = append(result, entry)
 	}
 	sort.Slice(result, func(i, j int) bool { return result[i].Path < result[j].Path })
-	return result, nil
+	return result, marker, nil
 }
 
-func (t *Tree) resolve(ctx context.Context, path storage.Path) (storage.Entry, error) {
-	if err := t.check(ctx, path); err != nil {
-		return storage.Entry{}, err
-	}
-	current := storage.Entry{Path: "", Kind: storage.Folder, NativeRef: []byte(t.root)}
-	if path == "" {
-		return current, nil
-	}
-	for _, segment := range strings.Split(string(path), "/") {
-		if current.Kind != storage.Folder {
-			return storage.Entry{}, fail("not_found", path)
-		}
-		children, err := t.children(ctx, current.Path)
-		if err != nil {
-			return storage.Entry{}, err
-		}
-		next := storage.Path(segment)
-		if current.Path != "" {
-			next = current.Path + "/" + next
-		}
-		found := false
-		for _, entry := range children {
-			if entry.Path == next {
-				current = entry
-				found = true
-				break
-			}
-		}
-		if !found {
-			return storage.Entry{}, fail("not_found", path)
-		}
-	}
-	return current, nil
-}
+// Stat observes one path with byte-exact probes only. A file is settled by its
+// own key, a folder by its marker key, and a folder that has no marker object by
+// one bounded listing of its own prefix, because such a folder exists exactly
+// while it has a child. Nothing here walks the ancestor chain, and nothing lists
+// a parent directory: a parent listing was one request per observation plus one
+// page per thousand siblings, so observing one entry cost a function of its
+// directory rather than of itself.
+//
+// Two consequences are deliberate. A path is not rejected because an ancestor is
+// a file: the shape is the index's to keep out and reconcile's to report, as
+// storage-driver.md states. And a key that exists both as a file and as a prefix
+// folder is observed as its file here, because the file key is the one that can
+// carry bytes; a listing of the parent still reports the duplicate as
+// ambiguous_path.
 func (t *Tree) Stat(ctx context.Context, path storage.Path) (storage.Entry, error) {
 	ctx, done, err := t.operation(ctx)
 	if err != nil {
@@ -342,42 +330,79 @@ func (t *Tree) Stat(ctx context.Context, path storage.Path) (storage.Entry, erro
 	if err := t.check(ctx, path); err != nil {
 		return storage.Entry{}, err
 	}
+	return t.stat(ctx, path)
+}
+
+func (t *Tree) stat(ctx context.Context, path storage.Path) (storage.Entry, error) {
 	if path == "" {
 		return storage.Entry{Path: "", Kind: storage.Folder, NativeRef: []byte(t.root)}, nil
 	}
-	// One listing of the parent settles this path: its kind, its exact spelling and
-	// any sibling collision are all decided there. Walking from the root turned one
-	// observation into one request per path segment, which made every deep read and
-	// every action step pay for the depth. A file still needs its own HEAD, because
-	// a listing never establishes a revision.
-	parent := parentPathOf(path)
-	children, err := t.children(ctx, parent)
-	if err != nil {
-		return storage.Entry{}, err
-	}
-	for _, entry := range children {
-		if entry.Path != path {
-			continue
-		}
-		if entry.Kind == storage.Folder {
-			return entry, nil
-		}
-		obj, err := t.backend.Head(ctx, t.key(path))
-		if err != nil {
-			return storage.Entry{}, err
-		}
+	obj, err := t.backend.Head(ctx, t.key(path))
+	if err == nil {
 		if obj.Size < 0 {
 			return storage.Entry{}, fail("invalid_backend_response", path)
 		}
 		return t.entry(path, obj), nil
 	}
-	return storage.Entry{}, fail("not_found", path)
-}
-func parentPathOf(p storage.Path) storage.Path {
-	if index := strings.LastIndexByte(string(p), '/'); index >= 0 {
-		return p[:index]
+	if !storage.IsCode(err, "not_found") {
+		return storage.Entry{}, err
 	}
-	return ""
+	if _, err := t.backend.Head(ctx, t.key(path)+"/"); err == nil {
+		return t.folderEntry(path), nil
+	} else if !storage.IsCode(err, "not_found") {
+		return storage.Entry{}, err
+	}
+	return t.prefixFolder(ctx, path)
+}
+
+// folderEntry describes a folder from its key. A marker's body is not user
+// content (a reasserted marker carries a service token), and a read tree's
+// revision names a retained version, which a folder key does not select, so the
+// entry carries neither size nor revision.
+func (t *Tree) folderEntry(path storage.Path) storage.Entry {
+	return storage.Entry{Path: path, Kind: storage.Folder, NativeRef: []byte(t.key(path))}
+}
+
+// PrefixFolder observes a folder that has no marker object. Object stores have no
+// separate folder record, so one child is the whole proof of existence; that the
+// listing was truncated cannot change the answer, and no further page is read.
+func (t *Tree) PrefixFolder(ctx context.Context, path storage.Path) (storage.Entry, error) {
+	ctx, done, err := t.operation(ctx)
+	if err != nil {
+		return storage.Entry{}, err
+	}
+	defer done()
+	if err := t.check(ctx, path); err != nil {
+		return storage.Entry{}, err
+	}
+	if path == "" {
+		return t.folderEntry(path), nil
+	}
+	return t.prefixFolder(ctx, path)
+}
+
+func (t *Tree) prefixFolder(ctx context.Context, path storage.Path) (storage.Entry, error) {
+	prefix := t.key(path) + "/"
+	page, err := t.backend.List(ctx, prefix, "")
+	if err != nil {
+		return storage.Entry{}, err
+	}
+	for _, obj := range page.Objects {
+		if !strings.HasPrefix(obj.Key, prefix) {
+			return storage.Entry{}, fail("invalid_backend_response", path)
+		}
+		return t.folderEntry(path), nil
+	}
+	for _, key := range page.Prefixes {
+		if !strings.HasPrefix(key, prefix) {
+			return storage.Entry{}, fail("invalid_backend_response", path)
+		}
+		return t.folderEntry(path), nil
+	}
+	if page.Truncated {
+		return storage.Entry{}, fail("incomplete_listing", path)
+	}
+	return storage.Entry{}, fail("not_found", path)
 }
 func (t *Tree) entry(path storage.Path, obj Object) storage.Entry {
 	return storage.Entry{Path: path, Kind: storage.File, NativeRef: []byte(t.key(path)), Revision: versionToken(obj.VersionID), NativeETag: listETag(obj.ETag), Size: obj.Size, ModifiedAt: obj.ModifiedAt, MediaType: obj.MediaType}
@@ -468,21 +493,24 @@ func (t *Tree) List(ctx context.Context, path storage.Path, request storage.Page
 			return storage.Page{}, err
 		}
 	}
-	// Stat settles this path with one listing of its parent; resolve walked from the
-	// root, which made every List cost one native request per path segment. A walk of
-	// a five-deep tree therefore paid five requests per folder just to learn that the
-	// folder its parent had already listed still exists — and a capture walks every
-	// folder of the subtree.
-	entry, err := t.Stat(ctx, path)
+	// One listing of the folder's own prefix is both the existence proof and the
+	// enumeration: a marker object or any child settles the folder. Probing the
+	// folder first made every listing two requests, and the parent listing it used
+	// to make scaled with the parent's size, which is what a capture of a wide tree
+	// paid per folder. The empty case is the only ambiguous one — a file or nothing
+	// at all — and is answered by the byte-exact probes of stat.
+	children, marker, err := t.children(ctx, path)
 	if err != nil {
 		return storage.Page{}, err
 	}
-	if entry.Kind != storage.Folder {
-		return storage.Page{}, fail("not_folder", path)
-	}
-	children, err := t.children(ctx, path)
-	if err != nil {
-		return storage.Page{}, err
+	if path != "" && len(children) == 0 && !marker {
+		entry, err := t.stat(ctx, path)
+		if err != nil {
+			return storage.Page{}, err
+		}
+		if entry.Kind != storage.Folder {
+			return storage.Page{}, fail("not_folder", path)
+		}
 	}
 	start := sort.Search(len(children), func(i int) bool { return children[i].Path > last })
 	end := start + limit
@@ -512,7 +540,10 @@ func (t *Tree) Open(ctx context.Context, path storage.Path, opts storage.ReadOpt
 	if opts.Offset < 0 || (opts.Length != nil && (*opts.Length <= 0 || opts.Offset > math.MaxInt64-*opts.Length)) {
 		return storage.Read{}, fail("invalid_range", path)
 	}
-	entry, err := t.resolve(ctx, path)
+	// The observation is the same byte-exact probe Stat makes. Open used to resolve
+	// the path by walking every ancestor, which cost one listing per path segment
+	// (and one page per thousand siblings of each ancestor) before the transfer.
+	entry, err := t.stat(ctx, path)
 	if err != nil {
 		return storage.Read{}, err
 	}

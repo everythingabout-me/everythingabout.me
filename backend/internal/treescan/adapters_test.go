@@ -96,7 +96,11 @@ func (nativeInventory) List(_ context.Context, prefix, cursor string) (objecttre
 	case "drive/owner/ folder /":
 		return objecttree.NativePage{Objects: []objecttree.Object{{Key: prefix + "raw +#?%.txt ", Size: 5}}}, nil
 	case "drive/owner/empty/":
-		return objecttree.NativePage{}, nil
+		// The parent page reported this folder by its marker object, so its own prefix
+		// listing returns that marker. A marker-less prefix folder with no child does
+		// not exist in an object store, and a directory listing proves existence from
+		// the marker or a child instead of re-observing the path.
+		return objecttree.NativePage{Objects: []objecttree.Object{{Key: prefix, Size: 0}}}, nil
 	}
 	panic("scan crossed owner or system root: " + prefix)
 }
