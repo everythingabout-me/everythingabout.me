@@ -81,6 +81,33 @@ test("a create that answers unchanged lands the row without moving bytes", async
   assert.equal(harness.completed[0].item.path, "/kept.txt");
 });
 
+// The publication that replaces a destination with different bytes must still carry the
+// digest: that settlement is the only moment the library can learn it, and without it an
+// existing tree would never gain one — so the skip could never fire for the next import.
+test("a replacement publishes the digest the row computed for its bytes", async (t) => {
+  const server = uploadServer();
+  const bytes = "new bytes";
+  const refused = {
+    type: "urn:eam:error:name_conflict", title: "name_conflict", status: 409, code: "name_conflict",
+    detail: "The destination already exists.", requestId: "req_conflict", observedRevision: "content-v1",
+  };
+  const attempts = [];
+  server.api.createUploadBatch = async (items) => {
+    server.calls.push(["createBatch", items.map(({ input, key }) => ({ input: structuredClone(input), key }))]);
+    return items.map(({ input }) => { attempts.push(input); return { error: refused }; });
+  };
+  const harness = await mount(t, server.api);
+  enqueue(harness, [entry("changed.txt", bytes)], "");
+  // The destination holds other bytes, so the digest retry conflicts too and the person is
+  // asked; answering "replace" rebuilds the intent, and that is where the digest has to
+  // survive: the settlement that follows is the only place the library can learn it.
+  let queue = await harness.until((queue) => queue.conflict !== null);
+  queue.answerConflict("replace");
+  queue = await harness.until(() => attempts.some((input) => input.condition?.mode !== "create"));
+  const replacement = attempts.find((input) => input.condition?.mode !== "create");
+  assert.equal(replacement.contentSha256, digest(bytes), "the replacement carries the digest that will be recorded");
+});
+
 // A re-import of bytes the library already holds: the first create is refused because the
 // destination exists, and the client asks again with the digest it can now compute. The
 // destination answers "already this content", so the row lands with no bytes and no

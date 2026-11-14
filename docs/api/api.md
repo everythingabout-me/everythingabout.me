@@ -673,8 +673,10 @@ up to 32 MiB and only when the row creates (a replacement must transfer by defin
 asks the same create once more with the digest under a fresh idempotency key. That is the one
 moment the digest is worth its read: the destination is known to exist, so a match saves the
 whole transfer, while on the happy path hashing would delay the create. The digest stays on
-the row's intent so a later retry does not hash again, and an `unchanged` answer in a page
-completes the row with the entry it names. A skip still costs one observation of the
+the row so a later attempt does not hash again, and it travels with *every* create the row
+sends — the replacement that publishes different bytes included, because that settlement is
+the only moment the library can learn the digest and without it an existing tree would never
+gain one. An `unchanged` answer in a page completes the row with the entry it names. A skip still costs one observation of the
 destination — the create reads it to prove the object is still there — but no session, no
 transfer and no settlement.
 

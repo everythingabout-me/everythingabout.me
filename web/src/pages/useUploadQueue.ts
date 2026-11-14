@@ -172,6 +172,15 @@ export interface UploadTask {
    */
   observedRevision?: string;
   /**
+   * The digest this row computed for its own bytes.
+   *
+   * It travels with every create the row sends, not only the one that tries to skip: a
+   * destination holding *other* bytes still has to publish these, and the settlement that
+   * publishes them is the only moment the library can learn the digest. Without that, an
+   * existing library never gains one and the skip could never fire for it.
+   */
+  contentSha256?: string;
+  /**
    * The file came from a dropped tree, so its create may materialize missing ancestors.
    *
    * The folder it names is part of the tree the person enumerated, not a typo, and the
@@ -694,6 +703,7 @@ async function prepareUploadSession(host: UploadRunHost, task: UploadTask, signa
     // request: the flag travels in the create, so a folder an earlier import never made is
     // created by the retry itself instead of answering parent_missing again.
     intent = { path: task.path, size: task.size, mediaType: task.file?.type || "application/octet-stream", condition,
+      ...(task.contentSha256 ? { contentSha256: task.contentSha256 } : {}),
       ...(task.parents && condition.mode !== "replace" ? { parents: true as const } : {}),
       ...(sourceModifiedAt && task.modifiedAt !== undefined ? { sourceModifiedAt: new Date(task.modifiedAt).toISOString() } : {}) };
     // Retain the exact intent/key in memory before allocation, including a lost create ACK.
@@ -928,8 +938,9 @@ async function retryCreateWithDigest(host: UploadRunHost, id: string, task: Uplo
   const digest = await prepared.catch(() => undefined);
   if (!digest || signal.aborted) return { kind: "none" };
   const withDigest = { ...intent, contentSha256: digest };
-  // Keep the digest on the row: a later retry offers it without hashing again.
-  host.patch(id, { intent: withDigest });
+  // Keep the digest on the row: the conflict path may rebuild this row's intent as a
+  // replacement, and that publication is what records the digest for the next import.
+  host.patch(id, { intent: withDigest, contentSha256: digest });
   try {
     const session = await host.admitUpload(withDigest, taskId(), signal);
     return { kind: "session", session };
