@@ -88,7 +88,7 @@ func commitStagedFile(ctx context.Context, tx pgx.Tx, op fileops.Operation, resu
 	if tag.RowsAffected() != 1 {
 		return nil, fileops.E("parent_changed", nil)
 	}
-	if err := saveContentRevision(ctx, tx, op.Root, *entry, filerevision.Content(fileRootNamespace(op.Root), *entry)); err != nil {
+	if err := saveContentRevision(ctx, tx, op.Root, *entry, filerevision.Content(fileRootNamespace(op.Root), *entry), assertedDigest(intent.AssertedDigest)); err != nil {
 		return nil, err
 	}
 	metadata, err := settledMetadata(ctx, tx, op.Root, *entry, nil)

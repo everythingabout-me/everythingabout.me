@@ -651,9 +651,22 @@ Idempotency-Key: mobile-upload-001
   "size":18234122311,
   "mediaType":"video/mp4",
   "condition":{"mode":"create"},
-  "sourceModifiedAt":"2026-10-29T08:00:00Z"
+  "sourceModifiedAt":"2026-10-29T08:00:00Z",
+  "contentSha256":"9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"
 }
 ```
+
+`contentSha256` is the digest the caller computed for the bytes it is about to send (64 lowercase hex,
+optional). It is an assertion: this service cannot verify it, because a class A publication never passes its
+bytes through the application, and a multipart object's provider ETag describes its parts rather than its
+content. It is recorded with the settlement that publishes the bytes and answers exactly one question: an
+existing destination at the same path, with the same length and the same recorded digest, is already this
+content, so the creation answers `200` with `{"unchanged":true,"item":…}` and opens **no session** — the
+re-import of an unchanged file moves nothing and costs no settlement. The digest recorded for an entry is
+cleared whenever that entry is replaced, so a skip can only keep bytes this service published while asserting
+the same content; a destination whose length, digest or native revision no longer matches takes the ordinary
+`409 name_conflict` path, and an explicit `replace`/`overwrite` always transfers. A client that omits the
+field simply never skips.
 
 `parents:true` (a create or overwrite with a full-path destination) creates the destination's missing
 ancestor folders as part of this request. Each created folder gets a fresh ID, its native marker object and

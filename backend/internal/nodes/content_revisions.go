@@ -5,7 +5,9 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/binary"
+	"encoding/hex"
 	"encoding/json"
+	"errors"
 
 	"everythingabout.me/backend/internal/fileops"
 	"everythingabout.me/backend/internal/filerevision"
@@ -39,6 +41,33 @@ func lookupContentRevision(ctx context.Context, reader contentRevisionReader, ow
 	}
 	return &revision, nil
 }
+
+// LookupAssertedDigest answers "the digest this service recorded for the bytes that are
+// there now", or "" when it cannot prove that. The generation row is joined by the same
+// native fingerprint LookupContentRevision uses, so an object replaced outside the service —
+// a new ETag, size or identity — answers empty instead of stale: the digest may only skip a
+// transfer while the bytes it described are still the ones at the destination.
+func (s *Service) LookupAssertedDigest(ctx context.Context, owner, namespace string, entry storage.Entry) (string, error) {
+	return lookupAssertedDigest(ctx, s.db.Pool(), owner, namespace, entry)
+}
+func lookupAssertedDigest(ctx context.Context, reader contentRevisionReader, owner, namespace string, entry storage.Entry) (string, error) {
+	if entry.Kind != storage.File {
+		return "", nil
+	}
+	var digest string
+	err := reader.QueryRow(ctx, `select coalesce(generation.content_sha256,'') from file_content_generations generation
+ where generation.owner_id=$1::uuid and generation.root_namespace=$2
+ and generation.node_id=file_tree_resolve($1::uuid,$3) and generation.native_fingerprint=$4`,
+		owner, namespace, string(entry.Path), contentFingerprint(entry)).Scan(&digest)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	return digest, nil
+}
+
 func contentFingerprint(entry storage.Entry) []byte {
 	h := sha256.New()
 	h.Write([]byte("eam/native-content/v1\x00"))
@@ -50,7 +79,18 @@ func contentFingerprint(entry storage.Entry) []byte {
 	}
 	return h.Sum(nil)
 }
-func saveContentRevision(ctx context.Context, tx pgx.Tx, root fileops.Root, entry storage.Entry, revision *string) error {
+
+// assertedDigest renders the client's assertion for the generation row, or nil. Only a
+// sha-256 of exactly one digest length is stored: anything else cannot pass the column's
+// check, and a malformed assertion must never become a skip later.
+func assertedDigest(digest *storage.Digest) any {
+	if digest == nil || digest.Algorithm != "sha-256" || len(digest.Value) != sha256.Size {
+		return nil
+	}
+	return hex.EncodeToString(digest.Value)
+}
+
+func saveContentRevision(ctx context.Context, tx pgx.Tx, root fileops.Root, entry storage.Entry, revision *string, digest any) error {
 	if entry.Kind != storage.File {
 		return nil
 	}
@@ -64,9 +104,9 @@ func saveContentRevision(ctx context.Context, tx pgx.Tx, root fileops.Root, entr
  and node_id is not null and node_id is distinct from file_tree_resolve($1::uuid,$3)`, root.OwnerID, fileRootNamespace(root), string(entry.Path)); err != nil {
 		return err
 	}
-	_, err := tx.Exec(ctx, `insert into file_content_generations(owner_id,root_namespace,path,node_id,native_fingerprint,content_revision)
- values($1::uuid,$2,$3,file_tree_resolve($1::uuid,$3),$4,$5)
- on conflict(owner_id,root_namespace,node_id) do update set path=excluded.path,native_fingerprint=excluded.native_fingerprint,content_revision=excluded.content_revision`, root.OwnerID, fileRootNamespace(root), string(entry.Path), contentFingerprint(entry), *revision)
+	_, err := tx.Exec(ctx, `insert into file_content_generations(owner_id,root_namespace,path,node_id,native_fingerprint,content_revision,content_sha256)
+ values($1::uuid,$2,$3,file_tree_resolve($1::uuid,$3),$4,$5,$6)
+ on conflict(owner_id,root_namespace,node_id) do update set path=excluded.path,native_fingerprint=excluded.native_fingerprint,content_revision=excluded.content_revision,content_sha256=excluded.content_sha256`, root.OwnerID, fileRootNamespace(root), string(entry.Path), contentFingerprint(entry), *revision, digest)
 	return err
 }
 func deleteContentRevision(ctx context.Context, tx pgx.Tx, root fileops.Root, source *storage.Entry) error {

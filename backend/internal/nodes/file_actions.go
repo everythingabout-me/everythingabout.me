@@ -224,7 +224,7 @@ func commitFileAction(ctx context.Context, tx pgx.Tx, op fileops.Operation, nati
 		if err := settleNewEntry(ctx, tx, op.Root, *item.result.Entry); err != nil {
 			return nil, err
 		}
-		if err := saveContentRevision(ctx, tx, op.Root, *item.result.Entry, filerevision.Content(fileRootNamespace(op.Root), *item.result.Entry)); err != nil {
+		if err := saveContentRevision(ctx, tx, op.Root, *item.result.Entry, filerevision.Content(fileRootNamespace(op.Root), *item.result.Entry), nil); err != nil {
 			return nil, err
 		}
 	}
@@ -404,7 +404,7 @@ func settleMovedEntry(ctx context.Context, tx pgx.Tx, root fileops.Root, source 
 		if revision == nil {
 			revision = filerevision.Content(fileRootNamespace(root), entry)
 		}
-		if err := saveContentRevision(ctx, tx, root, entry, revision); err != nil {
+		if err := saveContentRevision(ctx, tx, root, entry, revision, nil); err != nil {
 			return err
 		}
 	}

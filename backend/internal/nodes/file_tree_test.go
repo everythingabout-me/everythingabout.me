@@ -40,7 +40,7 @@ func TestCanonicalTreeMovePreservesThirtyThousandDescendants(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err = saveContentRevision(ctx, tx, root, nativeLeaf, &originalRevision); err != nil {
+	if err = saveContentRevision(ctx, tx, root, nativeLeaf, &originalRevision, nil); err != nil {
 		t.Fatal(err)
 	}
 	if err = tx.Commit(ctx); err != nil {

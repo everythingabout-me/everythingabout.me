@@ -141,6 +141,11 @@ func (s *Server) admitUploadPageItem(r *http.Request, f *fileRequest, body []byt
 	if err := s.handleFilesCreateUpload(rec, inner, f); err != nil {
 		return map[string]any{"error": filesProblem(err)}
 	}
+	if rec.header.Get(filesUnchangedHeader) == "true" {
+		// No session was opened: the destination already held these bytes, and the answer is
+		// the existing entry rather than a transport.
+		return map[string]any{"unchanged": json.RawMessage(rec.body.Bytes())}
+	}
 	return map[string]any{"upload": json.RawMessage(rec.body.Bytes())}
 }
 

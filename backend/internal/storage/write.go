@@ -63,6 +63,11 @@ type WriteIntent struct {
 	ParentPath       Path
 	ParentRevision   []byte
 	Digest           *Digest
+	// AssertedDigest is the content digest the owner's client computed for these bytes.
+	// Nothing in this layer verifies it — a class A publication never sees the bytes — so it
+	// is recorded, never trusted: the only decision it feeds is whether a creation for the
+	// same path may skip its transfer because the library already holds this content.
+	AssertedDigest *Digest `json:",omitempty"`
 }
 type Staged struct {
 	Intent WriteIntent

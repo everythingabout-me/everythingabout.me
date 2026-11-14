@@ -3,6 +3,8 @@ package api
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io"
@@ -22,6 +24,10 @@ import (
 	"everythingabout.me/backend/internal/storage"
 	"everythingabout.me/backend/internal/uploadspool"
 )
+
+// filesUnchangedHeader marks a creation that opened no session because the destination
+// already held the asserted content.
+const filesUnchangedHeader = "X-Eam-Unchanged"
 
 const filesUploadPartSize int64 = 16 << 20
 const filesUploadMaxParts = 10000
@@ -122,7 +128,14 @@ type filesCreateUploadRequest struct {
 	Size             *int64            `json:"size"`
 	MediaType        string            `json:"mediaType"`
 	SourceModifiedAt *time.Time        `json:"sourceModifiedAt"`
-	Condition        struct {
+	// ContentSHA256 is the sha-256 the client computed for the bytes it is about to send.
+	// The service cannot compute one itself (a class A publication never sees the bytes, and
+	// a multipart object's ETag describes its parts), so this is an assertion, recorded with
+	// the settlement and used for one decision only: a creation for the same path with the
+	// same length and the same digest skips its session, because the library already holds
+	// this content. See nodes.LookupAssertedDigest.
+	ContentSHA256 string `json:"contentSha256,omitempty"`
+	Condition     struct {
 		Mode            string `json:"mode"`
 		ContentRevision string `json:"contentRevision"`
 	} `json:"condition"`
@@ -466,6 +479,13 @@ func (s *Server) handleFilesCreateUpload(w http.ResponseWriter, r *http.Request,
 		req.SourceModifiedAt = &v
 	}
 	client.Size, client.MediaType, client.SourceModifiedAt, client.ClientCondition = *req.Size, req.MediaType, req.SourceModifiedAt, filesPutClientCondition(condition)
+	if req.ContentSHA256 != "" {
+		digest, e := filesAssertedDigest(req.ContentSHA256)
+		if e != nil {
+			return e
+		}
+		client.AssertedDigest = digest
+	}
 	if old, found, e := s.filesJournal.ReplayUpload(r.Context(), root, actor, key, client); e != nil {
 		return filesMutationProblem(e)
 	} else if found {
@@ -565,6 +585,24 @@ func (s *Server) handleFilesCreateUpload(w http.ResponseWriter, r *http.Request,
 		}
 		switch condition.Mode {
 		case fc.PutCreate:
+			// A re-import of bytes the library already holds. Nothing moves, so nothing is
+			// opened: a session would reserve quota, take a guard and cost a settlement to
+			// reach the answer "already there", and a 20k-file re-import paid all three for
+			// every file that had not changed.
+			unchanged, e := s.filesUnchangedDestination(r.Context(), f, existing, *req.Size, client.AssertedDigest)
+			if e != nil {
+				return e
+			}
+			if unchanged {
+				metadata, e := s.filesIndexedMetadata(r.Context(), f, p)
+				if e != nil {
+					return e
+				}
+				// The header is what a batch page reads to tell this answer from the other
+				// 200 a create can return (a replay, which carries a session).
+				w.Header().Set(filesUnchangedHeader, "true")
+				return writeFilesJSON(w, 200, map[string]any{"unchanged": true, "item": metadata})
+			}
 			// Adoption needs the bytes to be provably this owner's own failed publication
 			// and a transfer class that can publish without the client uploading again.
 			if writer, ok := native.(storage.DirectPutWriter); ok && writer.SupportsDirectPut(storage.Conditions{Absent: true}) && s.filesTransferClass() == storage.TransferPresignedParts {
@@ -1296,6 +1334,44 @@ func (s *Server) runUploadOperation(ctx context.Context, op fileops.Operation, a
 		err = service.Cleanup(ctx, op.Root, actor, op.ID, writer)
 	}
 	return op, err
+}
+
+// filesAssertedDigest validates the client's content digest. Lowercase hex only: the value
+// is stored and published verbatim, so one spelling is what makes two assertions comparable.
+func filesAssertedDigest(value string) (*storage.Digest, error) {
+	if len(value) != 2*sha256.Size {
+		return nil, fc.NewProblem(400, "invalid_request", "contentSha256 must be 64 lowercase hexadecimal characters.")
+	}
+	raw, err := hex.DecodeString(value)
+	if err != nil || hex.EncodeToString(raw) != value {
+		return nil, fc.NewProblem(400, "invalid_request", "contentSha256 must be 64 lowercase hexadecimal characters.")
+	}
+	return &storage.Digest{Algorithm: "sha-256", Value: raw}, nil
+}
+
+// filesUnchangedDestination reports whether this creation can skip its transfer because the
+// destination already holds exactly these bytes.
+//
+// The evidence is the digest recorded with the settlement that put them there, joined by the
+// native fingerprint: an object replaced outside the service answers empty, so a skip can
+// only ever keep bytes the library recorded asserting the same content. A destination whose
+// length differs is not the same file whatever its digest says, and either signal missing
+// means upload — the direction a wrong answer must fail in.
+func (s *Server) filesUnchangedDestination(ctx context.Context, f *fileRequest, existing storage.Entry, size int64, asserted *storage.Digest) (bool, error) {
+	if asserted == nil || existing.Kind != storage.File || existing.Size != size {
+		return false, nil
+	}
+	index, ok := s.filesIndex.(interface {
+		LookupAssertedDigest(context.Context, string, string, storage.Entry) (string, error)
+	})
+	if !ok {
+		return false, nil
+	}
+	recorded, err := index.LookupAssertedDigest(ctx, f.Principal.User.ID, f.ContentNamespace, existing)
+	if err != nil {
+		return false, nil
+	}
+	return recorded != "" && recorded == hex.EncodeToString(asserted.Value), nil
 }
 
 // filesDestinationConflict answers a create whose destination already exists, naming the
