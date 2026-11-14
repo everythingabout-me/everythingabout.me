@@ -81,6 +81,40 @@ test("a create that answers unchanged lands the row without moving bytes", async
   assert.equal(harness.completed[0].item.path, "/kept.txt");
 });
 
+// A re-import of bytes the library already holds: the first create is refused because the
+// destination exists, and the client asks again with the digest it can now compute. The
+// destination answers "already this content", so the row lands with no bytes and no
+// settlement — the case a 20k-file re-import is made of.
+test("a conflict retried with the digest lands the row when the destination holds the same bytes", async (t) => {
+  const server = uploadServer();
+  const bytes = "same bytes";
+  const attempts = [];
+  // The wire shape of one refused item, as the server answers it.
+  const refused = {
+    type: "urn:eam:error:name_conflict", title: "name_conflict", status: 409, code: "name_conflict",
+    detail: "The destination already exists.", requestId: "req_conflict", observedRevision: "content-v1",
+  };
+  server.api.createUploadBatch = async (items) => {
+    server.calls.push(["createBatch", items.map(({ input, key }) => ({ input: structuredClone(input), key }))]);
+    return items.map(({ input }) => {
+      attempts.push(input);
+      if (!input.contentSha256) return { error: refused };
+      return { unchanged: { unchanged: true, item: item(input.path, "file", bytes.length) } };
+    });
+  };
+  const harness = await mount(t, server.api);
+  enqueue(harness, [entry("kept.txt", bytes)], "");
+  const queue = await harness.until(allComplete);
+  assert.equal(queue.tasks[0].status, "completed");
+  assert.equal(attempts.length, 2, "the create is asked again with the digest");
+  assert.equal(attempts[0].contentSha256, undefined, "the first create carries no digest");
+  assert.equal(attempts[1].contentSha256, digest(bytes), "the retry carries the digest the client computed");
+  assert.equal(server.calls.filter(([kind]) => kind === "part").length, 0, "no bytes moved");
+  assert.equal(server.calls.filter(([kind]) => kind === "commit").length, 0, "nothing was settled");
+  assert.equal(harness.completed.length, 1);
+  assert.equal(harness.completed[0].item.path, "/kept.txt");
+});
+
 test("known rejected allocation stays failed across renders and retries only on explicit same-page action", async (t) => {
   const server = uploadServer();
   const attempts = [];

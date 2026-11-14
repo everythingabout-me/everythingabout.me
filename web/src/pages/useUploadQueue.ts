@@ -19,6 +19,14 @@ import { foldersWithoutFiles, type UploadEntry } from "./uploadSelection";
 import { claimUploadPath } from "./uploadOwnership";
 import { pendingFileOperation, setUploadOwner, settleFileOperation } from "./uploadPersistence";
 
+// Files worth hashing to learn whether a destination already holds them. The digest is only
+// computed after the server has said the destination exists, so it costs one read of a file
+// that would otherwise be read again to upload it; above this bound the read is the expensive
+// part of the transfer and the row uploads instead.
+const DIGEST_MAX_BYTES = 32 << 20;
+/** Digests already computed for a row, so a retried conflict does not hash twice. */
+const computedDigests = new Map<string, Promise<string | undefined>>();
+
 // Part requests in flight across every file. The bucket is an HTTP/1.1 origin — measured
 // against this bucket, not inferred from the dev server: it answers 1.1 even when the
 // client offers h2 in ALPN, so six sockets per origin is all that can move at once. The
@@ -852,6 +860,13 @@ async function admitUploadAttempt(host: UploadRunHost, id: string, task: UploadT
       return null;
     }
     if (error instanceof ApiError && error.status === 409 && error.code === "name_conflict" && !task.overwrite) {
+      // Before asking the person, ask the server whether it is the same content: the create
+      // already knows the destination exists, so a digest can settle it here for no bytes and
+      // no settlement. A destination holding other content answers `conflict` and takes the
+      // ordinary path below.
+      const retried = await retryCreateWithDigest(host, id, task, signal, error);
+      if (retried.kind === "unchanged") return null;
+      if (retried.kind === "session") return { session: retried.session, allocated: true };
       // The refusal already names the revision the server observed at the destination,
       // which is the only value a replacement can prove it may overwrite: reading the
       // same file again would spend a round trip per file to learn what this answer
@@ -870,6 +885,62 @@ async function admitUploadAttempt(host: UploadRunHost, id: string, task: UploadT
   }
   host.admissions.delete(id);
   return { session, allocated: true };
+}
+
+/**
+ * Step: ask once more, with the digest, before treating a create's `409` as a conflict.
+ *
+ * Contract
+ * - Caller: a create was refused `name_conflict`, the row creates rather than replaces, and
+ *   the destination therefore exists — which is the only moment a digest is worth computing:
+ *   on the happy path it would delay the create, and here it saves the whole transfer.
+ * - Returns `unchanged` when the server answered that the destination already holds these
+ *   bytes (the row is completed here), `session` when the destination disappeared between the
+ *   two creates and a session was admitted, `conflict` when it still exists with other
+ *   content, and `none` when this row has no digest to offer.
+ * - Sends at most one create, under a fresh idempotency key: the first key already names the
+ *   refused intent, and replaying it would answer that intent rather than this one.
+ */
+type DigestRetry =
+  | { kind: "unchanged" }
+  | { kind: "conflict" }
+  | { kind: "none" }
+  | { kind: "session"; session: FileUploadSession };
+
+async function retryCreateWithDigest(host: UploadRunHost, id: string, task: UploadTask, signal: AbortSignal, conflict: ApiError): Promise<DigestRetry> {
+  // The row, not the attempt's snapshot: `intent` is written by the admission this call is
+  // reacting to, so the snapshot taken before it started does not carry one.
+  const current = host.tasks.get(id) ?? task;
+  const file = current.file;
+  const intent = current.intent;
+  if (!file || !intent || current.size > DIGEST_MAX_BYTES || intent.condition?.mode !== "create") return { kind: "none" };
+  // The refusal has to name the revision it observed: that is the server saying a *file*
+  // holds the destination (not a folder), and without it a second create could only repeat
+  // the refusal. A standing "keep what is there" answer needs no digest either — that row is
+  // skipped without a request.
+  const observed = conflict instanceof FileApiError ? conflict.problem.observedRevision : undefined;
+  if (observed === undefined || host.conflictPolicy() === "skip") return { kind: "none" };
+  let prepared = computedDigests.get(id);
+  if (!prepared) {
+    prepared = withVerifySlot(() => sha256(file));
+    computedDigests.set(id, prepared);
+  }
+  const digest = await prepared.catch(() => undefined);
+  if (!digest || signal.aborted) return { kind: "none" };
+  const withDigest = { ...intent, contentSha256: digest };
+  // Keep the digest on the row: a later retry offers it without hashing again.
+  host.patch(id, { intent: withDigest });
+  try {
+    const session = await host.admitUpload(withDigest, taskId(), signal);
+    return { kind: "session", session };
+  } catch (error) {
+    if (error instanceof UnchangedDestination) {
+      host.complete(current, error.item);
+      return { kind: "unchanged" };
+    }
+    if (error instanceof ApiError && error.status === 409 && error.code === "name_conflict") return { kind: "conflict" };
+    throw error;
+  }
 }
 
 /**
@@ -1702,6 +1773,7 @@ function createQueue(): QueueOwner {
       tasks.current.delete(id);
       pending.current.delete(id);
       transferring.current.delete(id);
+      computedDigests.delete(id);
       if (task.isDir) openDirs.current.delete(task.path);
       dropAdmission(id);
       releaseClaim(id);

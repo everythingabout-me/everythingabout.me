@@ -668,11 +668,15 @@ the same content; a destination whose length, digest or native revision no longe
 `409 name_conflict` path, and an explicit `replace`/`overwrite` always transfers. A client that omits the
 field simply never skips.
 
-The browser client computes the digest at admission for files up to 32 MiB and only for
-`create` (a replacement must transfer by definition), keeps it in the row's intent so a retry
-does not hash again, and treats an `unchanged` answer in a page as the row's completion. A
-skip still costs one observation of the destination — the create reads it to prove the object
-is still there — but no session, no transfer and no settlement.
+The browser client computes the digest after a create is refused `name_conflict`, for files
+up to 32 MiB and only when the row creates (a replacement must transfer by definition), then
+asks the same create once more with the digest under a fresh idempotency key. That is the one
+moment the digest is worth its read: the destination is known to exist, so a match saves the
+whole transfer, while on the happy path hashing would delay the create. The digest stays on
+the row's intent so a later retry does not hash again, and an `unchanged` answer in a page
+completes the row with the entry it names. A skip still costs one observation of the
+destination — the create reads it to prove the object is still there — but no session, no
+transfer and no settlement.
 
 `parents:true` (a create or overwrite with a full-path destination) creates the destination's missing
 ancestor folders as part of this request. Each created folder gets a fresh ID, its native marker object and
