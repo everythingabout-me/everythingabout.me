@@ -639,6 +639,14 @@ export type FileUploadInput = {
   size: number;
   mediaType: string;
   sourceModifiedAt?: string;
+  /**
+   * The sha-256 (64 lowercase hex) of the bytes about to be sent, when the caller could
+   * compute one. The server records it with the publication and uses it for one decision:
+   * a creation that finds the same path, length and digest already holds these bytes, and
+   * answers `unchanged` instead of opening a session (docs/api/api.md). Optional: without
+   * it every creation uploads, exactly as before.
+   */
+  contentSha256?: string;
 } & (
   | { path: string; condition: FileUploadCondition; parents?: true; destination?: never; target?: never }
   | { destination: Destination; condition?: { mode: "create" }; path?: never; target?: never }
@@ -1715,9 +1723,9 @@ export const api = {
    * Admit a page of sessions in one request. Each item answers on its own: one refused
    * destination does not fail the page, and the caller maps its own error.
    */
-  async createUploadBatch(items: { input: FileUploadInput; key: string }[], signal?: AbortSignal): Promise<{ upload?: FileUploadSession; error?: FileProblem }[]> {
+  async createUploadBatch(items: { input: FileUploadInput; key: string }[], signal?: AbortSignal): Promise<{ upload?: FileUploadSession; unchanged?: { unchanged: true; item: Item }; error?: FileProblem }[]> {
     const body = { items: items.map(({ input, key }) => ({ ...uploadInput(input), idempotencyKey: key })) };
-    const result = await filePost<{ items: { upload?: FileUploadSession; error?: FileProblem }[] }>("/uploads/batch", body, undefined, signal);
+    const result = await filePost<{ items: { upload?: FileUploadSession; unchanged?: { unchanged: true; item: Item }; error?: FileProblem }[] }>("/uploads/batch", body, undefined, signal);
     return Array.isArray(result.items) ? result.items : [];
   },
 

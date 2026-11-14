@@ -427,6 +427,18 @@ class QueuePaused extends Error {
 function isQueuePaused(error: unknown): error is QueuePaused {
   return error instanceof QueuePaused;
 }
+
+/**
+ * The destination already holds these bytes, and the server said so instead of opening a
+ * session. The row completes with the entry the answer carries; there is nothing to
+ * transfer, settle or retry.
+ */
+class UnchangedDestination extends Error {
+  constructor(readonly item: Item) {
+    super("The destination already holds this content.");
+    this.name = "UnchangedDestination";
+  }
+}
 function isOperation(value: Item | FileOperation): value is FileOperation { return "state" in value && "progress" in value; }
 /**
  * What is at this path now, or null when nothing is.
@@ -721,8 +733,9 @@ function ensureUploadAdmission(host: UploadRunHost, task: UploadTask): Admission
       if (host.admissions.get(task.id) === entry) host.admissions.delete(task.id);
       // A paused page is not this destination's refusal: the look-ahead must be free to
       // prepare this file again once the queue resumes, so the paused error does not make
-      // it "already refused".
-      if (!isQueuePaused(error)) host.admissionFailed.add(task.id);
+      // it "already refused". Neither is an unchanged destination: it is the answer, not a
+      // refusal, and the row is about to complete with the entry it names.
+      if (!isQueuePaused(error) && !(error instanceof UnchangedDestination)) host.admissionFailed.add(task.id);
       // The window owns a refusal — it decides between waiting on the blocker, retrying
       // and failing the row — so the look-ahead steps back and lets the queue move on.
       host.requestPump();
@@ -1387,6 +1400,7 @@ function createQueue(): QueueOwner {
             if (item.cancelled) return;
             const result = results[index];
             if (result?.upload) item.resolve(result.upload);
+            else if (result?.unchanged) item.reject(new UnchangedDestination(result.unchanged.item));
             else if (result?.error) item.reject(new FileApiError(result.error));
             else {
               // A page that answered 200 must describe every item it carried. One that did
@@ -1844,6 +1858,13 @@ function createQueue(): QueueOwner {
       await settleUploadSession(runHost, id, plan.task, plan.session, signal);
     } catch (error) {
       if (signal.aborted) return;
+      // The server answered that the destination already holds these bytes: the row lands
+      // with the entry it carries, and nothing is transferred, settled or retried.
+      if (error instanceof UnchangedDestination) {
+        const current = tasks.current.get(id);
+        if (current) runHost.complete(current, error.item);
+        return;
+      }
       await abandonAttempt(runHost, id, error);
     } finally {
       running.current.delete(id);

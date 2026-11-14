@@ -178,11 +178,16 @@ test("pages stay inside the server's admission and settlement limits", async (t)
   // is one request either side of the limit; settlement pages fill to sixteen and the
   // remainder leaves on its own wait.
   const commitPages = callsOf(server, "commitBatch").map(([, ids]) => ids);
-  assert.deepEqual(callsOf(server, "createBatch").map(([, items]) => items.length), [32, 1]);
+  // A page is bounded by the server's limit; a partial one leaves on its own timer, so its
+  // exact size is not a contract (a page of 31 then 2 also obeys it). What must hold is the
+  // bound, full coverage, and the selection's order across pages.
+  const createPages = callsOf(server, "createBatch").map(([, items]) => items);
+  assert.equal(createPages.every((items) => items.length >= 1 && items.length <= 32), true, "no admission page exceeds the server's limit");
+  assert.deepEqual(createPages.flat().map(({ input }) => input.path), files.map(({ path }) => path), "the pages carry the selection in the order the list shows");
+  assert.equal(createPages[0].length, 32, "a full admission page leaves at once");
   assert.equal(commitPages[0].length, 16, "a full settlement page leaves at once");
   assert.equal(commitPages.every((ids) => ids.length >= 1 && ids.length <= 16), true, "no settlement page exceeds the server's limit");
   assert.equal(commitPages.flat().length, files.length, "every session is settled on exactly one page");
-  assert.deepEqual(page(server, "createBatch", 0).map(({ input }) => input.path), files.slice(0, 32).map(({ path }) => path));
 });
 
 test("an item refused because a folder holds the destination fails without asking", async (t) => {

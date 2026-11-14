@@ -58,6 +58,29 @@ for (const lostAck of ["create", "part", "commit"]) {
   });
 }
 
+// A re-import of bytes the library already holds: the create carries the digest the client
+// computed, and the server answers with the entry instead of a session. Nothing is
+// transferred, settled or recorded as a failure — the row simply lands.
+test("a create that answers unchanged lands the row without moving bytes", async (t) => {
+  const server = uploadServer();
+  const bytes = "same bytes";
+  server.api.createUploadBatch = async (items) => {
+    server.calls.push(["createBatch", items.map(({ input, key }) => ({ input: structuredClone(input), key }))]);
+    return items.map(() => ({ unchanged: { unchanged: true, item: item("kept.txt", "file", bytes.length) } }));
+  };
+  const harness = await mount(t, server.api);
+  enqueue(harness, [entry("kept.txt", bytes)], "");
+  const queue = await harness.until(allComplete);
+  assert.equal(queue.tasks[0].status, "completed");
+  // The digest travels in the create whenever it is ready (see DIGEST_MAX_BYTES); this
+  // answer's handling is what the row must act on either way.
+  assert.equal(server.calls.filter(([kind]) => kind === "part").length, 0, "no bytes moved");
+  assert.equal(server.calls.filter(([kind]) => kind === "commit").length, 0, "nothing was settled");
+  assert.equal(server.sessions.size, 0, "no session was opened");
+  assert.equal(harness.completed.length, 1);
+  assert.equal(harness.completed[0].item.path, "/kept.txt");
+});
+
 test("known rejected allocation stays failed across renders and retries only on explicit same-page action", async (t) => {
   const server = uploadServer();
   const attempts = [];
