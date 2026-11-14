@@ -1483,9 +1483,29 @@ export interface StorageConnection {
   location: string;
   enabled: boolean;
   mine: boolean;
+  /** Folder inside the store that holds the dated snapshots; "" is the store root. */
+  backupFolder: string;
+  /** Backup runs on this connection; a nonzero count locks the folder. */
+  runs: number;
+  /** Last reachability/latency/throughput test, if this account ever ran one. */
+  probe?: StorageTestResult | null;
+}
+
+export interface StorageTestResult {
+  testedAt: string;
+  ok: boolean;
+  backupReady: boolean;
+  error?: string;
+  latencyMs: number;
+  uploadBytes: number;
+  downloadBytes: number;
+  uploadBytesPerSecond: number;
+  downloadBytesPerSecond: number;
 }
 
 export interface BackupRun {
+  connectionId: string;
+  connectionName: string;
   snapshot: string;
   state: "running" | "complete" | "failed";
   files: number;
@@ -1500,6 +1520,8 @@ export interface StorageData {
   connections: StorageConnection[];
   keep: number;
   runs: BackupRun[];
+  /** The destination "Back up now" uses; "" when none is chosen. */
+  backupTarget: string;
 }
 
 export const api = {
@@ -1533,6 +1555,24 @@ export const api = {
 
   async removeStorageConnection(id: string): Promise<void> {
     await request(`/api/storage/connections/${encodeURIComponent(id)}`, { method: "DELETE" });
+  },
+
+  testStorageConnection(id: string): Promise<StorageTestResult> {
+    return post<StorageTestResult>(`/api/storage/connections/${encodeURIComponent(id)}/test`);
+  },
+
+  updateStorageConnection(id: string, input: { backupFolder: string }): Promise<{ backupFolder: string }> {
+    return request<{ backupFolder: string }>(`/api/storage/connections/${encodeURIComponent(id)}`, {
+      method: "PATCH",
+      body: JSON.stringify(input),
+    });
+  },
+
+  setBackupTarget(connectionId: string): Promise<{ backupTarget: string }> {
+    return request<{ backupTarget: string }>("/api/storage/backup-target", {
+      method: "PUT",
+      body: JSON.stringify({ connectionId }),
+    });
   },
 
   startBackup(input: {

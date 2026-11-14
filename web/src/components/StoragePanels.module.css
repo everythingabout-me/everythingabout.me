@@ -31,11 +31,22 @@
 
 .row {
   display: flex;
-  align-items: center;
+  flex-wrap: wrap;
+  align-items: flex-start;
   justify-content: space-between;
   gap: 12px;
   padding-bottom: 10px;
   border-bottom: 1px solid var(--border);
+}
+
+/* The settings form opens below both the row text and its actions. */
+.row > form {
+  flex-basis: 100%;
+}
+
+.rowBody {
+  flex: 1;
+  min-width: 0;
 }
 
 .row:last-child {
@@ -63,6 +74,16 @@
   color: var(--text-3);
   font-size: 13px;
   margin-top: 3px;
+}
+
+.mutedInline {
+  color: var(--text-3);
+}
+
+.status {
+  margin: 6px 0 0;
+  font-size: 13px;
+  color: var(--text-2);
 }
 
 .actions {

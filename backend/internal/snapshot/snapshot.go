@@ -195,6 +195,12 @@ func Verify(ctx context.Context, tree storage.Tree, root storage.Path) (Result, 
 func Dates(ctx context.Context, tree storage.Tree, root storage.Path) ([]string, error) {
 	entries, err := listAll(ctx, tree, root)
 	if err != nil {
+		// A configured folder that holds no snapshot yet is an empty history, not a
+		// failure. Before folders were configurable the root always existed, so this
+		// only became reachable when a person could name a subfolder.
+		if storage.IsCode(err, "not_found") {
+			return nil, nil
+		}
 		return nil, err
 	}
 	var dates []string

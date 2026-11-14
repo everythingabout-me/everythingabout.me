@@ -1,8 +1,10 @@
 # Backup by whole-tree snapshots
 
 > Status: connections (§7–§8) and the snapshot/prune/restore commands (§1–§6) are implemented
-> (`sql/035`–`sql/037`, `internal/connections`, `internal/snapshot`, `eam backup`). What is still
-> missing is the user surface (§11): a status/restore page and editing the policy in §4 from the UI.
+> (`sql/035`–`sql/037`, `internal/connections`, `internal/snapshot`, `eam backup`). The account surface
+> exists too: a destination can be tested for reachability/latency/throughput, chosen as the backup target,
+> and given a folder inside itself (`sql/055`, `POST /api/storage/connections/{id}/test`,
+> `PUT /api/storage/backup-target`). Editing the retention policy from the UI is still missing.
 > This replaces the earlier framing in which application metadata was part of the backup. Per `AGENTS.md` (*Bytes are the source of truth*), a backup is a
 > storage-layer artifact: the user's content survives because the storage layer holds copies of the tree.
 > Postgres is a read cache; losing it is a rebuild cost for the operator, never a loss for the user.
@@ -13,7 +15,7 @@ A **snapshot** is a complete, read-only copy of one owner's native content root,
 taken, stored under that owner's backup connection:
 
 ```text
-<backup connection>/<owner>/
+<backup connection>/<owner>/<folder>/
   2026-11-08/
     Photos/2026/trip.jpg
     Notes/diary.md
@@ -21,6 +23,14 @@ taken, stored under that owner's backup connection:
     Photos/2026/trip.jpg
     Notes/diary.md
 ```
+
+`<folder>` is the destination's backup folder, empty by default (the store's own root). It is a setting of
+the backup, not of the location: it is excluded from `ComputeIdentity`, so changing it cannot move the tree
+or invalidate admission evidence. It is locked once a run exists for that connection, because run rows name
+a date and not a folder — allowing the folder to move would leave every listed restore point under a
+directory nothing writes to. Storing the folder per run would lift that restriction; it is deferred because
+the current surface has no need to relocate history, and a per-run folder makes pruning a multi-root
+question.
 
 - Same relative paths, original names, raw bytes. No manifest, no index, no database needed to read it.
 - Each snapshot stands alone. A restore picks a date; it never reconstructs a chain.
@@ -252,6 +262,16 @@ Rules, each answering a specific failure:
   limit (5 GiB on COS and S3), and an entry above it is refused by name before the attempt.
 - One snapshot per owner per day is the default. RPO is therefore one day, which matches the stated need:
   this is backup, not sync, and the copy does not have to be reachable immediately.
+- **The account tests a destination before the first backup.** `POST /api/storage/connections/{id}/test`
+  measures one metadata round trip, uploads and reads back 8 MiB, then runs the admission probe and caches
+  the answer on the row. This is not cosmetic: a NAS can be reachable and still refuse conditional create,
+  and without the test the first failure would be a snapshot that already copied part of the tree. It is
+  bounded by those bytes and requests, never by a clock, so a slow link finishes instead of being cut off.
+- **At most one destination is selected, and "none" is a choice.** `backup_policies.enabled` records the
+  account's decision; without any row, a single attached destination is the obvious default and several
+  leave the choice open. Clearing the choice writes disabled policy rows instead of deleting them, so the
+  page cannot fall back to the only attached store and silently undo "none". Before this, the page used
+  whichever backup row came first, so a second destination was invisible.
 
 ## 10. Acceptance
 
@@ -278,7 +298,11 @@ A passing suite is not evidence that a deployment backs up. These are the gates:
 - Staging connections for upload acceleration; a second connection does not by itself make an upload faster,
   only the client-to-target path does.
 - Automatic failover or promotion.
-- Any user-facing surface beyond a status page: dates available, last success, and the restore entry point.
+- A scheduler in the process: a backup is started from the page or by the deployment's timer, and the page
+  reports what ran. `backup_policies.schedule_hours` is reserved for that timer, not read by the server.
+- Backing up to several destinations in one run. Several destinations may be attached and selected between,
+  but each run targets one; the artifact is per destination and a failed copy to one must not hide a good
+  copy to another.
 
 ## 12. Decisions in one place
 

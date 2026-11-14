@@ -16,6 +16,7 @@ import (
 	"everythingabout.me/backend/internal/snapshot"
 	"everythingabout.me/backend/internal/storage"
 	"everythingabout.me/backend/internal/storagebackend"
+	"github.com/jackc/pgx/v5"
 )
 
 // The storage settings surface. It is owner-only on purpose: a credential-bearing
@@ -31,17 +32,42 @@ type storageConnectionView struct {
 	Location string `json:"location"`
 	Enabled  bool   `json:"enabled"`
 	Mine     bool   `json:"mine"`
+	// BackupFolder is where dated snapshots are placed inside this store. It is
+	// empty at the tree root.
+	BackupFolder string `json:"backupFolder"`
+	// Runs counts the account's backup runs on this connection. A nonzero count is
+	// why the folder can no longer change, so the page has to know it.
+	Runs int `json:"runs"`
+	// Probe is the last measurement this account asked for, nil if it never did.
+	Probe json.RawMessage `json:"probe,omitempty"`
+}
+
+// storageTestView is one reachability/latency/throughput measurement. It is
+// returned by the test endpoint and cached on the row, so the page can render the
+// number without repeating the measurement.
+type storageTestView struct {
+	TestedAt               string `json:"testedAt"`
+	OK                     bool   `json:"ok"`
+	BackupReady            bool   `json:"backupReady"`
+	Error                  string `json:"error,omitempty"`
+	LatencyMS              int64  `json:"latencyMs"`
+	UploadBytes            int64  `json:"uploadBytes"`
+	DownloadBytes          int64  `json:"downloadBytes"`
+	UploadBytesPerSecond   int64  `json:"uploadBytesPerSecond"`
+	DownloadBytesPerSecond int64  `json:"downloadBytesPerSecond"`
 }
 
 type backupRunView struct {
-	Snapshot  string `json:"snapshot"`
-	State     string `json:"state"`
-	Files     int    `json:"files"`
-	Folders   int    `json:"folders"`
-	Bytes     int64  `json:"bytes"`
-	Error     string `json:"error,omitempty"`
-	StartedAt string `json:"startedAt"`
-	Finished  string `json:"finishedAt,omitempty"`
+	ConnectionID   string `json:"connectionId"`
+	ConnectionName string `json:"connectionName"`
+	Snapshot       string `json:"snapshot"`
+	State          string `json:"state"`
+	Files          int    `json:"files"`
+	Folders        int    `json:"folders"`
+	Bytes          int64  `json:"bytes"`
+	Error          string `json:"error,omitempty"`
+	StartedAt      string `json:"startedAt"`
+	Finished       string `json:"finishedAt,omitempty"`
 }
 
 // handleStorageGet is the whole settings page in one response: which connections
@@ -58,28 +84,52 @@ func (s *Server) handleStorageGet(w http.ResponseWriter, r *http.Request) error 
 	if err != nil {
 		return err
 	}
+	runCounts := map[string]int{}
+	countRows, err := s.db.Pool().Query(r.Context(), `select connection_id::text, count(*) from backup_runs where owner_id=$1::uuid group by connection_id`, user.ID)
+	if err != nil {
+		return err
+	}
+	for countRows.Next() {
+		var id string
+		var count int
+		if err := countRows.Scan(&id, &count); err != nil {
+			countRows.Close()
+			return err
+		}
+		runCounts[id] = count
+	}
+	countRows.Close()
+	if err := countRows.Err(); err != nil {
+		return err
+	}
 	views := make([]storageConnectionView, 0, len(rows))
 	for _, c := range rows {
 		views = append(views, storageConnectionView{
 			ID: c.ID, Name: c.Name, Role: c.Role, Backend: c.Backend,
 			Location: connectionLocation(c), Enabled: c.Enabled, Mine: c.OwnerID != "",
+			BackupFolder: c.Config.BackupFolder, Runs: runCounts[c.ID], Probe: c.LastProbe,
 		})
 	}
 	keep := 14
 	_ = s.db.Pool().QueryRow(r.Context(), `select keep from backup_policies where owner_id=$1::uuid limit 1`, user.ID).Scan(&keep)
+	target, err := s.backupTarget(r.Context(), user.ID, views)
+	if err != nil {
+		return err
+	}
 
 	runs := make([]backupRunView, 0, 20)
 	rows2, err := s.db.Pool().Query(r.Context(), `
-		select to_char(snapshot,'YYYY-MM-DD'), state, files, folders, bytes, coalesce(error,''),
-		       to_char(started_at,'YYYY-MM-DD"T"HH24:MI:SSOF'), coalesce(to_char(finished_at,'YYYY-MM-DD"T"HH24:MI:SSOF'),'')
-		from backup_runs where owner_id=$1::uuid order by started_at desc limit 20`, user.ID)
+		select r.connection_id::text, c.name, to_char(r.snapshot,'YYYY-MM-DD'), r.state, r.files, r.folders, r.bytes, coalesce(r.error,''),
+		       to_char(r.started_at,'YYYY-MM-DD"T"HH24:MI:SSOF'), coalesce(to_char(r.finished_at,'YYYY-MM-DD"T"HH24:MI:SSOF'),'')
+		from backup_runs r join storage_connections c on c.id = r.connection_id
+		where r.owner_id=$1::uuid order by r.started_at desc limit 20`, user.ID)
 	if err != nil {
 		return err
 	}
 	defer rows2.Close()
 	for rows2.Next() {
 		var run backupRunView
-		if err := rows2.Scan(&run.Snapshot, &run.State, &run.Files, &run.Folders, &run.Bytes, &run.Error, &run.StartedAt, &run.Finished); err != nil {
+		if err := rows2.Scan(&run.ConnectionID, &run.ConnectionName, &run.Snapshot, &run.State, &run.Files, &run.Folders, &run.Bytes, &run.Error, &run.StartedAt, &run.Finished); err != nil {
 			return err
 		}
 		runs = append(runs, run)
@@ -87,7 +137,45 @@ func (s *Server) handleStorageGet(w http.ResponseWriter, r *http.Request) error 
 	if err := rows2.Err(); err != nil {
 		return err
 	}
-	return s.ok(w, map[string]any{"connections": views, "keep": keep, "runs": runs})
+	return s.ok(w, map[string]any{"connections": views, "keep": keep, "runs": runs, "backupTarget": target})
+}
+
+// backupTarget is the destination a "Back up now" click uses. The policy row is
+// the account's explicit choice; without one, a single attached destination is the
+// obvious default, and several leave the choice open rather than silently picking
+// the one that sorts first.
+func (s *Server) backupTarget(ctx context.Context, ownerID string, views []storageConnectionView) (string, error) {
+	var chosen string
+	err := s.db.Pool().QueryRow(ctx, `
+		select p.connection_id::text from backup_policies p
+		join storage_connections c on c.id = p.connection_id
+		where p.owner_id=$1::uuid and p.enabled and c.role='backup'
+		order by p.updated_at desc limit 1`, ownerID).Scan(&chosen)
+	if err == nil {
+		return chosen, nil
+	}
+	if !errors.Is(err, pgx.ErrNoRows) {
+		return "", err
+	}
+	// A policy row that is merely disabled means the account said "none". Falling
+	// back to the only attached destination here would silently undo that choice.
+	var chose bool
+	if err := s.db.Pool().QueryRow(ctx, `select exists(select 1 from backup_policies where owner_id=$1::uuid)`, ownerID).Scan(&chose); err != nil {
+		return "", err
+	}
+	if chose {
+		return "", nil
+	}
+	var candidates []string
+	for _, v := range views {
+		if v.Role == "backup" && v.Enabled {
+			candidates = append(candidates, v.ID)
+		}
+	}
+	if len(candidates) == 1 {
+		return candidates[0], nil
+	}
+	return "", nil
 }
 
 type connectionInput struct {
@@ -196,6 +284,217 @@ func (s *Server) handleStorageConnectionAdd(w http.ResponseWriter, r *http.Reque
 	return s.ok(w, map[string]any{"name": c.Name})
 }
 
+// visibleConnection resolves one row the account may act on, or reports that it is
+// not on this page. Every settings handler starts here so a row that belongs to
+// another account is indistinguishable from a row that does not exist.
+func (s *Server) visibleConnection(r *http.Request, userID, id string) (connections.Connection, bool, error) {
+	rows, err := s.conns.Visible(r.Context(), userID)
+	if err != nil {
+		return connections.Connection{}, false, err
+	}
+	for _, c := range rows {
+		if c.ID == id {
+			return c, true, nil
+		}
+	}
+	return connections.Connection{}, false, nil
+}
+
+// handleStorageConnectionTest measures one destination and caches the answer.
+//
+// The measurement writes a payload and reads it back, then runs the admission probe
+// the backup path itself depends on. A person attaching a NAS is asking three
+// questions — is it there, how far away is it, how fast is it — and every answer is
+// only worth something if it was produced by the same native path a backup would
+// use. The admission half is what turns "the bytes went up" into "a snapshot can
+// be published here": conditional create is a separate promise from reachability.
+func (s *Server) handleStorageConnectionTest(w http.ResponseWriter, r *http.Request) error {
+	if s.db == nil || s.conns == nil {
+		return httpx.ServiceUnavailable("Storage settings are unavailable on this instance.")
+	}
+	user, err := s.requireUser(r)
+	if err != nil {
+		return err
+	}
+	if err := httpx.AssertSameOrigin(r); err != nil {
+		return err
+	}
+	target, ok, err := s.visibleConnection(r, user.ID, r.PathValue("id"))
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return httpx.NotFound("No such storage connection on this account.")
+	}
+	result := storageTestView{TestedAt: time.Now().UTC().Format(time.RFC3339)}
+	effective, err := target.ApplyEnvironment(*s.cfg)
+	switch {
+	case err != nil:
+		result.Error = err.Error()
+	default:
+		measurement, measureErr := storagebackend.Measure(r.Context(), &effective)
+		if measureErr != nil {
+			result.Error = measureErr.Error()
+			break
+		}
+		result.OK = true
+		result.LatencyMS = measurement.Latency.Milliseconds()
+		result.UploadBytes, result.DownloadBytes = measurement.Uploaded, measurement.Downloaded
+		result.UploadBytesPerSecond, result.DownloadBytesPerSecond = measurement.UploadRate, measurement.DownloadRate
+		// Publishability is a different question from reachability, so a store that
+		// answered but cannot be admitted is "reachable, not ready" rather than a
+		// failed connection test.
+		if _, probeErr := storagebackend.ProbeConnection(r.Context(), &effective); probeErr != nil {
+			result.Error = probeErr.Error()
+		} else {
+			result.BackupReady = true
+		}
+	}
+	if encoded, marshalErr := json.Marshal(result); marshalErr == nil {
+		if recordErr := s.conns.SetProbe(r.Context(), target.ID, encoded); recordErr != nil {
+			// The person still gets the answer they asked for; failing the request
+			// because the cache write failed would hide a working measurement.
+			slog.Warn("record storage test result", "connection", target.ID, "error", recordErr)
+		}
+	}
+	return s.ok(w, result)
+}
+
+// connectionSettingsInput carries the backup settings an account may change on a
+// destination it added. Folder is a relative path inside that store, not a new
+// location: changing it does not move the connection, only where dates are placed.
+type connectionSettingsInput struct {
+	BackupFolder *string `json:"backupFolder"`
+}
+
+// handleStorageConnectionSettings changes where a destination keeps its snapshots.
+// The deployment's own drive is refused: its location is an operator decision, and
+// an account editing it would be editing the tree its files live on.
+func (s *Server) handleStorageConnectionSettings(w http.ResponseWriter, r *http.Request) error {
+	if s.db == nil || s.conns == nil {
+		return httpx.ServiceUnavailable("Storage settings are unavailable on this instance.")
+	}
+	user, err := s.requireUser(r)
+	if err != nil {
+		return err
+	}
+	if err := httpx.AssertSameOrigin(r); err != nil {
+		return err
+	}
+	var in connectionSettingsInput
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4<<10)).Decode(&in); err != nil {
+		return httpx.BadRequest("The request body is not valid JSON.")
+	}
+	if in.BackupFolder == nil {
+		return httpx.BadRequest(`The request must carry "backupFolder" (send "" for the store's root).`)
+	}
+	target, ok, err := s.visibleConnection(r, user.ID, r.PathValue("id"))
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return httpx.NotFound("No such storage connection on this account.")
+	}
+	if target.OwnerID != user.ID {
+		return httpx.Forbidden("The default drive is managed by the deployment; only a destination this account added can be configured.")
+	}
+	if target.Role != connections.RoleBackup {
+		return httpx.Forbidden("Only a backup destination can be configured here.")
+	}
+	folder, err := connections.NormalizeBackupFolder(*in.BackupFolder)
+	if err != nil {
+		return httpx.BadRequest(err.Error())
+	}
+	if folder == target.Config.BackupFolder {
+		return s.ok(w, map[string]any{"backupFolder": folder})
+	}
+	if err := s.conns.SetBackupFolder(r.Context(), target.ID, user.ID, folder); err != nil {
+		switch {
+		case errors.Is(err, connections.ErrBackupFolderLocked):
+			return httpx.Conflict("This destination already holds backups, so its folder cannot change: those restore points live under the old folder. Remove them first, or keep the folder.")
+		case errors.Is(err, connections.ErrConnectionNotFound):
+			return httpx.NotFound("No such storage connection on this account.")
+		default:
+			return err
+		}
+	}
+	return s.ok(w, map[string]any{"backupFolder": folder})
+}
+
+// handleStorageBackupTarget chooses the destination a backup uses. The policy row
+// is the account's decision and survives a page reload, which the previous "first
+// backup connection wins" rule did not: a second destination was silently ignored.
+func (s *Server) handleStorageBackupTarget(w http.ResponseWriter, r *http.Request) error {
+	if s.db == nil || s.conns == nil {
+		return httpx.ServiceUnavailable("Storage settings are unavailable on this instance.")
+	}
+	user, err := s.requireUser(r)
+	if err != nil {
+		return err
+	}
+	if err := httpx.AssertSameOrigin(r); err != nil {
+		return err
+	}
+	var in struct {
+		ConnectionID string `json:"connectionId"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4<<10)).Decode(&in); err != nil {
+		return httpx.BadRequest("The request body is not valid JSON.")
+	}
+	ctx := r.Context()
+	if in.ConnectionID == "" {
+		// Recorded as disabled rows rather than deleted rows: an absent policy means
+		// "never chose", which the page still reads as the only attached destination.
+		tx, err := s.db.Pool().Begin(ctx)
+		if err != nil {
+			return err
+		}
+		defer tx.Rollback(ctx)
+		if _, err := tx.Exec(ctx, `update backup_policies set enabled=false, updated_at=now() where owner_id=$1::uuid`, user.ID); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(ctx, `
+			insert into backup_policies(owner_id, connection_id, enabled)
+			select $1::uuid, c.id, false from storage_connections c
+			where c.owner_id=$1::uuid and c.role='backup'
+			  and not exists (select 1 from backup_policies p where p.owner_id=$1::uuid and p.connection_id=c.id)`,
+			user.ID); err != nil {
+			return err
+		}
+		if err := tx.Commit(ctx); err != nil {
+			return err
+		}
+		return s.ok(w, map[string]any{"backupTarget": ""})
+	}
+	target, ok, err := s.visibleConnection(r, user.ID, in.ConnectionID)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return httpx.NotFound("No such storage connection on this account.")
+	}
+	if target.Role != connections.RoleBackup {
+		return httpx.BadRequest("Only a backup destination can be chosen as the target; the drive your files live on is not one.")
+	}
+	tx, err := s.db.Pool().Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	if _, err := tx.Exec(ctx, `update backup_policies set enabled=false, updated_at=now() where owner_id=$1::uuid and connection_id<>$2::uuid`, user.ID, target.ID); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, `
+		insert into backup_policies(owner_id, connection_id, enabled) values($1::uuid,$2::uuid,true)
+		on conflict (owner_id, connection_id) do update set enabled=true, updated_at=now()`, user.ID, target.ID); err != nil {
+		return err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return err
+	}
+	return s.ok(w, map[string]any{"backupTarget": target.ID})
+}
+
 func (s *Server) handleStorageConnectionRemove(w http.ResponseWriter, r *http.Request) error {
 	if s.db == nil || s.conns == nil {
 		return httpx.ServiceUnavailable("Storage settings are unavailable on this instance.")
@@ -256,6 +555,13 @@ func (s *Server) handleBackupStart(w http.ResponseWriter, r *http.Request) error
 	if target == nil {
 		return httpx.NotFound("No such storage connection on this account.")
 	}
+	// The authority connection is where the owner's files live; writing a dated copy
+	// into it would put a second tree inside the one being copied, and a restore
+	// would write back into the live tree's parent. Only a destination exists to
+	// receive snapshots.
+	if target.Role != connections.RoleBackup {
+		return httpx.BadRequest("Only a backup destination can run a snapshot, restore or prune; the connection your files live on cannot.")
+	}
 	switch in.Action {
 	case "snapshot", "prune", "restore":
 	default:
@@ -277,10 +583,15 @@ func (s *Server) handleBackupStart(w http.ResponseWriter, r *http.Request) error
 	// was ever asked for. The completion upsert updates this same row through the
 	// (owner, connection, snapshot) unique index, and the settings page already knows
 	// how to render 'running'.
-	if err := s.recordBackupStart(r.Context(), user.ID, target.ID, date); err != nil {
+	folder, err := s.recordBackupStart(r.Context(), user.ID, target.ID, date)
+	if err != nil {
 		s.releaseBackup(key)
 		return err
 	}
+	// The row was read before the run row existed. Locking it while recording the
+	// attempt re-reads the folder under the same lock a folder change takes, so the
+	// copy writes where this run's history row says it did.
+	target.Config.BackupFolder = folder
 	go s.runBackupJob(key, user.ID, *target, in.Action, date, in.Keep)
 	httpx.WriteOKStatus(w, http.StatusAccepted, map[string]any{"started": true})
 	return nil
@@ -290,14 +601,31 @@ func (s *Server) handleBackupStart(w http.ResponseWriter, r *http.Request) error
 // run interrupted by a deploy left no trace at all, and the history could not tell
 // "never started" from "started and died"; a re-run resets the row because the
 // unique index keys a day's attempt, not an append-only log.
-func (s *Server) recordBackupStart(ctx context.Context, ownerID, connectionID, date string) error {
-	_, err := s.db.Pool().Exec(ctx, `
+func (s *Server) recordBackupStart(ctx context.Context, ownerID, connectionID, date string) (string, error) {
+	tx, err := s.db.Pool().Begin(ctx)
+	if err != nil {
+		return "", err
+	}
+	defer tx.Rollback(ctx)
+	var folder *string
+	if err := tx.QueryRow(ctx, `select config->>'backupFolder' from storage_connections where id=$1::uuid for update`, connectionID).Scan(&folder); err != nil {
+		return "", fmt.Errorf("read the backup folder of connection %s before starting a run: %w", connectionID, err)
+	}
+	if _, err := tx.Exec(ctx, `
 		insert into backup_runs(owner_id, connection_id, snapshot, state)
 		values($1::uuid,$2::uuid,$3::date,'running')
 		on conflict (owner_id, connection_id, snapshot) do update
 		set state='running', error=null, files=0, folders=0, bytes=0, started_at=now(), finished_at=null`,
-		ownerID, connectionID, date)
-	return err
+		ownerID, connectionID, date); err != nil {
+		return "", err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return "", err
+	}
+	if folder == nil {
+		return "", nil
+	}
+	return *folder, nil
 }
 
 // MarkInterruptedBackups records that runs still at 'running' did not finish.
@@ -395,7 +723,7 @@ func (s *Server) runBackupJob(key, ownerID string, target connections.Connection
 			fail(fmt.Errorf("storage connection %q cannot accept a snapshot", target.Name))
 			return
 		}
-		result, err := snapshot.Copy(ctx, src, "", writer, storage.Path(date))
+		result, err := snapshot.Copy(ctx, src, "", writer, target.BackupRoot(date))
 		s.recordBackupRun(ctx, ownerID, target.ID, date, result, err)
 	case "prune":
 		remover, ok := dst.(storage.Remover)
@@ -406,7 +734,7 @@ func (s *Server) runBackupJob(key, ownerID string, target connections.Connection
 		if keep <= 0 {
 			keep = 14
 		}
-		if _, err := snapshot.Prune(ctx, dst, remover, "", keep); err != nil {
+		if _, err := snapshot.Prune(ctx, dst, remover, target.BackupFolderPath(), keep); err != nil {
 			fail(err)
 			return
 		}
@@ -429,7 +757,7 @@ func (s *Server) runBackupJob(key, ownerID string, target connections.Connection
 			fail(fmt.Errorf("the owner's tree cannot be restored into"))
 			return
 		}
-		result, err := snapshot.Copy(ctx, src, storage.Path(date), writer, storage.Path("restore-"+date))
+		result, err := snapshot.Copy(ctx, src, target.BackupRoot(date), writer, storage.Path("restore-"+date))
 		s.recordBackupRun(ctx, ownerID, target.ID, date, result, err)
 	}
 }

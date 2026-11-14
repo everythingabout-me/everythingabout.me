@@ -29,6 +29,15 @@ type Store interface {
 	// moved them. It is scoped by row id, not name, so a rename cannot repoint
 	// another row's evidence.
 	SetObjectPaths(ctx context.Context, id, admissionFile, spoolRoot string) error
+	// SetProbe caches the last measurement requested for one connection. It is
+	// scoped by row id because a rename keeps the same store but a reused name
+	// must not inherit someone else's result.
+	SetProbe(ctx context.Context, id string, probe []byte) error
+	// SetBackupFolder changes where snapshots are placed inside one account's own
+	// connection. It refuses a row that already holds backup runs: those dates live
+	// under the old folder, and a silent move would leave listed restore points
+	// pointing at a directory nothing writes to any more.
+	SetBackupFolder(ctx context.Context, id, ownerID, folder string) error
 }
 
 type postgresStore struct{ db *store.DB }
@@ -229,17 +238,15 @@ func (p postgresStore) SetObjectPaths(ctx context.Context, id, admissionFile, sp
 	return nil
 }
 
-const connectionColumns = `id::text, coalesce(owner_id::text, ''), name, backend, role, identity, config, secret, secret_reference, generation, admission, enabled`
-
 type scanner interface{ Scan(...any) error }
 
 func scanConnection(row scanner) (Connection, error) {
 	var (
 		c                   Connection
 		config, secret, ref []byte
-		ad                  []byte
+		ad, probe           []byte
 	)
-	if err := row.Scan(&c.ID, &c.OwnerID, &c.Name, &c.Backend, &c.Role, &c.Identity, &config, &secret, &ref, &c.Generation, &ad, &c.Enabled); err != nil {
+	if err := row.Scan(&c.ID, &c.OwnerID, &c.Name, &c.Backend, &c.Role, &c.Identity, &config, &secret, &ref, &c.Generation, &ad, &c.Enabled, &probe); err != nil {
 		return Connection{}, err
 	}
 	if err := json.Unmarshal(config, &c.Config); err != nil {
@@ -254,5 +261,74 @@ func scanConnection(row scanner) (Connection, error) {
 		}
 	}
 	c.Admission = ad
+	c.LastProbe = probe
 	return c, nil
 }
+
+// ErrConnectionNotFound reports that no row matched the id and account the caller
+// asked about. It is separate from a folder that is merely locked, because one is a
+// stale page and the other is a setting with a reason.
+var ErrConnectionNotFound = errors.New("storage connection not found on this account")
+
+// ErrBackupFolderLocked reports that the destination already holds snapshots, so
+// moving its folder would orphan every listed restore point. Removing those dates
+// first (or keeping the folder) is the only way through.
+var ErrBackupFolderLocked = errors.New("this destination already holds backups")
+
+func (p postgresStore) SetProbe(ctx context.Context, id string, probe []byte) error {
+	if len(probe) == 0 {
+		return fmt.Errorf("storage connection %s: an empty probe result cannot be recorded", id)
+	}
+	tag, err := p.db.Pool().Exec(ctx, `update storage_connections set last_probe=$2 where id=$1::uuid`, id, probe)
+	if err != nil {
+		return fmt.Errorf("storage connection %s: record probe result: %w", id, err)
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("%w: %s", ErrConnectionNotFound, id)
+	}
+	return nil
+}
+
+// SetBackupFolder serializes against a backup start by taking the same row lock
+// `recordBackupStart` takes. The lock is what makes "no run exists yet" a fact
+// rather than a race: without it a run could read the old folder, the update could
+// pass its no-runs check, and the snapshot would land somewhere the row no longer
+// names.
+func (p postgresStore) SetBackupFolder(ctx context.Context, id, ownerID, folder string) error {
+	tx, err := p.db.Pool().Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	var owner string
+	err = tx.QueryRow(ctx, `select coalesce(owner_id::text,'') from storage_connections where id=$1::uuid for update`, id).Scan(&owner)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return fmt.Errorf("%w: %s", ErrConnectionNotFound, id)
+	}
+	if err != nil {
+		return fmt.Errorf("storage connection %s: read before changing the backup folder: %w", id, err)
+	}
+	// A separate statement, after the lock is held, so it reads a snapshot taken
+	// after the run that held the lock committed. A subquery in the locking
+	// statement keeps the snapshot from before the wait under READ COMMITTED.
+	var runs int
+	if err := tx.QueryRow(ctx, `select count(*) from backup_runs where connection_id=$1::uuid`, id).Scan(&runs); err != nil {
+		return fmt.Errorf("storage connection %s: count existing runs: %w", id, err)
+	}
+	if owner != ownerID {
+		return fmt.Errorf("%w: %s belongs to another account or to the deployment", ErrConnectionNotFound, id)
+	}
+	if runs > 0 {
+		return fmt.Errorf("%w: %d run(s) already write under the current folder; keep it or remove those dates first", ErrBackupFolderLocked, runs)
+	}
+	if _, err := tx.Exec(ctx, `
+		update storage_connections
+		set config = jsonb_set(coalesce(config, '{}'::jsonb), '{backupFolder}', to_jsonb($2::text)),
+		    updated_at = now()
+		where id=$1::uuid`, id, folder); err != nil {
+		return fmt.Errorf("storage connection %s: write backup folder: %w", id, err)
+	}
+	return tx.Commit(ctx)
+}
+
+const connectionColumns = `id::text, coalesce(owner_id::text, ''), name, backend, role, identity, config, secret, secret_reference, generation, admission, enabled, last_probe`

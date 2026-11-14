@@ -174,3 +174,42 @@ func TestS3ContentPrefixDistinguishesDefaultFromRoot(t *testing.T) {
 		}
 	}
 }
+
+// The backup folder is where dates land inside the store, so the normal form has
+// to round-trip the spellings a person types and refuse anything that is not a
+// native relative path or that names the service's reserved prefix.
+func TestNormalizeBackupFolder(t *testing.T) {
+	for raw, want := range map[string]string{
+		"":          "",
+		"backups":   "backups",
+		"/backups/": "backups",
+		"  /a/b/  ": "a/b",
+		"备份/2026":   "备份/2026",
+	} {
+		got, err := NormalizeBackupFolder(raw)
+		if err != nil || got != want {
+			t.Errorf("NormalizeBackupFolder(%q) = %q, %v; want %q", raw, got, err, want)
+		}
+	}
+	for _, bad := range []string{"__eam_system__", "__eam_system__/x", "../x", "a//b", "/..", "a/./b"} {
+		if got, err := NormalizeBackupFolder(bad); err == nil {
+			t.Errorf("NormalizeBackupFolder(%q) = %q, want a refusal", bad, got)
+		}
+	}
+}
+
+// A snapshot's path is derived from the row, so the page, the CLI and a restore of
+// an older date cannot disagree about where a date lives.
+func TestBackupRootFollowsTheConfiguredFolder(t *testing.T) {
+	root := Connection{}
+	if got := root.BackupRoot("2026-11-14"); got != "2026-11-14" {
+		t.Fatalf("root folder gave %q", got)
+	}
+	placed := Connection{Config: Spec{BackupFolder: "backups"}}
+	if got := placed.BackupRoot("2026-11-14"); got != "backups/2026-11-14" {
+		t.Fatalf("configured folder gave %q", got)
+	}
+	if got := placed.BackupFolderPath(); got != "backups" {
+		t.Fatalf("folder path gave %q", got)
+	}
+}

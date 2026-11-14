@@ -195,6 +195,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/storage", s.wrap(s.handleStorageGet))
 	mux.HandleFunc("POST /api/storage/connections", s.wrap(s.handleStorageConnectionAdd))
 	mux.HandleFunc("DELETE /api/storage/connections/{id}", s.wrap(s.handleStorageConnectionRemove))
+	mux.HandleFunc("PATCH /api/storage/connections/{id}", s.wrap(s.handleStorageConnectionSettings))
+	mux.HandleFunc("POST /api/storage/connections/{id}/test", s.wrap(s.handleStorageConnectionTest))
+	mux.HandleFunc("PUT /api/storage/backup-target", s.wrap(s.handleStorageBackupTarget))
 	mux.HandleFunc("POST /api/storage/backup", s.wrap(s.handleBackupStart))
 
 	mux.HandleFunc("GET /api/save-links", s.wrap(s.handleListSaveLinks))

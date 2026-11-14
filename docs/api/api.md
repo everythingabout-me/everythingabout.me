@@ -1359,10 +1359,13 @@ a file client cannot select a provider through the file API.
 
 | Method | Route | Purpose |
 |---|---|---|
-| `GET` | `/api/storage` | This account's visible connections (its own plus the deployment default), the retention setting and the last 20 backup runs |
-| `POST` | `/api/storage/connections` | Attach the account's own drive: `backend` `cos` (`bucket`, `region`) or `s3` (`endpoint`, `bucket`, `region`, optional `prefix` and `pathStyle`), with `name`, `secretId`, `secretKey` |
+| `GET` | `/api/storage` | This account's visible connections (its own plus the deployment default), each with its backup folder, run count and last test result; the retention setting, the chosen backup target and the last 20 backup runs |
+| `POST` | `/api/storage/connections` | Attach the account's own backup destination: `backend` `cos` (`bucket`, `region`) or `s3` (`endpoint`, `bucket`, `region`, optional `prefix` and `pathStyle`), with `name`, `secretId`, `secretKey` |
 | `DELETE` | `/api/storage/connections/{id}` | Remove one of the account's own connections |
-| `POST` | `/api/storage/backup` | Start `snapshot`, `prune` or `restore` for one connection; returns `202` and records progress in `backup_runs` |
+| `PATCH` | `/api/storage/connections/{id}` | Set `backupFolder`, the root-relative folder inside that destination where dated snapshots are written (`""` is the store root). The deployment default cannot be edited |
+| `POST` | `/api/storage/connections/{id}/test` | Measure the destination: one metadata round trip (`latencyMs`), an 8 MiB upload and read-back (`uploadBytesPerSecond`, `downloadBytesPerSecond`), then the admission probe. Returns `{ok, backupReady, error, ...}` and caches it on the row |
+| `PUT` | `/api/storage/backup-target` | Choose `connectionId` as the destination a backup uses, or `""` for none. Exactly one destination is selected per account |
+| `POST` | `/api/storage/backup` | Start `snapshot`, `prune` or `restore` for one backup destination; returns `202` and records progress in `backup_runs` |
 
 `POST /api/storage/connections` accepts `cos` and `s3`, never `local`: an account may attach its own
 S3-compatible drive, because pointing the service at storage the account already runs is the feature, and an
@@ -1375,3 +1378,15 @@ Secrets are never returned by any of these responses; a mutation replaces the wh
 
 `restore` copies the chosen date to `restore-<date>/` on the owner's tree and cannot overwrite a live path.
 Nothing is indexed by a restore: run `eam reconcile --owner <id>` afterwards.
+
+A connection an account adds is always a **backup destination**, never the drive its files live on: the
+account API cannot select `authority`, and `POST /api/storage/backup` refuses an authority row as a target.
+The default drive in `GET /api/storage` is the deployment's, so `PATCH` and `DELETE` on it are refused.
+
+`backupFolder` is a relative path inside that destination, not a new location: it is not part of the
+connection's identity, so changing it cannot move the tree or invalidate the admission evidence. It is
+locked once any backup run exists for that connection (there is no per-run folder), because moving it would
+leave the listed restore points under a folder nothing writes to; the response is `409` naming that reason.
+The test endpoint is the only place the page learns whether a store can hold backups: it measures before it
+is needed and a store that answers but cannot be admitted reports `backupReady: false` with the reason,
+instead of failing a person's first backup an hour later.

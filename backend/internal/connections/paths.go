@@ -145,3 +145,49 @@ func S3ContentPrefix(chosen *string) (prefix string, rootAtBucket bool, err erro
 	}
 	return trimmed + "/", false, nil
 }
+
+// BackupFolderPath is this connection's snapshot folder as a root-relative path.
+// The empty path is the tree root, which is where a connection with no explicit
+// folder keeps its dated copies.
+func (c Connection) BackupFolderPath() storage.Path {
+	return storage.Path(c.Config.BackupFolder)
+}
+
+// BackupRoot is where one dated snapshot lives: the configured folder plus the
+// date. Deriving it from the row, instead of from a request argument, is what keeps
+// the web page, the CLI and a restore of an older date looking at the same place.
+func (c Connection) BackupRoot(date string) storage.Path {
+	folder := c.Config.BackupFolder
+	if folder == "" {
+		return storage.Path(date)
+	}
+	return storage.Path(folder + "/" + date)
+}
+
+// NormalizeBackupFolder accepts the spelling a person typed for the folder inside a
+// destination and returns the canonical root-relative one. Surrounding slashes and
+// spaces are forgiven because both are how a folder is written in a file manager;
+// anything that is not a native relative path is refused by name, so a typo fails
+// before a backup writes a directory nobody expected.
+//
+// The service's own prefix is refused for the same reason S3ContentPrefix refuses
+// it: a snapshot placed there would mix user content with the private system root,
+// and a connection rooted at the bucket would make that the one folder a person can
+// see but must not touch.
+func NormalizeBackupFolder(raw string) (string, error) {
+	trimmed := strings.Trim(strings.TrimSpace(raw), "/")
+	if trimmed == "" {
+		return "", nil
+	}
+	if err := storage.ValidatePath(storage.Path(trimmed)); err != nil {
+		return "", fmt.Errorf("backup folder %q is not a valid relative folder path: %w", raw, err)
+	}
+	first := trimmed
+	if i := strings.IndexByte(trimmed, '/'); i >= 0 {
+		first = trimmed[:i]
+	}
+	if first == "__eam_system__" {
+		return "", fmt.Errorf("backup folder %q is reserved for the service; choose another folder such as backups", raw)
+	}
+	return trimmed, nil
+}

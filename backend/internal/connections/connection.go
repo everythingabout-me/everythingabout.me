@@ -48,6 +48,11 @@ type Connection struct {
 	Generation      int64
 	Admission       json.RawMessage
 	Enabled         bool
+	// LastProbe caches the last measurement the account asked this connection to
+	// perform (reachability, latency, throughput). It describes nothing the driver
+	// acts on: a stale value must never decide whether a backup may run, which is
+	// why the run measures again through EnsureAdmission instead of reading this.
+	LastProbe json.RawMessage
 }
 
 // Spec is everything about a connection except its credentials and role. It
@@ -57,15 +62,25 @@ type Spec struct {
 	// RootAtBucket roots an owner-scoped connection's tree at the bucket itself instead
 	// of under a prefix. It is a flag rather than an empty prefix because the empty
 	// string already means "not configured".
-	RootAtBucket        bool      `json:"rootAtBucket,omitempty"`
-	CoordinatedWrites   bool      `json:"coordinatedWrites,omitempty"`
-	MaxSinglePutBytes   int64     `json:"maxSinglePutBytes,omitempty"`
-	ObjectAdmissionFile string    `json:"objectAdmissionFile,omitempty"`
-	ObjectSpoolRoot     string    `json:"objectSpoolRoot,omitempty"`
-	TransferClass       string    `json:"transferClass,omitempty"`
-	COS                 COSSpec   `json:"cos,omitempty"`
-	S3                  S3Spec    `json:"s3,omitempty"`
-	Local               LocalSpec `json:"local,omitempty"`
+	RootAtBucket        bool   `json:"rootAtBucket,omitempty"`
+	CoordinatedWrites   bool   `json:"coordinatedWrites,omitempty"`
+	MaxSinglePutBytes   int64  `json:"maxSinglePutBytes,omitempty"`
+	ObjectAdmissionFile string `json:"objectAdmissionFile,omitempty"`
+	ObjectSpoolRoot     string `json:"objectSpoolRoot,omitempty"`
+	TransferClass       string `json:"transferClass,omitempty"`
+	// BackupFolder is where snapshots live inside this connection's own tree, as a
+	// root-relative native path ("" means the tree root). It is a setting of the
+	// backup, not of the location: the connection's identity stays the bucket,
+	// prefix and generation, so changing this folder cannot move the tree.
+	//
+	// It is deliberately not part of ComputeIdentity. A folder change that altered
+	// the identity would make every existing admission and binding describe a
+	// different location, when all that changed is where inside the same tree a date
+	// folder is placed.
+	BackupFolder string    `json:"backupFolder,omitempty"`
+	COS          COSSpec   `json:"cos,omitempty"`
+	S3           S3Spec    `json:"s3,omitempty"`
+	Local        LocalSpec `json:"local,omitempty"`
 }
 
 type COSSpec struct {

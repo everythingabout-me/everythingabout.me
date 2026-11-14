@@ -2,6 +2,8 @@ package connections
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -248,5 +250,64 @@ func TestPostgresSameNameDifferentOwnersKeepDisjointObjectPaths(t *testing.T) {
 			t.Fatalf("owner %d's stored paths = %q, %q; want %q, %q", i,
 				got.Config.ObjectAdmissionFile, got.Config.ObjectSpoolRoot, paths[i][0], paths[i][1])
 		}
+	}
+}
+
+// A backup folder and a test result are written through one row and must read back
+// exactly. The folder is also refused once a run exists: those restore points name
+// a date, not a folder, so a silent move would leave them unreachable.
+func TestPostgresBackupFolderAndProbeRoundTrip(t *testing.T) {
+	db := connectionTestDB(t)
+	ctx := context.Background()
+	var ownerID string
+	if err := db.Pool().QueryRow(ctx, `insert into users(email, password_hash) values('backup-owner@example.test','test-only') returning id::text`).Scan(&ownerID); err != nil {
+		t.Fatal(err)
+	}
+	st := NewPostgresStore(db)
+	row := legacyRow(t, testCOSConfig("id", "key", "backup-bucket-125", "ap-hongkong"), "")
+	row.OwnerID, row.Name = ownerID, "nas"
+	row.Identity = mustIdentity(t, row)
+	row.SecretReference = SecretReference{}
+	row.Secret = Secret{COS: COSCredential{SecretID: "id", SecretKey: "key"}}
+	if err := st.Insert(ctx, row); err != nil {
+		t.Fatal(err)
+	}
+	var rowID string
+	if err := db.Pool().QueryRow(ctx, `select id::text from storage_connections where owner_id=$1::uuid and name='nas'`, ownerID).Scan(&rowID); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.SetBackupFolder(ctx, rowID, ownerID, "backups"); err != nil {
+		t.Fatalf("set the backup folder: %v", err)
+	}
+	got, ok, err := st.ByName(ctx, ownerID, "nas")
+	if err != nil || !ok {
+		t.Fatalf("read the row: ok=%t err=%v", ok, err)
+	}
+	if got.Config.BackupFolder != "backups" {
+		t.Fatalf("stored folder = %q, want %q", got.Config.BackupFolder, "backups")
+	}
+	if err := st.SetBackupFolder(ctx, rowID, "00000000-0000-4000-8000-000000000000", "elsewhere"); !errors.Is(err, ErrConnectionNotFound) {
+		t.Fatalf("another account changed the folder: %v", err)
+	}
+	if _, err := db.Pool().Exec(ctx, `insert into backup_runs(owner_id, connection_id, snapshot, state) values($1::uuid,$2::uuid,'2026-11-14','complete')`, ownerID, rowID); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.SetBackupFolder(ctx, rowID, ownerID, "elsewhere"); !errors.Is(err, ErrBackupFolderLocked) {
+		t.Fatalf("a folder moved after a run existed: %v", err)
+	}
+	probe := []byte(`{"ok":true,"latencyMs":12}`)
+	if err := st.SetProbe(ctx, rowID, probe); err != nil {
+		t.Fatalf("record the probe: %v", err)
+	}
+	got, _, err = st.ByName(ctx, ownerID, "nas")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decoded map[string]any
+	if err := json.Unmarshal(got.LastProbe, &decoded); err != nil {
+		t.Fatalf("stored probe is not JSON: %v (%s)", err, got.LastProbe)
+	}
+	if decoded["ok"] != true || decoded["latencyMs"] != float64(12) {
+		t.Fatalf("stored probe = %s, want ok=true latencyMs=12", got.LastProbe)
 	}
 }

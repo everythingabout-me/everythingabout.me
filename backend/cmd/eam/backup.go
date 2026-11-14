@@ -100,7 +100,7 @@ func runBackupSnapshot(ctx context.Context, cfg *config.Config, db *store.DB, co
 	if err != nil {
 		return err
 	}
-	result, copyErr := snapshot.Copy(ctx, source, "", writer, storage.Path(*date))
+	result, copyErr := snapshot.Copy(ctx, source, "", writer, target.BackupRoot(*date))
 	if err := finishBackupRun(ctx, db, runID, result, copyErr); err != nil && copyErr == nil {
 		return err
 	}
@@ -131,7 +131,7 @@ func runBackupList(ctx context.Context, db *store.DB, connStore connections.Stor
 		return fmt.Errorf("open backup connection %q: %w", target.Name, err)
 	}
 	defer tree.Close()
-	dates, err := snapshot.Dates(ctx, tree, "")
+	dates, err := snapshot.Dates(ctx, tree, target.BackupFolderPath())
 	if err != nil {
 		return err
 	}
@@ -140,7 +140,7 @@ func runBackupList(ctx context.Context, db *store.DB, connStore connections.Stor
 		return nil
 	}
 	for _, date := range dates {
-		result, err := snapshot.Verify(ctx, tree, storage.Path(date))
+		result, err := snapshot.Verify(ctx, tree, target.BackupRoot(date))
 		if err != nil {
 			fmt.Printf("%s  unreadable: %v\n", date, err)
 			continue
@@ -175,7 +175,7 @@ func runBackupPrune(ctx context.Context, db *store.DB, connStore connections.Sto
 	if !ok {
 		return fmt.Errorf("storage connection %q cannot prune: its driver does not expose removal", target.Name)
 	}
-	removed, err := snapshot.Prune(ctx, driver, remover, "", *keep)
+	removed, err := snapshot.Prune(ctx, driver, remover, target.BackupFolderPath(), *keep)
 	if err != nil {
 		return err
 	}
@@ -228,7 +228,7 @@ func runBackupRestore(ctx context.Context, db *store.DB, connStore connections.S
 	if !ok {
 		return fmt.Errorf("the owner's tree cannot be restored into: its driver does not expose staged publication")
 	}
-	result, err := snapshot.Copy(ctx, src, storage.Path(*date), writer, storage.Path(dest))
+	result, err := snapshot.Copy(ctx, src, target.BackupRoot(*date), writer, storage.Path(dest))
 	if err != nil {
 		return fmt.Errorf("restore %s from %q: %w", *date, target.Name, err)
 	}
