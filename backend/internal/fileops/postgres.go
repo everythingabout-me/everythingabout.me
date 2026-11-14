@@ -384,6 +384,11 @@ func (p *Postgres) readOnly(ctx context.Context, fn func(pgx.Tx) error) error {
 	return tx.Commit(ctx)
 }
 
+// transaction runs fn in one transaction that also orders one owner's writes. The advisory
+// lock is what makes "check for a conflicting guard, then insert mine" and the budget
+// arithmetic atomic across two operations, so every step that touches owner-wide state —
+// the guards, file_budgets, file_reservations, the change feed head, the entry index —
+// must use this one.
 func (p *Postgres) transaction(ctx context.Context, owner string, fn func(pgx.Tx) error) error {
 	tx, err := p.pool.Begin(ctx)
 	if err != nil {
@@ -394,6 +399,31 @@ func (p *Postgres) transaction(ctx context.Context, owner string, fn func(pgx.Tx
 		return err
 	}
 	if err = fn(tx); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
+// transactionOwnRow runs fn in one transaction without the owner's advisory lock, for a
+// step that writes nothing but one operation's own row (and its checkpoints or entries).
+// The `for update` readOperation already takes on that row is then the whole exclusion: two
+// attempts on one operation are serialized by it, and two different operations have no
+// state in common to order.
+//
+// Taking the owner lock for those steps anyway was what bounded a single import: every
+// small file's publication is admission + freeze + five bookkeeping steps, and the five
+// bookkeeping ones queued behind each other across files for no invariant at all. The lock
+// is per owner, so it did not protect those steps from anyone but the same owner's other
+// files — which is exactly the traffic a large import is made of.
+//
+// A step that touches owner-wide state must not use this: see `transaction` for the list.
+func (p *Postgres) transactionOwnRow(ctx context.Context, fn func(pgx.Tx) error) error {
+	tx, err := p.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	if err := fn(tx); err != nil {
 		return err
 	}
 	return tx.Commit(ctx)
@@ -870,21 +900,35 @@ func (p *Postgres) Claim(ctx context.Context, root Root, a Actor, id string, ttl
 	return op, err
 }
 
-// leased acquires the owner lock before operation rows, then checks the fence using
-// the database clock. Expiry blocks every mutation, including checkpoints and results.
+// leased runs one step under the owner lock, after checking the fence with the database
+// clock. Expiry blocks every mutation, including checkpoints and results.
 func (p *Postgres) leased(ctx context.Context, l Lease, fn func(pgx.Tx, *Operation, time.Time) error) error {
+	return p.leasedWith(ctx, l, true, fn)
+}
+
+// leasedOwnRow is leased for a step that writes only this operation's row, so it does not
+// take the owner lock (see transactionOwnRow). The fence is unchanged — the same lease
+// check, on the same row lock — because what makes two attempts on one operation exclusive
+// is that row, not the owner's.
+func (p *Postgres) leasedOwnRow(ctx context.Context, l Lease, fn func(pgx.Tx, *Operation, time.Time) error) error {
+	return p.leasedWith(ctx, l, false, fn)
+}
+
+func (p *Postgres) leasedWith(ctx context.Context, l Lease, order bool, fn func(pgx.Tx, *Operation, time.Time) error) error {
 	if !validID(l.OperationID) || l.Token == "" || l.Epoch < 1 {
 		return E("lease_lost", nil)
 	}
 	var owner string
-	err := p.pool.QueryRow(ctx, `select owner_id::text from file_operations where id=$1`, l.OperationID).Scan(&owner)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return E("not_found", nil)
+	if order {
+		err := p.pool.QueryRow(ctx, `select owner_id::text from file_operations where id=$1`, l.OperationID).Scan(&owner)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return E("not_found", nil)
+		}
+		if err != nil {
+			return err
+		}
 	}
-	if err != nil {
-		return err
-	}
-	return p.transaction(ctx, owner, func(tx pgx.Tx) error {
+	body := func(tx pgx.Tx) error {
 		op, _, err := readOperation(ctx, tx, l.OperationID)
 		if err != nil {
 			return err
@@ -900,7 +944,11 @@ func (p *Postgres) leased(ctx context.Context, l Lease, fn func(pgx.Tx, *Operati
 			return err
 		}
 		return saveOperation(ctx, tx, op)
-	})
+	}
+	if order {
+		return p.transaction(ctx, owner, body)
+	}
+	return p.transactionOwnRow(ctx, body)
 }
 func (p *Postgres) Renew(ctx context.Context, l Lease, ttl time.Duration) (Lease, error) {
 	var out Lease

@@ -64,7 +64,7 @@ func (p *Postgres) MarkCleaned(ctx context.Context, root Root, a Actor, id strin
 	if !validID(id) {
 		return E("not_found", nil)
 	}
-	return p.transaction(ctx, root.OwnerID, func(tx pgx.Tx) error {
+	return p.transactionOwnRow(ctx, func(tx pgx.Tx) error {
 		op, _, err := readOperation(ctx, tx, id)
 		if err != nil {
 			return err

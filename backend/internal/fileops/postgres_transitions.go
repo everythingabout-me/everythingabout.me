@@ -18,7 +18,7 @@ func appendCheckpoint(ctx context.Context, tx pgx.Tx, op *Operation, entry any, 
 	return err
 }
 func (p *Postgres) SaveCheckpoint(ctx context.Context, l Lease, b []byte) error {
-	return p.leased(ctx, l, func(tx pgx.Tx, op *Operation, _ time.Time) error {
+	return p.leasedOwnRow(ctx, l, func(tx pgx.Tx, op *Operation, _ time.Time) error {
 		if op.Terminal() {
 			return E("invalid_transition", nil)
 		}
@@ -49,7 +49,7 @@ func equalJSON(a, b any) bool {
 	return err == nil && bytes.Equal(x, y)
 }
 func (p *Postgres) SaveStage(ctx context.Context, l Lease, s storage.Staged) error {
-	return p.leased(ctx, l, func(_ pgx.Tx, op *Operation, _ time.Time) error {
+	return p.leasedOwnRow(ctx, l, func(_ pgx.Tx, op *Operation, _ time.Time) error {
 		if op.Kind != "upload_commit" {
 			return E("invalid_request", nil)
 		}
@@ -95,7 +95,7 @@ func anyApplied(op *Operation) bool {
 	return false
 }
 func (p *Postgres) StartEffect(ctx context.Context, l Lease) error {
-	return p.leased(ctx, l, func(tx pgx.Tx, op *Operation, _ time.Time) error {
+	return p.leasedOwnRow(ctx, l, func(tx pgx.Tx, op *Operation, _ time.Time) error {
 		uncertain, err := operationEntriesUncertain(ctx, tx, op)
 		if err != nil {
 			return err
@@ -114,7 +114,7 @@ func (p *Postgres) StartEffect(ctx context.Context, l Lease) error {
 	})
 }
 func (p *Postgres) SaveApplied(ctx context.Context, l Lease, result storage.MutationResult) error {
-	return p.leased(ctx, l, func(tx pgx.Tx, op *Operation, _ time.Time) error {
+	return p.leasedOwnRow(ctx, l, func(tx pgx.Tx, op *Operation, _ time.Time) error {
 		if op.Phase == NativeApplied {
 			if !equalJSON(op.NativeResult, result) {
 				return E("intent_conflict", nil)
@@ -141,7 +141,7 @@ func (p *Postgres) SaveApplied(ctx context.Context, l Lease, result storage.Muta
 	})
 }
 func (p *Postgres) MarkUnknown(ctx context.Context, l Lease, evidence []byte) error {
-	return p.leased(ctx, l, func(tx pgx.Tx, op *Operation, _ time.Time) error {
+	return p.leasedOwnRow(ctx, l, func(tx pgx.Tx, op *Operation, _ time.Time) error {
 		if op.Terminal() || op.Phase != EffectStarted {
 			return E("invalid_transition", nil)
 		}
@@ -156,7 +156,7 @@ func (p *Postgres) MarkUnknown(ctx context.Context, l Lease, evidence []byte) er
 	})
 }
 func (p *Postgres) BeginEntry(ctx context.Context, l Lease, n int) error {
-	return p.leased(ctx, l, func(tx pgx.Tx, op *Operation, _ time.Time) error {
+	return p.leasedOwnRow(ctx, l, func(tx pgx.Tx, op *Operation, _ time.Time) error {
 		uncertain, err := operationEntriesUncertain(ctx, tx, op)
 		if err != nil {
 			return err
@@ -193,7 +193,7 @@ func (p *Postgres) BeginEntry(ctx context.Context, l Lease, n int) error {
 	})
 }
 func (p *Postgres) SaveEntry(ctx context.Context, l Lease, n int, state string, checkpoint, evidence []byte, result json.RawMessage) error {
-	return p.leased(ctx, l, func(tx pgx.Tx, op *Operation, _ time.Time) error {
+	return p.leasedOwnRow(ctx, l, func(tx pgx.Tx, op *Operation, _ time.Time) error {
 		if op.Terminal() || op.Phase == NativeApplied {
 			return E("invalid_transition", nil)
 		}

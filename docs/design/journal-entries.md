@@ -94,12 +94,21 @@ The two numbers that change the decision:
 - **5.25 GB for a 500-file move, ~520 GB projected for 5,000 files.** The 5,000-file
   manifest document is a measured 8.18 MB; the write count per entry is measured at 5.01 and
   is constant. Nothing in the projection is a guess about where bytes go.
-- **The owner lock is held for ~108 ms per manifest entry, ~216 ms per file.** Five
+- **The owner lock was held for ~108 ms per manifest entry, ~216 ms per file.** Five
   transitions, each a locked document read (6.5 ms average) plus a document write (14.9 ms
   average, at a document that grows to a 1.36 MB peak) plus the advisory lock and commit. At
-  10,002 entries the document is ~6× larger, so a 5,000-file move holds the owner lock for
-  close to two hours. The owner lock is what serializes *every* write by that owner, so
-  during a large move that owner's uploads and other operations queue behind it.
+  10,002 entries the document is ~6× larger, so a 5,000-file move held the owner lock for
+  close to two hours, and that owner's uploads and other operations queued behind it. The
+  lock is per owner, so what it serialized was one owner's own writes — which on a large
+  import is the only traffic there is.
+
+  The lock is now taken only by the steps that write state two operations share: taking and
+  releasing guards, charging `file_budgets`/`file_reservations`/`file_entry_charges`,
+  appending change facts, and applying the entry index. The transitions that write one
+  operation's own row — the checkpoint, the staged evidence, the effect intent, the observed
+  result, an entry charged *before* `Settle` applies it — take that row's `for update` alone
+  (`fileops.transactionOwnRow`), so they no longer queue the owner. This changes the number
+  above rather than the argument: it was always the owner-wide state that had to be ordered.
 
 What the review got wrong or left out:
 
