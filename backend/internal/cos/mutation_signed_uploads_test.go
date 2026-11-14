@@ -89,6 +89,13 @@ func TestMutationClassASignsLengthWithoutDigest(t *testing.T) {
 	if grant.Number != 3 || grant.Size != int64(len(payload)) || grant.Headers["Content-MD5"] != "" {
 		t.Fatal("grant bound an unintended field", grant)
 	}
+	// The signed content type must be a CORS-safelisted one: any other value makes the
+	// browser preflight every part, and each part URL is unique, so no preflight cache can
+	// ever answer it. A part's content type is not the object's — the session's initiate
+	// call fixes that.
+	if got := grant.Headers["Content-Type"]; got != "text/plain" {
+		t.Fatalf("part content type %q is not CORS-safelisted; every part would be preflighted", got)
+	}
 	u, _ := url.Parse(grant.URL)
 	for _, name := range []string{"content-length", "content-type", "host"} {
 		if !strings.Contains(u.Query().Get("q-header-list"), name) {
@@ -126,7 +133,7 @@ func TestMutationClassASignsLengthWithoutDigest(t *testing.T) {
 		func(r *http.Request) { r.Method = "POST" }, func(r *http.Request) { r.URL.Path += "other"; r.URL.RawPath = "" }, func(r *http.Request) { r.Host = "different.example" },
 		func(r *http.Request) { q := r.URL.Query(); q.Set("partNumber", "4"); r.URL.RawQuery = q.Encode() },
 		func(r *http.Request) { q := r.URL.Query(); q.Set("uploadId", "other"); r.URL.RawQuery = q.Encode() },
-		func(r *http.Request) { r.Header.Set("Content-Type", "text/plain") },
+		func(r *http.Request) { r.Header.Set("Content-Type", "application/octet-stream") },
 	}
 	for i, change := range mutations {
 		if status := send(change); status != 403 {

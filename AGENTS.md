@@ -468,7 +468,10 @@ Variants: `Committed locally main@abc1234, not pushed` / `Not committed (tests f
   driver exists. Class A signs part and read URLs with the configured `COS_SECRET_*` credential, which
   remains server-side; `FILE_TRANSFER_CLASS` selects `presigned-parts` or `relay`. Grants are scoped to one upload
   session or one file, time-limited,
-  renewable and recorded before they are issued. Class A part URLs bind exact length and no digest.
+  renewable and recorded before they are issued. Class A part URLs bind exact length, no digest,
+  and a CORS-safelisted content type (`text/plain`) so a part PUT is a simple request with no
+  preflight: a part's type is not the object's, which `InitiateMultipartUpload` fixes, and a
+  preflight per unique part URL is a round trip that no cache can ever reuse.
   **A staged transfer is never published by its client**: multipart parts stay unpublished until the server
   completes them, class C bytes stay in the spool until the server publishes, and class B is a client contract.
   The exception is a **direct** class A session (one file that fits in a single part, on a connection admitted

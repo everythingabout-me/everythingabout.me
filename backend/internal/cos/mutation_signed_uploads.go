@@ -35,7 +35,15 @@ func (b *mutationBackend) SignPart(ctx context.Context, key, id string, number i
 	query := url.Values{"partNumber": {strconv.Itoa(number)}, "uploadId": {id}}
 	// A class A grant binds the exact part length and no content digest. The
 	// length is deterministic for the session geometry, so it can be signed.
-	headers := http.Header{"Content-Length": {strconv.FormatInt(size, 10)}, "Content-Type": {"application/octet-stream"}}
+	//
+	// The content type is the CORS-safelisted text/plain, never application/octet-stream:
+	// a signed header that is not safelisted makes the PUT a cross-origin request with a
+	// preflight, and every part URL is unique (its query carries the part number and upload
+	// id), so the browser's preflight cache can never answer one — a 20k-file import paid
+	// 20k preflights for parts that each move a kilobyte. A part's content type is not the
+	// object's: the media type is fixed by InitiateMultipartUpload, and this bucket was
+	// probed with a text/plain part completing to the declared application/json object.
+	headers := http.Header{"Content-Length": {strconv.FormatInt(size, 10)}, "Content-Type": {"text/plain"}}
 	duration := time.Until(expires)
 	if duration <= 0 || duration > time.Hour {
 		return out, storage.NewError("invalid_request", storage.Path(key), nil)
@@ -46,7 +54,7 @@ func (b *mutationBackend) SignPart(ctx context.Context, key, id string, number i
 	}
 	return storage.SignedPartGrant{
 		Number: number, Size: size, Method: http.MethodPut, URL: signed.String(),
-		Headers:   map[string]string{"Content-Length": strconv.FormatInt(size, 10), "Content-Type": "application/octet-stream"},
+		Headers:   map[string]string{"Content-Length": strconv.FormatInt(size, 10), "Content-Type": "text/plain"},
 		ExpiresAt: expires.UTC(),
 	}, nil
 }

@@ -165,11 +165,17 @@ The grant has two shapes, chosen by the connection, never by the client:
 | conditional PUT | `PUT` at the destination: `If-None-Match: *` plus the provider's overwrite switch (create), or `If-Match` alone (replace) | the condition is in the **signed headers**, so the signature covers it |
 | form upload | `POST` `multipart/form-data` to the bucket root, every value in the body | the condition is in the **signed policy**: exact key, exact length, media type, `x-cos-forbid-overwrite: true` |
 
-The form upload exists for one reason: a browser sends `multipart/form-data` as a CORS-simple
-request, so it is **not preflighted**, while a cross-origin `PUT` always is. With six sockets per
-HTTP/1.1 origin, that halves what a page of small files costs — one round trip per file instead of
-two. It is not a weaker write: a client that drops the overwrite field, changes the key, or sends
-another length gets a policy refusal, and the commit still verifies the object it finds.
+The form upload exists so that a *create* costs one round trip: a browser sends
+`multipart/form-data` as a CORS-simple request, so it is **not preflighted**, while a cross-origin
+`PUT` with a non-safelisted header always is. A part PUT gets the same treatment a different way —
+its signed headers are the exact length and the safelisted `text/plain` content type, so it is a
+simple request as well, and a part's content type is not the object's (the media type is fixed by
+`InitiateMultipartUpload`). That matters because every part URL is unique — its query carries the
+part number and upload id — so a preflight cache can never answer one: without it, a 20k-file
+import pays 20k preflights for kilobyte parts. With six sockets per HTTP/1.1 origin, halving the
+requests doubles a page of small files. It is not a weaker write: a client that drops the
+overwrite field, changes the key, or sends another length gets a policy refusal, and the commit
+still verifies the object it finds.
 
 What a form upload cannot express is a **replacement**: there is no "only if the current revision
 is X" in a form, and the provider ignores `If-None-Match` on it. Replacement therefore keeps the
@@ -368,7 +374,7 @@ Sign a header only when its value is deterministic and the client sends it exact
 | Category | Examples | Sign | Return to the client |
 |---|---|---|---|
 | Browser-derived | `Host`, `Content-Length` | yes | no — the browser sets them |
-| Client-set | `Content-Type`, `Content-Range`, `If-None-Match` | only when the server fixes the value | yes, and allow them in preflight |
+| Client-set | `Content-Type`, `Content-Range`, `If-None-Match` | only when the server fixes the value | yes; a part binds the safelisted `text/plain`, a destination PUT binds the object's media type |
 | Browser-chosen | `Accept-Encoding`, `User-Agent`, `Accept-Language` | never | no |
 
 - A signed `Content-Length` requires a fixed-length `Blob`/`File` body; a `ReadableStream` body is sent
