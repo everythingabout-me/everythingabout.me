@@ -39,10 +39,6 @@
   border-bottom: 1px solid var(--border);
 }
 
-/* The settings form opens below both the row text and its actions. */
-.row > form {
-  flex-basis: 100%;
-}
 
 .rowBody {
   flex: 1;

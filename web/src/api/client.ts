@@ -1494,7 +1494,7 @@ export interface StorageConnection {
 export interface StorageTestResult {
   testedAt: string;
   ok: boolean;
-  backupReady: boolean;
+  writable: boolean;
   error?: string;
   latencyMs: number;
   uploadBytes: number;
@@ -1520,7 +1520,7 @@ export interface StorageData {
   connections: StorageConnection[];
   keep: number;
   runs: BackupRun[];
-  /** The destination "Back up now" uses; "" when none is chosen. */
+  /** The provider the backup feature uses; "" when the feature is not configured. */
   backupTarget: string;
 }
 
@@ -1561,10 +1561,11 @@ export const api = {
     return post<StorageTestResult>(`/api/storage/connections/${encodeURIComponent(id)}/test`);
   },
 
-  updateStorageConnection(id: string, input: { backupFolder: string }): Promise<{ backupFolder: string }> {
+  /** The backup feature's placement on one provider; not a property of the provider. */
+  setBackupFolder(id: string, backupFolder: string): Promise<{ backupFolder: string }> {
     return request<{ backupFolder: string }>(`/api/storage/connections/${encodeURIComponent(id)}`, {
       method: "PATCH",
-      body: JSON.stringify(input),
+      body: JSON.stringify({ backupFolder }),
     });
   },
 

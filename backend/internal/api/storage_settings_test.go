@@ -111,9 +111,18 @@ func TestStorageTargetAndFolderAreAccountSettings(t *testing.T) {
 		Secret: connections.Secret{S3: connections.S3Credential{AccessKeyID: "id", SecretAccessKey: "key"}},
 	})
 
+	// Adding a provider is setup, not configuration: the backup feature stays
+	// unconfigured until the account says which provider it uses.
 	page := decodeStoragePage(t, storageRequest(t, server, http.MethodGet, "/api/storage", cookie, nil))
+	if page.BackupTarget != "" {
+		t.Fatalf("adding the only provider auto-configured backups to %q", page.BackupTarget)
+	}
+	if recorder := storageRequest(t, server, http.MethodPut, "/api/storage/backup-target", cookie, map[string]string{"connectionId": backup.ID}); recorder.Code != http.StatusOK {
+		t.Fatalf("configure the backup provider: %d %s", recorder.Code, recorder.Body.String())
+	}
+	page = decodeStoragePage(t, storageRequest(t, server, http.MethodGet, "/api/storage", cookie, nil))
 	if page.BackupTarget != backup.ID {
-		t.Fatalf("backupTarget = %q, want the only destination %q", page.BackupTarget, backup.ID)
+		t.Fatalf("backupTarget = %q, want %q", page.BackupTarget, backup.ID)
 	}
 
 	recorder := storageRequest(t, server, http.MethodPatch, "/api/storage/connections/"+backup.ID, cookie, map[string]string{"backupFolder": "/backups/"})

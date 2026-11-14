@@ -2,9 +2,9 @@
 
 > Status: connections (§7–§8) and the snapshot/prune/restore commands (§1–§6) are implemented
 > (`sql/035`–`sql/037`, `internal/connections`, `internal/snapshot`, `eam backup`). The account surface
-> exists too: a destination can be tested for reachability/latency/throughput, chosen as the backup target,
-> and given a folder inside itself (`sql/055`, `POST /api/storage/connections/{id}/test`,
-> `PUT /api/storage/backup-target`). Editing the retention policy from the UI is still missing.
+> exists too: providers are added and measured once (`sql/055`, `POST /api/storage/connections/{id}/test`),
+> and the **backup feature** separately chooses a provider and a folder (`PUT /api/storage/backup-target`,
+> `PATCH /api/storage/connections/{id}`). Editing the retention policy from the UI is still missing.
 > This replaces the earlier framing in which application metadata was part of the backup. Per `AGENTS.md` (*Bytes are the source of truth*), a backup is a
 > storage-layer artifact: the user's content survives because the storage layer holds copies of the tree.
 > Postgres is a read cache; losing it is a rebuild cost for the operator, never a loss for the user.
@@ -218,8 +218,14 @@ Rules, each answering a specific failure:
   [storage](storage.md#5-write-and-recovery-model)), because inheriting the deployment's would
   make the new bucket refuse evidence recorded for another one — and measuring it would overwrite the
   authority's proof. The measurement itself happens before the first snapshot: a drive may be recorded
-  while it is unreachable (a NAS that is off, a tunnel that is down), and a person adding one should not
+  while it is unreachable (a NAS that is off, a tunnel is down), and a person adding one should not
   have to wait for it to come back before saying where it is.
+
+**A row is a provider; a feature's use of it is separate state.** An account-added row carries
+`role='backup'` because backup is the only feature that exists today; the role means "this row may never
+back an owner's tree", not "backup owns this location". A future feature should reuse the provider row and
+record its own selection and placement, which is why provider setup exposes no usage settings and why the
+backup folder is reached through the backup feature's configuration.
 
 ## 8. Runtime
 
@@ -262,16 +268,23 @@ Rules, each answering a specific failure:
   limit (5 GiB on COS and S3), and an entry above it is refused by name before the attempt.
 - One snapshot per owner per day is the default. RPO is therefore one day, which matches the stated need:
   this is backup, not sync, and the copy does not have to be reachable immediately.
-- **The account tests a destination before the first backup.** `POST /api/storage/connections/{id}/test`
+- **The account tests a provider once, independently of any feature.** `POST /api/storage/connections/{id}/test`
   measures one metadata round trip, uploads and reads back 8 MiB, then runs the admission probe and caches
   the answer on the row. This is not cosmetic: a NAS can be reachable and still refuse conditional create,
   and without the test the first failure would be a snapshot that already copied part of the tree. It is
-  bounded by those bytes and requests, never by a clock, so a slow link finishes instead of being cut off.
-- **At most one destination is selected, and "none" is a choice.** `backup_policies.enabled` records the
-  account's decision; without any row, a single attached destination is the obvious default and several
-  leave the choice open. Clearing the choice writes disabled policy rows instead of deleting them, so the
-  page cannot fall back to the only attached store and silently undo "none". Before this, the page used
-  whichever backup row came first, so a second destination was invisible.
+  provider-level because the write protocol does not depend on which feature uses it; `writable` says
+  whether the service can publish there, not whether any particular feature is configured. It is bounded
+  by those bytes and requests, never by a clock, so a slow link finishes instead of being cut off.
+- **A provider is setup; a feature chooses it.** Adding a provider must not configure a feature. The backup
+  feature stays unconfigured until the account names a provider (`backup_policies.enabled`), even when only
+  one provider exists. The alternative — "the only attached provider is the obvious default" — was tried and
+  removed: it makes the second step invisible, so the account never learns that a choice exists, and a
+  second feature could not reuse the same provider with its own placement. For the same reason the folder
+  is a backup setting exposed against the provider (`PATCH /api/storage/connections/{id}` sets
+  `backupFolder`), not a property shown in provider setup.
+- **At most one provider per feature.** One snapshot destination is what a run targets; "not configured" is
+  recorded by disabling the policy rows rather than deleting them, because the row will also carry
+  retention. Several providers may exist and be chosen between, but each run names exactly one.
 
 ## 10. Acceptance
 

@@ -48,7 +48,7 @@ type storageConnectionView struct {
 type storageTestView struct {
 	TestedAt               string `json:"testedAt"`
 	OK                     bool   `json:"ok"`
-	BackupReady            bool   `json:"backupReady"`
+	Writable               bool   `json:"writable"`
 	Error                  string `json:"error,omitempty"`
 	LatencyMS              int64  `json:"latencyMs"`
 	UploadBytes            int64  `json:"uploadBytes"`
@@ -112,7 +112,7 @@ func (s *Server) handleStorageGet(w http.ResponseWriter, r *http.Request) error 
 	}
 	keep := 14
 	_ = s.db.Pool().QueryRow(r.Context(), `select keep from backup_policies where owner_id=$1::uuid limit 1`, user.ID).Scan(&keep)
-	target, err := s.backupTarget(r.Context(), user.ID, views)
+	target, err := s.backupTarget(r.Context(), user.ID)
 	if err != nil {
 		return err
 	}
@@ -140,42 +140,25 @@ func (s *Server) handleStorageGet(w http.ResponseWriter, r *http.Request) error 
 	return s.ok(w, map[string]any{"connections": views, "keep": keep, "runs": runs, "backupTarget": target})
 }
 
-// backupTarget is the destination a "Back up now" click uses. The policy row is
-// the account's explicit choice; without one, a single attached destination is the
-// obvious default, and several leave the choice open rather than silently picking
-// the one that sorts first.
-func (s *Server) backupTarget(ctx context.Context, ownerID string, views []storageConnectionView) (string, error) {
+// backupTarget is the provider the backup feature writes to, or "" when this
+// account has not configured it. There is deliberately no fallback to "the only
+// attached provider": adding a provider is setup, and a feature that switched
+// itself on because it happened to be the only candidate would make the second
+// step invisible — the same mistake as silently choosing the first row.
+func (s *Server) backupTarget(ctx context.Context, ownerID string) (string, error) {
 	var chosen string
 	err := s.db.Pool().QueryRow(ctx, `
 		select p.connection_id::text from backup_policies p
 		join storage_connections c on c.id = p.connection_id
 		where p.owner_id=$1::uuid and p.enabled and c.role='backup'
 		order by p.updated_at desc limit 1`, ownerID).Scan(&chosen)
-	if err == nil {
-		return chosen, nil
-	}
-	if !errors.Is(err, pgx.ErrNoRows) {
-		return "", err
-	}
-	// A policy row that is merely disabled means the account said "none". Falling
-	// back to the only attached destination here would silently undo that choice.
-	var chose bool
-	if err := s.db.Pool().QueryRow(ctx, `select exists(select 1 from backup_policies where owner_id=$1::uuid)`, ownerID).Scan(&chose); err != nil {
-		return "", err
-	}
-	if chose {
+	if errors.Is(err, pgx.ErrNoRows) {
 		return "", nil
 	}
-	var candidates []string
-	for _, v := range views {
-		if v.Role == "backup" && v.Enabled {
-			candidates = append(candidates, v.ID)
-		}
+	if err != nil {
+		return "", err
 	}
-	if len(candidates) == 1 {
-		return candidates[0], nil
-	}
-	return "", nil
+	return chosen, nil
 }
 
 type connectionInput struct {
@@ -347,7 +330,7 @@ func (s *Server) handleStorageConnectionTest(w http.ResponseWriter, r *http.Requ
 		if _, probeErr := storagebackend.ProbeConnection(r.Context(), &effective); probeErr != nil {
 			result.Error = probeErr.Error()
 		} else {
-			result.BackupReady = true
+			result.Writable = true
 		}
 	}
 	if encoded, marshalErr := json.Marshal(result); marshalErr == nil {
@@ -443,25 +426,10 @@ func (s *Server) handleStorageBackupTarget(w http.ResponseWriter, r *http.Reques
 	}
 	ctx := r.Context()
 	if in.ConnectionID == "" {
-		// Recorded as disabled rows rather than deleted rows: an absent policy means
-		// "never chose", which the page still reads as the only attached destination.
-		tx, err := s.db.Pool().Begin(ctx)
-		if err != nil {
-			return err
-		}
-		defer tx.Rollback(ctx)
-		if _, err := tx.Exec(ctx, `update backup_policies set enabled=false, updated_at=now() where owner_id=$1::uuid`, user.ID); err != nil {
-			return err
-		}
-		if _, err := tx.Exec(ctx, `
-			insert into backup_policies(owner_id, connection_id, enabled)
-			select $1::uuid, c.id, false from storage_connections c
-			where c.owner_id=$1::uuid and c.role='backup'
-			  and not exists (select 1 from backup_policies p where p.owner_id=$1::uuid and p.connection_id=c.id)`,
-			user.ID); err != nil {
-			return err
-		}
-		if err := tx.Commit(ctx); err != nil {
+		// The provider rows stay: "not configured" is a feature setting, not a reason
+		// to forget the provider. The policy row also carries retention later, so it
+		// is disabled rather than deleted.
+		if _, err := s.db.Pool().Exec(ctx, `update backup_policies set enabled=false, updated_at=now() where owner_id=$1::uuid`, user.ID); err != nil {
 			return err
 		}
 		return s.ok(w, map[string]any{"backupTarget": ""})
