@@ -345,37 +345,6 @@ test("a settling file holds no transfer slot, so the window keeps moving while i
   await harness.until((queue) => queue.tasks.every((task) => task.status === "completed"));
 });
 
-// The old window counted every started row, so sixty-four rows waiting for publication
-// stopped the queue from starting anything: a wave of parts, a wait for a whole settle page,
-// then the next wave, with the part pool idle in between. A settlement is a commitment, not a
-// transfer, and the depth of the one must not bound the other.
-test("a full settle window still lets the files behind it move their bytes", async (t) => {
-  const server = uploadServer(2);
-  const commitGate = deferred();
-  const sendCommit = server.api.commitUpload;
-  server.api.commitUpload = async (id) => { await commitGate.promise; return sendCommit(id); };
-  const pathOf = (id) => [...server.sessions.values()].find((session) => session.id === id).path;
-  const harness = await mount(t, server.api);
-  const files = Array.from({ length: 200 }, (_, i) => named(`s${String(i).padStart(3, "0")}`));
-  harness.render().enqueue(files, "");
-  const finalizing = (queue) => queue.tasks.filter((task) => task.status === "finalizing");
-  // Sixty-four publications are outstanding — the settle window in full — and the queue must
-  // not read that as "the transfer stage is busy".
-  let queue = await harness.until((queue) => finalizing(queue).length >= 64);
-  const published = new Set(finalizing(queue).map((task) => task.path));
-  const started = queue.tasks.filter((task) => task.status !== "queued");
-  assert.ok(started.length > 64, `only ${started.length} files started while 64 publications were waiting`);
-  // And the part pool keeps working: bytes arrive for a file that is not one of the rows
-  // already waiting to publish.
-  const partsBefore = server.calls.filter(([kind]) => kind === "part").length;
-  await harness.until(() => server.calls.filter(([kind]) => kind === "part").length > partsBefore);
-  const sending = server.calls.filter(([kind]) => kind === "part").slice(partsBefore).map(([, id]) => pathOf(id));
-  assert.ok(sending.some((path) => !published.has(path)), "a file behind the settle window sent its bytes");
-  commitGate.resolve();
-  await harness.until((queue) => queue.tasks.every((task) => task.status === "completed"));
-  assert.equal(server.sessions.size, files.length);
-});
-
 test("cancelling a prepared row aborts its session instead of leaving it open", async (t) => {
   const server = uploadServer(2);
   const gate = deferred();

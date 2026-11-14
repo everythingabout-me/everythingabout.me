@@ -330,22 +330,12 @@ the native upload or provider commit once and settles the index/result; it is no
 another full-byte transfer.
 
 The browser starts every queued task, so a large batch opens its sessions immediately. Started tasks send
-numbered parts through one global pool of sixteen part requests with no per-file cap; the receiver admits
-part bodies process-wide, so no session publishes a parallelism for clients to respect. The pool sits above the
-provider's six HTTP/1.1 sockets on purpose: a part waiting behind a new key's preflight would otherwise leave a
-socket idle. The file at the head of the queue takes every slot it has parts to fill — all sixteen while it
-does — and each freed slot goes to its next part, so files finish one after another and one slow part never
-idles a connection. A later file joins only on the slots the head leaves, when it has fewer parts left than
-slots; it never takes a slot away from the file ahead of it.
-
-The transfer window and the settlement window are separate, and the depth of one never bounds the other. A file
-holds a claim from the moment it starts until its bytes are placed, and a settlement slot from then until its
-commit answers; the queue therefore starts new files while earlier ones publish, and a page of publications the
-server has not yet answered cannot leave the part pool idle with work still queued behind it. Bounding starts by
-every started row instead — settling rows included — serialized the two stages into waves of parts, a wait for a
-whole settle page, and the next wave. The settlement window is bounded in its own right (four commit pages),
-because an unanswered publication holds a session, a guard on its destination and a place in the server's settle
-pool, and starting an unbounded number of them would only move the queue to the server.
+numbered parts through one global pool of eight part requests with no per-file cap; the receiver admits
+part bodies process-wide, so no session publishes a parallelism for clients to respect. The file at the head of
+the queue takes every slot it has parts to fill — all eight while it does — and each freed slot goes to its next
+part, so files finish one after another and one slow part never idles a connection. A later file joins only on
+the slots the head leaves, when it has fewer parts left than slots; it never takes a slot away from the file
+ahead of it.
 
 Queue order is therefore what decides which file finishes first, and it has to be the one a person can see, so a
 selection is queued the way the list shows it — folders first, then name — never in the order the OS delivered a

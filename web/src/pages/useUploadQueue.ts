@@ -39,13 +39,10 @@ const SETTLE_PAGE_WAIT_MS = 500;
 
 // Sessions kept in hand ahead of the transfer stage: four pages of thirty-two, so the stage
 // can be refilled four times over before a create page (~0.6 s for 32 against this bucket) has
-// to answer, and a page that arrives late costs no part slot. Together with the files that
-// hold a transfer claim and the ones already publishing, this is the most sessions one tab
-// holds open: 256, against an idle window of two hours — the depth is what "always sixteen
-// moving" costs, and the byte bound below is what keeps it honest for files that are not tiny.
-// The publishing sixty-four are the cheapest of the three: their bytes are already durable and
-// their session is frozen at the commit, so they add no reservation that admission had not
-// already made — only the second or so their page takes to answer.
+// to answer, and a page that arrives late costs no part slot. Together with the claims, this
+// is the most sessions one tab holds open: 192, against an idle window of two hours — the
+// depth is what "always sixteen moving" costs, and the byte bound below is what keeps it
+// honest for files that are not tiny.
 const ADMIT_AHEAD = 128;
 // A prepared session reserves its bytes against the owner's quota the moment it is admitted,
 // so depth is bounded by bytes as well as by count: 64 small files are nothing, 64 videos
@@ -61,26 +58,10 @@ const ADMIT_AHEAD_BYTES = 1_000_000_000;
 // before the session existed was a slot held by a file that could not send a byte, which is
 // what made an import run in waves with every row already answered by the provider.
 //
-// The claim ends when the bytes are placed, not when the commit answers: publication belongs
-// to the settlement stage and has its own window below. Bounding starts by the attempt
-// registry instead — every started row, settling included — serialized the two stages, and a
-// 20k-file import then sent a wave of parts, waited out a whole settle page, and sent the next
-// wave, with the part pool idle in between.
-//
 // Four times the part pool, so the queue behind the sixteen slots never empties while a page
 // of thirty-two admissions is in flight: the whole point of the depth is a slot that frees is
 // filled by a file that already has its session.
 const CLAIM_WINDOW = 64;
-// Files whose bytes are placed and whose publication has not answered yet, across the whole
-// tab. A settlement holds a session, a guard on its destination and a place in the server's
-// settle pool, so an unbounded number of them would trade a full part pool for a queue of
-// publications nobody can answer. Four commit pages, the depth the client's own settle pages
-// already need.
-//
-// It bounds starts, never settlements: a file that has placed its bytes always gets to
-// publish, and the window only decides when the next file may begin, so a slow publication
-// cannot leave the part pool empty while the queue still has work behind it.
-const SETTLE_WINDOW = 4 * COMMIT_BATCH_SIZE;
 // The page is published at most this often. A file changes state several times, and
 // every publication re-derives the row projection over the whole selection, so a
 // 20k-file folder would publish ~100k times and never leave the main thread. Task
@@ -539,6 +520,7 @@ interface UploadRunHost {
   readonly deadlines: Set<ReturnType<typeof setTimeout>>;
   readonly partPool: PartPool;
   readonly ranks: Map<string, number>;
+  readonly transferring: Set<string>;
   /** The authenticated owner, empty until the mount-time session check resolves. */
   owner(): string;
   /** The import's standing answer to "this destination already exists". */
@@ -965,6 +947,10 @@ async function moveUploadParts(
   allocated: boolean,
   signal: AbortSignal,
 ): Promise<boolean> {
+  // The session is in hand, so this file can move bytes and takes a transfer slot now.
+  // Taking it at claim time instead put slots on files that were still waiting for their
+  // create page, and the part pool then had nothing to hand out.
+  host.transferring.add(id);
   if (!Number.isSafeInteger(session.partSize) || session.partSize < 1 || !Number.isSafeInteger(session.partCount)
     || session.partCount !== Math.ceil(session.size / session.partSize)
     || !["any", "ascending"].includes(session.ordering)) throw new Error("Invalid upload session geometry.");
@@ -1320,14 +1306,10 @@ function createQueue(): QueueOwner {
   // Ids still waiting for a transfer slot, in selection order. A queued file may already
   // hold its session — admission is a stage of its own and does not remove it from here.
   const pending = useRef(new Set<string>());
-  // Ids holding a claim: from the moment a file starts to the moment its bytes are placed,
-  // whether it is moving bytes or still waiting for its session. Settlement is not part of
-  // it — see `settling` — so a publication that has not answered cannot keep the next file's
-  // first byte waiting.
-  const claimed = useRef(new Set<string>());
-  // Ids whose bytes are placed and whose publication has not answered yet. The settlement
-  // page is what they wait on, and this set is the bound on how many may wait at once.
-  const settling = useRef(new Set<string>());
+  // Ids currently holding a transfer slot, from the moment a file starts moving bytes to
+  // the moment its bytes are placed. Admission and settlement never take one, so this set
+  // — not "started tasks" — is the byte concurrency the part pool hands slots to.
+  const transferring = useRef(new Set<string>());
   // Admission in flight or in hand, one per file. Its presence is the right to start that
   // file without waiting for a create: whoever starts it awaits this promise instead of
   // sending a second request, and the session it carries is used once.
@@ -1705,8 +1687,7 @@ function createQueue(): QueueOwner {
       if (!task) continue;
       tasks.current.delete(id);
       pending.current.delete(id);
-      claimed.current.delete(id);
-      settling.current.delete(id);
+      transferring.current.delete(id);
       if (task.isDir) openDirs.current.delete(task.path);
       dropAdmission(id);
       releaseClaim(id);
@@ -1784,14 +1765,11 @@ function createQueue(): QueueOwner {
     } else { patch(task.id, { status: "finalizing", speed: 0 }); }
   }, [complete, patch, remove]);
 
-  // A file stops holding a transfer claim the moment its bytes are placed, and starts
-  // holding a settlement slot instead. The two are counted separately so a publication the
-  // server has not answered yet never keeps the next file's first byte waiting: that
-  // serialization is what made an import send a wave of parts, wait out a settle page, and
-  // send the next wave with the part pool idle in between.
+  // A file stops holding a transfer slot the moment its bytes are placed. The settlement
+  // has its own page and its own bound, so waiting for it here would only make the next
+  // file's first byte wait for this row's answer.
   const releaseWindow = useCallback((id: string) => {
-    if (!claimed.current.delete(id)) return;
-    settling.current.add(id);
+    if (!transferring.current.delete(id)) return;
     requestPump();
   }, [requestPump]);
 
@@ -1809,6 +1787,7 @@ function createQueue(): QueueOwner {
     deadlines: deadlines.current,
     partPool: partPool.current,
     ranks: ranks.current,
+    transferring: transferring.current,
     owner: () => owner.current,
     conflictPolicy: () => policyRef.current,
     patch,
@@ -1868,8 +1847,7 @@ function createQueue(): QueueOwner {
       await abandonAttempt(runHost, id, error);
     } finally {
       running.current.delete(id);
-      claimed.current.delete(id);
-      settling.current.delete(id);
+      transferring.current.delete(id);
       requestPump();
     }
   }, [runHost, requestPump]);
@@ -1925,12 +1903,7 @@ function createQueue(): QueueOwner {
     }
     const starts: UploadTask[] = [];
     for (const id of pending.current) {
-      if (claimed.current.size + starts.length >= CLAIM_WINDOW) break;
-      // A publication the server has not answered yet is a commitment, not a transfer: it
-      // holds a session, a guard on its destination and a place in the server's settle pool.
-      // It therefore bounds how many files may start, but never one that is already moving
-      // bytes — those settle either way, and the part pool keeps working behind them.
-      if (settling.current.size >= SETTLE_WINDOW) break;
+      if (running.current.size + starts.length >= CLAIM_WINDOW) break;
       const task = tasks.current.get(id);
       if (!task || task.status !== "queued" || task.cancelRequested) {
         pending.current.delete(id);
@@ -1951,9 +1924,7 @@ function createQueue(): QueueOwner {
       // Pool priority follows the order files first start, kept across retries/turns.
       if (!ranks.current.has(task.id)) ranks.current.set(task.id, nextRank.current++);
       running.current.set(task.id, { controller: new AbortController() });
-      // The claim is taken here and released when the bytes are placed, so it says who owns
-      // the row — not that the file can move yet, and not that it is still publishing.
-      claimed.current.add(task.id);
+      // No transfer slot yet: a claim says who owns the row, not that the file can move.
       patch(task.id, { status: "uploading", error: undefined });
     }
     for (const task of starts) void run(task.id, running.current.get(task.id)!);
@@ -2204,8 +2175,7 @@ function createQueue(): QueueOwner {
     deadlines.current.clear();
     for (const runtime of running.current.values()) runtime.controller.abort();
     running.current.clear();
-    claimed.current.clear();
-    settling.current.clear();
+    transferring.current.clear();
     // Prepared sessions have no row to outlive a closed tab: they are aborted here and the
     // idle window expires them. A navigation never reaches this, which is what keeps a
     // selected session available to the page that comes back.
