@@ -19,14 +19,6 @@ import { foldersWithoutFiles, type UploadEntry } from "./uploadSelection";
 import { claimUploadPath } from "./uploadOwnership";
 import { pendingFileOperation, setUploadOwner, settleFileOperation } from "./uploadPersistence";
 
-// Files worth hashing to learn whether a destination already holds them. The digest is only
-// computed after the server has said the destination exists, so it costs one read of a file
-// that would otherwise be read again to upload it; above this bound the read is the expensive
-// part of the transfer and the row uploads instead.
-const DIGEST_MAX_BYTES = 32 << 20;
-/** Digests already computed for a row, so a retried conflict does not hash twice. */
-const computedDigests = new Map<string, Promise<string | undefined>>();
-
 // Part requests in flight across every file. The bucket is an HTTP/1.1 origin — measured
 // against this bucket, not inferred from the dev server: it answers 1.1 even when the
 // client offers h2 in ALPN, so six sockets per origin is all that can move at once. The
@@ -171,15 +163,6 @@ export interface UploadTask {
    * changed in between is refused, never silently replaced.
    */
   observedRevision?: string;
-  /**
-   * The digest this row computed for its own bytes.
-   *
-   * It travels with every create the row sends, not only the one that tries to skip: a
-   * destination holding *other* bytes still has to publish these, and the settlement that
-   * publishes them is the only moment the library can learn the digest. Without that, an
-   * existing library never gains one and the skip could never fire for it.
-   */
-  contentSha256?: string;
   /**
    * The file came from a dropped tree, so its create may materialize missing ancestors.
    *
@@ -444,18 +427,6 @@ class QueuePaused extends Error {
 function isQueuePaused(error: unknown): error is QueuePaused {
   return error instanceof QueuePaused;
 }
-
-/**
- * The destination already holds these bytes, and the server said so instead of opening a
- * session. The row completes with the entry the answer carries; there is nothing to
- * transfer, settle or retry.
- */
-class UnchangedDestination extends Error {
-  constructor(readonly item: Item) {
-    super("The destination already holds this content.");
-    this.name = "UnchangedDestination";
-  }
-}
 function isOperation(value: Item | FileOperation): value is FileOperation { return "state" in value && "progress" in value; }
 /**
  * What is at this path now, or null when nothing is.
@@ -703,7 +674,6 @@ async function prepareUploadSession(host: UploadRunHost, task: UploadTask, signa
     // request: the flag travels in the create, so a folder an earlier import never made is
     // created by the retry itself instead of answering parent_missing again.
     intent = { path: task.path, size: task.size, mediaType: task.file?.type || "application/octet-stream", condition,
-      ...(task.contentSha256 ? { contentSha256: task.contentSha256 } : {}),
       ...(task.parents && condition.mode !== "replace" ? { parents: true as const } : {}),
       ...(sourceModifiedAt && task.modifiedAt !== undefined ? { sourceModifiedAt: new Date(task.modifiedAt).toISOString() } : {}) };
     // Retain the exact intent/key in memory before allocation, including a lost create ACK.
@@ -751,9 +721,8 @@ function ensureUploadAdmission(host: UploadRunHost, task: UploadTask): Admission
       if (host.admissions.get(task.id) === entry) host.admissions.delete(task.id);
       // A paused page is not this destination's refusal: the look-ahead must be free to
       // prepare this file again once the queue resumes, so the paused error does not make
-      // it "already refused". Neither is an unchanged destination: it is the answer, not a
-      // refusal, and the row is about to complete with the entry it names.
-      if (!isQueuePaused(error) && !(error instanceof UnchangedDestination)) host.admissionFailed.add(task.id);
+      // it "already refused".
+      if (!isQueuePaused(error)) host.admissionFailed.add(task.id);
       // The window owns a refusal — it decides between waiting on the blocker, retrying
       // and failing the row — so the look-ahead steps back and lets the queue move on.
       host.requestPump();
@@ -870,13 +839,6 @@ async function admitUploadAttempt(host: UploadRunHost, id: string, task: UploadT
       return null;
     }
     if (error instanceof ApiError && error.status === 409 && error.code === "name_conflict" && !task.overwrite) {
-      // Before asking the person, ask the server whether it is the same content: the create
-      // already knows the destination exists, so a digest can settle it here for no bytes and
-      // no settlement. A destination holding other content answers `conflict` and takes the
-      // ordinary path below.
-      const retried = await retryCreateWithDigest(host, id, task, signal, error);
-      if (retried.kind === "unchanged") return null;
-      if (retried.kind === "session") return { session: retried.session, allocated: true };
       // The refusal already names the revision the server observed at the destination,
       // which is the only value a replacement can prove it may overwrite: reading the
       // same file again would spend a round trip per file to learn what this answer
@@ -895,63 +857,6 @@ async function admitUploadAttempt(host: UploadRunHost, id: string, task: UploadT
   }
   host.admissions.delete(id);
   return { session, allocated: true };
-}
-
-/**
- * Step: ask once more, with the digest, before treating a create's `409` as a conflict.
- *
- * Contract
- * - Caller: a create was refused `name_conflict`, the row creates rather than replaces, and
- *   the destination therefore exists — which is the only moment a digest is worth computing:
- *   on the happy path it would delay the create, and here it saves the whole transfer.
- * - Returns `unchanged` when the server answered that the destination already holds these
- *   bytes (the row is completed here), `session` when the destination disappeared between the
- *   two creates and a session was admitted, `conflict` when it still exists with other
- *   content, and `none` when this row has no digest to offer.
- * - Sends at most one create, under a fresh idempotency key: the first key already names the
- *   refused intent, and replaying it would answer that intent rather than this one.
- */
-type DigestRetry =
-  | { kind: "unchanged" }
-  | { kind: "conflict" }
-  | { kind: "none" }
-  | { kind: "session"; session: FileUploadSession };
-
-async function retryCreateWithDigest(host: UploadRunHost, id: string, task: UploadTask, signal: AbortSignal, conflict: ApiError): Promise<DigestRetry> {
-  // The row, not the attempt's snapshot: `intent` is written by the admission this call is
-  // reacting to, so the snapshot taken before it started does not carry one.
-  const current = host.tasks.get(id) ?? task;
-  const file = current.file;
-  const intent = current.intent;
-  if (!file || !intent || current.size > DIGEST_MAX_BYTES || intent.condition?.mode !== "create") return { kind: "none" };
-  // The refusal has to name the revision it observed: that is the server saying a *file*
-  // holds the destination (not a folder), and without it a second create could only repeat
-  // the refusal. A standing "keep what is there" answer needs no digest either — that row is
-  // skipped without a request.
-  const observed = conflict instanceof FileApiError ? conflict.problem.observedRevision : undefined;
-  if (observed === undefined || host.conflictPolicy() === "skip") return { kind: "none" };
-  let prepared = computedDigests.get(id);
-  if (!prepared) {
-    prepared = withVerifySlot(() => sha256(file));
-    computedDigests.set(id, prepared);
-  }
-  const digest = await prepared.catch(() => undefined);
-  if (!digest || signal.aborted) return { kind: "none" };
-  const withDigest = { ...intent, contentSha256: digest };
-  // Keep the digest on the row: the conflict path may rebuild this row's intent as a
-  // replacement, and that publication is what records the digest for the next import.
-  host.patch(id, { intent: withDigest, contentSha256: digest });
-  try {
-    const session = await host.admitUpload(withDigest, taskId(), signal);
-    return { kind: "session", session };
-  } catch (error) {
-    if (error instanceof UnchangedDestination) {
-      host.complete(current, error.item);
-      return { kind: "unchanged" };
-    }
-    if (error instanceof ApiError && error.status === 409 && error.code === "name_conflict") return { kind: "conflict" };
-    throw error;
-  }
 }
 
 /**
@@ -1482,7 +1387,6 @@ function createQueue(): QueueOwner {
             if (item.cancelled) return;
             const result = results[index];
             if (result?.upload) item.resolve(result.upload);
-            else if (result?.unchanged) item.reject(new UnchangedDestination(result.unchanged.item));
             else if (result?.error) item.reject(new FileApiError(result.error));
             else {
               // A page that answered 200 must describe every item it carried. One that did
@@ -1784,7 +1688,6 @@ function createQueue(): QueueOwner {
       tasks.current.delete(id);
       pending.current.delete(id);
       transferring.current.delete(id);
-      computedDigests.delete(id);
       if (task.isDir) openDirs.current.delete(task.path);
       dropAdmission(id);
       releaseClaim(id);
@@ -1941,13 +1844,6 @@ function createQueue(): QueueOwner {
       await settleUploadSession(runHost, id, plan.task, plan.session, signal);
     } catch (error) {
       if (signal.aborted) return;
-      // The server answered that the destination already holds these bytes: the row lands
-      // with the entry it carries, and nothing is transferred, settled or retried.
-      if (error instanceof UnchangedDestination) {
-        const current = tasks.current.get(id);
-        if (current) runHost.complete(current, error.item);
-        return;
-      }
       await abandonAttempt(runHost, id, error);
     } finally {
       running.current.delete(id);
