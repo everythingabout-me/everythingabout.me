@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"time"
 
@@ -172,7 +173,7 @@ func (s *Server) filesPlannedParts(ctx context.Context, native fileops.NativeAct
 func filesPlannedCoverage(intent storage.WriteIntent, parts []storage.NativeUploadPart) error {
 	count := int((intent.Size + filesUploadPartSize - 1) / filesUploadPartSize)
 	if len(parts) != count {
-		return fileops.E("upload_incomplete", nil)
+		return fileops.E("upload_incomplete", fmt.Errorf("a %d-byte object needs %d parts, the provider listed %d", intent.Size, count, len(parts)))
 	}
 	for index, part := range parts {
 		number := index + 1
@@ -181,7 +182,7 @@ func filesPlannedCoverage(intent storage.WriteIntent, parts []storage.NativeUplo
 			expected = intent.Size - int64(number-1)*filesUploadPartSize
 		}
 		if part.Number != number || part.Size != expected {
-			return fileops.E("upload_incomplete", nil)
+			return fileops.E("upload_incomplete", fmt.Errorf("part %d is %d bytes at number %d, expected %d bytes at number %d", index+1, part.Size, part.Number, expected, number))
 		}
 	}
 	return nil

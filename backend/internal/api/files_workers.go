@@ -260,8 +260,16 @@ func (s *Server) fileOperationProgressed(id string) {
 }
 
 // fileOperationRetained reports one failed attempt with everything needed to debug it
-// without reproducing it: which operation, which kind, how far its manifest got, the
-// code of the failing step, the whole cause chain and when the next attempt is due.
+// without reproducing it: which operation, which destination, which kind, how long it
+// has been unable to progress, whether its owner already asked to cancel it, how far its
+// manifest got, the code of the failing step, the whole cause chain and when the next
+// attempt is due.
+//
+// The destination and the age are not decoration. An operator reading one of these
+// lines has to answer "which file, stuck since when, did the client give up?" without
+// a database session, and the operation id alone answers none of them: a batch import
+// of two hundred files looked exactly like eight unrelated ids.
+//
 // A failure that repeats is the only way to diagnose a stuck operation, so the record
 // escalates to Error after a few attempts instead of staying one unremarkable warning.
 func (s *Server) fileOperationRetained(op fileops.Operation, err error) {
@@ -293,9 +301,19 @@ func (s *Server) fileOperationRetained(op fileops.Operation, err error) {
 			}
 		}
 	}
+	var intent storage.WriteIntent
+	target := ""
+	if json.Unmarshal(op.Intent, &intent) == nil {
+		target = string(intent.Target)
+	}
+	age := time.Duration(0)
+	if !op.CreatedAt.IsZero() {
+		age = time.Since(op.CreatedAt).Round(time.Second)
+	}
 	attributes := []any{
 		"operation", op.ID, "kind", op.Kind, "state", op.State, "phase", op.Phase,
-		"owner", op.Root.OwnerID, "attempt", attempts, "code", code,
+		"owner", op.Root.OwnerID, "target", target, "age", age,
+		"cancelRequested", op.CancelRequested, "attempt", attempts, "code", code,
 		"cause", errorCauseChain(err), "entriesApplied", applied, "entriesTotal", total,
 		"retryIn", time.Until(nextTry).Round(time.Second),
 	}
@@ -377,8 +395,8 @@ func (s *Server) runFileOperation(ctx context.Context, op fileops.Operation) err
 		return fileops.E("unsupported", nil)
 	}
 	binding := native.StorageBinding()
-	if binding.OwnerID != op.Root.OwnerID || binding.ConnectionID != op.Root.ConnectionID || binding.Generation != op.Root.Generation || binding.ContentRoot != op.Root.ContentRoot || binding.SystemRoot != op.Root.SystemRoot || native.StorageNameRules().CaseSensitive != op.Root.CaseSensitive || native.Describe().RetainsVersions != op.Root.RetainsVersions {
-		return fileops.E("root_conflict", nil)
+	if err := fileops.RootConflict(op.Root, binding, native.StorageNameRules(), native.Describe().RetainsVersions); err != nil {
+		return err
 	}
 	// The journal captured provenance permits system recovery of effects while
 	// publication authorization independently checks the original live credential.

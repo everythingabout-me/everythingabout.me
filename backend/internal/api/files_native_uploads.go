@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/hex"
+	"fmt"
 	"net/http"
 	"sort"
 
@@ -60,7 +61,7 @@ func (s *Server) runNativeUploadOperation(ctx context.Context, op fileops.Operat
 				after = page[len(page)-1].Sequence
 			}
 			if len(writer.Parts) != u.PartCount {
-				return op, fileops.E("upload_incomplete", nil)
+				return op, fileops.E("upload_incomplete", fmt.Errorf("session advertises %d parts, the journal holds %d", u.PartCount, len(writer.Parts)))
 			}
 			sort.Slice(writer.Parts, func(i, j int) bool { return writer.Parts[i].Number < writer.Parts[j].Number })
 			// Service.Write's Stage entry requires a body, but this adapter seals native

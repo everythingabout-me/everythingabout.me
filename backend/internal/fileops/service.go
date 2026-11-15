@@ -63,16 +63,43 @@ func validateWriterRoot(root Root, writer storage.StagedWriter) error {
 	if described, ok := writer.(interface{ Describe() storage.Descriptor }); ok {
 		retains = described.Describe().RetainsVersions
 	}
-	if retains != root.RetainsVersions {
-		return E("root_conflict", nil)
-	}
-	return validateNativeBinding(root, bound.StorageBinding(), bound.StorageNameRules())
+	return RootConflict(root, bound.StorageBinding(), bound.StorageNameRules(), retains)
 }
-func validateNativeBinding(root Root, cfg storage.Config, names storage.NameRules) error {
-	if cfg.OwnerID != root.OwnerID || cfg.ConnectionID != root.ConnectionID || cfg.Generation != root.Generation || cfg.ContentRoot != root.ContentRoot || cfg.SystemRoot != root.SystemRoot || names.CaseSensitive != root.CaseSensitive {
-		return E("root_conflict", nil)
+
+// RootConflict names the first field where the driver actually opened for an
+// operation disagrees with the root the operation was admitted against.
+//
+// All of these used to collapse into one bare root_conflict, which is the shape a
+// refusal must not have: the caller cannot tell an owner mismatch from a generation
+// rollover, and the log line says only that "root_conflict" happened. Each field is
+// bound into the admitted operation and cannot change while it is non-terminal, so a
+// disagreement here is a real fault (a rebind, a restored database, a driver built
+// for another connection) and the operator needs to see which value disagrees to
+// pick the one command that resolves it.
+func RootConflict(root Root, cfg storage.Config, names storage.NameRules, retains bool) error {
+	switch {
+	case cfg.OwnerID != root.OwnerID:
+		return E("root_conflict", fmt.Errorf("owner bound %s, opened %s", root.OwnerID, cfg.OwnerID))
+	case cfg.ConnectionID != root.ConnectionID:
+		return E("root_conflict", fmt.Errorf("connection bound %q, opened %q", root.ConnectionID, cfg.ConnectionID))
+	case cfg.Generation != root.Generation:
+		return E("root_conflict", fmt.Errorf("generation bound %d, opened %d", root.Generation, cfg.Generation))
+	case cfg.ContentRoot != root.ContentRoot:
+		return E("root_conflict", fmt.Errorf("content root bound %q, opened %q", root.ContentRoot, cfg.ContentRoot))
+	case cfg.SystemRoot != root.SystemRoot:
+		return E("root_conflict", fmt.Errorf("system root bound %q, opened %q", root.SystemRoot, cfg.SystemRoot))
+	case names.CaseSensitive != root.CaseSensitive:
+		return E("root_conflict", fmt.Errorf("case sensitivity bound %t, opened %t", root.CaseSensitive, names.CaseSensitive))
+	case retains != root.RetainsVersions:
+		return E("root_conflict", fmt.Errorf("retains-versions bound %t, opened %t", root.RetainsVersions, retains))
 	}
 	return nil
+}
+
+// validateNativeBinding is the same check for callers that hold no driver
+// descriptor: version retention is the caller's own to compare.
+func validateNativeBinding(root Root, cfg storage.Config, names storage.NameRules) error {
+	return RootConflict(root, cfg, names, root.RetainsVersions)
 }
 
 // Write operates on an already admitted immutable intent. It never acquires
@@ -214,9 +241,24 @@ func validateStage(intent storage.WriteIntent, stage storage.Staged) error {
 	}
 	return nil
 }
+
+// validateNative checks the receipt a driver says it applied. Its five refusals used
+// to share one bare code, which left the log naming neither the field nor the two
+// values — and this is the one place a driver bug turns into a stuck operation, so the
+// person reading the line needs to know whether the path, the kind, the size or the
+// evidence disagreed, and by what.
 func validateNative(intent storage.WriteIntent, result storage.MutationResult) error {
-	if result.Entry == nil || result.Entry.Path != intent.Target || result.Entry.Kind != storage.File || result.Entry.Size != intent.Size || len(result.Evidence) == 0 {
-		return E("invalid_native_result", nil)
+	switch {
+	case result.Entry == nil:
+		return E("invalid_native_result", errors.New("the driver reported applied with no entry"))
+	case result.Entry.Path != intent.Target:
+		return E("invalid_native_result", fmt.Errorf("entry path %q, intent target %q", result.Entry.Path, intent.Target))
+	case result.Entry.Kind != storage.File:
+		return E("invalid_native_result", fmt.Errorf("entry %q is a %s, the intent publishes a file", result.Entry.Path, result.Entry.Kind))
+	case result.Entry.Size != intent.Size:
+		return E("invalid_native_result", fmt.Errorf("entry %q is %d bytes, the intent is %d", result.Entry.Path, result.Entry.Size, intent.Size))
+	case len(result.Evidence) == 0:
+		return E("invalid_native_result", fmt.Errorf("entry %q carries no native evidence", result.Entry.Path))
 	}
 	return nil
 }
@@ -227,7 +269,7 @@ func validateReplay(ctx context.Context, body io.Reader, intent storage.WriteInt
 		return err
 	}
 	if n != intent.Size {
-		return E("length_mismatch", nil)
+		return E("length_mismatch", fmt.Errorf("replayed body is %d bytes, the intent is %d", n, intent.Size))
 	}
 	digest := h.Sum(nil)
 	if intent.Digest != nil && (intent.Digest.Algorithm != "sha-256" || !bytes.Equal(intent.Digest.Value, digest)) {

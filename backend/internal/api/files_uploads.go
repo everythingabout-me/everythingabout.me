@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"mime"
@@ -1258,7 +1259,7 @@ func (s *Server) runUploadOperation(ctx context.Context, op fileops.Operation, a
 				after = page[len(page)-1].Sequence
 			}
 			if len(receipts) != u.PartCount {
-				return op, fileops.E("upload_incomplete", nil)
+				return op, fileops.E("upload_incomplete", fmt.Errorf("session advertises %d parts, the journal holds %d", u.PartCount, len(receipts)))
 			}
 			sort.Slice(receipts, func(i, j int) bool { return receipts[i].Number < receipts[j].Number })
 			parts := make([]uploadspool.Part, 0, len(receipts))

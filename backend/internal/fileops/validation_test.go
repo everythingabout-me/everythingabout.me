@@ -2,7 +2,9 @@ package fileops
 
 import (
 	"encoding/json"
+	"errors"
 	"math"
+	"strings"
 	"testing"
 
 	"everythingabout.me/backend/internal/storage"
@@ -154,5 +156,46 @@ func TestUploadIntentBinding(t *testing.T) {
 		if _, _, _, err := validateBegin(req); !IsCode(err, "invalid_request") {
 			t.Fatal("missing or conflicting native conditions accepted")
 		}
+	}
+}
+
+// A root mismatch has to name the field that disagrees. Every one of them used to
+// collapse into a bare root_conflict, so the log could say that the operation's root
+// and the opened driver disagreed but not which value to fix.
+func TestRootConflictNamesTheDisagreeingField(t *testing.T) {
+	r := testRoot()
+	names := storage.NameRules{CaseSensitive: true}
+	opened := func() storage.Config {
+		return storage.Config{OwnerID: r.OwnerID, ConnectionID: r.ConnectionID, Generation: r.Generation, ContentRoot: r.ContentRoot, SystemRoot: r.SystemRoot}
+	}
+	cases := []struct {
+		name   string
+		change func(*storage.Config, *storage.NameRules)
+		bound  bool
+		want   string
+	}{
+		{"owner", func(c *storage.Config, _ *storage.NameRules) { c.OwnerID = "22222222-2222-4222-8222-222222222222" }, r.RetainsVersions, "owner bound " + r.OwnerID},
+		{"connection", func(c *storage.Config, _ *storage.NameRules) { c.ConnectionID = "other" }, r.RetainsVersions, `connection bound "test"`},
+		{"generation", func(c *storage.Config, _ *storage.NameRules) { c.Generation = 9 }, r.RetainsVersions, "generation bound 1"},
+		{"content root", func(c *storage.Config, _ *storage.NameRules) { c.ContentRoot = "/native/other" }, r.RetainsVersions, `content root bound "/native/content"`},
+		{"system root", func(c *storage.Config, _ *storage.NameRules) { c.SystemRoot = "/native/other" }, r.RetainsVersions, `system root bound "/native/system"`},
+		{"case sensitivity", func(_ *storage.Config, n *storage.NameRules) { n.CaseSensitive = false }, r.RetainsVersions, "case sensitivity bound true"},
+		{"retains versions", func(*storage.Config, *storage.NameRules) {}, true, "retains-versions bound false"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg, rules := opened(), names
+			tc.change(&cfg, &rules)
+			err := RootConflict(r, cfg, rules, tc.bound)
+			if !IsCode(err, "root_conflict") {
+				t.Fatalf("want root_conflict, got %v", err)
+			}
+			if cause := errors.Unwrap(err); cause == nil || !strings.Contains(cause.Error(), tc.want) {
+				t.Fatalf("want cause naming %q, got %v", tc.want, cause)
+			}
+		})
+	}
+	if err := RootConflict(r, opened(), names, r.RetainsVersions); err != nil {
+		t.Fatalf("an agreeing root must not conflict: %v", err)
 	}
 }
