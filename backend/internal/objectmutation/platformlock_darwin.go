@@ -17,7 +17,7 @@ func admitSpool(root *os.Root) error {
 	defer file.Close()
 	var info unix.Statfs_t
 	if err = unix.Fstatfs(int(file.Fd()), &info); err != nil {
-		return err
+		return &os.PathError{Op: "fstatfs", Path: root.Name(), Err: err}
 	}
 	raw := make([]byte, len(info.Fstypename))
 	for i, b := range info.Fstypename {

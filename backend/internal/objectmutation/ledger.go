@@ -195,7 +195,9 @@ func (d *Driver) lock(ctx context.Context, kind, id string, try bool) (func(), e
 	if id == "" || len(id) > 1024 || strings.ContainsAny(id, "\r\n\x00") {
 		return nil, fail("invalid_intent", "")
 	}
-	file, err := spoolOpen(d.root, keyFor(kind, id)+".lock", os.O_CREATE|os.O_RDWR, 0600)
+	lockName := keyFor(kind, id) + ".lock"
+	lockPath := spoolPath(d.root, lockName)
+	file, err := spoolOpen(d.root, lockName, os.O_CREATE|os.O_RDWR, 0600)
 	if err != nil {
 		return nil, err
 	}
@@ -209,13 +211,13 @@ func (d *Driver) lock(ctx context.Context, kind, id string, try bool) (func(), e
 			file.Close()
 			return nil, err
 		}
-		locked, err := lockFile(file)
+		locked, err := lockFile(file, lockPath)
 		if err != nil {
 			file.Close()
 			return nil, err
 		}
 		if locked {
-			return func() { _ = unlockFile(file); _ = file.Close() }, nil
+			return func() { _ = unlockFile(file, lockPath); _ = file.Close() }, nil
 		}
 		if try {
 			file.Close()

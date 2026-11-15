@@ -5,6 +5,7 @@ package localstorage
 import (
 	"errors"
 	"os"
+	"path/filepath"
 	"syscall"
 
 	"golang.org/x/sys/unix"
@@ -41,7 +42,7 @@ func stagedLock(root *os.Root, name string) (func(), error) {
 		if errors.Is(err, unix.EWOULDBLOCK) || errors.Is(err, unix.EAGAIN) {
 			return nil, errStagedLocked
 		}
-		return nil, err
+		return nil, &os.PathError{Op: "flock", Path: filepath.Join(root.Name(), name), Err: err}
 	}
 	if err := syncRoot(root); err != nil {
 		f.Close()

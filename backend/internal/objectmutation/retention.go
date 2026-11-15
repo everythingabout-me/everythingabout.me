@@ -293,7 +293,7 @@ func tryLedgerLock(root *os.Root, name string) (func(), bool, error) {
 		file.Close()
 		return nil, false, fail("invalid_evidence", "")
 	}
-	locked, err := lockFile(file)
+	locked, err := lockFile(file, spoolPath(root, name))
 	if err != nil {
 		file.Close()
 		return nil, false, err
@@ -302,7 +302,7 @@ func tryLedgerLock(root *os.Root, name string) (func(), bool, error) {
 		file.Close()
 		return nil, false, nil
 	}
-	return func() { _ = unlockFile(file); _ = file.Close() }, true, nil
+	return func() { _ = unlockFile(file, spoolPath(root, name)); _ = file.Close() }, true, nil
 }
 
 // removeSettledRecord removes the private payload first, then the record. The record
