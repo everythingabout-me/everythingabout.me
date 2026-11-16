@@ -1103,3 +1103,68 @@ func TestFilesUploadsOverwriteCondition(t *testing.T) {
 	uploadsHTTPProblem(t, open("/overwrite.txt", "overwrite-with-revision", map[string]any{"mode": "overwrite", "contentRevision": "cr_x"}, 3), 400, "invalid_request")
 	f.checkNoLiability(t, h.root)
 }
+
+// A create can find an object the index does not hold: an interrupted publication wrote the
+// bytes and died before settlement. A read of that path is 404, but the refused create names
+// the observed revision and the two conditions that still publish over the object and repair
+// the index. That is the state the 42k-file import hit repeatedly and could not get out of.
+func TestFilesUploadsUnindexedDestinationNamesItsRecovery(t *testing.T) {
+	f := newFileWorkerFixture(t)
+	h := newUploadsHTTPFixture(t, f)
+	orphan := func(name, body string) string {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(f.cfg.Storage.Local.ContentRoot, h.root.OwnerID, name), []byte(body), 0600); err != nil {
+			t.Fatal(err)
+		}
+		return "/" + name
+	}
+	open := func(path, key string, condition map[string]any, size int) *httptest.ResponseRecorder {
+		data, _ := json.Marshal(map[string]any{"path": path, "size": size, "mediaType": "text/plain", "condition": condition})
+		headers := make(http.Header)
+		headers.Set("Idempotency-Key", key)
+		headers.Set("Content-Type", "application/json")
+		return h.request("POST", "/api/files/uploads", h.bearer, data, headers)
+	}
+	upload := func(t *testing.T, path, key string, condition map[string]any, body string) map[string]any {
+		t.Helper()
+		id := uploadsHTTPJSON(t, open(path, key, condition, len(body)), 201)["id"].(string)
+		uploadsHTTPJSON(t, h.part(id, 1, []byte(body), nil), 201)
+		return h.commit(t, id)
+	}
+	read := func(path string) *httptest.ResponseRecorder {
+		return h.request("GET", "/api/files/content?"+url.Values{"path": {path}}.Encode(), h.bearer, nil, nil)
+	}
+	metadata := func(path string) *httptest.ResponseRecorder {
+		return h.request("GET", "/api/files?"+url.Values{"path": {path}}.Encode(), h.bearer, nil, nil)
+	}
+
+	path := orphan("orphan.txt", "lost")
+	if got := metadata(path); got.Code != 404 {
+		t.Fatalf("unindexed metadata HTTP %d, want 404: %s", got.Code, got.Body.String())
+	}
+	problem := uploadsHTTPJSON(t, open(path, "orphan-create", map[string]any{"mode": "create"}, 5), 409)
+	revision, _ := problem["observedRevision"].(string)
+	detail, _ := problem["detail"].(string)
+	if problem["code"] != "name_conflict" || revision == "" || !strings.Contains(detail, "overwrite") || !strings.Contains(detail, "replace") || !strings.Contains(detail, "404") {
+		t.Fatalf("refusal did not name the recovery: %v", problem)
+	}
+
+	// Replace with the revision the refusal observed; no prior read is needed.
+	replaced := upload(t, path, "orphan-replace", map[string]any{"mode": "replace", "contentRevision": revision}, "fixed")
+	if replaced["id"] == "" {
+		t.Fatalf("replace did not publish: %v", replaced)
+	}
+	if got := metadata(path); got.Code != 200 || got.Body.String() == "" {
+		t.Fatalf("replaced metadata HTTP %d: %s", got.Code, got.Body.String())
+	}
+	if got := read(path); got.Code != 200 || got.Body.String() != "fixed" {
+		t.Fatalf("replaced content HTTP %d %q", got.Code, got.Body.String())
+	}
+
+	// A second orphan goes through overwrite, which needs no revision at all.
+	path2 := orphan("orphan2.txt", "lost2")
+	upload(t, path2, "orphan-overwrite", map[string]any{"mode": "overwrite"}, "new2")
+	if got := read(path2); got.Code != 200 || got.Body.String() != "new2" {
+		t.Fatalf("overwritten content HTTP %d %q", got.Code, got.Body.String())
+	}
+}

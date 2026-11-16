@@ -1302,20 +1302,32 @@ func (s *Server) runUploadOperation(ctx context.Context, op fileops.Operation, a
 }
 
 // filesDestinationConflict answers a create whose destination already exists, naming the
-// revision the tree holds there now.
+// revision the tree holds there now and the two conditions that publish over it.
 //
 // The client's next move is a decision about this exact file — replace it or leave it — and
 // naming the observed revision here is what makes that decision cost one Create instead of a
 // metadata read and then a Create. The observation, not the index, is what it can rely on: an
 // interrupted import leaves the index holding bytes the object no longer has, and a
 // replacement precondition built from that stale value is refused forever.
+//
+// A create can also observe an object the index does not hold at all: an interrupted
+// publication wrote the bytes and died before settlement. A metadata read of that path
+// answers 404, but both upload conditions resolve a path lexically and publish over the object, so naming
+// them here is what turns the report's "409 forever" into one retry. Without either proof the
+// create stays 409: the service never adopts an object it cannot attribute to this owner.
 func (s *Server) filesDestinationConflict(ctx context.Context, f *fileRequest, existing storage.Entry) error {
 	problem := fc.NewProblem(409, "name_conflict", "The destination already exists.")
 	if existing.Kind != storage.File {
 		return problem
 	}
-	if revision, err := s.filesObservedContentRevision(ctx, f, existing); err == nil && revision != nil {
-		problem.ObservedRevision = *revision
+	revision, err := s.filesObservedContentRevision(ctx, f, existing)
+	if err != nil || revision == nil {
+		return problem
 	}
+	problem.ObservedRevision = *revision
+	if f.Driver == nil || !filesUnderlyingDriver(f.Driver).Describe().AtomicReplace {
+		return problem
+	}
+	problem.Detail = "The destination already exists. Retry with condition replace using the observedRevision in this response, or with condition overwrite. If a metadata read of the path returns 404, the object is not indexed: either condition still publishes over it and repairs the index, allocating a fresh ID because there is no indexed identity to preserve. An operator can also run `eam reconcile` for the owner."
 	return problem
 }

@@ -62,7 +62,7 @@ func TestP6GeneratedPromptsUseOnlyUnifiedTransfers(t *testing.T) {
 	}
 
 	classA := tokenPrompt("https://files.example", "token-secret", &auth.Token{CanRead: true, CanWrite: true}, "A")
-	for _, required := range []string{"presigned-parts", "transport.parts", "grantedParts", "partsComplete", "grantedParts: 32", "fewer than a quarter of the", "at most 256", "must not ask for 9,968 grants", "/parts/sign", "session_required", "Branch on each grant's `method`", "`fields`", "`fileField`", "`bytesPresent: true`", "Do not add application", "`state` is `succeeded`", "`200` returns the settled file", "`progress.completed` stays `0`", "`retrying`", `"parents":true`, "do not attach the API token"} {
+	for _, required := range []string{"presigned-parts", "transport.parts", "grantedParts", "partsComplete", "grantedParts: 32", "fewer than a quarter of the", "at most 256", "must not ask for 9,968 grants", "/parts/sign", "session_required", "Branch on each grant's `method`", "`fields`", "`fileField`", "`bytesPresent: true`", "Do not add application", "`state` is `succeeded`", "`200` returns the settled file", "`progress.completed` stays `0`", "`retrying`", "overwrite", "observedRevision", "eam reconcile", "metadata read", `"parents":true`, "do not attach the API token"} {
 		if !strings.Contains(classA, required) {
 			t.Fatalf("class A instructions omit %q", required)
 		}

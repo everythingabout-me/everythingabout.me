@@ -230,16 +230,23 @@ func (f linkFacts) writeWrite(b *strings.Builder) {
 		b.WriteString("`maxSinglePutBytes` bounds this request; above it, use a session.\n\n")
 	}
 
-	b.WriteString("Create is the default. To replace an existing file, read its `contentRevision` with\n")
-	b.WriteString("`GET $DRIVE/api/files?path=<path>` and send\n")
+	b.WriteString("Create is the default. To replace without a prior read, send\n")
+	b.WriteString("`\"condition\":{\"mode\":\"overwrite\"}` in a session: it replaces the file when\n")
+	b.WriteString("one is there and creates it otherwise. To replace exactly the bytes you observed,\n")
+	b.WriteString("read its `contentRevision` with `GET $DRIVE/api/files?path=<path>` and send\n")
 	if f.Class == "C" && f.Read {
 		b.WriteString("`\"condition\":{\"mode\":\"replace\",\"contentRevision\":\"...\"}` in the session, or\n")
-		b.WriteString("`If-Match: \"<contentRevision>\"` on a single PUT. A `409` or `412` conflict is final;\n")
-		b.WriteString("never overwrite blindly.\n\n")
+		b.WriteString("`If-Match: \"<contentRevision>\"` on a single PUT.\n")
 	} else {
-		b.WriteString("`\"condition\":{\"mode\":\"replace\",\"contentRevision\":\"...\"}` in the session. A\n")
-		b.WriteString("`409` or `412` conflict is final; never overwrite blindly.\n\n")
+		b.WriteString("`\"condition\":{\"mode\":\"replace\",\"contentRevision\":\"...\"}` in the session.\n")
 	}
+	b.WriteString("A create refused with `409 name_conflict` names the destination's `observedRevision`:\n")
+	b.WriteString("retry with `replace` using that value, or with `overwrite`. If a metadata read of\n")
+	b.WriteString("the path answers `404`, the object exists but the index does not; both conditions\n")
+	b.WriteString("publish over it and repair the index (a fresh id, since there is no indexed one).\n")
+	b.WriteString("An operator can also run `eam reconcile` for the owner. Do not loop on create. A\n")
+	b.WriteString("`409` or `412` after a retry means the file moved on: re-read, do not overwrite\n")
+	b.WriteString("blindly.\n\n")
 }
 
 func (f linkFacts) writeEvents(b *strings.Builder) {

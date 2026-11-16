@@ -692,6 +692,14 @@ already decided; it does not drop the condition on the write itself. Both `targe
 existing file; an unknown ID returns 404. Replacement preserves ID; creation publishes a fresh ID.
 Session IDs and any reserved future entry ID are separate; an open upload is not a live file.
 
+An interrupted publication can leave the opposite disagreement: the object exists in the native tree but the
+index has no row for it. A metadata read of that path is `404` and a delete by path cannot find it, but a
+create observes the object and answers `409 name_conflict` with its `observedRevision`. That refusal is
+actionable: `replace` with the `observedRevision` (no prior read needed) or `overwrite` both publish over the
+object and settle a fresh index row. Because there is no indexed identity, the published file gets a fresh ID
+rather than preserving one. A bare create never adopts an object it cannot attribute to this owner; an
+operator can run `eam reconcile` to adopt the tree. Do not retry the same create unchanged.
+
 The existing top-level `path` form is deliberately retained for current clients. With create/default condition
 it is shorthand for `destination:{path}`; with replace condition it is shorthand for `target:{path}`. It is
 exclusive with both destination and target; mixed forms return `400 invalid_selector`. This shortcut retains
