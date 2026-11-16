@@ -979,7 +979,9 @@ that was deleted meanwhile is refused when it commits. From then on the server s
 relayed ones. It returns file metadata with `200` if settled, or `202 + Operation + Location + Retry-After`
 otherwise. Repeated commit returns the same settled result or operation identity. Only the server's own commit
 call can have an ambiguous effect; it enters outcome_unknown and blocks conflicting mutations until reconcile
-resolves it.
+resolves it. A commit that keeps failing without progress is bounded by claims, not by a clock: after six
+claims it ends `failed` (nothing was published) or `unresolved` (the effect is unknown), releasing the path
+instead of holding it forever and telling the client to start a new upload (§8).
 
 DELETE upload aborts open sessions atomically (`204`, repeat `204`) and discards provider state:
 `AbortMultipartUpload` for class A, the provider session for class B (an unfinished Dropbox
@@ -1005,7 +1007,7 @@ until their expiry and still cannot publish. Queued work rechecks authorization 
 ## 8. Operations, concurrency, and quota
 
 Operation JSON has `{id,kind,state,progress,result,error,cancelRequested,retrying,createdAt,finishedAt}`. States are
-`queued/running/outcome_unknown/succeeded/failed/cancelled`; progress is `{completed,total,unit}` with nullable
+`queued/running/outcome_unknown/succeeded/failed/cancelled/unresolved`; progress is `{completed,total,unit}` with nullable
 total. Also record per-entry effects, conflicts and remaining work for partial tree operations.
 `unit` names what is being counted: `entries` for a manifest operation, `bytes` for `upload_commit`, and
 `objects` for a recursive deletion. A recursive deletion is the one kind with no manifest — the acceptance
@@ -1026,6 +1028,23 @@ Result is the file/folder metadata for mkdir/move/copy/upload_commit (an `upload
 folder's new `parentRevision`, as the commit answer does), `{deleted,purged,adopted}` for delete, or
 `{contentUrl,mediaType,size,contentRevision}` for thumbnail; contentUrl is a same-origin representation endpoint.
 The committed upload also stores its file metadata result in session status. Errors use the same Problem structure.
+
+`unresolved` is terminal and exists only for `upload_commit`. It means the service stopped trying and cannot
+prove whether the publication landed: the object may be in the native tree, but the index and quota were
+**not** settled as a success. It therefore releases the path guard and the logical/physical reservation
+exactly as a failure does, marks the upload session `aborted`, and never reports a result. The client answers
+it by starting a new upload with a new Idempotency-Key; if the destination object exists, that create returns
+`409 name_conflict` and `condition:{"mode":"overwrite"}` publishes over it and repairs the index. A full
+`eam reconcile` adopts any object the index does not hold, so the publication is recoverable without the old
+session. The bound is a number of claims, not a wall clock: the worker backs off up to 30 minutes between
+attempts, so a time window would fire during an outage that still had a chance or wait hours after a permanent
+refusal. A permanent refusal before any effect (`permission_denied`, `invalid_config`, `invalid_intent`,
+`unsupported`, `baseline_required`, `root_conflict`, `quota_exceeded`, `staging_full`) ends `failed`
+immediately. Otherwise, after six claims with no progress, a multipart session still in
+`admitted`/`receiving`/`staged_ready` ends `failed` (its parts stay unpublished until the server completes
+them), while a session that reached `effect_started`/`native_applied`, or a `direct` session whose client PUT
+may already have published, ends `unresolved`. No sweep, time window or scoped reconcile is added: the
+provider/session lifecycle and the existing full `eam reconcile` remain the backstops.
 
 Operation/session visibility uses owner, creator principal and captured authorization anchors. Before creation,
 the anchor is the destination parent, not the nonexistent output file or folder. While source/destination files or folders still exist,
@@ -1048,7 +1067,8 @@ retention. Advertised resume durability covers the admitted open-session interva
 Failed/cancelled tree operations may have partial native results; report captured per-entry progress.
 Recovery follows the saved manifest and native validators, never blindly rescan-and-delete a changed tree.
 A replacement worker cannot issue conflicting final effects merely because its predecessor lease expired.
-An unresolved operation retains its path/subtree guard until native quiescence/fencing is established.
+An `outcome_unknown` operation retains its path/subtree guard until native quiescence/fencing is established;
+`unresolved` is the terminal state that says the service stopped trying, so it releases its guard (see above).
 
 Reserve quota transactionally before accepting bytes, consistently for every client and authentication method. Charge
 logical file sizes (including copies), track reservations independently from staging/physical usage, recheck
@@ -1077,7 +1097,11 @@ rather than reporting a partial owner-wide number. Even at the owner root they a
 usage is what the index shows, the ledger is what admission charged — so neither corrects the other.
 
 Idempotency keys are scoped by owner, principal, route/action and canonical request fingerprint. Same key with
-different intent returns `409 idempotency_conflict`. The fingerprint covers what the client asked for, never what
+different intent returns `409 idempotency_conflict`. A create replayed with a key whose upload operation is
+terminal and not `succeeded` — or whose session is `expired`/`aborted` — returns `409 idempotency_key_spent`
+with that operation's `operationId`: the key names an upload that ended without publishing, so the recovery is
+a new upload with a new key (and `overwrite` if the destination object exists), never the dead session. A
+succeeded replay still returns the settled resource. The fingerprint covers what the client asked for, never what
 admission derived from the connection: native conditions and revisions, a resolved parent, and the connection's
 implicit-parents capability are evidence stored with the operation, so the same request must fingerprint the same
 whether it is being admitted or replayed. Store the durable operation/session/result with the key;
@@ -1160,7 +1184,7 @@ silently serve the first page again.
 | 401 | unauthenticated |
 | 403 | forbidden (known visible resource, insufficient action permission), transfer_scope_exceeded |
 | 404 | not_found (also outside visible scope) |
-| 409 | name_conflict, cursor_stale, upload_incomplete, part_conflict, grant_required, session_required, baseline_required, watch_deleted, watch_access_lost, snapshot_limit, subscription_limit |
+| 409 | name_conflict, idempotency_conflict, idempotency_key_spent, cursor_stale, upload_incomplete, part_conflict, grant_required, session_required, baseline_required, watch_deleted, watch_access_lost, snapshot_limit, subscription_limit |
 | 410 | upload_expired, upload_aborted, result_expired, cursor_expired, snapshot_expired, reset_required |
 | 411 | length_required |
 | 412 | precondition_failed, target_changed |

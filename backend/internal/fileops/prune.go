@@ -92,7 +92,7 @@ func (p *Postgres) pruneBatch(ctx context.Context, owner string, now time.Time, 
 		rows, err := tx.Query(ctx, `select id::text,snapshot,`+journalColumnList+`
 			from file_operations o
 			where o.owner_id=$1::uuid
-			  and o.state in ('succeeded','failed','cancelled')
+			  and o.state in ('succeeded','failed','cancelled','unresolved')
 			  and o.phase='settled'
 			  and o.retain_until < $2
 			  and ($3::timestamptz is null or (o.retain_until,o.id) > ($3::timestamptz,$4::uuid))
@@ -187,7 +187,7 @@ func (p *Postgres) pruneBatch(ctx context.Context, owner string, now time.Time, 
 		// candidate query cannot turn the delete into a blind one.
 		tag, err := tx.Exec(ctx, `delete from file_operations
 			where id = any($1::uuid[]) and owner_id=$2
-			  and state in ('succeeded','failed','cancelled') and phase='settled'
+			  and state in ('succeeded','failed','cancelled','unresolved') and phase='settled'
 			  and retain_until < $3
 			  and not exists (select 1 from file_operation_guards g where g.operation_id=file_operations.id)
 			  and not exists (select 1 from file_changes c where c.owner_id=$2 and c.operation_id=file_operations.id::text)

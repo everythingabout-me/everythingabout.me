@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io/fs"
 	"log/slog"
 	"strings"
 	"sync"
@@ -444,8 +445,10 @@ func (s *Server) runFileOperation(ctx context.Context, op fileops.Operation) err
 		// file resource, because its response is the metadata a read returns.
 		var commit fileops.IndexCommit = nodes.CommitStagedFile
 		upload := false
-		if _, e := s.filesJournal.GetUpload(ctx, op.Root, actor, op.ID); e == nil {
-			upload, commit = true, nodes.CommitStagedUpload
+		var uploadRow fileops.Upload
+		if row, e := s.filesJournal.GetUpload(ctx, op.Root, actor, op.ID); e == nil {
+			upload, uploadRow = true, row
+			commit = nodes.CommitStagedUpload
 		} else if !fileops.IsCode(e, "not_found") {
 			return e
 		}
@@ -460,6 +463,25 @@ func (s *Server) runFileOperation(ctx context.Context, op fileops.Operation) err
 		}
 		if upload {
 			_, e := s.runUploadOperation(ctx, op, actor, native, service)
+			if e != nil {
+				// A commit that failed may be one the service can never make progress on.
+				// Retiring it here is what turns "retries forever" into a terminal answer;
+				// it runs before the generic retained log so a terminal operation is never
+				// reported as if a later attempt would recover it.
+				outcome := s.retireUploadAfterAttempt(ctx, op.Root, actor, op.ID, uploadRow.Mode, e)
+				if outcome.handled {
+					if outcome.transitioned {
+						// Best effort and never part of the terminal transition: the
+						// provider/session lifecycle and the existing cleanup scan remain
+						// the backstop if this call fails.
+						if cleanupErr := s.cleanupRetiredUpload(ctx, outcome.operation, actor, native, service); cleanupErr != nil {
+							slog.Warn("staged bytes of a retired upload still need cleanup",
+								"operation", outcome.operation.ID, "cause", errorCauseChain(cleanupErr))
+						}
+					}
+					return nil
+				}
+			}
 			return e
 		}
 		var updated fileops.Operation
@@ -487,6 +509,192 @@ func (s *Server) runFileOperation(ctx context.Context, op fileops.Operation) err
 	}
 	_, err = actions.Run(ctx, op.Root, actor, op.ID, native)
 	return err
+}
+
+// uploadRetirement is the outcome of applying the no-progress policy to one failed
+// upload_commit attempt.
+type uploadRetirement struct {
+	operation fileops.Operation
+	// handled means the attempt must not be reported as "retained for recovery": the
+	// operation is terminal now, either already or because this call retired it.
+	handled bool
+	// transitioned means this call performed the retirement, so the caller owes the
+	// best-effort cleanup of the staged provider bytes.
+	transitioned bool
+}
+
+// retireUploadAfterAttempt decides whether a failed upload commit is one the service
+// should stop retrying, and ends it if so.
+//
+// The policy exists because a retry loop has no terminal answer of its own: a commit that
+// fails every attempt — a provider that refuses every request, a staged allocation that
+// cannot be read — kept its guard and its reservation forever, so the destination could not
+// be used by any client and the quota was never returned. Six claims is the bound, counted
+// in attempts rather than elapsed time: the worker backs off from 30 seconds to 30 minutes,
+// so a wall-clock window would either fire during a provider outage that still had a chance
+// or wait hours after a permanent refusal. Claims are the one number that says "the service
+// really tried", and the bound belongs to the work it admitted, not to the clock.
+//
+// Only upload_commit is retired. A move/copy/delete manifest has per-entry effects that a
+// full reconcile resolves, and its policy is unchanged.
+func (s *Server) retireUploadAfterAttempt(ctx context.Context, root fileops.Root, actor fileops.Actor, id, mode string, attemptErr error) uploadRetirement {
+	latest, err := s.filesJournal.Get(ctx, root, actor, id)
+	if err != nil {
+		slog.Debug("could not read an upload operation for retirement", "operation", id, "cause", err)
+		return uploadRetirement{}
+	}
+	if latest.Terminal() {
+		// Another attempt (or the client's own abort) already gave this operation its
+		// answer. The error this attempt returned is stale with respect to the journal, so
+		// it must not schedule a retry record for an id the pending scan will not select.
+		return uploadRetirement{operation: latest, handled: true}
+	}
+	state, ok := stalledUploadState(latest.Phase, mode, latest.Lease.Epoch, attemptErr)
+	if !ok {
+		return uploadRetirement{}
+	}
+	retired, err := s.filesJournal.RetireStalled(ctx, root, actor, id, state, stalledUploadProblem(state, attemptErr))
+	if err != nil {
+		// operation_in_progress/lease_lost means a live attempt owns the row; it is not
+		// ours to force-fail. The next failure applies the same policy.
+		if !fileops.IsCode(err, "operation_in_progress") && !fileops.IsCode(err, "lease_lost") {
+			slog.Warn("could not retire a stalled upload operation", "operation", id, "cause", errorCauseChain(err))
+		}
+		return uploadRetirement{}
+	}
+	var intent storage.WriteIntent
+	_ = json.Unmarshal(retired.Intent, &intent)
+	slog.Warn("file operation retired after no progress",
+		"operation", retired.ID, "kind", retired.Kind, "state", retired.State, "phase", latest.Phase,
+		"owner", retired.Root.OwnerID, "target", string(intent.Target), "claims", latest.Lease.Epoch,
+		"code", fileOperationErrorCode(attemptErr), "cause", errorCauseChain(attemptErr))
+	return uploadRetirement{operation: retired, handled: true, transitioned: true}
+}
+
+// cleanupRetiredUpload discards the provider session of a retired upload with the same
+// writer selection the commit used: a relay session has bytes in the spool, a class A
+// session has provider parts, and a direct session has no temporary identity at all.
+// Re-running the upload entry point on the now-terminal operation performs exactly that
+// cleanup and nothing else. A failure is logged and never undoes the terminal state: the
+// cleanup scan's partial index covers the other terminal states, and its definition is a
+// published migration this change may not rewrite. The provider/session lifecycle is the
+// backstop the API contract names, and a late receiver that was holding the staged bytes
+// re-queues the same terminal operation through startFileCleanup once it releases them.
+func (s *Server) cleanupRetiredUpload(ctx context.Context, op fileops.Operation, actor fileops.Actor, native fileops.NativeActions, service *fileops.Service) error {
+	_, err := s.runUploadOperation(ctx, op, actor, native, service)
+	return err
+}
+
+// uploadRetirementClaims is the number of claims after which an upload commit that has
+// still made no progress is retired. Lease.Epoch is the count of claims on the operation.
+const uploadRetirementClaims = 6
+
+// stalledUploadState is the whole policy, kept pure so it can be tested without a provider.
+//
+// "Pre-effect" means nothing has been handed to the native tree yet: the phases admitted,
+// receiving and staged_ready. A multipart session in one of those phases has published
+// nothing (its parts stay unpublished until the server completes them), so a permanent
+// refusal there can be answered Failed. A direct session is different at every phase: the
+// client's own PUT at the destination is the publication, so the service cannot rule out
+// that the bytes are already there; it is never pre-effect for this rule.
+//
+// The permanent-error branch does not need six claims: retrying a permission denial, a
+// root mismatch or a quota refusal can never succeed, and making the client wait through
+// the backoff would only delay the same answer.
+func stalledUploadState(phase fileops.Phase, mode string, epoch int64, attemptErr error) (fileops.State, bool) {
+	preEffect := phase == fileops.Admitted || phase == fileops.Receiving || phase == fileops.StagedReady
+	direct := mode == fileops.UploadModeDirect
+	if preEffect && !direct && permanentUploadError(attemptErr) {
+		return fileops.Failed, true
+	}
+	if epoch < uploadRetirementClaims {
+		return "", false
+	}
+	if preEffect && !direct {
+		// Nothing was published, so Failed is the truthful answer; the last cause is kept.
+		return fileops.Failed, true
+	}
+	// The effect may already have landed (effect_started/native_applied, or a direct
+	// session whose client PUT may have published). Unknown is a live state a worker still
+	// resolves; Unresolved is the terminal statement that the service stopped trying.
+	return fileops.Unresolved, true
+}
+
+// permanentUploadError names the refusals a retry cannot change. It deliberately excludes
+// generic storage 5xx/timeouts: those are the failures a later attempt may still recover,
+// and the claim bound is what ends them if they never do.
+func permanentUploadError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, fs.ErrPermission) {
+		return true
+	}
+	var failure *fileops.Error
+	if !errors.As(err, &failure) {
+		return false
+	}
+	switch failure.Code {
+	case "invalid_config", "invalid_intent", "unsupported", "baseline_required", "root_conflict", "quota_exceeded", "staging_full":
+		return true
+	}
+	return false
+}
+
+// stalledUploadProblem is the stored reason a retirement leaves on the operation.
+func stalledUploadProblem(state fileops.State, attemptErr error) json.RawMessage {
+	if state == fileops.Unresolved {
+		return json.RawMessage(`{"code":"outcome_unknown","detail":"The upload stopped before the service could prove whether it published. Start a new upload with a new Idempotency-Key; if the destination exists, the create returns 409 and the overwrite condition replaces it."}`)
+	}
+	code := permanentUploadCode(attemptErr)
+	detail := "The upload was ended before it published: " + code + "."
+	if cause := retirementCause(attemptErr); cause != "" && cause != code {
+		detail += " Cause: " + cause + "."
+	}
+	detail += " Start a new upload with a new Idempotency-Key; if the destination exists, the create returns 409 and the overwrite condition replaces it."
+	value, _ := json.Marshal(map[string]string{"code": code, "detail": detail})
+	return value
+}
+
+// permanentUploadCode keeps the failing step, not a canned sentence: a client reading
+// `invalid_config` can ask the owner to check the connection, while `error` cannot.
+func permanentUploadCode(err error) string {
+	var failure *fileops.Error
+	if errors.As(err, &failure) {
+		return failure.Code
+	}
+	if errors.Is(err, fs.ErrPermission) {
+		return "permission_denied"
+	}
+	return fileOperationErrorCode(err)
+}
+
+// retirementCause renders only this application's own vocabulary, never a database or
+// provider response body: the operation error is client-visible, and the full chain
+// (including the driver's private cause) stays in the log line the retirement writes.
+func retirementCause(err error) string {
+	var parts []string
+	for current := err; current != nil; current = errors.Unwrap(current) {
+		var part string
+		switch typed := current.(type) {
+		case *fileops.Error:
+			part = typed.Code
+		case *storage.Error:
+			part = typed.Code
+			if facts := typed.Provider.Diagnostic(); facts != "" {
+				part += " (" + facts + ")"
+			}
+		default:
+			if errors.Is(current, fs.ErrPermission) {
+				part = "permission denied"
+			}
+		}
+		if part == "" || len(parts) > 0 && parts[len(parts)-1] == part {
+			continue
+		}
+		parts = append(parts, part)
+	}
+	return strings.Join(parts, " <- ")
 }
 
 // StartFileOperations retries durable known work after startup; unknown outcomes

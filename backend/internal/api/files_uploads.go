@@ -476,6 +476,17 @@ func (s *Server) handleFilesCreateUpload(w http.ResponseWriter, r *http.Request,
 		if e = s.filesMutationAuthorize(r, f, native)(r.Context(), old.Operation); e != nil {
 			return filesMutationProblem(e)
 		}
+		// A session that ended without publishing is not an upload a client can resume: its
+		// key points at an operation that will never commit, so replaying it could only
+		// answer a dead session forever. Saying the key is spent is what tells the client to
+		// start over with a new key; a succeeded replay still returns its settled resource
+		// below, exactly as before.
+		if (old.Operation.Terminal() && old.Operation.State != fileops.Succeeded) ||
+			old.State == fileops.UploadAborted || old.State == fileops.UploadExpired {
+			spent := fc.NewProblem(409, "idempotency_key_spent", "The idempotency key belongs to an upload that ended without publishing. Start a new upload with a new Idempotency-Key; if the destination exists, the create returns 409 name_conflict and the overwrite condition replaces it.")
+			spent.OperationID = old.Operation.ID
+			return spent
+		}
 		resource := s.filesUploadResource(old, f)
 		if filesUploadExpired(old) != nil {
 			resource.State = "expired"

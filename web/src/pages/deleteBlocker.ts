@@ -27,7 +27,7 @@ export type DeleteBlocker =
   | { resolution: "blocked"; reason: "upload"; name: string }
   | { resolution: "blocked"; reason: "other" };
 
-const TERMINAL = new Set(["succeeded", "failed", "cancelled"]);
+const TERMINAL = new Set(["succeeded", "failed", "cancelled", "unresolved"]);
 
 function statusOf(error: unknown): number | null {
   const status = (error as { status?: unknown } | null)?.status;

@@ -27,6 +27,11 @@ export async function waitForOperation(
     if (current.state === "failed") {
       throw new Error(current.error?.detail || t("error.saveFailed"));
     }
+    // Only an upload_commit is retired as unresolved; naming it here keeps the loop from
+    // polling a terminal operation forever if one ever reaches a generic wait.
+    if (current.state === "unresolved") {
+      throw new Error(current.error?.detail || t("drive.uploadUnresolved"));
+    }
     await new Promise<void>((resolve) => window.setTimeout(resolve, 1000));
     current = await api.getOperation(current.id);
     onProgress?.(current.progress);

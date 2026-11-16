@@ -35,6 +35,11 @@ func TestUploadStateAt(t *testing.T) {
 			Upload{State: UploadCommitting, ExpiresAt: now.Add(time.Hour), Operation: Operation{State: Unknown}},
 			UploadUnknown,
 		},
+		{
+			"committing that was retired as unresolved",
+			Upload{State: UploadCommitting, ExpiresAt: now.Add(time.Hour), Operation: Operation{State: Unresolved}},
+			UploadAborted,
+		},
 	} {
 		if got := uploadStateAt(tt.u, now); got != tt.state {
 			t.Errorf("%s: uploadStateAt = %q, want %q", tt.name, got, tt.state)

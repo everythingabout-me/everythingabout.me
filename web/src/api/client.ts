@@ -281,7 +281,7 @@ export interface FileReservations {
 export interface FileOperation {
   id: string;
   kind: "mkdir" | "move" | "copy" | "delete" | "upload_commit" | "thumbnail";
-  state: "queued" | "running" | "outcome_unknown" | "succeeded" | "failed" | "cancelled";
+  state: "queued" | "running" | "outcome_unknown" | "succeeded" | "failed" | "cancelled" | "unresolved";
   progress: { completed: number; total: number | null; unit: string };
   // A deletion answers with what happened to the bytes, and only once the purge has
   // settled: `purged` counts objects removed, `adopted` those left because a newer intent

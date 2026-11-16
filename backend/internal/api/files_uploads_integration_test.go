@@ -1168,3 +1168,65 @@ func TestFilesUploadsUnindexedDestinationNamesItsRecovery(t *testing.T) {
 		t.Fatalf("overwritten content HTTP %d %q", got.Code, got.Body.String())
 	}
 }
+
+// A key whose upload ended without publishing must not replay a dead session forever.
+// The answer is a spent key, which is the only thing that tells the client to start a new
+// upload (and, at an existing destination, to use overwrite). A succeeded replay keeps its
+// settled resource, and a new key is free to replace the same path.
+func TestFilesUploadsIdempotencyKeySpent(t *testing.T) {
+	f := newFileWorkerFixture(t)
+	h := newUploadsHTTPFixture(t, f)
+	open := func(path, key string, condition map[string]any, size int) *httptest.ResponseRecorder {
+		data, _ := json.Marshal(map[string]any{"path": path, "size": size, "mediaType": "text/plain", "condition": condition})
+		headers := make(http.Header)
+		headers.Set("Idempotency-Key", key)
+		headers.Set("Content-Type", "application/json")
+		return h.request("POST", "/api/files/uploads", h.bearer, data, headers)
+	}
+
+	// An aborted session is a terminal non-success: its key is spent.
+	id := h.newUpload(t, "/spent.txt", "spent-key", 4)
+	if w := h.request("DELETE", uploadRoute(id, ""), h.bearer, nil, nil); w.Code != 204 {
+		t.Fatalf("abort HTTP %d: %s", w.Code, w.Body.String())
+	}
+	spent := uploadsHTTPJSON(t, h.create("/spent.txt", "spent-key", 4, h.bearer, nil), 409)
+	if spent["code"] != "idempotency_key_spent" || spent["operationId"] != id {
+		t.Fatalf("aborted replay %v, want idempotency_key_spent for %s", spent, id)
+	}
+	detail, _ := spent["detail"].(string)
+	if !strings.Contains(detail, "new Idempotency-Key") || !strings.Contains(detail, "name_conflict") {
+		t.Fatalf("spent key did not name the recovery: %q", detail)
+	}
+
+	// A new key may open a new session for the same path.
+	fresh := h.newUpload(t, "/spent.txt", "fresh-key", 4)
+	if fresh == id {
+		t.Fatal("a new key reused the dead session")
+	}
+	uploadsHTTPJSON(t, h.part(fresh, 1, []byte("data"), nil), 201)
+	h.commit(t, fresh)
+	// A succeeded replay still returns its settled resource, not the spent-key Problem.
+	replay := uploadsHTTPJSON(t, h.create("/spent.txt", "fresh-key", 4, h.bearer, nil), 200)
+	if replay["id"] != fresh || replay["state"] != "committed" {
+		t.Fatalf("succeeded replay %v", replay)
+	}
+	// The old key stays spent even though the destination now exists.
+	if again := uploadsHTTPJSON(t, h.create("/spent.txt", "spent-key", 4, h.bearer, nil), 409); again["code"] != "idempotency_key_spent" {
+		t.Fatalf("old key became usable again: %v", again)
+	}
+
+	// A different key at the existing destination gets the ordinary conflict, and the
+	// documented overwrite condition publishes over it. That is the client's repair path
+	// after an unresolved publication.
+	problem := uploadsHTTPJSON(t, h.create("/spent.txt", "conflict-key", 4, h.bearer, nil), 409)
+	if problem["code"] != "name_conflict" {
+		t.Fatalf("existing destination answer %v", problem)
+	}
+	replacement := uploadsHTTPJSON(t, open("/spent.txt", "overwrite-key", map[string]any{"mode": "overwrite"}, 4), 201)
+	uploadsHTTPJSON(t, h.part(replacement["id"].(string), 1, []byte("repl"), nil), 201)
+	settled := h.commit(t, replacement["id"].(string))
+	if settled["size"] != float64(4) {
+		t.Fatalf("overwrite did not settle: %v", settled)
+	}
+	f.checkNoLiability(t, h.root)
+}

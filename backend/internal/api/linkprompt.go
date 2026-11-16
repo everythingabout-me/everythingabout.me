@@ -213,9 +213,15 @@ func (f linkFacts) writeWrite(b *strings.Builder) {
 	b.WriteString("the `Location` (`$DRIVE/api/files/operations/<operationId>`) until `state` is `succeeded`.\n")
 	b.WriteString("`progress.completed` stays `0` for `upload_commit` until it settles — its unit is\n")
 	b.WriteString("bytes, not parts — and a non-null `retrying` means the operation is failing and\n")
-	b.WriteString("backing off, not merely slow. `failed`, `cancelled` and `outcome_unknown` are not\n")
-	b.WriteString("success; settle an `outcome_unknown` session through the same upload id, never by\n")
-	b.WriteString("starting over.\n\n")
+	b.WriteString("backing off, not merely slow. `failed`, `cancelled`, `unresolved` and\n")
+	b.WriteString("`outcome_unknown` are not success. An `outcome_unknown` operation is still being\n")
+	b.WriteString("resolved: follow that Operation and do not start a second session for its path. An\n")
+	b.WriteString("`unresolved` operation is terminal — the service stopped trying and cannot prove\n")
+	b.WriteString("whether the file published. Start a new upload with a new Idempotency-Key; if the\n")
+	b.WriteString("destination exists the create answers `409 name_conflict`, and\n")
+	b.WriteString("`\"condition\":{\"mode\":\"overwrite\"}` replaces it. `409 idempotency_key_spent` on a\n")
+	b.WriteString("create means the same thing: the key belongs to an upload that ended without\n")
+	b.WriteString("publishing, so use a new key. Do not retry the dead session or its key.\n\n")
 
 	if f.Class == "C" && f.Read {
 		b.WriteString("A short create may use one request instead of a session, when capabilities reports\n")

@@ -180,7 +180,8 @@ func uploadState(u Upload) UploadState {
 		return UploadCommitted
 	case Failed:
 		return UploadFailed
-	case Cancelled:
+	case Cancelled, Unresolved:
+		// An unresolved commit is terminal: its session is aborted, never still publishing.
 		return UploadAborted
 	case Unknown:
 		return UploadUnknown

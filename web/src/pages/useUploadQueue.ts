@@ -124,7 +124,7 @@ export type UploadStatus = "queued" | "waiting" | "uploading" | "finalizing" | "
 export interface FileOperationWait {
   operationId: string;
   path: string;
-  state: "queued" | "running" | "outcome_unknown" | "failed" | "cancelled";
+  state: "queued" | "running" | "outcome_unknown" | "failed" | "cancelled" | "unresolved";
   statusUnavailable?: boolean;
   /**
    * What is holding the path. A row may only claim a deletion when the blocker is one:
@@ -453,7 +453,9 @@ async function observedEntry(path: string): Promise<Item | null> {
  */
 function waitMessage(wait: FileOperationWait): string {
   if (wait.statusUnavailable) return t("drive.operationStatusUnavailable");
-  const ended = wait.state === "failed" || wait.state === "cancelled";
+  // Unresolved is terminal too: the upload stopped trying and released the path, so the
+  // wait cannot end by itself any more than a failure can.
+  const ended = wait.state === "failed" || wait.state === "cancelled" || wait.state === "unresolved";
   if (wait.kind === "delete") {
     return ended ? t("drive.deletionDidNotFinish", { path: wait.path }) : t("drive.waitingForDeletion", { path: wait.path });
   }
@@ -825,7 +827,7 @@ async function admitUploadAttempt(host: UploadRunHost, id: string, task: UploadT
         ? blockerOperation
         : await api.getOperation(error.operationId, signal).catch(() => undefined);
       if (signal.aborted) return null;
-      if (blocker && blocker.id === error.operationId && ["succeeded", "failed", "cancelled"].includes(blocker.state)) {
+      if (blocker && blocker.id === error.operationId && ["succeeded", "failed", "cancelled", "unresolved"].includes(blocker.state)) {
         host.patch(id, { status: "queued", allocationRejected: false });
         return null;
       }
@@ -1245,6 +1247,15 @@ async function abandonAttempt(host: UploadRunHost, id: string, error: unknown): 
     } else {
       host.patch(id, { status: "failed", error: message(error), speed: 0 });
     }
+  } else if (error instanceof ApiError && error.status === 409 && error.code === "idempotency_key_spent") {
+    // The key names an upload that ended without publishing and can never resume it. The
+    // server told us to start over, so the row does exactly that with a new key: a fresh
+    // create at an existing destination answers `name_conflict`, which the normal
+    // replace/skip handling below already knows how to ask.
+    host.patch(id, { status: "queued", uploadId: undefined, operationId: undefined, intent: undefined, observedRevision: undefined, createKey: taskId(), terminalState: undefined, allocationRejected: false, uploaded: false, loaded: 0, error: undefined, speed: 0 });
+  } else if (error instanceof ApiError && (error.code === "upload_gone" || error.code === "upload_aborted" || error.code === "upload_expired")) {
+    // The session is terminal and cannot be resumed; a retry has to allocate a new one.
+    host.patch(id, { status: "failed", error: message(error), speed: 0, terminalState: error.code === "upload_expired" ? "expired" : "aborted" });
   } else { host.patch(id, { status: "failed", error: message(error), speed: 0 }); }
 }
 
@@ -1754,14 +1765,21 @@ function createQueue(): QueueOwner {
       // now at the destination, so an abort would be a request the server can only refuse.
       if (!task.isDir) patch(task.id, { sessionTerminal: true });
       complete(task, op.result);
-    } else if (op.state === "failed" || op.state === "cancelled") {
+    } else if (op.state === "failed" || op.state === "cancelled" || op.state === "unresolved") {
       if (task.cancelRequested) {
         if (task.uploadId) verified.current.delete(task.uploadId);
         remove([task.id]);
       }
       else if (task.retryRequested) {
         patch(task.id, { status: "queued", uploadId: undefined, operationId: undefined, intent: undefined, observedRevision: undefined, createKey: taskId(), terminalState: undefined, retryRequested: false, uploaded: false, loaded: 0 });
-      } else patch(task.id, { status: "failed", speed: 0, terminalState: task.isDir ? undefined : op.state === "failed" ? "failed" : "aborted", error: op.error ? problemText(op.error) : t("drive.uploadFailed") });
+      } else {
+        // An unresolved commit is terminal but may have published: its session is already
+        // aborted, so a retry must allocate a new one (and, if the destination exists, use
+        // overwrite) rather than resume the dead id.
+        const terminalState = task.isDir ? undefined : op.state === "failed" ? "failed" : "aborted";
+        const fallback = op.state === "unresolved" ? t("drive.uploadUnresolved") : t("drive.uploadFailed");
+        patch(task.id, { status: "failed", speed: 0, terminalState, error: op.error ? problemText(op.error) : fallback });
+      }
     } else { patch(task.id, { status: "finalizing", speed: 0 }); }
   }, [complete, patch, remove]);
 
@@ -2029,7 +2047,7 @@ function createQueue(): QueueOwner {
   const resume = useCallback((id: string) => {
     const task = tasks.current.get(id);
     const wait = task?.waitingFor;
-    if (!task || !wait || (wait.state !== "failed" && wait.state !== "cancelled")) return;
+    if (!task || !wait || (wait.state !== "failed" && wait.state !== "cancelled" && wait.state !== "unresolved")) return;
     settleFileOperation(wait.operationId);
     patch(id, { status: "queued", waitingFor: undefined, waitMessage: undefined, speed: 0 });
     publish();

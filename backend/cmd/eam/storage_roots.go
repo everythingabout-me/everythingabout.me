@@ -265,7 +265,7 @@ func (p postgresRootStore) BackfillCoordinates(ctx context.Context, owner, bucke
 func (p postgresRootStore) PendingWork(ctx context.Context, owner string) (pendingWork, error) {
 	var work pendingWork
 	err := p.db.Pool().QueryRow(ctx, `select
- (select count(*) from file_operations where owner_id=$1::uuid and state not in ('succeeded','failed','cancelled')),
+ (select count(*) from file_operations where owner_id=$1::uuid and state not in ('succeeded','failed','cancelled','unresolved')),
  (select count(*) from file_operation_guards where owner_id=$1::uuid)`, owner).Scan(&work.Operations, &work.Guards)
 	return work, err
 }

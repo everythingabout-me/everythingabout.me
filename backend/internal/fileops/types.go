@@ -86,6 +86,17 @@ const (
 	Succeeded State = "succeeded"
 	Failed    State = "failed"
 	Cancelled State = "cancelled"
+	// Unresolved is terminal: the service stopped trying and cannot prove whether the
+	// native effect landed. It exists so an upload commit that cannot make progress ends
+	// instead of retrying forever.
+	//
+	// It never records a success. The index/quota settlement a success implies did not
+	// happen, so the reservation and guards are released exactly as a failure releases
+	// them, and the client starts a new upload; the effect may still be adopted by a full
+	// reconcile from the native tree. It is deliberately separate from Unknown
+	// (outcome_unknown), which is a live state the journal is still resolving: a pending
+	// scan selects Unknown, never Unresolved, and no transition may Settle it.
+	Unresolved State = "unresolved"
 )
 
 type Phase string
@@ -208,7 +219,7 @@ type PrefixDeleteCommit func(context.Context, pgx.Tx, Operation) (int64, error)
 type LivePaths func(context.Context, Root, []storage.Path) ([]bool, error)
 
 func (o Operation) Terminal() bool {
-	return o.State == Succeeded || o.State == Failed || o.State == Cancelled
+	return o.State == Succeeded || o.State == Failed || o.State == Cancelled || o.State == Unresolved
 }
 
 // EntriesLayout names where an operation's manifest entries live. It is the one

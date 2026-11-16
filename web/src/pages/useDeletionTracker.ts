@@ -65,7 +65,7 @@ export function useDeletionTracker({ owner, showToast, reload }: DeletionTracker
     await Promise.all(known.map(async (entry) => {
       try {
         const operation = await api.getOperation(entry.id);
-        const ended = operation.state === "failed" || operation.state === "cancelled" || operation.state === "outcome_unknown";
+        const ended = operation.state === "failed" || operation.state === "cancelled" || operation.state === "outcome_unknown" || operation.state === "unresolved";
         // A record is dropped by whatever settles its Operation, whatever kind it was: the
         // record names a path, and `pendingFileOperation` matches by path alone, so one
         // left behind by a move or a commit blocks every later upload there just as a
