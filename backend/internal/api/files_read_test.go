@@ -732,6 +732,34 @@ func TestFilesReadCursorRejectsTamperingAndDifferentBindings(t *testing.T) {
 	}
 }
 
+func TestFilesReadRejectsUnknownQueryParameters(t *testing.T) {
+	s, f, d, index := filesReadFixture()
+	filesReadAdd(d, "Docs", storage.Folder, 0)
+	filesReadAdd(d, "Docs/a.txt", storage.File, 1)
+	index.rows = []nodes.Row{filesReadRow("Docs", true), filesReadRow("Docs/a.txt", false), filesReadRow("Docs/b.txt", false)}
+	f.Scope = "/Docs"
+	// A cursor-paginated route must not treat ?offset= as "start over at page 1":
+	// silently answering the first page turns a large directory into "nothing matched".
+	for _, handler := range []fileHandler{s.handleFilesList, s.handleFilesSearch, s.handleFilesCapabilities} {
+		err := handler(httptest.NewRecorder(), filesReadRequest("path=%2FDocs&offset=200"), f)
+		filesReadProblem(t, err, 400, "invalid_request")
+		var problem *fc.Problem
+		if !errors.As(err, &problem) || !strings.Contains(problem.Detail, `"offset"`) {
+			t.Fatalf("error does not name the unsupported parameter: %v", err)
+		}
+	}
+	// The supported keys keep working: a normal list pages with limit and its cursor.
+	page := filesReadCollection(t, filesReadCall(t, s, f, s.handleFilesList, "path=%2FDocs&limit=1"))
+	if page.NextCursor == nil {
+		t.Fatal("fixture missing next page")
+	}
+	filesReadCall(t, s, f, s.handleFilesList, "path=%2FDocs&limit=1&cursor="+*page.NextCursor)
+	// An id-selected list resolves identity before the parser, so it must stay 200.
+	idServer, idFile, idIndex := mutationIdentityFixture()
+	idIndex.rows[0].ID = mutationFolderID
+	filesReadCall(t, idServer, idFile, idServer.handleFilesList, "id="+mutationFolderID)
+}
+
 func TestFilesReadPermissionsAndInvalidQueries(t *testing.T) {
 	s, f, d, index := filesReadFixture()
 	filesReadAdd(d, "Docs", storage.Folder, 0)

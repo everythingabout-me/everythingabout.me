@@ -252,7 +252,7 @@ All suffixes are below `B`:
 
 | Method | Resource | Behavior |
 |---|---|---|
-| GET | `/me` | Current principal, authorized path scope, indexed usage and reservations |
+| GET | `/me` | Current principal, authorized path scope, indexed usage and reservations; see §8 for `usage` vs `quota` |
 | GET | `/capabilities?path=/Photos` or `?id=1f12cfd6-b93b-41ad-ae71-52a4299c3421` | Effective limits/features at an authorized entry |
 | GET | `?path=/Photos/a.jpg` or `?id=f7ca1104-12f0-4bbf-8c77-41d341f7d120` | Indexed metadata by either selector; no native lookup |
 | GET | `/list?path=/Photos&limit=&cursor=` or `id=1f12cfd6-b93b-41ad-ae71-52a4299c3421` in place of path | Indexed immediate children with SQL keyset pagination |
@@ -1028,6 +1028,22 @@ identical bytes — which carry the same revision — can be replaced again by a
 claim is permanent because it records bytes that are gone. Temporary upload data and retained provider
 versions use a separate physical budget. Missing index entries alone never make ordinary native files garbage.
 
+`GET B/me` reports two byte counters that are not interchangeable. `usage.bytes`/`usage.files` are the indexed
+files visible in the selected scope: a database view, not the budget. `quota.logicalBytes` is the owner's
+charged budget — the initial compared baseline plus application journal changes — and it is the number
+admission compares against `quota.logicalLimitBytes`; `reservations.logicalBytes` is the in-flight part of that
+budget, so remaining room is
+`quota.logicalLimitBytes - quota.logicalBytes - reservations.logicalBytes`. Never use `usage.bytes` for
+admission. The two numbers can differ because the budget is not recomputed from the index and pending,
+deleted, outside or reconciled state can lag one view or the other. The practical rule: pace and admit writes
+against the quota ledger, and report scope totals to the user from usage. A client that substitutes one for
+the other either refuses a write the service would admit or over-commits the account.
+
+`quota` and `reservations` are present only at the owner root: `GET B/me` returns them when `scope.path` is
+`/`, and capabilities returns them when both the scope and the selected path are `/`. A scoped read omits both
+rather than reporting a partial owner-wide number. Even at the owner root they answer different questions —
+usage is what the index shows, the ledger is what admission charged — so neither corrects the other.
+
 Idempotency keys are scoped by owner, principal, route/action and canonical request fingerprint. Same key with
 different intent returns `409 idempotency_conflict`. The fingerprint covers what the client asked for, never what
 admission derived from the connection: native conditions and revisions, a resolved parent, and the connection's
@@ -1046,6 +1062,8 @@ names, as on Google Drive), supported checksums, maximum file/single-PUT/part si
 expiry/retention policy, `sourceModifiedAt` support, and quota/reservation information appropriate to the caller. Numbers are authoritative
 for admission but may change before a later request; new sessions bind their accepted limits. Upload responses
 provide their exact chunk layout. Never expose provider names or assume every backend has the same limits.
+Quota/reservations appear only at the owner root and describe the admission ledger; `usage.bytes`/`usage.files`
+from B/me are the indexed scope view. Do not use one as the other (§8).
 
 Capabilities also always include identity: {id:true,path:true,uniquePaths:true} and changeTracking with
 available, read, subscribe, delivery, retentionSeconds, subscriptionLifetimeSeconds, snapshotLifetimeSeconds,
@@ -1080,6 +1098,16 @@ and advertised transfer class describe implemented service support, not automati
 maintenance. GET B/me also returns changes and subscribe booleans alongside existing file read/write/scope,
 usage and cookie csrfToken fields. Owner sessions have both new grants; token grants remain explicit.
 
+Three capability values are easy to read backwards. `transferClass`/`transferKind` name the one class this
+connection selected. `transferClasses` lists the classes the driver can serve — COS can serve both
+`presigned-parts` and `relay` — not what this connection offers; a client starts every transfer from the
+session's `transferClass`/`transferKind` and must never pick a class from `transferClasses`.
+`maxSinglePutBytes: 0` means this connection has no single-PUT route, so every write uses a session (the
+condition §6 states); it is not a size limit of zero. `names.maxDepth: 0` and `names.maxSegmentBytes: 0` mean
+this connection imposes no additional limit, and `names.maxPathBytes` is the real bound; 0 is neither
+"unknown" nor "unlimited storage" — the configured content root and the storage budget still bound what a
+write can create.
+
 Object roots use current ETags as native revisions: `pinnedRead`, `strongContentValidators` and
 `sourceModifiedAt` are false, while upload, replacement, folder creation, move, copy and deletion are
 available whenever `write` is true and the requested action is admitted. Native condition enforcement is
@@ -1089,6 +1117,10 @@ a stale If-Match is refused — otherwise the session publishes through multipar
 globally fenced; object reads are validated but not version-pinned.
 Scans synchronize observed index metadata; budget counters retain the initial compared baseline plus
 application journal changes/reservations, not exact quota state across unsynchronized outside writers.
+
+Listing, search, capabilities and the upload session lists reject an unknown query parameter with `400 invalid_request` naming it, instead of ignoring it:
+pagination is `limit` plus an opaque `cursor`, so a request such as `?offset=200` must fail rather than
+silently serve the first page again.
 
 | Status | Representative code |
 |---|---|

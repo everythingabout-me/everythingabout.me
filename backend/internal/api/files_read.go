@@ -9,9 +9,11 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/url"
 	"path"
+	"sort"
 	"strconv"
 	"strings"
 	"unicode/utf8"
@@ -61,6 +63,26 @@ func parseFilesReadQuery(r *http.Request, scope fc.Path, pathRequired bool) (fil
 		if len(values) != 1 {
 			return invalid("Query parameters must occur once.")
 		}
+	}
+	// Reject an unknown parameter instead of ignoring it. Ignoring lets a client
+	// paginate with ?offset= against a route that pages with an opaque cursor: the
+	// server answers page 1 again, so a large directory looks like "nothing matched"
+	// rather than a rejected request. The allowlist is exactly what this parser and
+	// its callers consume; a new read parameter must be added here and documented.
+	// filesReadSelectorQuery removes id before calling this parser, because identity
+	// selection is resolved before pagination; the uploads list and parts routes
+	// pass their raw query and read only limit and cursor.
+	var unknown []string
+	for name := range q {
+		switch name {
+		case "path", "limit", "cursor", "q", "kind", "mediaType":
+		default:
+			unknown = append(unknown, name)
+		}
+	}
+	if len(unknown) > 0 {
+		sort.Strings(unknown)
+		return invalid(fmt.Sprintf("The query parameter %q is not supported; use limit and an opaque cursor.", unknown[0]))
 	}
 	p := string(scope)
 	if v, ok := q["path"]; ok {
@@ -326,6 +348,20 @@ func (s *Server) handleFilesMe(w http.ResponseWriter, r *http.Request, f *fileRe
 	return writeFilesJSON(w, 200, result)
 }
 
+// Capability fields whose zero or list value is easy to read backwards:
+//
+//   - transferClass/transferKind name the class this connection selected.
+//     transferClasses lists the classes the driver can serve (COS can serve both
+//     presigned-parts and relay), not what this connection offers. A client uses the
+//     session's transferClass/transferKind and never picks a class from
+//     transferClasses; advertising a capability the connection did not select would
+//     send a transfer around the negotiated route.
+//   - maxSinglePutBytes == 0 means this connection has no single-PUT route and every
+//     write uses a session (see docs/api/api.md §6). It is not a size limit of zero.
+//   - names.maxDepth == 0 and names.maxSegmentBytes == 0 mean this connection imposes
+//     no additional limit; names.maxPathBytes is the real bound. 0 is neither "unknown"
+//     nor "unlimited storage": the configured content root and the storage budget still
+//     bound what a write can create.
 func (s *Server) handleFilesCapabilities(w http.ResponseWriter, r *http.Request, f *fileRequest) error {
 	q, err := s.filesReadSelectorQuery(r, f, false)
 	if err != nil {
