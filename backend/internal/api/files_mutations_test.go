@@ -110,6 +110,30 @@ func TestFilesMutationProblemsAndPUTUnknownLocation(t *testing.T) {
 	}
 }
 
+// A nonempty folder refused without recursion used to answer with its own code as prose,
+// which reads as "this API cannot delete folders": a caller answered it by deleting 3,878
+// files one request at a time instead of repeating one DELETE. The refusal is a guard, so
+// it has to name the flag that means it — from every route that can produce it, including
+// a storage driver that spells the refusal "not_empty" rather than "directory_not_empty".
+func TestDirectoryNotEmptyNamesTheRecursiveRemedy(t *testing.T) {
+	for _, err := range []error{
+		fileops.E("directory_not_empty", nil),
+		&fileops.Error{Code: "not_empty"},
+		storage.NewError("not_empty", "/Photos/2024", nil),
+	} {
+		var p *fc.Problem
+		if !errors.As(filesMutationProblem(err), &p) || p.Status != 409 || p.Code != "directory_not_empty" {
+			t.Fatalf("mapping %v: %+v", err, p)
+		}
+		if !strings.Contains(p.Detail, "recursive=true") {
+			t.Fatalf("detail %q does not name the remedy", p.Detail)
+		}
+		if strings.Contains(p.Detail, "could not complete") {
+			t.Fatalf("detail %q is still the bare code", p.Detail)
+		}
+	}
+}
+
 func TestFilesGuardConflictPreservesOperationID(t *testing.T) {
 	err := filesMutationProblem(&fileops.Error{Code: "operation_in_progress", OperationID: "guard-operation", OperationKind: "upload_commit"})
 	var p *fc.Problem

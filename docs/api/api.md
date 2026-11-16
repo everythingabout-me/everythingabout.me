@@ -363,6 +363,9 @@ quota charges the new sizes. No application-only content sharing replaces the de
 
 DELETE optionally accepts `If-Revision: nr_...` to guard the selected file or folder; recursive deletion additionally
 serializes against subtree mutations. Without it deletion explicitly applies to the current accessible subtree.
+A folder that still has entries is refused with `409 directory_not_empty` and nothing is removed; the same
+DELETE with `recursive=true` deletes the folder and its accepted subtree in one operation. The service never
+recurses because a folder was named — the flag is the caller's decision, which is why the refusal names it.
 No trash or restore API. Success requires actual native deletion plus index settlement; removing only index
 rows is not deletion. An accepted deletion is final for the user at once: every listing, metadata read and
 ID lookup conceals the path and its captured subtree while the native purge runs, and only a terminal

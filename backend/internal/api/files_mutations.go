@@ -24,6 +24,15 @@ import (
 	"everythingabout.me/backend/internal/storage"
 )
 
+// directoryNotEmptyDetail answers the question a nonrecursive refusal raises: whether this
+// API can delete a folder at all. It can — the flag is the user's decision, not a limit —
+// but a detail that only repeated the code ("The file operation could not complete:
+// directory_not_empty.") read as "folders are undeletable", and one caller answered it by
+// deleting 3,878 files one request at a time instead of repeating a single DELETE that the
+// service accepts immediately. The service must never recurse on its own, so this refusal
+// is the only place the explicit form can be named.
+const directoryNotEmptyDetail = "The folder still has entries. Add recursive=true to the query to delete the folder and everything under it; without that flag the service never deletes content the request did not name."
+
 func filesMutationProblem(err error) error {
 	var p *fc.Problem
 	if errors.As(err, &p) {
@@ -78,10 +87,14 @@ func filesMutationProblem(err error) error {
 			code = "unsupported_option"
 		case "baseline_required", "root_conflict", "lease_lost", "recovery_required", "outcome_unknown":
 			status = 503
-		case "not_empty":
+		case "not_empty", "directory_not_empty":
+			status = 409
 			code = "directory_not_empty"
 		}
 		problem := fc.NewProblem(status, code, "The file operation could not complete: "+code+".")
+		if code == "directory_not_empty" {
+			problem.Detail = directoryNotEmptyDetail
+		}
 		if code == "upload_incomplete" {
 			// The cause is computed locally from the provider's part listing — numbers and
 			// lengths, never a response body — so it is the one fact that tells a client
@@ -124,7 +137,7 @@ func filesMutationProblem(err error) error {
 		case "parent_missing":
 			return fc.NewProblem(409, "parent_missing", "The destination parent does not exist.")
 		case "not_empty":
-			return fc.NewProblem(409, "directory_not_empty", "The directory is not empty.")
+			return fc.NewProblem(409, "directory_not_empty", directoryNotEmptyDetail)
 		case "changed":
 			return fc.NewProblem(412, "target_changed", "The captured native path changed.")
 		case "name_conflict":

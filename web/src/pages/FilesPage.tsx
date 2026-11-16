@@ -1123,8 +1123,10 @@ export function FilesPage() {
 
   /**
    * Runs the delete and reports it where the deleted item is marked on screen, never in the
-   * dialog that is already closed. A recursive delete can take a minute to be *accepted* (the server
-   * enumerates the subtree twice before it freezes the manifest), so every failure ends in
+   * dialog that is already closed. Acceptance is one transaction: the index settles the
+   * subtree and answers, while the native purge continues behind it — so a folder of
+   * thousands of files costs the same request as an empty one. A delete blocked by an
+   * unfinished upload or operation is the only retryable refusal, and every failure ends in
    * an actionable toast instead of a thrown error nobody can answer.
    */
   const applyDelete = async (target: Item) => {
