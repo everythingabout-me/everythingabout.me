@@ -510,7 +510,7 @@ Every backend maintenance script lives in one binary (`make` is just a shortcut)
 ```bash
 cd backend && go run ./cmd/eam --help          # or ./bin/eam --help
 go run ./cmd/eam migrate                       # create / upgrade tables
-go run ./cmd/eam doctor [--write]              # self-check (`--write` writes a probe object, then deletes it)
+go run ./cmd/eam doctor [--write] [--max-operation-age 30m]  # self-check; --write probes COS, --max-operation-age fails when the oldest nonterminal operation is older
 go run ./cmd/eam reconcile --owner … [--inventory …] [--dry-run]
 go run ./cmd/eam storage-resolve-upload --operation-id … [--dry-run]  # operator fallback: release a discarded upload whose abort answer was lost
 go run ./cmd/eam storage-ledger-prune --owner-id UUID [--dry-run]  # reclaim expired settled intent records; non-terminal records stay

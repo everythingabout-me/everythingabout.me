@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -12,6 +13,7 @@ import (
 	"everythingabout.me/backend/internal/config"
 	"everythingabout.me/backend/internal/connections"
 	"everythingabout.me/backend/internal/cos"
+	"everythingabout.me/backend/internal/fileops"
 	"everythingabout.me/backend/internal/storage"
 	"everythingabout.me/backend/internal/storagebackend"
 	"everythingabout.me/backend/internal/store"
@@ -43,6 +45,7 @@ func runDoctor(args []string) error {
 	flags := flag.NewFlagSet("doctor", flag.ContinueOnError)
 	writeTest := flags.Bool("write", false, "also test legacy COS write + delete")
 	ownerID := flags.String("owner-id", "", "owner UUID for native tree checks on local/S3 backends")
+	maxOperationAge := flags.Duration("max-operation-age", 0, "fail when the oldest nonterminal operation is older than this; 0 reports only")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
@@ -74,6 +77,9 @@ func runDoctor(args []string) error {
 		defer db.Close()
 		checkDatabase(ctx, db, checks)
 	}
+
+	fmt.Println("\nfile operations")
+	checkOperationQueue(ctx, db, checks, *maxOperationAge)
 
 	fmt.Println("\nemail")
 	if cfg.SESConfigured() {
@@ -269,6 +275,66 @@ func checkDatabase(ctx context.Context, db *store.DB, checks *doctor) {
 	if unowned > 0 {
 		checks.warn(fmt.Sprintf("%d legacy files have no owner; run: eam claim --email you@example.com", unowned))
 	}
+}
+
+// checkOperationQueue reports the nonterminal operation queue: how many operations
+// are waiting, the oldest one, and how many carry a cancel request. It exists because
+// a stalled queue is silent — during a 23k-file import 129 operations sat queued for
+// about an hour, and the operator learned it only by querying the database. The queue
+// itself is a warning-free fact at any age; --max-operation-age is the operator's
+// policy for when that fact should fail the check, so an external monitor can alert on
+// a non-zero exit without doctor inventing a budget.
+func checkOperationQueue(ctx context.Context, db *store.DB, checks *doctor, maxAge time.Duration) {
+	if db == nil {
+		checks.warn("operation queue not inspected: database unavailable")
+		return
+	}
+	queue, err := fileops.NewPostgres(db.Pool()).OperationQueue(ctx)
+	if errors.Is(err, fileops.ErrOperationQueueUnavailable) {
+		checks.warn(err.Error())
+		return
+	}
+	if err != nil {
+		checks.bad("read operation queue", err, "run `eam migrate` first")
+		return
+	}
+	for _, line := range operationQueueLines(queue) {
+		fmt.Println(line)
+	}
+	if err := operationQueueStalled(queue, maxAge); err != nil {
+		checks.bad("operation queue stalled", err, "inspect the operation log / queue; do not auto-restart")
+	}
+}
+
+// operationQueueLines renders one queue snapshot into the section's body. It is pure so
+// the formatting is testable without a database or a captured stdout.
+func operationQueueLines(q fileops.OperationQueue) []string {
+	lines := []string{fmt.Sprintf("  nonterminal       %d (queued %d, running %d, outcome_unknown %d)", q.Total(), q.Queued, q.Running, q.OutcomeUnknown)}
+	if q.Oldest == nil {
+		lines = append(lines, "  oldest            none")
+	} else {
+		lines = append(lines, fmt.Sprintf("  oldest            %s  %s  owner %s  created %s",
+			formatOperationAge(q.Oldest.Age), q.Oldest.State, q.Oldest.OwnerID, q.Oldest.CreatedAt.UTC().Format(time.RFC3339)))
+	}
+	return append(lines, fmt.Sprintf("  cancel requested  %d", q.CancelRequested))
+}
+
+// operationQueueStalled is the policy, not a fixed budget: a threshold of zero means
+// the operator asked for a report only, and any positive threshold fails when the
+// oldest nonterminal operation is older than it. The error names the queue length and
+// the age so a log line measured in hours says which of the two crossed the line.
+func operationQueueStalled(q fileops.OperationQueue, maxAge time.Duration) error {
+	if maxAge <= 0 || q.Oldest == nil || q.Oldest.Age <= maxAge {
+		return nil
+	}
+	return fmt.Errorf("%d nonterminal, oldest %s", q.Total(), formatOperationAge(q.Oldest.Age))
+}
+
+func formatOperationAge(age time.Duration) string {
+	if age < 0 {
+		age = 0
+	}
+	return age.Round(time.Second).String()
 }
 
 func checkCOS(ctx context.Context, cfg *config.Config, checks *doctor, writeTest bool) {
