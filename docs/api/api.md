@@ -1044,7 +1044,9 @@ immediately. Otherwise, after six claims with no progress, a multipart session s
 `admitted`/`receiving`/`staged_ready` ends `failed` (its parts stay unpublished until the server completes
 them), while a session that reached `effect_started`/`native_applied`, or a `direct` session whose client PUT
 may already have published, ends `unresolved`. No sweep, time window or scoped reconcile is added: the
-provider/session lifecycle and the existing full `eam reconcile` remain the backstops.
+provider/session lifecycle and the existing full `eam reconcile` remain the backstops. A recorded cancel is
+honoured earlier: a pre-effect multipart session ends `cancelled` as soon as no live worker owns it, while a
+cancel after the effect can only end `unresolved` (see Cancel below).
 
 Operation/session visibility uses owner, creator principal and captured authorization anchors. Before creation,
 the anchor is the destination parent, not the nonexistent output file or folder. While source/destination files or folders still exist,
@@ -1057,10 +1059,14 @@ accepted unfinished actions return `202 + Operation + Location` with Retry-After
 acceptance; no header promises completion before timeout. Streaming PUT only returns after commit and does
 not detach the caller's unfinished request body into a background operation.
 
-Cancel stops further safe steps, not already completed native effects. Before final publication starts,
-a winning upload cancellation sets session aborted and operation cancelled. After the native effect starts,
-resolve its real outcome; committed returns `409 already_committed`, unresolved remains outcome_unknown.
-Repeat commit on a definitely aborted session returns `410 upload_aborted`.
+Cancel stops further safe steps, not already completed native effects, and is recorded immediately. Before
+final publication starts, a winning upload cancellation sets the session aborted and the operation
+`cancelled`. After the native effect starts, the service resolves the real outcome: committed returns
+`409 already_committed`; a publication it cannot prove ends `unresolved` after the bounded no-progress claims,
+never a false `cancelled`. A pre-effect multipart commit that is failing for another reason but carries a
+cancel ends `cancelled` as soon as no live worker owns it. A worker that still holds its lease is not
+force-failed; the log/restart is the escape for a blocked syscall. Repeat commit on a definitely aborted
+session returns `410 upload_aborted`.
 A running commit must seal/migrate its native data before its provider retention deadline, retain a replayable
 spool, or fail explicitly if the provider expires it; removing the public idle timer does not extend native
 retention. Advertised resume durability covers the admitted open-session interval, not unlimited native life.

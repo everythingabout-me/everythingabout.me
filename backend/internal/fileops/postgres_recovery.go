@@ -32,7 +32,7 @@ func (p *Postgres) RetireStalled(ctx context.Context, root Root, actor Actor, id
 	if !validID(id) {
 		return out, E("not_found", nil)
 	}
-	if state != Failed && state != Unresolved {
+	if state != Failed && state != Unresolved && state != Cancelled {
 		return out, E("invalid_request", nil)
 	}
 	if len(problem) > 0 {

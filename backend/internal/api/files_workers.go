@@ -549,7 +549,7 @@ func (s *Server) retireUploadAfterAttempt(ctx context.Context, root fileops.Root
 		// it must not schedule a retry record for an id the pending scan will not select.
 		return uploadRetirement{operation: latest, handled: true}
 	}
-	state, ok := stalledUploadState(latest.Phase, mode, latest.Lease.Epoch, attemptErr)
+	state, ok := stalledUploadState(latest.Phase, mode, latest.Lease.Epoch, latest.CancelRequested, attemptErr)
 	if !ok {
 		return uploadRetirement{}
 	}
@@ -601,9 +601,14 @@ const uploadRetirementClaims = 6
 // The permanent-error branch does not need six claims: retrying a permission denial, a
 // root mismatch or a quota refusal can never succeed, and making the client wait through
 // the backoff would only delay the same answer.
-func stalledUploadState(phase fileops.Phase, mode string, epoch int64, attemptErr error) (fileops.State, bool) {
+func stalledUploadState(phase fileops.Phase, mode string, epoch int64, cancelRequested bool, attemptErr error) (fileops.State, bool) {
 	preEffect := phase == fileops.Admitted || phase == fileops.Receiving || phase == fileops.StagedReady
 	direct := mode == fileops.UploadModeDirect
+	// A cancel asked for before any effect can be honoured at once: nothing was published,
+	// so Cancelled is true and there is nothing for a later claim to discover.
+	if preEffect && !direct && cancelRequested {
+		return fileops.Cancelled, true
+	}
 	if preEffect && !direct && permanentUploadError(attemptErr) {
 		return fileops.Failed, true
 	}
@@ -616,7 +621,9 @@ func stalledUploadState(phase fileops.Phase, mode string, epoch int64, attemptEr
 	}
 	// The effect may already have landed (effect_started/native_applied, or a direct
 	// session whose client PUT may have published). Unknown is a live state a worker still
-	// resolves; Unresolved is the terminal statement that the service stopped trying.
+	// resolves; Unresolved is the terminal statement that the service stopped trying. A
+	// cancel here cannot be reported as Cancelled: the service does not know that the
+	// publication did not land.
 	return fileops.Unresolved, true
 }
 
@@ -643,6 +650,9 @@ func permanentUploadError(err error) bool {
 
 // stalledUploadProblem is the stored reason a retirement leaves on the operation.
 func stalledUploadProblem(state fileops.State, attemptErr error) json.RawMessage {
+	if state == fileops.Cancelled {
+		return json.RawMessage(`{"code":"upload_aborted","detail":"The upload was cancelled before it published. Start a new upload if you still want the file."}`)
+	}
 	if state == fileops.Unresolved {
 		return json.RawMessage(`{"code":"outcome_unknown","detail":"The upload stopped before the service could prove whether it published. Start a new upload with a new Idempotency-Key; if the destination exists, the create returns 409 and the overwrite condition replaces it."}`)
 	}
