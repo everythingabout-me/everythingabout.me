@@ -68,9 +68,13 @@ func (s *Server) filesBeginPlannedUpload(ctx context.Context, native fileops.Nat
 		}
 		parts = append(parts, payload)
 	}
+	// `parts` is a window, not the whole session: a 537 MB file is 33 parts but its
+	// first response carries 32 grants. Say so in the payload, because a client that
+	// reads `parts` as complete uploads a partial file and only learns it at commit.
 	return map[string]any{
 		"kind": storage.TransferPresignedParts, "parts": parts,
 		"signUrl": fc.Base + "/uploads/" + u.ID + "/parts/sign", "expiresAt": plan.ExpiresAt.UTC(),
+		"grantedParts": len(parts), "partsComplete": len(parts) == u.PartCount,
 	}, nil
 }
 
@@ -170,16 +174,19 @@ func (s *Server) filesPlannedParts(ctx context.Context, native fileops.NativeAct
 	return parts, nil
 }
 
-func filesPlannedCoverage(intent storage.WriteIntent, parts []storage.NativeUploadPart) error {
-	count := int((intent.Size + filesUploadPartSize - 1) / filesUploadPartSize)
+// filesPlannedCoverage verifies that the provider holds exactly the parts the session's
+// geometry requires. partSize comes from the session rather than the package constant so
+// the count and the expected lengths keep matching if a connection's geometry changes.
+func filesPlannedCoverage(intent storage.WriteIntent, partSize int64, parts []storage.NativeUploadPart) error {
+	count := int((intent.Size + partSize - 1) / partSize)
 	if len(parts) != count {
 		return fileops.E("upload_incomplete", fmt.Errorf("a %d-byte object needs %d parts, the provider listed %d", intent.Size, count, len(parts)))
 	}
 	for index, part := range parts {
 		number := index + 1
-		expected := filesUploadPartSize
+		expected := partSize
 		if number == count {
-			expected = intent.Size - int64(number-1)*filesUploadPartSize
+			expected = intent.Size - int64(number-1)*partSize
 		}
 		if part.Number != number || part.Size != expected {
 			return fileops.E("upload_incomplete", fmt.Errorf("part %d is %d bytes at number %d, expected %d bytes at number %d", index+1, part.Size, part.Number, expected, number))

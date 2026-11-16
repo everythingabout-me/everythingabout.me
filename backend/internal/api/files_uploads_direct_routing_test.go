@@ -21,6 +21,7 @@ import (
 type directRoutingDriver struct {
 	fileops.NativeActions
 	storage.PlannedUploadWriter
+	storage.NumberedUploadWriter
 	factory     *directRoutingFactory
 	beginDirect int
 	planned     int
@@ -64,11 +65,30 @@ func (d *directRoutingDriver) BeginDirectPut(_ context.Context, in storage.Write
 	}, nil
 }
 
+func (d *directRoutingDriver) ListUploadParts(ctx context.Context, in storage.WriteIntent, after, limit int, metadata storage.UploadMetadata) ([]storage.NativeUploadPart, bool, error) {
+	d.factory.mu.Lock()
+	listed := d.factory.listed
+	d.factory.mu.Unlock()
+	if listed != nil {
+		// A test states what the provider holds; the fixture backend has no signed-part
+		// listing, and the refusal under test is decided from that listing.
+		return listed, false, nil
+	}
+	return d.PlannedUploadWriter.ListUploadParts(ctx, in, after, limit, metadata)
+}
+
 type directRoutingFactory struct {
 	mu             sync.Mutex
 	inner          OwnerStorageFactory
 	conditionalPut bool
+	listed         []storage.NativeUploadPart
 	drivers        []*directRoutingDriver
+}
+
+func (f *directRoutingFactory) setListed(parts []storage.NativeUploadPart) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.listed = parts
 }
 
 func (f *directRoutingFactory) Open(ctx context.Context, owner string) (storage.Driver, error) {
@@ -86,8 +106,13 @@ func (f *directRoutingFactory) Open(ctx context.Context, owner string) (storage.
 		driver.Close()
 		return nil, errors.New("fixture driver does not expose planned uploads")
 	}
+	numbered, ok := driver.(storage.NumberedUploadWriter)
+	if !ok {
+		driver.Close()
+		return nil, errors.New("fixture driver does not expose numbered uploads")
+	}
 	f.mu.Lock()
-	wrapped := &directRoutingDriver{NativeActions: native, PlannedUploadWriter: planned, factory: f}
+	wrapped := &directRoutingDriver{NativeActions: native, PlannedUploadWriter: planned, NumberedUploadWriter: numbered, factory: f}
 	f.drivers = append(f.drivers, wrapped)
 	f.mu.Unlock()
 	return wrapped, nil
@@ -214,5 +239,41 @@ func TestFilesUploadsDirectReplacementStopsWhenConditionalPutIsNoLongerAdmitted(
 	}
 	if direct, _ := factory.signed(); direct != 1 {
 		t.Fatal("a replacement grant was signed after its condition stopped being admitted")
+	}
+}
+
+// A commit that finds 32 of 33 provider parts must say which gap it found. The generic
+// "could not complete: upload_incomplete" was the whole answer a client got, so a client
+// holding a partial upload had no way to learn it was one part short of a 33-part file.
+func TestFilesUploadCommitNamesTheMissingParts(t *testing.T) {
+	f := newObjectsAPIFixture(t)
+	if _, err := f.db.Pool().Exec(f.ctx, `update file_budgets set logical_limit=$1,physical_limit=$2`, int64(1<<30), int64(3<<30)); err != nil {
+		t.Fatal(err)
+	}
+	f.cfg.Storage.TransferClass = storage.TransferPresignedParts
+	factory := &directRoutingFactory{inner: f.backend}
+	f.server.SetStorageFactory(factory)
+
+	const size = int64(537131743) // 33 parts of 16 MiB plus a 260831-byte final part.
+	body, _ := json.Marshal(map[string]any{"path": "/window-commit", "size": size, "mediaType": "application/octet-stream"})
+	resource := uploadsHTTPJSON(t, f.request(t, "POST", "/uploads", "", body, http.Header{"Idempotency-Key": {"window-commit"}}), 201)
+	if resource["partCount"] != float64(33) {
+		t.Fatalf("partCount = %v, want 33", resource["partCount"])
+	}
+	id := resource["id"].(string)
+	listing := make([]storage.NativeUploadPart, 32)
+	for index := range listing {
+		listing[index] = storage.NativeUploadPart{Number: index + 1, Size: filesUploadPartSize}
+	}
+	factory.setListed(listing)
+	response := f.request(t, "POST", "/uploads/"+id+"/commit", "", nil, nil)
+	uploadsHTTPProblem(t, response, 409, "upload_incomplete")
+	problem := uploadsHTTPJSON(t, response, 409)
+	detail, _ := problem["detail"].(string)
+	if !strings.Contains(detail, "needs 33 parts") || !strings.Contains(detail, "listed 32") {
+		t.Fatalf("detail does not name the gap: %q", detail)
+	}
+	if response.Header().Get("Content-Type") != "application/problem+json" {
+		t.Fatalf("commit refusal content type = %q", response.Header().Get("Content-Type"))
 	}
 }

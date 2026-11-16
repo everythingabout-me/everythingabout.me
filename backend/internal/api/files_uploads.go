@@ -743,7 +743,8 @@ func (s *Server) filesDirectPutTransport(ctx context.Context, native fileops.Nat
 		if err != nil {
 			return nil, err
 		}
-		return map[string]any{"kind": storage.TransferPresignedParts, "parts": []any{payload}, "expiresAt": grant.ExpiresAt.UTC()}, nil
+		return map[string]any{"kind": storage.TransferPresignedParts, "parts": []any{payload}, "expiresAt": grant.ExpiresAt.UTC(),
+			"grantedParts": 1, "partsComplete": true}, nil
 	}
 	writer, ok := native.(storage.DirectPutWriter)
 	if !ok {
@@ -765,7 +766,8 @@ func (s *Server) filesDirectPutTransport(ctx context.Context, native fileops.Nat
 	if err != nil {
 		return nil, err
 	}
-	return map[string]any{"kind": storage.TransferPresignedParts, "parts": []any{payload}, "expiresAt": grant.ExpiresAt.UTC()}, nil
+	return map[string]any{"kind": storage.TransferPresignedParts, "parts": []any{payload}, "expiresAt": grant.ExpiresAt.UTC(),
+		"grantedParts": 1, "partsComplete": true}, nil
 }
 
 // runDirectUploadOperation settles a session whose bytes the client already PUT at the
@@ -1104,7 +1106,7 @@ func (s *Server) handleFilesCommitUpload(w http.ResponseWriter, r *http.Request,
 		if intentErr != nil {
 			return intentErr
 		}
-		if coverageErr := filesPlannedCoverage(intent, parts); coverageErr != nil {
+		if coverageErr := filesPlannedCoverage(intent, u.PartSize, parts); coverageErr != nil {
 			return filesMutationProblem(coverageErr)
 		}
 	}

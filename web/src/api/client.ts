@@ -337,6 +337,10 @@ export type FileUploadTransport =
     parts: FileUploadPartGrant[];
     /** Present for a multipart window; a direct publication has one grant and nothing to sign. */
     signUrl?: string;
+    /** How many grants `parts` carries; it is a window, not the whole session. */
+    grantedParts?: number;
+    /** False: more parts must be granted before commit. True: this is all there is to send. */
+    partsComplete?: boolean;
     expiresAt: string;
   }
   | { kind: "resumable-session"; url: string; chunkSize: number; credential?: { scheme: "bearer"; value: string; expiresAt: string } }

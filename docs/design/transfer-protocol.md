@@ -109,9 +109,22 @@ signed part URLs; further windows and renewals come from one batch endpoint:
   "parts": [
     { "number": 1, "size": 16777216, "url": "https://...", "expiresAt": "2026-11-05T05:00:00Z" }
   ],
-  "signUrl": "/api/files/uploads/u_.../parts/sign"
+  "signUrl": "/api/files/uploads/u_.../parts/sign",
+  "grantedParts": 32,
+  "partsComplete": false
 }
 ```
+
+`parts` is the first window, not the whole session, and the payload says so explicitly: `grantedParts` is
+how many grants the window carries and `partsComplete` is whether it already covers every part. With
+`partsComplete:false` the client must sign any part it is about to send that has no valid grant, and must
+ensure the final part is granted before commit; it does not ask for every remaining number at once, it keeps
+the pacing below. `partsComplete:true` means there is nothing else to send. A zero-byte session is `0/true`
+and a direct publication is `1/true`.
+
+The window is not a rate limit. A create page admits up to 32 sessions, so a whole-file grant list for a
+10,000-part upload would be megabytes per create response and would make one admission page expensive; the
+window is sized to keep a client busy while keeping the response bounded.
 
 ```http
 POST B/uploads/u_.../parts/sign

@@ -82,6 +82,16 @@ func filesMutationProblem(err error) error {
 			code = "directory_not_empty"
 		}
 		problem := fc.NewProblem(status, code, "The file operation could not complete: "+code+".")
+		if code == "upload_incomplete" {
+			// The cause is computed locally from the provider's part listing — numbers and
+			// lengths, never a response body — so it is the one fact that tells a client
+			// which part to send. "Could not complete: upload_incomplete" named nothing and
+			// left a 33-part upload retrying the same 32 parts.
+			problem.Detail = "The upload session is missing parts; send the remaining parts and commit again."
+			if e.Cause != nil {
+				problem.Detail = "The upload session is missing parts: " + e.Cause.Error() + "."
+			}
+		}
 		if code == "operation_in_progress" {
 			// The blocking operation is part of the cause: the client can wait for that exact
 			// Operation or cancel it, while a bare code leaves nothing to act on.

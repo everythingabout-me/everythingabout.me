@@ -721,14 +721,26 @@ Example response (numbers are illustrative, not universal defaults):
   "transport":{
     "kind":"presigned-parts",
     "parts":[{"number":1,"size":16777216,"url":"https://...","expiresAt":"2026-11-05T05:00:00Z"}],
-    "signUrl":"/api/files/uploads/u_.../parts/sign"
+    "signUrl":"/api/files/uploads/u_.../parts/sign",
+    "grantedParts":32,
+    "partsComplete":false
   }
 }
 ```
 
+The `parts` array above is abbreviated for readability; in a real response its length equals `grantedParts`,
+which is 32 for this 1,087-part session's first window.
+
 A class A session also carries a top-level `signUrl` beside `transport.signUrl`. A direct publication's
 transport carries the single already-signed grant and therefore no `signUrl`, because there is nothing left
 to sign.
+
+`transport.parts` is the first window of class A grants, not the whole session, and the payload says so:
+`grantedParts` is how many grants the window carries and `partsComplete` is whether it already covers every
+part. With `partsComplete:false` the client must sign any part it is about to send that has no valid grant,
+and must ensure the final part is granted before commit; it keeps the pacing described under Class A below.
+`partsComplete:true` means there is nothing else to send. A zero-byte session is `0/true`, and a direct
+publication is `1/true` because its grant already publishes the destination.
 
 `transport` is opaque to every component except the client's transfer executor and is the only field that
 differs between classes. Part numbers start at 1; offset is `(number-1)*partSize`; all but the final part have
@@ -747,15 +759,23 @@ session/source state or performing authorized recovery. This does not restore th
 {"kind":"relay","url":"/api/files/uploads/u_.../parts"}
 ```
 
-**Class A.** `parts` is the first window of signed URLs. Each URL binds PUT, object key, native upload, part
+**Class A.** `parts` is the first window of signed URLs. `grantedParts` is how many grants that window
+carries, and `partsComplete` says whether it already covers every part: when it is `false` the client must
+sign any part it is about to send that has no valid grant, and must ensure the final part is granted before
+commit — not ask for every remaining number at once. It keeps the pacing below: request the next window with
+`POST B/uploads/{id}/parts/sign {"numbers":[...]}` when fewer than a quarter of the unsent URLs remain, and
+re-sign any URL that expired or returned 403; a re-signed number keeps its bound length. When
+`partsComplete` is `true` there is nothing else to send; a zero-byte session is `0/true`, and a direct
+publication is `1/true`. The window is not a rate limit: a create page admits up to 32 sessions, so a
+whole-file grant list for a 10,000-part upload would be megabytes per create response and would make one
+admission page expensive; the window is sized to keep a client busy while keeping the response bounded.
+Each URL binds PUT, object key, native upload, part
 number and exact length, and no content digest. A one-part session on a connection that admits direct
 publication instead carries a single grant for the **destination itself**: `method` is `PUT` with the
 conditional `headers` it was signed for (create or replace), or `POST` with `fields` and `fileField` — a
 conditional form upload whose whole body is signed, answered `201` on success and `409` with the usual
 `name_conflict` when the destination already exists. A form grant carries no request headers and cannot
-express a replacement. Request more with
-`POST B/uploads/{id}/parts/sign {"numbers":[...]}` when fewer than a quarter of unsent URLs remain, and re-sign
-any part whose URL expired or returned 403; a re-signed number keeps its bound length. A client may add an
+express a replacement. A client may add an
 unsigned `Content-MD5` header as a transmission check. Until commit a part URL's holder can rewrite that part;
 this is accepted. The response is `{"parts":[{"number","size","method","url","headers","expiresAt"}],"expiresAt"}`;
 re-signing a number keeps its bound length.
@@ -881,6 +901,10 @@ visible and a replace has already overwritten the old content before the server 
 | A (direct) | The client PUT a single conditional object at the destination, so the commit only observes it: it takes the path guard, requires the destination to be a file of the session's exact length, records the revision it actually finds as the content generation and settles index/quota. It does **not** compare that revision with the one the session bound — the client's own write already happened — so the commit prevents index divergence, not overwriting. A create signed this way is refused as `name_conflict` (`412` from the provider) when the name exists |
 | B | Verifies the provider holds the full length, then completes the provider session itself (OneDrive deferred commit, Box session commit, Dropbox `upload_session/finish`; Google Drive completes on the final chunk), then settles |
 | C | Verifies coverage from durable receipts and publishes |
+
+An `upload_commit` Operation keeps `progress.completed` at `0` until its settlement, because `progress.unit`
+is `bytes` — bytes the publication settles, not parts already accepted — so a poller must not read the zero
+as a stall.
 
 Commit answers with the publication instead of a token whenever the settlement fits in the request: `200` with
 the file resource, exactly like the other mutations above. `202 + Operation` remains for the cases where the

@@ -134,6 +134,32 @@ func TestPlannedUploadRejectsIncompleteProviderListing(t *testing.T) {
 	}
 }
 
+// The open response is a window, not the session: a 33-part file is answered with 32
+// grants, and the final part's grant binds the remainder rather than a full part.
+func TestPlannedUploadFirstWindowIsExplicitlyPartial(t *testing.T) {
+	d, _, metadata := signedFixture(t)
+	ctx := context.Background()
+	const size = int64(537131743) // 33 parts of 16 MiB plus a 260831-byte final part.
+	in := nativeIntent(t, d, "window", size)
+	expires := time.Now().Add(10 * time.Minute)
+	plan, err := d.BeginPlannedUpload(ctx, in, metadata, expires)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plan.Parts) != 32 {
+		t.Fatalf("first window carries %d grants, want 32", len(plan.Parts))
+	}
+	for index, grant := range plan.Parts {
+		if grant.Number != index+1 || grant.Size != nativePartSize {
+			t.Fatalf("window grant %d = %+v", index, grant)
+		}
+	}
+	grants, err := d.SignUploadParts(ctx, in, []int{33}, metadata, expires)
+	if err != nil || len(grants) != 1 || grants[0].Size != 260831 {
+		t.Fatalf("final part grant = %+v, %v", grants, err)
+	}
+}
+
 func TestPlannedUploadRenewalKeepsBoundLengths(t *testing.T) {
 	d, b, metadata := signedFixture(t)
 	ctx := context.Background()
