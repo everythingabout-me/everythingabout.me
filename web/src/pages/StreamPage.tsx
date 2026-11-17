@@ -9,6 +9,7 @@ import {
   type TimelineEvent,
   type StreamStatus,
 } from "../api/client";
+import { decodeHeicUrl, tileEdge } from "../components/preview/heicDecode";
 import { htmlCardPolicy } from "../components/preview/htmlCardPolicy";
 import { AppHeader } from "../components/AppHeader";
 import { RefreshIcon } from "../components/icons";
@@ -344,29 +345,60 @@ function Media({ media }: { media: EventMedia[] }) {
   );
 }
 
+/** Formats a browser decodes itself; everything else needs a decoder of our own. */
+const rasterMime = /^image\/(jpeg|png|gif|webp|avif|bmp|x-icon|vnd\.microsoft\.icon)$/;
+const heifMime = /^image\/(heic|heif)$/;
+
 function Thumb({ media }: { media: EventMedia }) {
   const [failed, setFailed] = useState(false);
   const [url, setURL] = useState<string | null>(null);
+  const [node, setNode] = useState<HTMLElement | null>(null);
+  // Nothing is fetched or decoded until the tile is about to be seen: a photo card can hold four
+  // HEIC tiles, each one a multi-megabyte download and a full-resolution libheif decode, and the
+  // stream renders many cards at once.
+  const [nearViewport, setNearViewport] = useState(false);
+  useEffect(() => {
+    if (!node || nearViewport) return;
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (entries.some((entry) => entry.isIntersecting)) setNearViewport(true);
+      },
+      { rootMargin: "200px" },
+    );
+    observer.observe(node);
+    return () => observer.disconnect();
+  }, [node, nearViewport]);
   useEffect(() => {
     setFailed(false);
     setURL(null);
-    if (!media.path || media.video) return;
+    if (!media.path || media.video || !nearViewport) return;
     const controller = new AbortController();
     let created: string | null = null;
     void api.metadata(media.path, controller.signal).then(async (file) => {
       if (controller.signal.aborted) return;
       const mime = file.mediaType?.split(";", 1)[0].trim().toLowerCase();
-      if (file.kind === "file" && mime && /^image\/(jpeg|png|gif|webp|avif|bmp|x-icon|vnd\.microsoft\.icon)$/.test(mime)) {
-        const url = await api.downloadURL(file.path, "inline", controller.signal);
-        created = url;
-        if (!controller.signal.aborted) setURL(url);
+      if (file.kind !== "file" || !mime) return;
+      if (!rasterMime.test(mime) && !heifMime.test(mime)) return;
+      const source = await api.downloadURL(file.path, "inline", controller.signal);
+      if (controller.signal.aborted) return;
+      if (heifMime.test(mime)) {
+        const thumb = await decodeHeicUrl(source, tileEdge, controller.signal);
+        if (controller.signal.aborted) {
+          URL.revokeObjectURL(thumb);
+          return;
+        }
+        created = thumb;
+        setURL(thumb);
+        return;
       }
+      created = source;
+      setURL(source);
     }).catch(() => { if (!controller.signal.aborted) setFailed(true); });
     return () => {
       controller.abort();
       if (created?.startsWith("blob:")) URL.revokeObjectURL(created);
     };
-  }, [media.path, media.video]);
+  }, [media.path, media.video, nearViewport]);
 
   if (media.video) {
     return (
@@ -375,9 +407,10 @@ function Thumb({ media }: { media: EventMedia }) {
       </div>
     );
   }
-  if (failed || !url) return <div className={`${styles.tile} ${styles.tileFallback}`} aria-hidden="true" />;
+  if (failed || !url) return <div ref={setNode} className={`${styles.tile} ${styles.tileFallback}`} aria-hidden="true" />;
   return (
     <img
+      ref={setNode}
       className={styles.tile}
       src={url}
       alt={media.name ?? ""}

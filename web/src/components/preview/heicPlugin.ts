@@ -1,6 +1,7 @@
 import type { PreviewCommand, PreviewContext, PreviewPlugin } from "@open-file-viewer/core";
 import { t } from "../../i18n";
-import { isHeicFile, scaledSize } from "./heicFormat";
+import { decodeHeic, previewEdge } from "./heicDecode";
+import { isHeicFile } from "./heicFormat";
 
 /**
  * Previews HEIC/HEIF photos by decoding them ourselves.
@@ -25,7 +26,7 @@ export function heicPlugin(): PreviewPlugin {
     async render(ctx: PreviewContext) {
       ctx.setLoading(true);
       try {
-        const decoded = await decodeToJpeg(await readBytes(ctx));
+        const decoded = await decodeHeic(await readBytes(ctx), previewEdge);
         const url = URL.createObjectURL(decoded.blob);
         return showImage(ctx, url, decoded.width, decoded.height);
       } catch (error) {
@@ -54,56 +55,6 @@ async function readSource(ctx: PreviewContext): Promise<Blob> {
   }
   if (source instanceof Blob) return source;
   return new Blob([source], { type: "image/heic" });
-}
-
-/** The slice of the libheif-js API this plugin uses. */
-interface HeifImage {
-  get_width(): number;
-  get_height(): number;
-  display(data: ImageData, done: (ok: boolean) => void): void;
-}
-
-interface HeifDecoder {
-  HeifDecoder: new () => { decode(bytes: Uint8Array): HeifImage[] };
-}
-
-interface DecodedPhoto {
-  blob: Blob;
-  width: number;
-  height: number;
-}
-
-/**
- * HEIC bytes -> a JPEG small enough to display.
- *
- * libheif hands back full-resolution RGBA, so a 12 MP photo holds a ~98 MB ImageData for the
- * duration of the call. The copy drawn to the viewer's canvas is the scaled one, so the memory
- * the preview keeps afterwards is the display size rather than the capture size.
- */
-async function decodeToJpeg(bytes: ArrayBuffer): Promise<DecodedPhoto> {
-  const module = await import("libheif-js/libheif-wasm/libheif-bundle.mjs");
-  // The ESM entry exports the Emscripten factory; the wasm binary is inlined in the bundle, so
-  // there is no separate asset to serve.
-  const libheif = (await (module.default as () => Promise<HeifDecoder>)()) as HeifDecoder;
-  const image = new libheif.HeifDecoder().decode(new Uint8Array(bytes))[0];
-  if (!image) throw new Error("HEIC preview failed: libheif decoded no image");
-
-  const width = image.get_width();
-  const height = image.get_height();
-  const source = new OffscreenCanvas(width, height).getContext("2d");
-  if (!source) throw new Error("HEIC preview failed: no 2D context");
-  const frame = source.createImageData(width, height);
-  await new Promise<void>((resolve, reject) => {
-    image.display(frame, (ok) => (ok ? resolve() : reject(new Error("HEIC preview failed: libheif refused to display"))));
-  });
-  source.putImageData(frame, 0, 0);
-
-  const scaled = scaledSize(width, height);
-  const target = new OffscreenCanvas(scaled.width, scaled.height);
-  const context = target.getContext("2d");
-  if (!context) throw new Error("HEIC preview failed: no 2D context");
-  context.drawImage(source.canvas, 0, 0, scaled.width, scaled.height);
-  return { blob: await target.convertToBlob({ type: "image/jpeg", quality: 0.86 }), ...scaled };
 }
 
 /** The decoded photo, with the zoom and rotate commands the viewer's other image preview offers. */
