@@ -14,6 +14,7 @@ import pdfWorkerSrc from "pdfjs-dist/build/pdf.worker.mjs?url";
 import { api, isNativeAbsent } from "../../api/client";
 import { locale, t } from "../../i18n";
 import { StorageNotice } from "../StorageNotice";
+import { heicPlugin } from "./heicPlugin";
 import { htmlPlugin } from "./htmlPlugin";
 import styles from "./FilePreview.module.css";
 
@@ -26,11 +27,14 @@ import styles from "./FilePreview.module.css";
  * Office / text / audio and video) plus HTML; CAD, 3D and GIS would drag in mlightcad, three and
  * leaflet, which is not worth it for a personal file library. Add them when needed.
  *
- * Order is a contract: the first matching plugin renders. `textPlugin` also matches `text/html`,
- * so `htmlPlugin` has to come first or every HTML file goes back to being shown as source.
+ * Order is a contract: the first matching plugin renders. `textPlugin` also matches `text/html`
+ * and `imagePlugin` also claims `heic`, so both replacements have to come before the upstream
+ * plugins they replace, or the file silently falls back to source / to a decoder that cannot read
+ * iPhone photos.
  */
 const plugins = [
   htmlPlugin(),
+  heicPlugin(),
   imagePlugin(),
   textPlugin(),
   pdfPlugin({ workerSrc: pdfWorkerSrc, legacyWorkerSrc: pdfLegacyWorkerSrc }),
