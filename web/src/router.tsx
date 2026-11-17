@@ -45,13 +45,28 @@ const pageBoundary = {
 
 export const router = createBrowserRouter([
   {
+    /*
+     * Home is the file browser, opened at the root of the tree: opening the app is meant to show
+     * the files themselves, not a menu that leads to them. Folders below the root keep their own
+     * /files/... address so the open folder stays linkable.
+     */
     path: "/",
-    element: <StreamPage />,
+    element: <FilesPage />,
+    shouldRevalidate: () => false,
     loader: async () => ({ user: await requireUser() }),
     ...pageBoundary,
   },
   {
-    // Matches /files and every logical path below it: /files/Photos/2024/a.jpg.
+    // The timeline lives beside the file browser rather than on top of it; it has no nav entry.
+    path: "/stream",
+    element: <StreamPage />,
+    loader: async () => ({ user: await requireUser() }),
+    ...pageBoundary,
+  },
+  // The root listing is the home page now; old links to the bare browser still work.
+  { path: "/files", loader: () => redirect("/"), ...pageBoundary },
+  {
+    // Matches every logical path below the root: /files/Photos/2024/a.jpg.
     path: "/files/*",
     element: <FilesPage />,
     // Every folder click is a new splat value on this same route instance, so the default

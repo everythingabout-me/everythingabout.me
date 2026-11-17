@@ -1312,7 +1312,8 @@ export function FilesPage() {
       }
       onDrop={canUpload ? onDrop : undefined}
     >
-      <title>{`${file ? file.name : currentName} · ${t("app.name")}`}</title>
+      {/* The root is the app's home page, so it does not need a folder name in the title. */}
+      <title>{file ? `${file.name} · ${t("app.name")}` : path ? `${currentName} · ${t("app.name")}` : t("app.name")}</title>
 
       <AppHeader user={user} />
 
@@ -1644,7 +1645,7 @@ export function FilesPage() {
                 </span>
                 <span className={styles.emptyTitle}>{t("file.notFoundTitle")}</span>
                 <span className={styles.emptyText}>{t("file.notFoundText")}</span>
-                <Link className={styles.secondaryBtn} to="/files">
+                <Link className={styles.secondaryBtn} to="/">
                   {t("file.backToRoot")}
                 </Link>
                 <StorageNotice />

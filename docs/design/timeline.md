@@ -565,11 +565,15 @@ Key points:
 
 ## 10. Frontend
 
-Route `/` (the stream), with the file browser demoted to `/files`; on mobile the stream is the main entry point. The UI never says "timeline / event / moment" — only months, cards, and the data band.
+Route `/stream` holds the stream and `/` is the file browser. The stream used to be the home page; it
+moved because opening the app is opening your files — the stream is a second view of the same tree, not
+a menu in front of it — and the top bar now carries only the brand (home) and the account chip
+(settings), with no navigation list. The UI never says "timeline / event / moment" — only months, cards,
+and the data band.
 
 ```
 ┌───────────────────────────────────────────────────────────┐
-│  Everything About Me      [时间线] [文件] [搜索]    账号  │
+│  Everything About Me                                账号  │
 ├───────────────────────────────────────────────────────────┤
 │  2025                                                     │
 │  ├ 6 月  · 1,284 个文件 · 6 个片段            [整理中 ⏳] │

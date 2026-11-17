@@ -184,7 +184,7 @@ export function StreamPage() {
               {indexing ? t("stream.emptyIndexingText") : t("stream.emptyText")}
             </span>
             {!indexing && (
-              <Link className={styles.emptyAction} to="/files">
+              <Link className={styles.emptyAction} to="/">
                 {t("stream.emptyAction")}
               </Link>
             )}

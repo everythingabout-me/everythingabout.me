@@ -12,10 +12,11 @@ const { filesHref, filesRoutePath } = await load("../src/filesPath.ts");
 const { canPreviewFile } = await load("../src/components/preview/supported.ts");
 const { htmlCardPolicy } = await load("../src/components/preview/htmlCardPolicy.ts");
 
-test("root and absolute resources map to the existing relative SPA route", () => {
-  assert.equal(filesHref("/"), "/files");
-  assert.equal(filesHref(""), "/files");
+test("the root is the home page and absolute resources map to the /files SPA route", () => {
+  assert.equal(filesHref("/"), "/");
+  assert.equal(filesHref(""), "/");
   assert.equal(filesHref("/Photos/a.jpg"), "/files/Photos/a.jpg");
+  assert.equal(filesRoutePath("/"), "");
   assert.equal(filesRoutePath("/files"), "");
   assert.equal(filesRoutePath("/files/Photos/a.jpg"), "Photos/a.jpg");
 });

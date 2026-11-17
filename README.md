@@ -182,8 +182,9 @@ The key sits directly on the path (`drive/<userID>/Photos/2024/a.jpg`), which me
 
 - **Bilingual**: the locale follows the system/browser preferred language (`zh` → Chinese, everything else → English) with no language switcher; the stream's months, card subtitles, and relative times follow it too
 - Sign-in (sign up is merged into it) and settings follow the system light/dark setting
-- `/` is a flat event stream: one card is one event (a photo / a sentence / a group of numbers / an app's own HTML), with no year or month headings and no statistics
-- `/files` is the file browser: the open folder is the URL (`/files/Photos/2024`), with breadcrumbs, relative times, type icons and hover actions
+- `/` is the file browser, opened at the root of the tree: the app opens on the files themselves rather than on a menu that leads to them
+- `/stream` is a flat event stream: one card is one event (a photo / a sentence / a group of numbers / an app's own HTML), with no year or month headings and no statistics
+- Folders below the root are the URL (`/files/Photos/2024`), with breadcrumbs, relative times, type icons and hover actions
 - Every file has its own page at `/files/<path>`, built like a folder page (same header, breadcrumbs and title block): an inline preview for images, PDF, Office (docx / xlsx / pptx), plain text and source code, audio and video, plus type, size and timestamps;
   the viewer ([open-file-viewer](https://github.com/xushanpei/open-file-viewer)) plus pdfjs go through `React.lazy`,
   so nothing downloads on first paint and a single chunk (~191KB gzip) is fetched when you open one, with the per-format renderer loading on top of that; formats without a preview still offer a download
@@ -192,10 +193,10 @@ The key sits directly on the path (`drive/<userID>/Photos/2024/a.jpg`), which me
 - The upload queue and selected Files remain in memory during folder navigation within the current Files page/document. Refresh/close discards the queue; reopening starts empty, without restored failed tasks or File reselection. A browser-native beforeunload warning is registered while queued, waiting, uploading or finalizing tasks remain. Same-page retries retain idempotency keys and verify receipt hashes; cancellation reconciles the same session/Operation. No unload-time abort API is required. The current user's old `eam.uploads.v1:<owner>` localStorage record is removed without executing it; owner-scoped pending delete identities remain independent. Durable backend recovery/expiry and accepted Operations continue unchanged. Apply all forward migrations, including `024_file_uploads.sql`, before starting the new binary.
 - Search matches both the filename and the full path, and each result shows its directory on the right
 - New directories use an inline input, and deletion has a confirmation dialog (it is permanent)
-- One shared top bar on every signed-in page: the brand (which is the way home) on the left, the account chip (which opens settings) on the right, and the file page's search and upload actions in the page body. There is no navigation list: `/` is the content, `/settings` is everything else
+- One shared top bar on every signed-in page: the brand (which is the way home) on the left, the account chip (which opens settings) on the right, and the file page's search and upload actions in the page body. There is no navigation list: `/` is the files, `/settings` is everything else
 - `/settings` is one page with a left section list and the selected section on the right: **General** (the account, its email and password, sign out), **Connect** (apps, tokens, save links, recent activity), **Storage** (providers, backups, index sync)
 - The current folder or file is the URL itself (`/files/...`), so you can share or refresh straight into it; old `/drive?path=...` links redirect
-- Frontend routes: `/` (stream), `/files` (file browser), `/files/<path>` (folder or file detail), `/settings` (General), `/settings/connect`, `/settings/storage`, `/login` (code sign-in, `?mode=password` goes straight to password sign-in); the old `/account` and `/connect` URLs redirect into settings
+- Frontend routes: `/` (file browser at the root), `/files/<path>` (folder or file detail), `/stream` (timeline, URL only), `/settings` (General), `/settings/connect`, `/settings/storage`, `/login` (code sign-in, `?mode=password` goes straight to password sign-in); old `/files`, `/account` and `/connect` URLs redirect
 
 ## Getting started
 
