@@ -50,6 +50,15 @@ Either way, once the link works:
 
       mkdir -p -m 700 "${XDG_CONFIG_HOME:-$HOME/.config}/eam"
       (umask 077 && echo "$LINK" > "${XDG_CONFIG_HOME:-$HOME/.config}/eam/drive")
+      cat "${XDG_CONFIG_HOME:-$HOME/.config}/eam/drive"
+
+  Read the file back and compare, because a refused write is indistinguishable from a successful
+  one until the next session asks the same setup question again. The save is part of the job, not a
+  convenience: if it fails — a read-only home, `EACCES`, a sandbox that confines writes to a project
+  directory — say so plainly, name the refused path, and give the owner the one change that permits
+  it, a writable config directory outside every project tree (`0700`, file `0600`). Do not quietly
+  use the link for this one task and report success; that trades one setup for one per session,
+  which is the cost this document exists to remove.
 
 ### Every run after: no paste, no questions
 
