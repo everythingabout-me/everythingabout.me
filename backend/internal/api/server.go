@@ -239,6 +239,11 @@ func (s *Server) Handler() http.Handler {
 	saveMux.HandleFunc("GET /{code}", s.wrap(s.handleSaveLinkPage))
 	mux.Handle("/s/", http.StripPrefix("/s", saveMux))
 
+	// The drive skill is the same handoff with the connection taken out: install it once, then
+	// each connection is found through its /s/ link. Public, because it holds no secret and has
+	// to be installable before a connection exists.
+	mux.HandleFunc("GET /skill", s.wrap(handleDriveSkill))
+
 	if s.web != nil {
 		mux.Handle("/", s.web)
 	} else {

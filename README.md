@@ -388,6 +388,7 @@ existing separate endpoints and envelopes.
 | GET | `/me` | Current account, token permissions including changes/subscribe/policyVersion, usage |
 | PATCH | `/me` | `{"name"}` names the connection this token belongs to (an app names itself after scanning) |
 | GET | `/s/<code>` | Agent instructions: a save-link code returns the save prompt; a Connect token (`eam_...`) returns that connection's prompt, live |
+| GET | `/skill` | Installable agent skill: how to find a connection, then read its live prompt at `/s/` |
 
 All clients fetch content through a read grant or same-origin streaming, and upload through a transfer-class
 session followed by explicit commit. Long work returns

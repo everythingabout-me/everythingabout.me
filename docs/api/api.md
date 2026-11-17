@@ -1397,6 +1397,12 @@ instructions show current grants rather than freezing mutable rights into a QR. 
 --changes and --subscribe, default false. These rights never expand native path scope. The older audit_log
 account activity path remains separate from the new file_audit owner collection.
 
+GET /skill is public and returns the installable drive skill as text/markdown: the half of the same handoff
+that does not change per connection, so it carries no token, scope, expiry or transfer class. Those are
+rendered from the live row at /s/<code>, and a copy inside the skill would be a second answer that goes stale
+where a reader would not check it. The skill is installed once and then discovers each connection through its
+/s/ link; `Cache-Control: public, max-age=300` bounds how long an installed copy lags a deploy.
+
 ## 13. Design choices and acceptance
 
 - One API accepts stable service IDs or direct paths for every client. Native/provider IDs and unrelated

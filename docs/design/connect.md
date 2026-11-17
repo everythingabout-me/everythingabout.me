@@ -155,6 +155,28 @@ The URL is a credential, not a bookmark: it contains the token, exactly like the
 404. This is the save-link tradeoff applied to a scoped connection: one short sentence instead of a block,
 with the block one click away.
 
+### The installable half
+
+The one-line prompt still needs the link to arrive in a conversation. `GET /skill` serves the other half:
+an agent skill that is installed once and then knows how to find a connection at all — `$EAM_DRIVE`,
+`${XDG_CONFIG_HOME:-~/.config}/eam/drive`, or a link the user pasted — and that it must read
+`/s/<token>` before its first call.
+
+The skill also owns the two runs that follow. On the first, it walks the owner through `Add app` on
+`/connect`, names the connection with `PATCH /me` so the list stops saying `Unnamed app`, and saves the
+link to `${XDG_CONFIG_HOME:-~/.config}/eam/drive` at mode 0600. On every run after, it reads that file and
+skips the setup entirely. Without a saved location a skill is only a better-worded request for the same
+paste, every session; the alternative — baking the token into the skill file — puts a credential at a
+stable path that no revocation reaches. The file is the same secret as the link, so it is `0600` and
+outside any project tree, exactly like `.env`.
+
+It is public and contains no token, scope, expiry or transfer class, for the reason in the paragraph above:
+a skill file outlives every connection it will ever describe, so anything mutable inside it would be a copy
+a reader trusts more than the live page. What it does carry is what `/s/` cannot say — where to look for a
+connection, and the rules that hold for all of them (the token is a credential, scope is a boundary, deletes
+are permanent, an Operation is followed rather than re-issued). It is embedded in the binary, so the copy
+served is the copy that was built.
+
 ## 4. The page
 
 ```
