@@ -1,0 +1,159 @@
+/*
+ * The settings page is a classic two-column layout: a section list on the left and the
+ * selected section on the right. It stays on --page-width so it lines up with the header.
+ */
+.page {
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+}
+
+.main {
+  flex: 1;
+  width: 100%;
+  max-width: var(--page-width);
+  margin: 0 auto;
+  padding: 30px 24px 72px;
+}
+
+.layout {
+  display: grid;
+  grid-template-columns: 164px minmax(0, 1fr);
+  gap: 34px;
+  align-items: start;
+}
+
+/* Sticky below the 64px header plus this page's own top padding. */
+.sidebar {
+  position: sticky;
+  top: 88px;
+}
+
+.heading {
+  margin: 0 0 10px;
+  padding: 0 10px;
+  font-size: 19px;
+  font-weight: 650;
+  letter-spacing: -0.02em;
+  line-height: 1.35;
+}
+
+.nav {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.navItem {
+  display: flex;
+  align-items: center;
+  height: 32px;
+  padding: 0 10px;
+  border-radius: 8px;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text-2);
+  white-space: nowrap;
+  transition: background 0.14s ease, color 0.14s ease;
+}
+
+.navItem:hover {
+  background: var(--hover);
+  color: var(--text);
+}
+
+/* The open section keeps a filled background at rest, like the old top-bar navigation did. */
+.navItemActive,
+.navItemActive:hover {
+  background: var(--blue-light);
+  color: var(--text);
+  font-weight: 600;
+}
+
+/*
+ * The pane is an inline-size container: the sections inside size themselves against the pane,
+ * not the viewport, because the sidebar takes 164px away at every width.
+ */
+.pane {
+  min-width: 0;
+  container-type: inline-size;
+}
+
+.paneHead {
+  margin: 0 0 18px;
+}
+
+.paneTitle {
+  margin: 0;
+  font-size: 22px;
+  font-weight: 650;
+  letter-spacing: -0.02em;
+  line-height: 1.25;
+}
+
+.paneLead {
+  margin: 6px 0 0;
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--text-2);
+}
+
+/* ---------- Responsive ---------- */
+
+@media (max-width: 760px) {
+  .main {
+    padding: 22px 16px 56px;
+  }
+
+  .layout {
+    grid-template-columns: 1fr;
+    gap: 16px;
+  }
+
+  .sidebar {
+    position: static;
+  }
+
+  .heading {
+    margin-bottom: 8px;
+    padding: 0;
+    font-size: 17px;
+  }
+
+  /* Narrow screens put the sections in a horizontal strip; the pane keeps the whole width. */
+  .nav {
+    flex-direction: row;
+    gap: 6px;
+    padding-bottom: 2px;
+    overflow-x: auto;
+    scrollbar-width: none;
+  }
+
+  .nav::-webkit-scrollbar {
+    display: none;
+  }
+
+  .navItem {
+    height: 30px;
+    padding: 0 12px;
+    border: 1px solid var(--border);
+    border-radius: 999px;
+  }
+
+  .navItemActive,
+  .navItemActive:hover {
+    border-color: var(--blue);
+  }
+
+  .paneHead {
+    margin-bottom: 12px;
+  }
+
+  /*
+   * The active chip in the section strip already names the section; repeating it as a heading
+   * one line below is the same words twice.
+   */
+  .paneTitle {
+    display: none;
+  }
+}

@@ -153,10 +153,10 @@ make dev
 
 - **Email code sign-in and sign-up are merged**: enter an email → receive a code → existing accounts sign in, missing accounts are created on the spot. There are no usernames, and by default no password either.
 - Every account has a **unique, immutable `users.id` (a UUID)** as its internal identity; users never need to care about it, and on screen the email is the only identifier. Changing the email leaves the id and file ownership untouched.
-- Passwords are **optional**: the account page lets you set, change, or remove one; once set, sign in at `/login?mode=password` (the login page does not show the password entry). Passwords are salted and hashed with Go's `scrypt`, and **the format is exactly the same as before the rewrite** (`scrypt$N$r$p$salt$hash`), so old passwords keep working.
+- Passwords are **optional**: settings lets you set, change, or remove one; once set, sign in at `/login?mode=password` (the login page does not show the password entry). Passwords are salted and hashed with Go's `scrypt`, and **the format is exactly the same as before the rewrite** (`scrypt$N$r$p$salt$hash`), so old passwords keep working.
 - The session is an httpOnly cookie (`eam_session`); the database stores only the token's SHA-256, and it expires after 30 days by default. The token format also matches the old version, so existing sessions survive the migration.
 - Files are isolated by `owner_id`, and each user gets a separate prefix in COS, `drive/<userID>/`, so different accounts can have paths with the same name.
-- `/account` lets you change the email (which takes **two verification codes, one for the current address and one for the new one**) and set or remove a password; the page only shows the email and the signup date.
+- `/settings` (the General section) lets you change the email (which takes **two verification codes, one for the current address and one for the new one**) and set or remove a password; it only shows the email and the signup date.
 - **A password change or an email change ends every other session** and keeps the one that made the change: the rows deleted are the account's `sessions` rows except the cookie sending the request. A reused or stolen cookie stops working at the moment the owner recovers the account, instead of surviving until it expires.
 - Registration is open by default; on a personal instance, once you have registered yourself it is worth putting `ALLOW_REGISTRATION=false` in `.env` and restarting.
 
@@ -181,7 +181,7 @@ The key sits directly on the path (`drive/<userID>/Photos/2024/a.jpg`), which me
 ## The UI
 
 - **Bilingual**: the locale follows the system/browser preferred language (`zh` → Chinese, everything else → English) with no language switcher; the stream's months, card subtitles, and relative times follow it too
-- Three pages — sign in / sign up (merged into one) / account — that follow the system light/dark setting
+- Sign-in (sign up is merged into it) and settings follow the system light/dark setting
 - `/` is a flat event stream: one card is one event (a photo / a sentence / a group of numbers / an app's own HTML), with no year or month headings and no statistics
 - `/files` is the file browser: the open folder is the URL (`/files/Photos/2024`), with breadcrumbs, relative times, type icons and hover actions
 - Every file has its own page at `/files/<path>`, built like a folder page (same header, breadcrumbs and title block): an inline preview for images, PDF, Office (docx / xlsx / pptx), plain text and source code, audio and video, plus type, size and timestamps;
@@ -192,9 +192,10 @@ The key sits directly on the path (`drive/<userID>/Photos/2024/a.jpg`), which me
 - The upload queue and selected Files remain in memory during folder navigation within the current Files page/document. Refresh/close discards the queue; reopening starts empty, without restored failed tasks or File reselection. A browser-native beforeunload warning is registered while queued, waiting, uploading or finalizing tasks remain. Same-page retries retain idempotency keys and verify receipt hashes; cancellation reconciles the same session/Operation. No unload-time abort API is required. The current user's old `eam.uploads.v1:<owner>` localStorage record is removed without executing it; owner-scoped pending delete identities remain independent. Durable backend recovery/expiry and accepted Operations continue unchanged. Apply all forward migrations, including `024_file_uploads.sql`, before starting the new binary.
 - Search matches both the filename and the full path, and each result shows its directory on the right
 - New directories use an inline input, and deletion has a confirmation dialog (it is permanent)
-- One shared top bar on every signed-in page: brand, `Home` / `Files` navigation with the current page highlighted, the account chip, and the file page's search and upload actions
+- One shared top bar on every signed-in page: the brand (which is the way home) on the left, the account chip (which opens settings) on the right, and the file page's search and upload actions in the page body. There is no navigation list: `/` is the content, `/settings` is everything else
+- `/settings` is one page with a left section list and the selected section on the right: **General** (the account, its email and password, sign out), **Connect** (apps, tokens, save links, recent activity), **Storage** (providers, backups, index sync)
 - The current folder or file is the URL itself (`/files/...`), so you can share or refresh straight into it; old `/drive?path=...` links redirect
-- Frontend routes: `/` (stream), `/files` (file browser), `/files/<path>` (folder or file detail), `/login` (code sign-in, `?mode=password` goes straight to password sign-in), `/account`
+- Frontend routes: `/` (stream), `/files` (file browser), `/files/<path>` (folder or file detail), `/settings` (General), `/settings/connect`, `/settings/storage`, `/login` (code sign-in, `?mode=password` goes straight to password sign-in); the old `/account` and `/connect` URLs redirect into settings
 
 ## Getting started
 
@@ -408,11 +409,11 @@ https://your-host/s/abcd2345efgh2345
 
 The URL itself is the token plus the instructions: `GET` only returns a prompt and accepts no content.
 Generated save and Connect prompts call `/api/files` content or a transfer-class session/commit and
-follow durable Operations. The account page can mint as many save links as needed, show recent use,
+follow durable Operations. Settings → Connect can mint as many save links as needed, show recent use,
 and revoke them at any time; a revoked
 link stops working immediately. The short code has no eam_ prefix and also works directly as a Bearer token
-for its existing file read/write access, without implicit change-history or subscription grants. The account
-page's recent activity lists older recorded writes; Connect/account/event activity remains in audit_log,
+for its existing file read/write access, without implicit change-history or subscription grants. Connect's
+recent activity lists older recorded writes; connection/account/event activity remains in audit_log,
 while the new owner file audit collection is separate.
 
 Changes require explicit file read plus changes; subscriptions/SSE additionally require subscribe. Existing
@@ -429,7 +430,7 @@ eam token list   --email you@example.com
 eam token revoke --email you@example.com --id <token ID>
 ```
 
-The browser has the same thing at `/connect`: clicking **Add app** mints a connection with the defaults and
+The browser has the same thing at `/settings/connect`: clicking **Add app** mints a connection with the defaults and
 shows a QR code plus a one-line prompt, while its path, permissions and lifetime stay editable in the same
 panel. The prompt links to `/s/<token>`, which returns the full instructions from the live row. The page
 mints apps only; tokens can still be created with the CLI or the web API and are listed there for revocation.
@@ -454,7 +455,7 @@ Legacy `/api/fs/*` routes and the old root file routes (`/capabilities`, `/list`
 | DELETE | `/api/auth/password` | Remove the password (requires the current password) |
 | POST | `/api/auth/logout` | End the current session |
 | GET | `/api/auth/me` | Current user (including `hasPassword`); anonymous requests return `user: null` |
-| GET | `/api/account` | Account page summary (current user + count of unclaimed legacy files) |
+| GET | `/api/account` | Settings summary (current user, save links, recent activity, count of unclaimed legacy files) |
 | POST | `/api/auth/email/current-code` | Send an email-change code to the **current address** (requires a session, used to confirm identity) |
 | POST | `/api/auth/email/code` | Send an email-change code to the **new address** (requires a session) |
 | POST | `/api/auth/email` | Change the email (requires codes for both the current and the new address) |
@@ -565,7 +566,7 @@ invalidate restored checkpoints. See the
 - **Without SES configured, production cannot do code sign-in/sign-up**: development falls back to codes in the log; configure SES and a template before going live. Accounts that already have a password can still sign in with it.
 - **Changing the email requires two codes, for both the current and the new address**: a session alone cannot change it, and the old address receives no change notice (a notification email could be added later).
 - **Passwords are optional**: once set you can sign in with one; an account without a password depends entirely on the email being reachable.
-- **A forgotten password is not fatal**: sign in with an email code and reset it on the account page; but losing the email itself leaves no recovery path (no backup email, no recovery codes).
+- **A forgotten password is not fatal**: sign in with an email code and reset it in settings; but losing the email itself leaves no recovery path (no backup email, no recovery codes).
 - **Rate limiting is in-process memory**: with multiple instances each keeps its own count, so strict limiting needs Redis.
 - **Directory movement depends on backend and destination**: eligible Local moves use native root rename; growing/deeper destinations and flat object trees retain finite work. Outside-tool moves followed by additive reconcile do not automatically preserve IDs or remove old index entries.
 - **Change tracking observes the index**: external creation/update appears after explicit scan/import; external deletions are not automatically pruned. Snapshot bounds, fixed cursor expiry and explicit retention maintenance apply. Webhooks, automatic prune scheduling and verified publisher identity are deferred.

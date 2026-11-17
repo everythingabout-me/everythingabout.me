@@ -14,9 +14,19 @@ const en = {
   "common.refresh": "Refresh",
   "common.loading": "Loading…",
 
-  "nav.stream": "Home",
-  "nav.files": "Files",
-  "nav.connect": "Connect",
+  "nav.settings": "Settings",
+  "nav.settingsFor": "Settings: {email}",
+
+  "settings.title": "Settings",
+  "settings.sections": "Settings sections",
+  "settings.general.title": "General",
+  "settings.general.lead": "Your account and how you sign in.",
+  "settings.general.signOutHint":
+    "This ends the session in this browser only; other browsers stay signed in.",
+  "settings.connect.title": "Connect",
+  "settings.connect.lead": "Apps, agents and links that can reach this drive.",
+  "settings.storage.title": "Storage",
+  "settings.storage.lead": "Where the bytes live, and how the index keeps up with them.",
 
   "drives.title": "Storage providers",
   "drives.lead":
@@ -296,7 +306,6 @@ const en = {
   "auth.devCodeNotice": "Dev mode: code {code} filled in",
   "auth.codeSentNotice": "Code sent. Check your inbox (valid for {minutes} minutes).",
 
-  "connect.title": "Connect",
   "connect.addApp": "Add app",
   "connect.path": "Path",
   "connect.pathLoading": "Loading folders…",
@@ -357,7 +366,7 @@ const en = {
   "account.subtitle":
     "Your email is your only identity. Sign in with a code by default; a password is optional.",
   "account.signOut": "Sign out",
-  "account.storage.title": "Storage",
+  "account.sync.title": "Index sync",
   "account.storage.hint":
     "The drive is the source of truth; the index is a readable cache of it. Syncing makes the index match the drive and records every removal.",
   "account.storage.preview": "Preview differences",
@@ -453,10 +462,9 @@ const en = {
   "legal.backHome": "Back to the app",
 
   "meta.description": "A personal data foundation",
-  "meta.accountTitle": "Account · Everything About Me",
+  "meta.settingsTitle": "Settings · Everything About Me",
   "meta.loginCodeTitle": "Sign in · Everything About Me",
   "meta.loginPasswordTitle": "Sign in · Everything About Me",
-  "meta.connectTitle": "Connect · Everything About Me",
 
   "error.title": "Something went wrong",
   "error.eyebrow": "Error",
@@ -483,9 +491,18 @@ const zh: Record<MessageKey, string> = {
   "common.refresh": "刷新",
   "common.loading": "加载中…",
 
-  "nav.stream": "首页",
-  "nav.files": "文件",
-  "nav.connect": "连接",
+  "nav.settings": "设置",
+  "nav.settingsFor": "设置：{email}",
+
+  "settings.title": "设置",
+  "settings.sections": "设置导航",
+  "settings.general.title": "常规",
+  "settings.general.lead": "账号信息和登录方式。",
+  "settings.general.signOutHint": "只结束这个浏览器的登录，其他设备不受影响。",
+  "settings.connect.title": "连接",
+  "settings.connect.lead": "可以访问这个网盘的应用、代理和链接。",
+  "settings.storage.title": "存储",
+  "settings.storage.lead": "文件字节存在哪里，索引怎么跟上。",
 
   "drives.title": "存储服务",
   "drives.lead": "服务可以存放数据的地方。添加只是让它可用——具体用在哪里、放在哪个目录，由下面的功能自己决定。",
@@ -753,7 +770,6 @@ const zh: Record<MessageKey, string> = {
   "auth.devCodeNotice": "开发模式：验证码 {code} 已自动填入",
   "auth.codeSentNotice": "验证码已发送，请查收邮箱（{minutes} 分钟内有效）",
 
-  "connect.title": "连接",
   "connect.addApp": "添加 App",
   "connect.path": "路径",
   "connect.pathLoading": "加载中…",
@@ -813,7 +829,7 @@ const zh: Record<MessageKey, string> = {
   "account.title": "账户",
   "account.subtitle": "邮箱就是你的唯一标识；默认用验证码登录，密码可选。",
   "account.signOut": "退出登录",
-  "account.storage.title": "存储",
+  "account.sync.title": "索引同步",
   "account.storage.hint":
     "网盘是数据的来源，索引只是它的读取缓存。同步会让索引与网盘一致，并记录每一次移除。",
   "account.storage.preview": "预览差异",
@@ -905,10 +921,9 @@ const zh: Record<MessageKey, string> = {
   "legal.backHome": "返回应用",
 
   "meta.description": "个人数据基座",
-  "meta.accountTitle": "账户 · Everything About Me",
+  "meta.settingsTitle": "设置 · Everything About Me",
   "meta.loginCodeTitle": "登录 / 注册 · Everything About Me",
   "meta.loginPasswordTitle": "密码登录 · Everything About Me",
-  "meta.connectTitle": "连接 · Everything About Me",
 
   "error.title": "页面出错了",
   "error.eyebrow": "Error",

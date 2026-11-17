@@ -1,4 +1,4 @@
-/* One top bar for every signed-in page: brand + navigation, account chip on the far right. */
+/* One top bar for every signed-in page: the brand (home) and the account chip (settings). */
 
 .topbar {
   position: sticky;
@@ -37,36 +37,6 @@
   width: 21px;
   height: 21px;
   flex: none;
-}
-
-.nav {
-  display: flex;
-  align-items: center;
-  gap: 2px;
-  flex: none;
-}
-
-.navLink {
-  padding: 6px 10px;
-  border-radius: 8px;
-  font-size: 13px;
-  font-weight: 500;
-  color: var(--text-2);
-  white-space: nowrap;
-  transition: background 0.14s ease, color 0.14s ease;
-}
-
-.navLink:hover {
-  background: var(--hover);
-  color: var(--text);
-}
-
-/* The current page keeps a filled background at rest, not just on hover. */
-.navLinkActive,
-.navLinkActive:hover {
-  background: var(--blue-light);
-  color: var(--text);
-  font-weight: 600;
 }
 
 .spacer {
@@ -146,16 +116,5 @@
     padding: 0 4px;
     border-color: var(--border);
     background: var(--surface);
-  }
-}
-
-@media (max-width: 520px) {
-  .topbarInner {
-    gap: 6px;
-    padding: 0 12px;
-  }
-
-  .navLink {
-    padding: 6px 8px;
   }
 }

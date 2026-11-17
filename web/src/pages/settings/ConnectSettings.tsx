@@ -1,18 +1,15 @@
 import { useEffect, useRef, useState } from "react";
-import { useLoaderData } from "react-router";
-import {
-  api,
-  type AuthUser,
-  type ConnectData,
-  type Connection,
-  type CreatedConnection,
-} from "../api/client";
-import { AppHeader } from "../components/AppHeader";
-import { PathPicker } from "../components/PathPicker";
-import { AppIcon, CheckIcon, CopyIcon, KeyIcon } from "../components/icons";
-import { t, type MessageKey } from "../i18n";
-import { formatRelativeTime, formatUntil } from "../i18n/format";
-import styles from "./ConnectPage.module.css";
+import { useLoaderData, useOutletContext } from "react-router";
+import { api, type ConnectData, type Connection, type CreatedConnection } from "../../api/client";
+import { ActivityList } from "../../components/ActivityList";
+import { PathPicker } from "../../components/PathPicker";
+import { SaveLinks } from "../../components/SaveLinks";
+import { AppIcon, CheckIcon, CopyIcon, KeyIcon } from "../../components/icons";
+import { t, type MessageKey } from "../../i18n";
+import { formatRelativeTime, formatUntil } from "../../i18n/format";
+import type { SettingsContext } from "../SettingsPage";
+import settingsStyles from "./settings.module.css";
+import styles from "./connect.module.css";
 
 const DAY = 86_400;
 
@@ -100,8 +97,13 @@ function agentPrompt(created: CreatedConnection): string {
   return t("connect.promptLine", { url });
 }
 
-export function ConnectPage() {
-  const { user, data } = useLoaderData() as { user: AuthUser; data: ConnectData };
+/**
+ * Connect is everything that can reach the drive without a browser session: apps minted here,
+ * tokens minted elsewhere, the save links that accept uploads, and what all of them did lately.
+ */
+export function ConnectSettings() {
+  const { data } = useLoaderData() as { data: ConnectData };
+  const { summary } = useOutletContext<SettingsContext>();
   const [tokens, setTokens] = useState<Connection[]>(data.tokens ?? []);
   const [created, setCreated] = useState<CreatedConnection | null>(null);
   const [adding, setAdding] = useState(false);
@@ -175,61 +177,83 @@ export function ConnectPage() {
   }
 
   return (
-    <div className={styles.page}>
-      <title>{t("meta.connectTitle")}</title>
-      <AppHeader user={user} />
-      <main className={styles.main}>
-        <header className={styles.intro}>
-          <h1 className={styles.title}>{t("connect.title")}</h1>
-          <div className={styles.actions}>
-            <button className={styles.secondary} type="button" disabled={adding} onClick={() => void addApp()}>
-              {adding ? t("connect.creating") : t("connect.addApp")}
-            </button>
+    <div className={settingsStyles.stack}>
+      {created ? (
+        <AppHandoff
+          key={created.token.id}
+          created={created}
+          onUpdated={onUpdated}
+          onDone={() => setCreated(null)}
+        />
+      ) : null}
+
+      {error && <p className={styles.error}>{error}</p>}
+
+      <section className={settingsStyles.card}>
+        <div className={settingsStyles.cardHead}>
+          <div className={settingsStyles.cardHeadText}>
+            <div className={settingsStyles.titleRow}>
+              <h2 className={settingsStyles.cardTitle}>{t("connect.appsTitle")}</h2>
+              <span className={settingsStyles.count}>{apps.length}</span>
+            </div>
           </div>
-        </header>
-
-        {created ? (
-          <AppHandoff
-            key={created.token.id}
-            created={created}
-            onUpdated={onUpdated}
-            onDone={() => setCreated(null)}
-          />
-        ) : null}
-
-        {error && <p className={styles.error}>{error}</p>}
-
-        <ConnectionList
-          title={t("connect.appsTitle")}
+          <button
+            className={`${styles.secondary} ${settingsStyles.cardAction}`}
+            type="button"
+            disabled={adding}
+            onClick={() => void addApp()}
+          >
+            {adding ? t("connect.creating") : t("connect.addApp")}
+          </button>
+        </div>
+        <ConnectionRows
           items={apps}
           empty={t("connect.emptyApps")}
           revoking={revoking}
           onRevoke={revoke}
         />
-        <ConnectionList
-          title={t("connect.tokensTitle")}
+      </section>
+
+      <section className={settingsStyles.card}>
+        <div className={settingsStyles.cardHead}>
+          <div className={settingsStyles.cardHeadText}>
+            <div className={settingsStyles.titleRow}>
+              <h2 className={settingsStyles.cardTitle}>{t("connect.tokensTitle")}</h2>
+              <span className={settingsStyles.count}>{temporary.length}</span>
+            </div>
+          </div>
+        </div>
+        <ConnectionRows
           items={temporary}
           empty={t("connect.emptyTokens")}
           revoking={revoking}
           onRevoke={revoke}
         />
+      </section>
 
-        {finished.length > 0 && (
-          <section className={styles.section}>
-            <details className={styles.finished}>
-              <summary className={styles.finishedSummary}>
-                <span>{t("connect.finished")}</span>
-                <span className={styles.count}>{finished.length}</span>
-              </summary>
-              <div className={styles.list}>
-                {finished.map((connection) => (
-                  <ConnectionRow key={connection.id} connection={connection} finished />
-                ))}
-              </div>
-            </details>
-          </section>
-        )}
-      </main>
+      {finished.length > 0 && (
+        <section className={settingsStyles.card}>
+          <details className={styles.finished}>
+            <summary className={styles.finishedSummary}>
+              <span>{t("connect.finished")}</span>
+              <span className={settingsStyles.count}>{finished.length}</span>
+            </summary>
+            <div className={styles.rows}>
+              {finished.map((connection) => (
+                <ConnectionRow key={connection.id} connection={connection} finished />
+              ))}
+            </div>
+          </details>
+        </section>
+      )}
+
+      <section className={settingsStyles.card}>
+        <SaveLinks initial={summary.saveLinks} />
+      </section>
+
+      <section className={settingsStyles.card}>
+        <ActivityList items={summary.activity} />
+      </section>
     </div>
   );
 }
@@ -351,7 +375,15 @@ function AppHandoff({
     setSaving(true);
     setConfigError(null);
     try {
-      const saved = await api.updateConnection(token.id, { prefix, read, write, events, changes, subscribe, expiresIn: life });
+      const saved = await api.updateConnection(token.id, {
+        prefix,
+        read,
+        write,
+        events,
+        changes,
+        subscribe,
+        expiresIn: life,
+      });
       setToken(saved.token);
       onUpdated(saved.token);
     } catch (caught) {
@@ -479,40 +511,29 @@ function CodeBlock({
   );
 }
 
-function ConnectionList({
-  title,
+function ConnectionRows({
   items,
   empty,
   revoking,
   onRevoke,
 }: {
-  title: string;
   items: Connection[];
   empty: string;
   revoking: string | null;
   onRevoke: (connection: Connection) => Promise<void>;
 }) {
+  if (items.length === 0) return <p className={settingsStyles.empty}>{empty}</p>;
   return (
-    <section className={styles.section}>
-      <div className={styles.sectionHead}>
-        <h2 className={styles.sectionTitle}>{title}</h2>
-        <span className={styles.count}>{items.length}</span>
-      </div>
-      <div className={styles.list}>
-        {items.length === 0 ? (
-          <p className={styles.empty}>{empty}</p>
-        ) : (
-          items.map((connection) => (
-            <ConnectionRow
-              key={connection.id}
-              connection={connection}
-              revoking={revoking === connection.id}
-              onRevoke={() => onRevoke(connection)}
-            />
-          ))
-        )}
-      </div>
-    </section>
+    <div className={styles.rows}>
+      {items.map((connection) => (
+        <ConnectionRow
+          key={connection.id}
+          connection={connection}
+          revoking={revoking === connection.id}
+          onRevoke={() => onRevoke(connection)}
+        />
+      ))}
+    </div>
   );
 }
 

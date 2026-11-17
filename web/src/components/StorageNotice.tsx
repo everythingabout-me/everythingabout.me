@@ -3,7 +3,7 @@ import { t } from "../i18n";
 import styles from "./StorageNotice.module.css";
 
 /**
- * The one thing a person can do when the index and storage disagree: let the account page
+ * The one thing a person can do when the index and storage disagree: let the storage settings
  * compare them and apply the difference. The drive is the source of truth, so this is a
  * pointer to that flow rather than a second sync implementation.
  */
@@ -18,7 +18,7 @@ export function StorageNotice({ missingContent = false }: { missingContent?: boo
           {t(missingContent ? "storageDrift.contentText" : "storageDrift.pathText")}
         </span>
       </div>
-      <Link className={styles.action} to="/account#storage">
+      <Link className={styles.action} to="/settings/storage">
         {t("storageDrift.action")}
       </Link>
     </div>

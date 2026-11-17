@@ -9,10 +9,12 @@ import {
 } from "./api/client";
 import { filesHref } from "./filesPath";
 import { AuthLayout } from "./layouts/AuthLayout";
-import { AccountPage } from "./pages/AccountPage";
-import { ConnectPage } from "./pages/ConnectPage";
 import { FilesPage } from "./pages/FilesPage";
 import { LegalPage } from "./pages/LegalPage";
+import { SettingsPage } from "./pages/SettingsPage";
+import { ConnectSettings } from "./pages/settings/ConnectSettings";
+import { GeneralSettings } from "./pages/settings/GeneralSettings";
+import { StorageSettings } from "./pages/settings/StorageSettings";
 import { StreamPage } from "./pages/StreamPage";
 import { LoginPage } from "./pages/LoginPage";
 import { LoadingFallback } from "./pages/LoadingFallback";
@@ -69,31 +71,56 @@ export const router = createBrowserRouter([
     ...pageBoundary,
   },
   {
-    path: "/connect",
-    element: <ConnectPage />,
-    loader: async (): Promise<{ user: AuthUser; data: ConnectData }> => {
+    /*
+     * One settings page with its sections as child routes. The account summary is the page's own
+     * data (the header needs the user), so it is loaded here and shared through the outlet; each
+     * section loads only what it shows. shouldRevalidate keeps a section switch from repeating
+     * the page-level request — the section loaders still run on their own.
+     */
+    path: "/settings",
+    element: <SettingsPage />,
+    loader: async (): Promise<{ summary: AccountSummary }> => {
       try {
-        return { user: await requireUser(), data: await api.connect() };
+        return { summary: await api.account() };
       } catch (error) {
         if (error instanceof ApiError && error.status === 401) throw redirect("/login");
         throw error;
       }
     },
+    shouldRevalidate: () => false,
     ...pageBoundary,
+    children: [
+      { index: true, element: <GeneralSettings /> },
+      {
+        path: "connect",
+        element: <ConnectSettings />,
+        loader: async (): Promise<{ data: ConnectData }> => {
+          try {
+            return { data: await api.connect() };
+          } catch (error) {
+            if (error instanceof ApiError && error.status === 401) throw redirect("/login");
+            throw error;
+          }
+        },
+      },
+      {
+        path: "storage",
+        element: <StorageSettings />,
+        loader: async (): Promise<{ data: StorageData }> => {
+          try {
+            return { data: await api.storage() };
+          } catch (error) {
+            if (error instanceof ApiError && error.status === 401) throw redirect("/login");
+            throw error;
+          }
+        },
+      },
+      { path: "*", loader: () => redirect("/settings") },
+    ],
   },
-  {
-    path: "/account",
-    element: <AccountPage />,
-    loader: async (): Promise<{ summary: AccountSummary; storage: StorageData }> => {
-      try {
-        return { summary: await api.account(), storage: await api.storage() };
-      } catch (error) {
-        if (error instanceof ApiError && error.status === 401) throw redirect("/login");
-        throw error;
-      }
-    },
-    ...pageBoundary,
-  },
+  // The account and connect pages became sections of settings; keep their old URLs working.
+  { path: "/account", loader: () => redirect("/settings") },
+  { path: "/connect", loader: () => redirect("/settings/connect") },
   // Public legal pages: Google OAuth branding, app stores and payment providers all need a
   // policy and terms URL that anyone can open without an account.
   {

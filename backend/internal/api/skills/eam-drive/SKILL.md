@@ -37,7 +37,7 @@ A link the user pasted is the connection — use it. Only if there is none, walk
 They cannot be handed a token; they have to open the page, because management is session-only on the web
 and a drive token deliberately cannot mint or widen another:
 
-- Open `<host>/connect`, press `Add app` (`添加 App` if their interface is Chinese), and copy the
+- Open `<host>/settings/connect`, press `Add app` (`添加 App` if their interface is Chinese), and copy the
   one-line prompt it shows. The host is `everythingabout.me` unless they run their own instance — ask
   rather than assume.
 - Paste that line here.

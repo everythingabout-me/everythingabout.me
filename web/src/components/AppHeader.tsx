@@ -1,21 +1,18 @@
-import { Link, useLocation } from "react-router";
+import { Link } from "react-router";
 import type { AuthUser } from "../api/client";
 import { t } from "../i18n";
 import { BrandMark } from "./BrandMark";
 import styles from "./AppHeader.module.css";
 
 /**
- * The one top bar for every signed-in page: brand, primary navigation (with the current page
- * highlighted) and the account chip on the far right. Page tools such as search and upload stay
- * in the page body, so the header looks the same on every page.
+ * The one top bar for every signed-in page: the brand is the way home, the account chip is the
+ * way into settings. There is no navigation list here on purpose — the home page shows the
+ * content and everything that is not content lives in one settings page, so a second row of
+ * links would only repeat two entry points the brand and the chip already provide.
+ *
+ * Page tools such as search and upload stay in the page body.
  */
 export function AppHeader({ user }: { user: AuthUser }) {
-  const { pathname } = useLocation();
-
-  const homeActive = pathname === "/";
-  const filesActive = pathname === "/files" || pathname.startsWith("/files/");
-  const connectActive = pathname === "/connect";
-
   return (
     <header className={styles.topbar}>
       <div className={styles.topbarInner}>
@@ -24,37 +21,13 @@ export function AppHeader({ user }: { user: AuthUser }) {
           <span className={styles.brandText}>{t("app.name")}</span>
         </Link>
 
-        <nav className={styles.nav} aria-label={t("nav.primary")}>
-          <Link
-            className={`${styles.navLink} ${homeActive ? styles.navLinkActive : ""}`}
-            to="/"
-            aria-current={homeActive ? "page" : undefined}
-          >
-            {t("nav.stream")}
-          </Link>
-          <Link
-            className={`${styles.navLink} ${filesActive ? styles.navLinkActive : ""}`}
-            to="/files"
-            aria-current={filesActive ? "page" : undefined}
-          >
-            {t("nav.files")}
-          </Link>
-          <Link
-            className={`${styles.navLink} ${connectActive ? styles.navLinkActive : ""}`}
-            to="/connect"
-            aria-current={connectActive ? "page" : undefined}
-          >
-            {t("nav.connect")}
-          </Link>
-        </nav>
-
         <div className={styles.spacer} />
 
         <Link
           className={styles.account}
-          to="/account"
-          title={t("nav.accountSettings")}
-          aria-label={t("nav.accountSettingsFor", { email: user.email })}
+          to="/settings"
+          title={t("nav.settings")}
+          aria-label={t("nav.settingsFor", { email: user.email })}
         >
           <span className={styles.avatar}>{user.email.slice(0, 1).toUpperCase()}</span>
           <span className={styles.email}>{user.email}</span>

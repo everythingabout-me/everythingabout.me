@@ -355,11 +355,11 @@ const UploadFailures = memo(function UploadFailures({
       {/* A failed row is not always lost bytes. A direct upload publishes at the destination
           before the commit settles it, so a failure in the index half leaves the file in
           storage and out of the list — and retrying it then meets "already exists". The
-          index is a cache of that tree, so the user-facing repair is the same sync the
-          account page already offers; without this line the only route was an operator. */}
+          index is a cache of that tree, so the user-facing repair is the same sync that
+          storage settings already offers; without this line the only route was an operator. */}
       <p className={styles.uploadFailuresHint}>
         {t("drive.uploadFailuresSyncHint")}{" "}
-        <Link className={styles.failuresSyncLink} to="/account#storage">
+        <Link className={styles.failuresSyncLink} to="/settings/storage">
           {t("drive.uploadFailuresSyncAction")}
         </Link>
       </p>

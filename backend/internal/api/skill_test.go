@@ -41,7 +41,7 @@ func TestDriveSkillServesInstallableMarkdown(t *testing.T) {
 	// The second run is seamless only because the first run saved a connection somewhere the next
 	// session will look. A reader who is told to paste a link but not where to keep it costs the user
 	// the same paste every time, which is the whole thing the skill exists to remove.
-	for _, want := range []string{"/s/", "/skill", "/connect", "XDG_CONFIG_HOME", "/eam/drive"} {
+	for _, want := range []string{"/s/", "/skill", "/settings/connect", "XDG_CONFIG_HOME", "/eam/drive"} {
 		if !strings.Contains(body, want) {
 			t.Fatalf("skill body never mentions %s, so a reader cannot reach the live instructions or keep the connection", want)
 		}

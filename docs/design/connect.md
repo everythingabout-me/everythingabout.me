@@ -162,8 +162,8 @@ an agent skill that is installed once and then knows how to find a connection at
 `${XDG_CONFIG_HOME:-~/.config}/eam/drive`, or a link the user pasted — and that it must read
 `/s/<token>` before its first call.
 
-The skill also owns the two runs that follow. On the first, it walks the owner through `Add app` on
-`/connect`, names the connection with `PATCH /me` so the list stops saying `Unnamed app`, and saves the
+The skill also owns the two runs that follow. On the first, it walks the owner through `Add app` in
+settings (`/settings/connect`), names the connection with `PATCH /me` so the list stops saying `Unnamed app`, and saves the
 link to `${XDG_CONFIG_HOME:-~/.config}/eam/drive` at mode 0600. On every run after, it reads that file and
 skips the setup entirely. Without a saved location a skill is only a better-worded request for the same
 paste, every session; the alternative — baking the token into the skill file — puts a credential at a
@@ -359,8 +359,10 @@ counts separately.
   the v1 answer.
 - **Renaming from the page**, filtering, pruning finished rows, usage charts. An app names itself; the page
   never renames a connection. The lists stay readable at personal scale.
-- **Moving save links here.** They remain on the account page; the `/s/` link page overlaps, so a future cleanup
-  can retire one of them.
+- **Merging save links into the connection rows.** They sit in the Connect settings section, but as their own
+  list: an upload link has no name, scope or expiry, so it shares nothing with a connection row, and the `/s/`
+  link page already overlaps — a future cleanup can still retire one of them. (They left the account page when
+  settings was split into General / Connect / Storage; the account page no longer exists to hold them.)
 - **App-side SDK / spec page.** The JSON schema above plus `GET /me` is the whole integration; it is documented
   in [docs/api/api.md](../api/api.md) §4.15.
 
