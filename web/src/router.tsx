@@ -4,6 +4,7 @@ import {
   api,
   type AccountSummary,
   type StorageData,
+  type StorageConnectionDetail,
   type AuthUser,
   type ConnectData,
 } from "./api/client";
@@ -15,6 +16,7 @@ import { SettingsPage } from "./pages/SettingsPage";
 import { ConnectSettings } from "./pages/settings/ConnectSettings";
 import { GeneralSettings } from "./pages/settings/GeneralSettings";
 import { StorageSettings } from "./pages/settings/StorageSettings";
+import { StorageProviderSettings } from "./pages/settings/StorageProviderSettings";
 import { StreamPage } from "./pages/StreamPage";
 import { LoginPage } from "./pages/LoginPage";
 import { LoadingFallback } from "./pages/LoadingFallback";
@@ -111,6 +113,24 @@ export const router = createBrowserRouter([
             return { data: await api.storage() };
           } catch (error) {
             if (error instanceof ApiError && error.status === 401) throw redirect("/login");
+            throw error;
+          }
+        },
+      },
+      {
+        /*
+         * One provider's page: its own address, so it can be linked to and the back
+         * button works. A provider that no longer exists (removed in another tab) is a
+         * list, not an error page.
+         */
+        path: "storage/:id",
+        element: <StorageProviderSettings />,
+        loader: async ({ params }): Promise<{ data: StorageConnectionDetail }> => {
+          try {
+            return { data: await api.storageConnection(params.id ?? "") };
+          } catch (error) {
+            if (error instanceof ApiError && error.status === 401) throw redirect("/login");
+            if (error instanceof ApiError && error.status === 404) throw redirect("/settings/storage");
             throw error;
           }
         },

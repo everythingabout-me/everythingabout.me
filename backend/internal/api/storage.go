@@ -24,6 +24,17 @@ import (
 // tree somewhere else. Every handler here takes the session cookie and asserts the
 // same origin, exactly like the other account mutations.
 
+// defaultBackupKeep is the number of dated snapshots a rotation keeps when no policy row
+// has chosen one. It repeats sql/037's column default because a prune asked for before any
+// retention was configured must still keep something: reading "no policy row yet" as "keep
+// everything" would make the same command mean opposite things.
+const defaultBackupKeep = 14
+
+// backupRunHistoryLimit bounds the restore points one provider's page lists. A run is
+// one row per date and the default retention is 14 dates, so this is years of daily
+// snapshots — a page that needs more has a retention question, not a paging one.
+const backupRunHistoryLimit = 120
+
 type storageConnectionView struct {
 	ID       string `json:"id"`
 	Name     string `json:"name"`
@@ -32,14 +43,35 @@ type storageConnectionView struct {
 	Location string `json:"location"`
 	Enabled  bool   `json:"enabled"`
 	Mine     bool   `json:"mine"`
-	// BackupFolder is where dated snapshots are placed inside this store. It is
-	// empty at the tree root.
+	// BackupFolder is where dated snapshots are placed inside this store. It is the
+	// backup feature's placement recorded against this row, not a property of the
+	// provider: the folder is a backup setting, which is what lets a second feature
+	// reuse the same provider with its own placement.
 	BackupFolder string `json:"backupFolder"`
 	// Runs counts the account's backup runs on this connection. A nonzero count is
 	// why the folder can no longer change, so the page has to know it.
 	Runs int `json:"runs"`
+	// LastRun is the newest of those runs: what a provider's card can say about
+	// history without carrying every date of every provider to the list page.
+	LastRun *backupRunView `json:"lastRun,omitempty"`
 	// Probe is the last measurement this account asked for, nil if it never did.
 	Probe json.RawMessage `json:"probe,omitempty"`
+}
+
+func connectionView(c connections.Connection, runCount int, last *backupRunView) storageConnectionView {
+	return storageConnectionView{
+		ID: c.ID, Name: c.Name, Role: c.Role, Backend: c.Backend,
+		Location: connectionLocation(c), Enabled: c.Enabled, Mine: c.OwnerID != "",
+		BackupFolder: c.Config.BackupFolder, Runs: runCount, LastRun: last, Probe: c.LastProbe,
+	}
+}
+
+// backupTargetView names a provider rather than just identifying it: a provider's own
+// page has to say which other provider choosing this one would turn off, and an id
+// would leave the person to go and look it up.
+type backupTargetView struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
 }
 
 // storageTestView is one reachability/latency/throughput measurement. It is
@@ -70,8 +102,10 @@ type backupRunView struct {
 	Finished       string `json:"finishedAt,omitempty"`
 }
 
-// handleStorageGet is the whole settings page in one response: which connections
-// this account may use, what the backup policy is, and what the last runs did.
+// handleStorageGet lists the providers this account may use: the row, how many runs the
+// backup feature has recorded against it, and its newest one. The dates themselves are
+// not here — they belong to the provider that holds them, which is what that provider's
+// own page answers (handleStorageConnectionGet).
 func (s *Server) handleStorageGet(w http.ResponseWriter, r *http.Request) error {
 	if s.db == nil || s.conns == nil {
 		return httpx.ServiceUnavailable("Storage settings are unavailable on this instance.")
@@ -80,64 +114,180 @@ func (s *Server) handleStorageGet(w http.ResponseWriter, r *http.Request) error 
 	if err != nil {
 		return err
 	}
-	rows, err := s.conns.Visible(r.Context(), user.ID)
+	ctx := r.Context()
+	rows, err := s.conns.Visible(ctx, user.ID)
 	if err != nil {
 		return err
 	}
-	runCounts := map[string]int{}
-	countRows, err := s.db.Pool().Query(r.Context(), `select connection_id::text, count(*) from backup_runs where owner_id=$1::uuid group by connection_id`, user.ID)
+	runCounts, err := s.backupRunCounts(ctx, user.ID)
 	if err != nil {
 		return err
 	}
-	for countRows.Next() {
-		var id string
-		var count int
-		if err := countRows.Scan(&id, &count); err != nil {
-			countRows.Close()
-			return err
-		}
-		runCounts[id] = count
-	}
-	countRows.Close()
-	if err := countRows.Err(); err != nil {
+	lastRuns, err := s.lastBackupRuns(ctx, user.ID)
+	if err != nil {
 		return err
 	}
 	views := make([]storageConnectionView, 0, len(rows))
 	for _, c := range rows {
-		views = append(views, storageConnectionView{
-			ID: c.ID, Name: c.Name, Role: c.Role, Backend: c.Backend,
-			Location: connectionLocation(c), Enabled: c.Enabled, Mine: c.OwnerID != "",
-			BackupFolder: c.Config.BackupFolder, Runs: runCounts[c.ID], Probe: c.LastProbe,
-		})
+		views = append(views, connectionView(c, runCounts[c.ID], lastRuns[c.ID]))
 	}
-	keep := 14
-	_ = s.db.Pool().QueryRow(r.Context(), `select keep from backup_policies where owner_id=$1::uuid limit 1`, user.ID).Scan(&keep)
-	target, err := s.backupTarget(r.Context(), user.ID)
+	target, err := s.backupTarget(ctx, user.ID)
 	if err != nil {
 		return err
 	}
+	return s.ok(w, map[string]any{"connections": views, "backupTarget": target})
+}
 
-	runs := make([]backupRunView, 0, 20)
-	rows2, err := s.db.Pool().Query(r.Context(), `
-		select r.connection_id::text, c.name, to_char(r.snapshot,'YYYY-MM-DD'), r.state, r.files, r.folders, r.bytes, coalesce(r.error,''),
-		       to_char(r.started_at,'YYYY-MM-DD"T"HH24:MI:SSOF'), coalesce(to_char(r.finished_at,'YYYY-MM-DD"T"HH24:MI:SSOF'),'')
-		from backup_runs r join storage_connections c on c.id = r.connection_id
-		where r.owner_id=$1::uuid order by r.started_at desc limit 20`, user.ID)
-	if err != nil {
-		return err
+// backupRunColumns is backupRunView's select list, shared by the readers below so the
+// scan order cannot drift away from a query.
+const backupRunColumns = `r.connection_id::text, c.name, to_char(r.snapshot,'YYYY-MM-DD'), r.state, r.files, r.folders, r.bytes, coalesce(r.error,''),
+	       to_char(r.started_at,'YYYY-MM-DD"T"HH24:MI:SSOF'), coalesce(to_char(r.finished_at,'YYYY-MM-DD"T"HH24:MI:SSOF'),'')`
+
+type rowScanner interface{ Scan(dest ...any) error }
+
+func scanBackupRun(row rowScanner) (backupRunView, error) {
+	var run backupRunView
+	err := row.Scan(&run.ConnectionID, &run.ConnectionName, &run.Snapshot, &run.State,
+		&run.Files, &run.Folders, &run.Bytes, &run.Error, &run.StartedAt, &run.Finished)
+	return run, err
+}
+
+// backupRuns reads this account's runs, newest first. An empty connectionID means every
+// provider. The filter travels as a query parameter rather than as a second statement so
+// both readers keep one column list and one ordering.
+func (s *Server) backupRuns(ctx context.Context, ownerID, connectionID string, limit int) ([]backupRunView, error) {
+	var filter *string
+	if connectionID != "" {
+		filter = &connectionID
 	}
-	defer rows2.Close()
-	for rows2.Next() {
-		var run backupRunView
-		if err := rows2.Scan(&run.ConnectionID, &run.ConnectionName, &run.Snapshot, &run.State, &run.Files, &run.Folders, &run.Bytes, &run.Error, &run.StartedAt, &run.Finished); err != nil {
-			return err
+	rows, err := s.db.Pool().Query(ctx, `
+		select `+backupRunColumns+`
+		from backup_runs r join storage_connections c on c.id = r.connection_id
+		where r.owner_id=$1::uuid and ($2::uuid is null or r.connection_id=$2::uuid)
+		order by r.started_at desc limit $3`, ownerID, filter, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	runs := make([]backupRunView, 0, 8)
+	for rows.Next() {
+		run, err := scanBackupRun(rows)
+		if err != nil {
+			return nil, err
 		}
 		runs = append(runs, run)
 	}
-	if err := rows2.Err(); err != nil {
+	return runs, rows.Err()
+}
+
+// lastBackupRuns is the newest run per connection. A provider's card needs one date;
+// reading a bounded tail of everyone's history and keeping the first per provider would
+// hide a provider whose last backup is older than the newest runs of another.
+func (s *Server) lastBackupRuns(ctx context.Context, ownerID string) (map[string]*backupRunView, error) {
+	rows, err := s.db.Pool().Query(ctx, `
+		select distinct on (r.connection_id) `+backupRunColumns+`
+		from backup_runs r join storage_connections c on c.id = r.connection_id
+		where r.owner_id=$1::uuid
+		order by r.connection_id, r.started_at desc`, ownerID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	last := make(map[string]*backupRunView)
+	for rows.Next() {
+		run, err := scanBackupRun(rows)
+		if err != nil {
+			return nil, err
+		}
+		last[run.ConnectionID] = &run
+	}
+	return last, rows.Err()
+}
+
+// backupRunCounts is how many runs each connection holds. The count, not the history, is
+// what locks a destination's backup folder: a restore point names a date and a folder,
+// so moving the folder makes every listed date unreachable.
+func (s *Server) backupRunCounts(ctx context.Context, ownerID string) (map[string]int, error) {
+	rows, err := s.db.Pool().Query(ctx, `select connection_id::text, count(*) from backup_runs where owner_id=$1::uuid group by connection_id`, ownerID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	counts := make(map[string]int)
+	for rows.Next() {
+		var id string
+		var count int
+		if err := rows.Scan(&id, &count); err != nil {
+			return nil, err
+		}
+		counts[id] = count
+	}
+	return counts, rows.Err()
+}
+
+// handleStorageConnectionGet is one provider's page: the row, the backup feature's
+// placement on it, and the restore points that live in it.
+//
+// It is not folded into GET /api/storage because a provider page owns its own history.
+// One shared response would either ship every date of every provider to a page that
+// shows one, or cap one provider's history at the newest runs of the others.
+func (s *Server) handleStorageConnectionGet(w http.ResponseWriter, r *http.Request) error {
+	if s.db == nil || s.conns == nil {
+		return httpx.ServiceUnavailable("Storage settings are unavailable on this instance.")
+	}
+	user, err := s.requireUser(r)
+	if err != nil {
 		return err
 	}
-	return s.ok(w, map[string]any{"connections": views, "keep": keep, "runs": runs, "backupTarget": target})
+	ctx := r.Context()
+	target, ok, err := s.visibleConnection(r, user.ID, r.PathValue("id"))
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return httpx.NotFound("No such storage connection on this account.")
+	}
+	counts, err := s.backupRunCounts(ctx, user.ID)
+	if err != nil {
+		return err
+	}
+	runs, err := s.backupRuns(ctx, user.ID, target.ID, backupRunHistoryLimit)
+	if err != nil {
+		return err
+	}
+	var last *backupRunView
+	if len(runs) > 0 {
+		last = &runs[0]
+	}
+	chosen, err := s.backupTargetRef(ctx, user.ID)
+	if err != nil {
+		return err
+	}
+	return s.ok(w, map[string]any{
+		"connection":   connectionView(target, counts[target.ID], last),
+		"backupTarget": chosen,
+		"runs":         runs,
+	})
+}
+
+// backupTargetRef is the provider the backup feature writes to, or nil when this account
+// has not configured it. It carries the name because a provider's own page has to say
+// which provider choosing this one would turn off: with one page per provider, "at most
+// one destination" is otherwise invisible from where the choice is made.
+func (s *Server) backupTargetRef(ctx context.Context, ownerID string) (*backupTargetView, error) {
+	var ref backupTargetView
+	err := s.db.Pool().QueryRow(ctx, `
+		select c.id::text, c.name from backup_policies p
+		join storage_connections c on c.id = p.connection_id
+		where p.owner_id=$1::uuid and p.enabled and c.role='backup'
+		order by p.updated_at desc limit 1`, ownerID).Scan(&ref.ID, &ref.Name)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &ref, nil
 }
 
 // backupTarget is the provider the backup feature writes to, or "" when this
@@ -146,19 +296,11 @@ func (s *Server) handleStorageGet(w http.ResponseWriter, r *http.Request) error 
 // itself on because it happened to be the only candidate would make the second
 // step invisible — the same mistake as silently choosing the first row.
 func (s *Server) backupTarget(ctx context.Context, ownerID string) (string, error) {
-	var chosen string
-	err := s.db.Pool().QueryRow(ctx, `
-		select p.connection_id::text from backup_policies p
-		join storage_connections c on c.id = p.connection_id
-		where p.owner_id=$1::uuid and p.enabled and c.role='backup'
-		order by p.updated_at desc limit 1`, ownerID).Scan(&chosen)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return "", nil
-	}
-	if err != nil {
+	ref, err := s.backupTargetRef(ctx, ownerID)
+	if err != nil || ref == nil {
 		return "", err
 	}
-	return chosen, nil
+	return ref.ID, nil
 }
 
 type connectionInput struct {
@@ -700,7 +842,7 @@ func (s *Server) runBackupJob(key, ownerID string, target connections.Connection
 			return
 		}
 		if keep <= 0 {
-			keep = 14
+			keep = defaultBackupKeep
 		}
 		if _, err := snapshot.Prune(ctx, dst, remover, target.BackupFolderPath(), keep); err != nil {
 			fail(err)

@@ -34,7 +34,12 @@ const SETTINGS_SECTIONS: Section[] = [
 export function SettingsPage() {
   const { summary } = useLoaderData() as { summary: AccountSummary };
   const { pathname } = useLocation();
-  const section = SETTINGS_SECTIONS.find((item) => item.to === pathname) ?? SETTINGS_SECTIONS[0];
+  // A section can own deeper routes (/settings/storage/:id), so a section stays chosen
+  // by prefix; only an `end` entry, which has no children, must match exactly.
+  const section =
+    SETTINGS_SECTIONS.find((item) =>
+      item.end ? item.to === pathname : pathname === item.to || pathname.startsWith(`${item.to}/`),
+    ) ?? SETTINGS_SECTIONS[0];
 
   return (
     <div className={styles.page}>

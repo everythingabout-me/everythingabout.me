@@ -1483,6 +1483,8 @@ export interface StorageConnection {
   backupFolder: string;
   /** Backup runs on this connection; a nonzero count locks the folder. */
   runs: number;
+  /** The newest of those runs; absent when no backup ever ran here. */
+  lastRun?: BackupRun | null;
   /** Last reachability/latency/throughput test, if this account ever ran one. */
   probe?: StorageTestResult | null;
 }
@@ -1514,10 +1516,19 @@ export interface BackupRun {
 
 export interface StorageData {
   connections: StorageConnection[];
-  keep: number;
-  runs: BackupRun[];
   /** The provider the backup feature uses; "" when the feature is not configured. */
   backupTarget: string;
+}
+
+/**
+ * One provider's page. The dates are per provider on purpose: a snapshot lives in the
+ * store that holds it, so a page that shows one provider must not list another's.
+ */
+export interface StorageConnectionDetail {
+  connection: StorageConnection;
+  /** The provider backups go to now; absent when the feature is unconfigured. */
+  backupTarget?: { id: string; name: string } | null;
+  runs: BackupRun[];
 }
 
 export const api = {
@@ -1532,6 +1543,10 @@ export const api = {
 
   storage(): Promise<StorageData> {
     return request<StorageData>("/api/storage");
+  },
+
+  storageConnection(id: string): Promise<StorageConnectionDetail> {
+    return request<StorageConnectionDetail>(`/api/storage/connections/${encodeURIComponent(id)}`);
   },
 
   addStorageConnection(input: {

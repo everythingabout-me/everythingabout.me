@@ -1,100 +1,83 @@
 import { useEffect, useState } from "react";
-import { useRevalidator } from "react-router";
-import { api, type BackupRun, type StorageConnection, type StorageData, type StorageTestResult } from "../api/client";
+import { Link, useRevalidator } from "react-router";
+import {
+  api,
+  type BackupRun,
+  type StorageConnection,
+  type StorageConnectionDetail,
+  type StorageTestResult,
+} from "../api/client";
 import { formatBytes, formatSpeed } from "../pages/sizeFormat";
 import { t } from "../i18n";
 import styles from "./StoragePanels.module.css";
 
 /**
- * Providers are setup: a location plus the credential that reaches it. Adding one
- * only makes it available — which feature uses it, and where under it, is the
- * feature's own setting. The service's default provider is where the live tree
- * lives; an account-attached provider can only ever be a secondary store.
+ * A provider's card is identity and health only. The credential, the measurement and
+ * whatever feature chose it live one level down: a list of four cards that each carry
+ * a test button, a folder field and a date table is a page with no index.
  */
-export function DrivesPanel({ data }: { data: StorageData }) {
-  const revalidator = useRevalidator();
-  const [open, setOpen] = useState(false);
-  const [testing, setTesting] = useState("");
-  const [error, setError] = useState("");
-
-  async function remove(connection: StorageConnection) {
-    setError("");
-    try {
-      await api.removeStorageConnection(connection.id);
-      revalidator.revalidate();
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-    }
-  }
-
-  async function test(connection: StorageConnection) {
-    setError("");
-    setTesting(connection.id);
-    try {
-      await api.testStorageConnection(connection.id);
-      revalidator.revalidate();
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setTesting("");
-    }
-  }
-
+export function ProviderCard({ connection, backupTarget }: { connection: StorageConnection; backupTarget: string }) {
+  const role = providerRoleLabel(connection, backupTarget);
   return (
-    <section className={styles.section}>
-      <h2 className={styles.title}>{t("drives.title")}</h2>
-      <p className={styles.lead}>{t("drives.lead")}</p>
-      <ul className={styles.list}>
-        {data.connections.map((connection) => {
-          const badge =
-            connection.role === "authority"
-              ? t("drives.roleYourFiles")
-              : connection.id === data.backupTarget
-                ? t("drives.roleInUse")
-                : t("drives.roleUnused");
-          return (
-            <li className={styles.row} key={connection.id}>
-              <div className={styles.rowBody}>
-                <div className={styles.name}>
-                  {connection.name}
-                  <span className={styles.badge}>{badge}</span>
-                </div>
-                <div className={styles.muted}>{connection.location}</div>
-                {connection.probe ? <ProbeLine probe={connection.probe} /> : null}
-              </div>
-              <div className={styles.actions}>
-                {connection.backend !== "local" ? (
-                  <button className={styles.quiet} disabled={testing !== ""} onClick={() => void test(connection)}>
-                    {testing === connection.id ? t("drives.testing") : t("drives.test")}
-                  </button>
-                ) : null}
-                {connection.mine ? (
-                  <button className={styles.quiet} onClick={() => void remove(connection)}>
-                    {t("common.remove")}
-                  </button>
-                ) : null}
-              </div>
-            </li>
-          );
-        })}
-      </ul>
-      <p className={styles.hint}>{t("drives.testHint")}</p>
-      {error ? <p className={styles.error}>{error}</p> : null}
-      {open ? (
-        <AddDrive
-          onCancel={() => setOpen(false)}
-          onAdded={() => {
-            setOpen(false);
-            revalidator.revalidate();
-          }}
-        />
-      ) : (
-        <button className={styles.button} onClick={() => setOpen(true)}>
-          {t("drives.add")}
-        </button>
-      )}
-    </section>
+    <Link className={styles.card} to={`/settings/storage/${connection.id}`}>
+      <span className={styles.cardName}>
+        {connection.name}
+        <span className={styles.badge}>{role}</span>
+      </span>
+      <span className={styles.cardLocation}>{connection.location}</span>
+      <HealthChip probe={connection.probe} />
+      <span className={styles.cardMeta}>{backupLine(connection.lastRun)}</span>
+    </Link>
   );
+}
+
+/**
+ * The badge states the feature's choice, not the provider's history: a provider that
+ * still holds older snapshots but is not the current destination would otherwise read
+ * as "not used yet" while its own page lists dates.
+ */
+export function providerRoleLabel(connection: StorageConnection, backupTarget: string): string {
+  if (connection.role === "authority") return t("drives.roleYourFiles");
+  if (connection.id === backupTarget) return t("drives.roleInUse");
+  return connection.lastRun ? t("drives.roleOff") : t("drives.roleUnused");
+}
+
+/**
+ * Whether the last test still says something: a provider that answered but cannot
+ * publish is not "ready", because publication is the promise a backup depends on.
+ */
+function HealthChip({ probe }: { probe?: StorageTestResult | null }) {
+  if (!probe) {
+    return (
+      <span className={styles.chip}>
+        <span className={styles.dot} />
+        {t("drives.cardUntested")}
+      </span>
+    );
+  }
+  const ready = probe.ok && probe.writable;
+  const label = !probe.ok
+    ? t("drives.cardUnreachable")
+    : probe.writable
+      ? t("drives.cardReady")
+      : t("drives.cardNotWritable");
+  return (
+    <span className={styles.chip}>
+      <span className={ready ? `${styles.dot} ${styles.dotReady}` : styles.dot} />
+      {label}
+      <span className={styles.mutedInline}>
+        {" · "}
+        {testedAgo(probe.testedAt)}
+      </span>
+    </span>
+  );
+}
+
+function backupLine(last?: BackupRun | null): string {
+  if (!last) return t("drives.cardNoBackup");
+  if (last.state === "running") return t("drives.cardBackingUp");
+  if (last.state === "failed") return t("drives.cardLastFailed");
+  return t("drives.cardLastBackup", { date: last.snapshot });
 }
 
 /**
@@ -102,7 +85,7 @@ export function DrivesPanel({ data }: { data: StorageData }) {
  * answered, how far away it is, and how fast bytes move. A provider that answers
  * but cannot publish is reported separately, because "connected" is not "usable".
  */
-function ProbeLine({ probe }: { probe: StorageTestResult }) {
+export function ProbeLine({ probe }: { probe: StorageTestResult }) {
   if (!probe.ok) {
     return <p className={styles.error}>{t("drives.testFailed", { error: probe.error ?? "" })}</p>;
   }
@@ -135,7 +118,7 @@ function testedAgo(iso: string): string {
   return t("drives.testedDays", { days: Math.round(hours / 24) });
 }
 
-function AddDrive({ onAdded, onCancel }: { onAdded: () => void; onCancel: () => void }) {
+export function AddProvider({ onAdded, onCancel }: { onAdded: () => void; onCancel: () => void }) {
   const [error, setError] = useState("");
   const [backend, setBackend] = useState<"cos" | "s3">("cos");
   const [pathStyle, setPathStyle] = useState(true);
@@ -231,20 +214,22 @@ function AddDrive({ onAdded, onCancel }: { onAdded: () => void; onCancel: () => 
 }
 
 /**
- * Backups are the feature that uses a provider: which provider, and where inside
- * it, are settings of the backup, not of the provider. Keeping the folder here is
- * what lets a second feature use the same provider with its own placement.
+ * Backups are the feature that uses a provider: which provider, and where inside it,
+ * are settings of the backup, not of the provider. They are shown here, on the
+ * provider that holds the bytes, because a restore point is a directory in *this*
+ * store — a page that showed one provider must not list another's dates.
  *
- * Restore points, one row per date. A restore copies the date to a new folder on the
- * owner's tree and refuses to overwrite anything, so a wrong choice is recoverable.
+ * "Use this provider" is the one setting that is not local: at most one destination is
+ * chosen, so the page names the provider that turning this one on would turn off.
  */
-export function BackupsPanel({ data }: { data: StorageData }) {
+export function BackupSection({ detail }: { detail: StorageConnectionDetail }) {
   const revalidator = useRevalidator();
+  const connection = detail.connection;
   const [message, setMessage] = useState("");
   const [saving, setSaving] = useState(false);
-  const destinations = data.connections.filter((c) => c.role === "backup");
-  const target = destinations.find((c) => c.id === data.backupTarget);
-  const running = data.runs.some((run) => run.state === "running");
+  const isTarget = detail.backupTarget?.id === connection.id;
+  const replaces = detail.backupTarget && !isTarget ? detail.backupTarget : null;
+  const running = detail.runs.some((run) => run.state === "running");
 
   // A snapshot runs off the request, so the page has to ask again until it finishes;
   // otherwise a finished backup keeps saying "Running" until the next manual refresh.
@@ -254,11 +239,11 @@ export function BackupsPanel({ data }: { data: StorageData }) {
     return () => clearInterval(timer);
   }, [running, revalidator]);
 
-  async function choose(connectionId: string) {
+  async function choose(use: boolean) {
     setMessage("");
     setSaving(true);
     try {
-      await api.setBackupTarget(connectionId);
+      await api.setBackupTarget(use ? connection.id : "");
       revalidator.revalidate();
     } catch (e) {
       setMessage(e instanceof Error ? e.message : String(e));
@@ -267,24 +252,12 @@ export function BackupsPanel({ data }: { data: StorageData }) {
     }
   }
 
-  async function run() {
-    if (!target) return;
+  // A run names its own provider, so running one here does not require that this
+  // provider be the chosen destination — the choice only governs the unattended job.
+  async function run(action: "snapshot" | "restore", date?: string) {
     setMessage("");
     try {
-      await api.startBackup({ connectionId: target.id, action: "snapshot", keep: data.keep });
-      setMessage(t("backup.started"));
-      revalidator.revalidate();
-    } catch (e) {
-      setMessage(e instanceof Error ? e.message : String(e));
-    }
-  }
-
-  async function runRestore(entry: BackupRun) {
-    setMessage("");
-    try {
-      // The run names its own provider, so restoring an older date from another
-      // provider does not require selecting it first.
-      await api.startBackup({ connectionId: entry.connectionId, action: "restore", date: entry.snapshot, keep: data.keep });
+      await api.startBackup({ connectionId: connection.id, action, date });
       setMessage(t("backup.started"));
       revalidator.revalidate();
     } catch (e) {
@@ -296,35 +269,26 @@ export function BackupsPanel({ data }: { data: StorageData }) {
     <section className={styles.section}>
       <h2 className={styles.title}>{t("backup.title")}</h2>
       <p className={styles.lead}>{t("backup.lead")}</p>
-      {destinations.length === 0 ? (
-        <p className={styles.muted}>{t("backup.noProvider")}</p>
-      ) : (
-        <>
-          <label className={styles.field}>
-            {t("backup.provider")}
-            <select value={data.backupTarget} disabled={saving} onChange={(event) => void choose(event.target.value)}>
-              <option value="">{t("backup.providerNone")}</option>
-              {destinations.map((destination) => (
-                <option key={destination.id} value={destination.id}>
-                  {destination.name}
-                </option>
-              ))}
-            </select>
-          </label>
-          {target ? (
-            <BackupFolderSettings key={target.id} connection={target} onSaved={() => revalidator.revalidate()} />
-          ) : (
-            <p className={styles.muted}>{t("backup.chooseProvider")}</p>
-          )}
-          <div className={styles.actions}>
-            <button className={styles.button} disabled={!target || running} onClick={() => void run()}>
-              {t("backup.runNow")}
-            </button>
-          </div>
-        </>
-      )}
+      <label className={styles.check}>
+        <input type="checkbox" checked={isTarget} disabled={saving} onChange={(event) => void choose(event.target.checked)} />
+        {t("backup.useThis", { name: connection.name })}
+      </label>
+      <p className={styles.hint}>
+        {isTarget
+          ? t("backup.inUse")
+          : replaces
+            ? t("backup.replaces", { name: replaces.name })
+            : t("backup.notChosen")}
+      </p>
+      <BackupFolderSettings key={connection.id} connection={connection} onSaved={() => revalidator.revalidate()} />
+      <div className={styles.actions}>
+        <button className={styles.button} disabled={running} onClick={() => void run("snapshot")}>
+          {t("backup.runNow")}
+        </button>
+      </div>
       {message ? <p className={styles.hint}>{message}</p> : null}
-      {data.runs.length === 0 ? (
+      <h3 className={styles.subtitle}>{t("backup.points")}</h3>
+      {detail.runs.length === 0 ? (
         <p className={styles.muted}>{t("backup.noPoints")}</p>
       ) : (
         <table className={styles.table}>
@@ -337,12 +301,9 @@ export function BackupsPanel({ data }: { data: StorageData }) {
             </tr>
           </thead>
           <tbody>
-            {data.runs.map((entry) => (
-              <tr key={entry.connectionId + entry.snapshot + entry.state + entry.startedAt}>
-                <td>
-                  {entry.snapshot}
-                  <div className={styles.muted}>{entry.connectionName}</div>
-                </td>
+            {detail.runs.map((entry) => (
+              <tr key={entry.snapshot + entry.state + entry.startedAt}>
+                <td>{entry.snapshot}</td>
                 <td>{stateLabel(entry)}</td>
                 <td>
                   {entry.files > 0
@@ -350,7 +311,11 @@ export function BackupsPanel({ data }: { data: StorageData }) {
                     : "—"}
                 </td>
                 <td>
-                  <button className={styles.quiet} disabled={entry.state !== "complete"} onClick={() => void runRestore(entry)}>
+                  <button
+                    className={styles.quiet}
+                    disabled={entry.state !== "complete" || running}
+                    onClick={() => void run("restore", entry.snapshot)}
+                  >
                     {t("backup.restore")}
                   </button>
                 </td>
@@ -365,8 +330,8 @@ export function BackupsPanel({ data }: { data: StorageData }) {
 }
 
 /**
- * The folder is where dated snapshots land inside the chosen provider. It is not
- * the provider's location: changing it cannot move the connection, which is why the
+ * The folder is where dated snapshots land inside this provider. It is not the
+ * provider's location: changing it cannot move the connection, which is why the
  * identity stays the same. Once a date has been written the folder is locked,
  * because moving it would leave listed restore points pointing at a directory
  * nothing writes to.
@@ -378,7 +343,7 @@ function BackupFolderSettings({ connection, onSaved }: { connection: StorageConn
 
   return (
     <form
-      className={styles.form}
+      className={styles.folderForm}
       onSubmit={async (event) => {
         event.preventDefault();
         setError("");

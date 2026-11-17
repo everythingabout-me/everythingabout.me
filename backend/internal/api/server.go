@@ -193,6 +193,7 @@ func (s *Server) Handler() http.Handler {
 	// Storage settings are owner-only: they carry credentials, so an API token must
 	// never reach them.
 	mux.HandleFunc("GET /api/storage", s.wrap(s.handleStorageGet))
+	mux.HandleFunc("GET /api/storage/connections/{id}", s.wrap(s.handleStorageConnectionGet))
 	mux.HandleFunc("POST /api/storage/connections", s.wrap(s.handleStorageConnectionAdd))
 	mux.HandleFunc("DELETE /api/storage/connections/{id}", s.wrap(s.handleStorageConnectionRemove))
 	mux.HandleFunc("PATCH /api/storage/connections/{id}", s.wrap(s.handleStorageConnectionSettings))

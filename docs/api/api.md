@@ -1437,7 +1437,8 @@ a file client cannot select a provider through the file API.
 
 | Method | Route | Purpose |
 |---|---|---|
-| `GET` | `/api/storage` | This account's visible providers (its own plus the deployment default), each with its run count and last test result; the backup feature's chosen provider and per-provider folder; the retention setting and the last 20 backup runs |
+| `GET` | `/api/storage` | This account's visible providers (its own plus the deployment default), each with its run count, its newest run and last test result, plus the backup feature's chosen provider. The dates that live inside one provider are that provider's own page, not here |
+| `GET` | `/api/storage/connections/{id}` | One provider's page: the row with its run count, newest run and last test result; the backup feature's chosen provider as `{id, name}` (absent when unconfigured, and the name is what lets a page say which provider choosing this one would replace); and that provider's own restore points, newest first (up to 120). A provider this account cannot see answers `404`, the same as one that does not exist |
 | `POST` | `/api/storage/connections` | Attach the account's own storage provider: `backend` `cos` (`bucket`, `region`) or `s3` (`endpoint`, `bucket`, `region`, optional `prefix` and `pathStyle`), with `name`, `secretId`, `secretKey`. This is setup only: no feature uses it until one says so |
 | `DELETE` | `/api/storage/connections/{id}` | Remove one of the account's own providers |
 | `PATCH` | `/api/storage/connections/{id}` | Set the **backup feature's** `backupFolder` on that provider: a root-relative path where dated snapshots are written (`""` is the provider's root). The deployment default cannot be edited |
@@ -1453,6 +1454,11 @@ account's own credential, provider response bodies are never echoed to a client,
 whether registration is open. A `local` row stays refused because it would hand an account the server's own
 filesystem paths, which is a different thing from naming a network endpoint.
 Secrets are never returned by any of these responses; a mutation replaces the whole credential.
+
+**A page per provider is what keeps the dates honest.** `GET /api/storage` answers "which providers
+exist"; `GET /api/storage/connections/{id}` answers for one of them. The split exists because a restore
+point is a directory under exactly one provider: one shared response would either ship every date of every
+provider to a page that shows one, or cap one provider's history at the newest runs of the others.
 
 `restore` copies the chosen date to `restore-<date>/` on the owner's tree and cannot overwrite a live path.
 Nothing is indexed by a restore: run `eam reconcile --owner <id>` afterwards.

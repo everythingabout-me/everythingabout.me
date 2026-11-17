@@ -189,3 +189,128 @@ func TestStorageTargetAndFolderAreAccountSettings(t *testing.T) {
 		t.Fatalf("another account selected a destination: %d", recorder.Code)
 	}
 }
+
+// storageDetailPage decodes the one-provider page. Only the fields this test decides on
+// are named, so a copy change does not break it and a mixed-provider regression does.
+type storageDetailPage struct {
+	Connection struct {
+		ID   string `json:"id"`
+		Runs int    `json:"runs"`
+		Last *struct {
+			Snapshot string `json:"snapshot"`
+		} `json:"lastRun"`
+	} `json:"connection"`
+	BackupTarget *struct {
+		ID   string `json:"id"`
+		Name string `json:"name"`
+	} `json:"backupTarget"`
+	Runs []struct {
+		Snapshot string `json:"snapshot"`
+	} `json:"runs"`
+}
+
+func decodeStorageDetail(t *testing.T, recorder *httptest.ResponseRecorder) storageDetailPage {
+	t.Helper()
+	var envelope storageEnvelope
+	if err := json.Unmarshal(recorder.Body.Bytes(), &envelope); err != nil {
+		t.Fatalf("decode %s: %v", recorder.Body.String(), err)
+	}
+	if !envelope.OK {
+		t.Fatalf("request failed: %s", envelope.Error)
+	}
+	var page storageDetailPage
+	if err := json.Unmarshal(envelope.Data, &page); err != nil {
+		t.Fatal(err)
+	}
+	return page
+}
+
+// A provider's page shows that provider's dates and nothing else's. The dates are
+// directories inside one store, so a page that listed another provider's restore points
+// would offer a restore from a place it cannot reach; and choosing a destination has to
+// name the one it replaces, because with one page per provider "at most one" is invisible
+// from the place the choice is made.
+func TestStorageConnectionPageIsPerProvider(t *testing.T) {
+	server, _, ctx := newAccountSessionTestServer(t)
+	owner := createAccount(t, ctx, server, "storage-page@example.test", hashedPassword(t, "correct-horse-3"))
+	cookie := openSession(t, ctx, server, owner)
+
+	first := insertStorageRow(t, server, ctx, connections.Connection{
+		Name: "nas-one", Backend: "s3", Role: connections.RoleBackup, OwnerID: owner,
+		Config: connections.Spec{CoordinatedWrites: true, S3: connections.S3Spec{
+			Endpoint: "https://nas-one.example.test", Region: "us-east-1", Bucket: "backups",
+			PathStyle: true, ContentPrefix: "drive/", SystemPrefix: "__eam_system__/",
+		}},
+		Secret: connections.Secret{S3: connections.S3Credential{AccessKeyID: "id", SecretAccessKey: "key"}},
+	})
+	second := insertStorageRow(t, server, ctx, connections.Connection{
+		Name: "nas-two", Backend: "s3", Role: connections.RoleBackup, OwnerID: owner,
+		Config: connections.Spec{CoordinatedWrites: true, S3: connections.S3Spec{
+			Endpoint: "https://nas-two.example.test", Region: "us-east-1", Bucket: "backups",
+			PathStyle: true, ContentPrefix: "drive/", SystemPrefix: "__eam_system__/",
+		}},
+		Secret: connections.Secret{S3: connections.S3Credential{AccessKeyID: "id", SecretAccessKey: "key"}},
+	})
+
+	for _, row := range []struct {
+		connection string
+		date       string
+	}{{first.ID, "2026-11-14"}, {second.ID, "2026-11-15"}} {
+		if _, err := server.db.Pool().Exec(ctx,
+			`insert into backup_runs(owner_id, connection_id, snapshot, state) values($1::uuid,$2::uuid,$3::date,'complete')`,
+			owner, row.connection, row.date); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if recorder := storageRequest(t, server, http.MethodPut, "/api/storage/backup-target", cookie, map[string]string{"connectionId": first.ID}); recorder.Code != http.StatusOK {
+		t.Fatalf("choose the first destination: %d %s", recorder.Code, recorder.Body.String())
+	}
+
+	page := decodeStorageDetail(t, storageRequest(t, server, http.MethodGet, "/api/storage/connections/"+second.ID, cookie, nil))
+	if page.Connection.ID != second.ID {
+		t.Fatalf("page is for %q, want %q", page.Connection.ID, second.ID)
+	}
+	if len(page.Runs) != 1 || page.Runs[0].Snapshot != "2026-11-15" {
+		t.Fatalf("provider page lists %+v, want only this provider's 2026-11-15", page.Runs)
+	}
+	if page.Connection.Runs != 1 {
+		t.Fatalf("run count = %d, want 1", page.Connection.Runs)
+	}
+	if page.Connection.Last == nil || page.Connection.Last.Snapshot != "2026-11-15" {
+		t.Fatalf("newest run = %+v, want 2026-11-15", page.Connection.Last)
+	}
+	if page.BackupTarget == nil || page.BackupTarget.Name != "nas-one" {
+		t.Fatalf("backup target = %+v, want the named provider this page would replace", page.BackupTarget)
+	}
+
+	// The list carries one date per card and no dates of its own; shipping them here is
+	// what made the old page mix two stores in one table.
+	list := storageRequest(t, server, http.MethodGet, "/api/storage", cookie, nil)
+	var envelope storageEnvelope
+	if err := json.Unmarshal(list.Body.Bytes(), &envelope); err != nil || !envelope.OK {
+		t.Fatalf("decode list: %v %s", err, list.Body.String())
+	}
+	var listed struct {
+		Connections []struct {
+			ID string `json:"id"`
+		} `json:"connections"`
+		Runs []json.RawMessage `json:"runs"`
+	}
+	if err := json.Unmarshal(envelope.Data, &listed); err != nil {
+		t.Fatal(err)
+	}
+	if len(listed.Runs) != 0 {
+		t.Fatalf("list still carries %d cross-provider runs", len(listed.Runs))
+	}
+	if len(listed.Connections) != 2 {
+		t.Fatalf("list has %d providers, want 2", len(listed.Connections))
+	}
+
+	// A provider on another account answers 404, the same as one that does not exist:
+	// a 403 would confirm that this id names something.
+	other := createAccount(t, ctx, server, "other-storage-page@example.test", hashedPassword(t, "correct-horse-4"))
+	otherCookie := openSession(t, ctx, server, other)
+	if recorder := storageRequest(t, server, http.MethodGet, "/api/storage/connections/"+second.ID, otherCookie, nil); recorder.Code != http.StatusNotFound {
+		t.Fatalf("another account's provider page answered %d, want 404", recorder.Code)
+	}
+}
