@@ -1,49 +1,35 @@
 import { useEffect, useState } from "react";
-import {
-  audioPlugin,
-  imagePlugin,
-  officePlugin,
-  pdfPlugin,
-  textPlugin,
-  videoPlugin,
-} from "@open-file-viewer/core";
 import { FileViewer } from "@open-file-viewer/react";
 import "@open-file-viewer/core/style.css";
-import pdfLegacyWorkerSrc from "pdfjs-dist/legacy/build/pdf.worker.mjs?url";
-import pdfWorkerSrc from "pdfjs-dist/build/pdf.worker.mjs?url";
 import { api, isNativeAbsent } from "../../api/client";
 import { locale, t } from "../../i18n";
 import { StorageNotice } from "../StorageNotice";
-import { heicPlugin } from "./heicPlugin";
-import { htmlPlugin } from "./htmlPlugin";
+import { previewPlugins } from "./plugins";
+import { isArchiveFile } from "./supported";
+import ZipPreview from "./ZipPreview";
 import styles from "./FilePreview.module.css";
 
 /**
  * The inline preview on a file's detail page. The whole file only enters through `React.lazy`:
  * the first screen never downloads this chunk.
  *
- * Plugins are built once — re-creating them on every render rebuilds the viewer instance and
- * loses zoom and scroll position. This layer enables only the six common families (images / PDF /
- * Office / text / audio and video) plus HTML; CAD, 3D and GIS would drag in mlightcad, three and
- * leaflet, which is not worth it for a personal file library. Add them when needed.
- *
- * Order is a contract: the first matching plugin renders. `textPlugin` also matches `text/html`
- * and `imagePlugin` also claims `heic`, so both replacements have to come before the upstream
- * plugins they replace, or the file silently falls back to source / to a decoder that cannot read
- * iPhone photos.
+ * A ZIP is not rendered by the viewer but by `ZipPreview`, which needs the archive's directory
+ * before it has a file to hand to a plugin — and, unlike every other format, must not download
+ * the whole object to work out what is inside it. The plugin chain is shared, so an entry
+ * rendered inside the archive is the same preview as the same file on its own.
  */
-const plugins = [
-  htmlPlugin(),
-  heicPlugin(),
-  imagePlugin(),
-  textPlugin(),
-  pdfPlugin({ workerSrc: pdfWorkerSrc, legacyWorkerSrc: pdfLegacyWorkerSrc }),
-  officePlugin(),
-  videoPlugin(),
-  audioPlugin(),
-];
-
 export default function FilePreview({ path, name, mediaType }: { path: string; name: string; mediaType: string | null }) {
+  if (isArchiveFile(name)) {
+    return (
+      <div className={styles.viewer}>
+        <ZipPreview path={path} name={name} />
+      </div>
+    );
+  }
+  return <MediaPreview path={path} name={name} mediaType={mediaType} />;
+}
+
+function MediaPreview({ path, name, mediaType }: { path: string; name: string; mediaType: string | null }) {
   // Render fetched bytes through plugins; only safe media receives inline disposition.
   const safeInline = /^(image\/(jpeg|png|gif|webp|avif)|audio\/|video\/)/.test(mediaType ?? "");
   const [url, setURL] = useState<string | null>(null);
@@ -99,7 +85,7 @@ export default function FilePreview({ path, name, mediaType }: { path: string; n
         toolbar
         theme="auto"
         locale={locale === "zh" ? "zh-CN" : "en-US"}
-        plugins={plugins}
+        plugins={previewPlugins}
       />
     </div>
   );

@@ -1,8 +1,9 @@
 /**
  * Which extensions are worth previewing.
  *
- * This list must match the plugins enabled in `FilePreview.tsx`: too many entries make users wait
- * on a 190KB chunk for an empty preview, too few leave viewable files unopenable.
+ * This list must match the renderers enabled in `plugins.ts` (plus the archive reader the ZIP
+ * entry is routed to in `FilePreview.tsx`): too many entries make users wait on a 190KB chunk for
+ * an empty preview, too few leave viewable files unopenable.
  *
  * It deliberately does not import `@open-file-viewer/core` — FilesPage checks on every render, so
  * a static reference to the core package would defeat lazy loading. Hence the hand-written list.
@@ -113,6 +114,8 @@ const previewableExtensions: ReadonlySet<string> = new Set([
   "srt",
   "vtt",
   "lrc",
+  // ZIP (ZipPreview: contents are listed and entries are extracted on demand; see zipArchive)
+  "zip",
   // Audio and video (videoPlugin / audioPlugin; hls and mpegts load on demand)
   "mp4",
   "m4v",
@@ -148,4 +151,15 @@ export function canPreviewFile(name: string, mediaType?: string | null): boolean
   const dot = name.lastIndexOf(".");
   if (dot <= 0 || dot === name.length - 1) return false;
   return previewableExtensions.has(name.slice(dot + 1).toLowerCase());
+}
+
+/**
+ * A ZIP archive: previewed as its contents rather than as a document.
+ *
+ * The extension decides, not the media type: the media type a service stored is often absent or
+ * generic, while the name is what the viewer, the archive reader and a person all agree on.
+ */
+export function isArchiveFile(name: string): boolean {
+  const dot = name.lastIndexOf(".");
+  return dot > 0 && name.slice(dot + 1).toLowerCase() === "zip";
 }
