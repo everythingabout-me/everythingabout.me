@@ -14,6 +14,7 @@ import pdfWorkerSrc from "pdfjs-dist/build/pdf.worker.mjs?url";
 import { api, isNativeAbsent } from "../../api/client";
 import { locale, t } from "../../i18n";
 import { StorageNotice } from "../StorageNotice";
+import { htmlPlugin } from "./htmlPlugin";
 import styles from "./FilePreview.module.css";
 
 /**
@@ -22,10 +23,14 @@ import styles from "./FilePreview.module.css";
  *
  * Plugins are built once — re-creating them on every render rebuilds the viewer instance and
  * loses zoom and scroll position. This layer enables only the six common families (images / PDF /
- * Office / text / audio and video); CAD, 3D and GIS would drag in mlightcad, three and leaflet,
- * which is not worth it for a personal file library. Add them when needed.
+ * Office / text / audio and video) plus HTML; CAD, 3D and GIS would drag in mlightcad, three and
+ * leaflet, which is not worth it for a personal file library. Add them when needed.
+ *
+ * Order is a contract: the first matching plugin renders. `textPlugin` also matches `text/html`,
+ * so `htmlPlugin` has to come first or every HTML file goes back to being shown as source.
  */
 const plugins = [
+  htmlPlugin(),
   imagePlugin(),
   textPlugin(),
   pdfPlugin({ workerSrc: pdfWorkerSrc, legacyWorkerSrc: pdfLegacyWorkerSrc }),

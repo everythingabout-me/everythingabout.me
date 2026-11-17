@@ -40,10 +40,17 @@ test("navigation decodes accepted names exactly once and preserves native spelli
   }
 });
 
-test("active and playlist media use the download fallback", () => {
-  for (const name of ["active.svg", "active.html", "active.htm", "playlist.m3u8"]) assert.equal(canPreviewFile(name), false);
+// SVG and playlists have no plugin here, so they still fall back to download. HTML used to be in
+// that list because a preview pointed the browser at the application origin, where an uploaded
+// document would run as us; `htmlPlugin` now reads the bytes itself and hands them to an
+// opaque-origin sandbox, which is the property those cases were really protecting.
+test("formats without a plugin fall back to download while sandboxed HTML is previewed", () => {
+  for (const name of ["active.svg", "playlist.m3u8"]) assert.equal(canPreviewFile(name), false);
   assert.equal(canPreviewFile("renamed.jpg", "image/svg+xml"), false);
-  assert.equal(canPreviewFile("renamed.txt", "text/html; charset=utf-8"), false);
+  for (const name of ["report.html", "report.HTM", "report.htm"]) assert.equal(canPreviewFile(name, "text/html"), true);
+  // A text file that merely declares an HTML type stays a text preview: htmlPlugin claims by
+  // extension, so a declaration alone cannot turn a file into a rendered document.
+  assert.equal(canPreviewFile("renamed.txt", "text/html; charset=utf-8"), true);
   for (const [name, mime] of [["a.jpg", "image/jpeg"], ["a.pdf", "application/pdf"], ["a.txt", "text/plain"], ["a.mp4", "video/mp4"]]) {
     assert.equal(canPreviewFile(name, mime), true);
   }

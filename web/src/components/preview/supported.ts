@@ -57,6 +57,9 @@ const previewableExtensions: ReadonlySet<string> = new Set([
   "fodp",
   "key",
   "dps",
+  // HTML (htmlPlugin: rendered inside a sandboxed iframe — see htmlPreviewPolicy)
+  "html",
+  "htm",
   // Plain text / source code / structured text (textPlugin)
   "txt",
   "text",
@@ -131,10 +134,17 @@ const previewableExtensions: ReadonlySet<string> = new Set([
   "weba",
 ]);
 
-/** Filename -> extension, case-insensitive; a missing extension (e.g. .bashrc) means no preview. */
+/**
+ * Filename -> extension, case-insensitive; a missing extension (e.g. .bashrc) means no preview.
+ *
+ * The MIME exceptions are formats whose bytes a browser would execute as a document if anything
+ * rendered them directly: SVG and XHTML have no plugin here, so answering "no preview" keeps the
+ * viewer chunk from loading only to fall through to its download panel. HTML is different — it has
+ * `htmlPlugin`, which never hands the bytes to a document context.
+ */
 export function canPreviewFile(name: string, mediaType?: string | null): boolean {
   const mime = mediaType?.split(";", 1)[0].trim().toLowerCase();
-  if (mime === "text/html" || mime === "image/svg+xml" || mime === "application/xhtml+xml") return false;
+  if (mime === "image/svg+xml" || mime === "application/xhtml+xml") return false;
   const dot = name.lastIndexOf(".");
   if (dot <= 0 || dot === name.length - 1) return false;
   return previewableExtensions.has(name.slice(dot + 1).toLowerCase());

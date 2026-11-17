@@ -298,6 +298,7 @@ const en = {
 
   "preview.loading": "Loading preview…",
   "preview.failed": "The preview could not load. Downloading the file may still work.",
+  "preview.htmlFailed": "The HTML file could not be read for rendering. Downloading it still works.",
   "storageDrift.contentTitle": "This file is no longer in storage",
   "storageDrift.contentText":
     "It was probably moved or deleted outside the app, and the index still points at the old location. Syncing the index shows where it is now.",
@@ -780,6 +781,7 @@ const zh: Record<MessageKey, string> = {
 
   "preview.loading": "正在加载预览…",
   "preview.failed": "预览加载失败，可以试试下载这个文件。",
+  "preview.htmlFailed": "无法读取这个 HTML 文件用于渲染，可以下载后用浏览器打开。",
   "storageDrift.contentTitle": "这个文件在存储里已经不存在了",
   "storageDrift.contentText":
     "它可能是在别处被移动或删除了，索引还停在旧位置。同步索引后就能看到它现在的去向。",
