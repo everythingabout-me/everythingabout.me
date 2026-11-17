@@ -698,6 +698,54 @@ func TestFilesObjectsPostgresS3MutationConformance(t *testing.T) {
 			t.Fatal("implicit parent acquired a synthetic native marker or child publication repeated")
 		}
 	})
+	t.Run("move_of_imported_folder_with_subfolders_settles", func(t *testing.T) {
+		// An imported tree has implicit folders at every level: the provider makes a
+		// folder from its prefix, and no level has a marker object or revision. Moving
+		// such a folder plans mkdir/copy for the destination and a delete for every
+		// source, including the revision-less folders. The driver settles those
+		// deletes as Conditions.ImplicitFolder without a native request, and the
+		// settlement has to accept that receipt: rejecting it moved the bytes, left
+		// the index on the old path, and retried the operation forever.
+		key := "drive/" + f.owners[0] + "/Tree/sub/a.txt"
+		f.provider.mu.Lock()
+		f.provider.record(key, []byte("abcdef"), "text/plain", map[string]string{}, false)
+		f.provider.mu.Unlock()
+		scan, err := treescan.Inventory(f.ctx, strings.NewReader("key,size,lastmodifieddate\n"+key+",6,2020-01-02T03:04:05Z\n"), "drive/"+f.owners[0]+"/", treescan.Options{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err = nodes.ApplyScan(f.ctx, f.db.Pool(), f.owners[0], scan, nodes.ScanApplyOptions{}); err != nil {
+			t.Fatal(err)
+		}
+		driver, err := f.backend.Open(f.ctx, f.owners[0])
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, path := range []storage.Path{"Tree", "Tree/sub"} {
+			folder, statErr := driver.Stat(f.ctx, path)
+			if statErr != nil || folder.Kind != storage.Folder || len(folder.Revision) != 0 {
+				driver.Close()
+				t.Fatalf("imported folder %q must have no native revision: %+v %v", path, folder, statErr)
+			}
+		}
+		driver.Close()
+		source := f.metadata(t, "/Tree")
+		base := f.usageAt(t, 0)
+		objectsAPIJSON(t, f.request(t, "POST", "/move", "", []byte(fmt.Sprintf(`{"from":"/Tree","to":"/MovedTree","ifRevision":%q}`, source["revision"])), nil), 200)
+		moved := f.metadata(t, "/MovedTree/sub/a.txt")
+		if moved["kind"] != "file" || moved["size"] != float64(6) {
+			t.Fatalf("moved child %+v", moved)
+		}
+		if body := f.request(t, "GET", "/content", "/MovedTree/sub/a.txt", nil, nil); body.Code != 200 || body.Body.String() != "abcdef" {
+			t.Fatalf("moved child contents HTTP%d %q", body.Code, body.Body.String())
+		}
+		for _, path := range []string{"/Tree", "/Tree/sub", "/Tree/sub/a.txt"} {
+			if missing := f.request(t, "GET", "", path, nil, nil); missing.Code != 404 {
+				t.Fatalf("old path %q still reads: HTTP%d %s", path, missing.Code, missing.Body.String())
+			}
+		}
+		f.usage(t, 0, base.LogicalBytes, base.PhysicalBytes)
+	})
 }
 
 type objectAPIGatedBody struct {

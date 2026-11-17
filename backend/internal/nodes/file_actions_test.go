@@ -72,6 +72,18 @@ func indexActionEntry(t *testing.T, pool *pgxpool.Pool, root fileops.Root, p str
 	}
 	return id
 }
+
+// implicitFolderDeleteEffect builds the delete effect fileops captures for a prefix folder
+// with no native marker object: the captured source is a folder and it has no
+// revision, so the manifest carries no SourceRevision and executeAction asks the
+// driver for Conditions.ImplicitFolder. The driver settles that removal without a
+// native request, so its result is evidence only.
+func implicitFolderDeleteEffect(number int, source string) fileops.EntryEffect {
+	captured := storage.Entry{Path: storage.Path(source), Kind: storage.Folder}
+	effect := fileops.EntryEffect{ManifestEntry: fileops.ManifestEntry{Number: number, Action: "delete", Source: storage.Path(source), SourceEntry: &captured}, State: "applied", Evidence: []byte("implicit-folder-delete")}
+	effect.Result, _ = json.Marshal(storage.MutationResult{Evidence: effect.Evidence})
+	return effect
+}
 func actionEffect(number int, action, source, target string, kind storage.Kind) fileops.EntryEffect {
 	effect := fileops.EntryEffect{ManifestEntry: fileops.ManifestEntry{Number: number, Action: action, Source: storage.Path(source), Target: storage.Path(target), SourceRevision: []byte("captured-version"), Size: 3}, State: "applied", Evidence: []byte("proven-native-effect")}
 	result := storage.MutationResult{Evidence: effect.Evidence}
@@ -280,18 +292,51 @@ func TestCommitFileActionProvenEffects(t *testing.T) {
 		assertActionID(t, pool, root, "first.txt", "")
 		assertActionID(t, pool, root, "source.txt", source)
 	})
+	t.Run("move of a marker-less folder settles its implicit deletion", func(t *testing.T) {
+		root := actionOwner(t, pool)
+		folder := indexActionEntry(t, pool, root, "from", true)
+		sub := indexActionEntry(t, pool, root, "from/sub", true)
+		child := indexActionEntry(t, pool, root, "from/a.txt", false)
+		effects := []fileops.EntryEffect{
+			actionEffect(0, "mkdir", "", "to", storage.Folder),
+			actionEffect(1, "mkdir", "", "to/sub", storage.Folder),
+			actionEffect(2, "copy", "from/a.txt", "to/a.txt", storage.File),
+			actionEffect(3, "delete", "from/a.txt", "", storage.File),
+			implicitFolderDeleteEffect(4, "from/sub"),
+			implicitFolderDeleteEffect(5, "from"),
+		}
+		result := runActionCommit(t, pool, actionOperation(root, "move", "from", "to", effects...))
+		assertActionID(t, pool, root, "to", folder)
+		assertActionID(t, pool, root, "to/sub", sub)
+		assertActionID(t, pool, root, "to/a.txt", child)
+		assertActionID(t, pool, root, "from", "")
+		assertActionID(t, pool, root, "from/sub", "")
+		assertActionID(t, pool, root, "from/a.txt", "")
+		var metadata fc.Metadata
+		if err := json.Unmarshal(result, &metadata); err != nil || metadata.Path != "/to" || metadata.Kind != "folder" {
+			t.Fatalf("move result %s: %v", result, err)
+		}
+	})
 	t.Run("deletion requires captured version proof", func(t *testing.T) {
 		root := actionOwner(t, pool)
 		id := indexActionEntry(t, pool, root, "source.txt", false)
 		effect := actionEffect(0, "delete", "source.txt", "", storage.File)
 		effect.SourceRevision = nil
-		tx, err := pool.Begin(context.Background())
-		if err != nil {
-			t.Fatal(err)
-		}
-		defer tx.Rollback(context.Background())
-		if _, err = CommitFileAction(context.Background(), tx, actionOperation(root, "delete", "source.txt", "", effect), nil); !fileops.IsCode(err, "invalid_native_result") {
-			t.Fatalf("missing proof accepted: %v", err)
+		// A captured entry does not relax the rule: only a folder can lack a revision, so
+		// a revision-less file is still refused even when its source was captured.
+		captured := storage.Entry{Path: "source.txt", Kind: storage.File, Size: 3}
+		file := effect
+		file.SourceEntry = &captured
+		for _, rejected := range []fileops.EntryEffect{effect, file} {
+			tx, err := pool.Begin(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err = CommitFileAction(context.Background(), tx, actionOperation(root, "delete", "source.txt", "", rejected), nil); !fileops.IsCode(err, "invalid_native_result") {
+				tx.Rollback(context.Background())
+				t.Fatalf("missing proof accepted: %v", err)
+			}
+			tx.Rollback(context.Background())
 		}
 		assertActionID(t, pool, root, "source.txt", id)
 	})

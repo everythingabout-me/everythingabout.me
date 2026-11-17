@@ -289,7 +289,10 @@ together, and a crash before the commit rolls all of them back. What must hold:
 - **The commit callback still receives the entries, not a count.** `CommitFileAction`
   re-validates each applied entry's `Result`/`Evidence` pairing and its `SourceRevision`; a
   design that trusted `state='applied'` alone would let a wrong result into the index without
-  its evidence.
+  its evidence. A delete may omit the revision only for a captured marker-less folder, which
+  the driver settled as `Conditions.ImplicitFolder`: such a folder has no native state to
+  name, so there is nothing to compare, and requiring one made every move of an imported
+  tree fail after its bytes had already moved.
 - **`file_credit_claims` stays as it is.** Deletion credits are keyed by
   `(owner, path, revision, operation)` and are read during settlement; they are not entries
   and must not be collapsed into this table.

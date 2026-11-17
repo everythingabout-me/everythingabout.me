@@ -70,7 +70,14 @@ func commitFileAction(ctx context.Context, tx pgx.Tx, op fileops.Operation, nati
 		switch effect.Action {
 		case "delete":
 			// SourceRevision is captured unchanged-source proof, not a fresh DB lookup.
-			if effect.Source == "" || effect.Target != "" || len(effect.SourceRevision) == 0 || result.Entry != nil {
+			// A marker-less prefix folder has no native object, so there is no revision
+			// to prove; fileops asks the driver for Conditions.ImplicitFolder and the
+			// driver settles the removal only after the folder's last child is gone
+			// (objectmutation.removeImplicitFolder). Every other delete still has to
+			// name the exact native state it removed: a revision-less file, or a folder
+			// whose marker existed, would otherwise be recorded gone on the driver's
+			// word alone.
+			if effect.Source == "" || effect.Target != "" || result.Entry != nil || len(effect.SourceRevision) == 0 && !implicitFolderRemoval(effect) {
 				return nil, fileops.E("invalid_native_result", nil)
 			}
 			deletes[effect.Source] = effect
@@ -314,6 +321,20 @@ func commitFileAction(ctx context.Context, tx pgx.Tx, op fileops.Operation, nati
 		return nil, err
 	}
 	return json.Marshal(metadata)
+}
+
+// implicitFolderRemoval reports the one delete a manifest may prove without a
+// revision: capture saw a folder and no native revision for it. On an object store
+// such a folder is only a prefix — it exists while its children do and has no marker
+// object to name — so fileops expresses its removal as Conditions.ImplicitFolder
+// (fileops executeAction) and the driver settles it without a native request
+// (objectmutation removeImplicitFolder), returning evidence only. Settlement has to
+// accept that receipt, or a move of any folder without a marker can never settle: the
+// bytes have moved, every entry stays applied, the journal retries forever and the
+// old path reads as native_absent. A file, or a folder that did carry a revision,
+// still requires one.
+func implicitFolderRemoval(effect fileops.EntryEffect) bool {
+	return effect.SourceEntry != nil && effect.SourceEntry.Kind == storage.Folder && len(effect.SourceRevision) == 0
 }
 
 func fileRootNamespace(root fileops.Root) string { return root.Namespace() }
