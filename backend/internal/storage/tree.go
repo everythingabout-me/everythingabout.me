@@ -99,6 +99,28 @@ type ReferenceReader interface {
 	StatReference(ctx context.Context, p Path, ref []byte) (Entry, error)
 	OpenReference(ctx context.Context, p Path, ref []byte, options ReadOptions) (Read, error)
 }
+
+// PrefixProbe answers one question in one request: does this folder hold any native
+// entry below it?
+//
+// It exists for destination planning. A flat object store has no folder record, so
+// proving that a planned target path is free costs three requests (HEAD key, HEAD
+// key/, LIST prefix), and a move pays that per target: a 7,685-entry move spent
+// 23,000 of its roughly 30,000 planning requests on target absence alone, before a
+// single byte moved. Since every planned target is either the destination itself
+// (already observed) or a path below it, one listing of the destination's prefix
+// answers the whole manifest, and for a folder destination it is also a stricter
+// answer: an object under the destination collides with the tree it is about to
+// contain even when the plan would not overwrite it.
+//
+// It is optional. A driver that cannot list a prefix directly leaves the coordinator
+// on its per-target path. And it is a preflight, never the safety guarantee: a
+// target can be occupied after the probe, which is why every effect stays
+// conditional on the target being absent.
+type PrefixProbe interface {
+	PrefixEmpty(ctx context.Context, p Path) (bool, error)
+}
+
 type Factory interface {
 	Open(context.Context, Config) (Driver, error)
 }

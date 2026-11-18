@@ -658,9 +658,35 @@ func validateCapture(ctx context.Context, req ActionRequest, native NativeAction
 	if b.Existing != nil {
 		checks = append(checks, nativeCheck{expected: *b.Existing})
 	}
-	for _, entry := range manifest {
-		if entry.Target != "" {
-			checks = append(checks, nativeCheck{expected: storage.Entry{Path: entry.Target}, absent: true})
+	// Destination absence is one question, not one per target. A flat object store
+	// answers "is this path free" with three requests (HEAD key, HEAD key/, LIST
+	// prefix), so the per-target checks below cost three requests per manifest entry:
+	// a 7,685-entry move spent 23,000 of its roughly 30,000 planning requests on them,
+	// before a byte moved. Every planned target is either req.To — already observed
+	// absent by capture — or a path below req.To/, so one listing of that prefix
+	// answers the whole manifest, and for a folder destination it answers strictly
+	// more, because an object under the destination is a collision even when the plan
+	// would not overwrite it. The probe is a preflight, never the safety guarantee:
+	// every copy remains conditional on its own target being absent, so a target
+	// occupied after the probe still fails at the effect instead of here.
+	probedDestination := false
+	if probe, ok := native.(storage.PrefixProbe); ok && (req.Kind == "move" || req.Kind == "copy") {
+		empty, err := probe.PrefixEmpty(ctx, req.To)
+		if err != nil && !storage.IsCode(err, "unsupported") {
+			return err
+		}
+		if err == nil {
+			if !empty {
+				return E("target_changed", nil)
+			}
+			probedDestination = true
+		}
+	}
+	if !probedDestination {
+		for _, entry := range manifest {
+			if entry.Target != "" {
+				checks = append(checks, nativeCheck{expected: storage.Entry{Path: entry.Target}, absent: true})
+			}
 		}
 	}
 	for _, result := range observeChecks(ctx, native, checks) {

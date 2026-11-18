@@ -543,6 +543,21 @@ func (d *driver) List(ctx context.Context, path storage.Path, request storage.Pa
 	return result, nil
 }
 
+// PrefixEmpty answers whether the folder holds any entry. A filesystem reads the
+// directory itself, so one page of one is the whole probe; a missing path is empty
+// because nothing exists below it. The caller has already observed the path itself,
+// which is what would report a file sitting where the folder is expected.
+func (d *driver) PrefixEmpty(ctx context.Context, path storage.Path) (bool, error) {
+	page, err := d.List(ctx, path, storage.PageRequest{Limit: 1})
+	if storage.IsCode(err, "not_found") {
+		return true, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return len(page.Entries) == 0, nil
+}
+
 func (d *driver) Open(ctx context.Context, path storage.Path, options storage.ReadOptions) (storage.Read, error) {
 	if err := validatePath(path); err != nil {
 		return storage.Read{}, err

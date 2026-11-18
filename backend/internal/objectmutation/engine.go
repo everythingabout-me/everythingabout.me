@@ -49,6 +49,7 @@ var _ storage.FolderWriter = (*Driver)(nil)
 var _ storage.Remover = (*Driver)(nil)
 var _ storage.NativeMover = (*Driver)(nil)
 var _ storage.NativeCopier = (*Driver)(nil)
+var _ storage.PrefixProbe = (*Driver)(nil)
 
 func New(tree storage.Driver, binding storage.Config, backend Backend, options Options) (*Driver, error) {
 	a := options.Admission
@@ -398,6 +399,19 @@ func (d *Driver) List(ctx context.Context, p storage.Path, req storage.PageReque
 	}
 	return out, nil
 }
+
+// PrefixEmpty forwards a read-only probe to the native tree. Nothing is staged,
+// published or recorded, so the admission ledger is not involved; a driver whose
+// tree cannot list a prefix reports unsupported, and the coordinator keeps its
+// per-target checks.
+func (d *Driver) PrefixEmpty(ctx context.Context, p storage.Path) (bool, error) {
+	probe, ok := d.tree.(storage.PrefixProbe)
+	if !ok {
+		return false, fail("unsupported", p)
+	}
+	return probe.PrefixEmpty(ctx, p)
+}
+
 func (d *Driver) Open(ctx context.Context, p storage.Path, options storage.ReadOptions) (storage.Read, error) {
 	ctx, done, err := d.operation(ctx)
 	if err != nil {

@@ -213,6 +213,13 @@ func (w *MutationDriver) List(ctx context.Context, path storage.Path, request st
 	}
 	return page, nil
 }
+
+// PrefixEmpty reads the directory once. It does not go through the admitted List:
+// that path validates every sibling and re-observes the selected page, which is the
+// right cost for a listing and the wrong one for a yes/no probe.
+func (w *MutationDriver) PrefixEmpty(ctx context.Context, path storage.Path) (bool, error) {
+	return w.driver.PrefixEmpty(ctx, path)
+}
 func (w *MutationDriver) Open(ctx context.Context, path storage.Path, options storage.ReadOptions) (storage.Read, error) {
 	if err := validatePath(path); err != nil {
 		return storage.Read{}, err

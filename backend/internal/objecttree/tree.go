@@ -85,6 +85,8 @@ type Tree struct {
 	cancel   context.CancelFunc
 }
 
+var _ storage.PrefixProbe = (*Tree)(nil)
+
 // Bind creates a cheap root view over an existing pooled native client. Roots
 // are exact relative prefixes; one optional trailing slash is accepted.
 func Bind(backend Backend, cfg storage.Config, secret []byte) (*Tree, error) {
@@ -523,6 +525,34 @@ func (t *Tree) List(ctx context.Context, path storage.Path, request storage.Page
 	}
 	return page, nil
 }
+
+// PrefixEmpty answers whether any native object exists below path, in one listing
+// of the folder's own prefix. The first page carrying an object or a common prefix
+// settles it; an empty page cannot be truncated, so the answer never needs a second
+// request. List would materialize up to maxDirectoryEntries children of an occupied
+// destination to learn the same thing, which is the worst case for a conflict.
+func (t *Tree) PrefixEmpty(ctx context.Context, path storage.Path) (bool, error) {
+	if err := t.check(ctx, path); err != nil {
+		return false, err
+	}
+	ctx, done, err := t.operation(ctx)
+	if err != nil {
+		return false, err
+	}
+	defer done()
+	// The same spelling children uses: the root already ends in "/", a named path
+	// needs one, and the bucket-rooted tree is spelled "".
+	prefix := t.key(path)
+	if path != "" {
+		prefix += "/"
+	}
+	page, err := t.backend.List(ctx, prefix, "")
+	if err != nil {
+		return false, err
+	}
+	return len(page.Objects) == 0 && len(page.Prefixes) == 0, nil
+}
+
 func (t *Tree) Open(ctx context.Context, path storage.Path, opts storage.ReadOptions) (storage.Read, error) {
 	ctx, done, err := t.operation(ctx)
 	if err != nil {

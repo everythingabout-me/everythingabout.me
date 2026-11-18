@@ -363,6 +363,29 @@ return unsupported before an unsafe effect. Conflicting external writes are outs
 do not claim they are fenced. An atomic no-replace primitive is needed to guarantee absence against them.
 A native MOVE that is atomic only within a filesystem must not be advertised as atomic across volumes.
 
+### Destination absence is one listing, not one per target
+
+A move or copy freezes a manifest of N targets and must prove, before the first effect, that none of them is
+occupied. On a flat object store a target is three probes — the file key, the folder marker key (`key + "/"`),
+and one listing of the folder's own prefix, because a path with no object can still be a prefix folder — so
+the per-target rule costs 3N native requests. A 7,685-entry move spent 23,000 of its roughly 30,000 planning
+requests on this one question, before a byte moved; it is the single largest cost in a large move and it grows
+with the tree rather than with the answer.
+
+The destination root answers all of them. Every planned target is either `to` itself — which capture already
+observed absent, file and marker and prefix folder — or a path under `to/`, so one listing of `to/` answers
+the whole manifest: if nothing exists below `to/`, no target below it can exist. For a folder destination
+that answer is also stricter than what it replaces, because an object left under the destination that the
+plan would not overwrite still collides with the tree the destination is about to contain, and the
+per-target check could not see it since it was never a target. The probe lists the destination's own
+prefix, never its parent, for the reason above.
+
+The capability is optional. A driver that cannot list a prefix (or refuses with `unsupported`) leaves the
+coordinator on its per-target path, so the optimization changes cost without changing what a driver must do.
+And it is a preflight, not a fence: a target occupied after the probe is still refused by that effect's own
+absence condition, which is where the guarantee has always lived. The probe decides how a large plan fails,
+not whether an effect is safe.
+
 ### Why a listing does not establish a revision
 
 A revision is only ever taken from an observation that returns one *for that exact entry*, and only from the
