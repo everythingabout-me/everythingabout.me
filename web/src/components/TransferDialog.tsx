@@ -20,6 +20,7 @@ export function TransferDialog({
   mode,
   item,
   progress,
+  phase,
   cancelling,
   onCancel,
   onCancelOperation,
@@ -29,6 +30,8 @@ export function TransferDialog({
   item: Item;
   /** Entry counts the server reports while the move/copy runs. */
   progress: FileOperation["progress"] | null;
+  /** The step inside the operation; a settlement has no count of its own to show. */
+  phase: FileOperation["phase"] | null;
   cancelling: boolean;
   onCancel: () => void;
   onCancelOperation: () => void;
@@ -44,6 +47,9 @@ export function TransferDialog({
   const [loadError, setLoadError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Every entry is applied but the operation is still running: the server is settling the
+  // index in one transaction, so the counts cannot move again until it commits.
+  const settling = phase === "native_applied" && progress !== null && progress.total !== null && progress.completed >= progress.total;
 
   useEffect(() => {
     const element = dialog.current;
@@ -170,7 +176,11 @@ export function TransferDialog({
         )}
       </div>
 
-      {busy && progress && progress.total ? (
+      {busy && settling ? (
+        <p className={styles.progress} role="status">
+          {t("drive.settling")}
+        </p>
+      ) : busy && progress && progress.total ? (
         <p className={styles.progress} role="status">
           {t("drive.progress", { done: progress.completed, total: progress.total })}
         </p>

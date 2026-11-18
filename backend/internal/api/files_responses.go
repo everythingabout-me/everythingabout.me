@@ -218,9 +218,15 @@ type filesOperationRetry struct {
 // filesOperationResource is GET B/operations/{id} and the 202 body of an
 // asynchronous mutation.
 type filesOperationResource struct {
-	ID              string                 `json:"id"`
-	Kind            string                 `json:"kind"`
-	State           string                 `json:"state"`
+	ID    string `json:"id"`
+	Kind  string `json:"kind"`
+	State string `json:"state"`
+	// Phase names the step inside a nonterminal operation. For a mutation it is the only
+	// thing the resource can say while settlement holds the index: every entry is applied
+	// (`progress.completed` == `total`), and the settlement is one transaction that commits
+	// nothing until it finishes, so no count can advance. `native_applied` there means the
+	// bytes are done and the index is being written.
+	Phase           string                 `json:"phase"`
 	Progress        filesOperationProgress `json:"progress"`
 	Result          any                    `json:"result"`
 	Error           *fc.Problem            `json:"error"`

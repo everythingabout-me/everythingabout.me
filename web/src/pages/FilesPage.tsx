@@ -1785,6 +1785,7 @@ export function FilesPage() {
           mode={transfer.transfer.mode}
           item={transfer.transfer.item}
           progress={transfer.progress}
+          phase={transfer.phase}
           cancelling={transfer.cancelling}
           onCancel={() => transfer.close()}
           onCancelOperation={() => void transfer.cancel()}

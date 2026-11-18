@@ -1025,9 +1025,15 @@ until their expiry and still cannot publish. Queued work rechecks authorization 
 
 ## 8. Operations, concurrency, and quota
 
-Operation JSON has `{id,kind,state,progress,result,error,cancelRequested,retrying,createdAt,finishedAt}`. States are
+Operation JSON has `{id,kind,state,phase,progress,result,error,cancelRequested,retrying,createdAt,finishedAt}`. States are
 `queued/running/outcome_unknown/succeeded/failed/cancelled/unresolved`; progress is `{completed,total,unit}` with nullable
 total. Also record per-entry effects, conflicts and remaining work for partial tree operations.
+`phase` names the step inside a nonterminal operation (`admitted/receiving/staged_ready/effect_started/native_applied/settled`).
+For a move or copy it is the only progress signal the settlement can offer: every entry is applied
+(`progress.completed == total`) and the index settlement is a single transaction that commits nothing until it
+finishes, so `native_applied` with a full count means the bytes are done and the index is being written. It is
+reported rather than concealed because a count that sits at 100% while the operation stays `running` is
+otherwise indistinguishable from a stuck worker.
 `unit` names what is being counted: `entries` for a manifest operation, `bytes` for `upload_commit`, and
 `objects` for a recursive deletion. A recursive deletion is the one kind with no manifest — the acceptance
 settles the index and answers `202`, so `state` stays `running` until the native byte purge settles. Its

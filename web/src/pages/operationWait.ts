@@ -16,10 +16,10 @@ import { t } from "../i18n";
  */
 export async function waitForOperation(
   operation: FileOperation,
-  onProgress?: (progress: FileOperation["progress"]) => void,
+  onUpdate?: (operation: FileOperation) => void,
 ): Promise<void> {
   let current = operation;
-  onProgress?.(current.progress);
+  onUpdate?.(current);
   while (current.state !== "succeeded") {
     if (current.state === "cancelled") {
       throw new Error(current.error?.detail || t("drive.transferCancelled"));
@@ -34,6 +34,6 @@ export async function waitForOperation(
     }
     await new Promise<void>((resolve) => window.setTimeout(resolve, 1000));
     current = await api.getOperation(current.id);
-    onProgress?.(current.progress);
+    onUpdate?.(current);
   }
 }

@@ -32,6 +32,8 @@ export interface TransferJob {
   transfer: { mode: TransferMode; item: Item } | null;
   /** Entry counts the server reports while the move/copy runs. */
   progress: FileOperation["progress"] | null;
+  /** The step inside the operation, so the dialog can name a settlement the counts cannot. */
+  phase: FileOperation["phase"] | null;
   cancelling: boolean;
   open(mode: TransferMode, item: Item): void;
   /** Dismiss without changing anything; an accepted Operation keeps running server-side. */
@@ -46,12 +48,14 @@ export function useTransferJob({ path, load, revisionForMutation, showToast }: T
   const navigate = useNavigate();
   const [transfer, setTransfer] = useState<{ mode: TransferMode; item: Item } | null>(null);
   const [progress, setProgress] = useState<FileOperation["progress"] | null>(null);
+  const [phase, setPhase] = useState<FileOperation["phase"] | null>(null);
   const [cancelling, setCancelling] = useState(false);
   const operation = useRef<string | null>(null);
 
   // Progress belongs to the dialog that is open now, never to the previous transfer.
   useEffect(() => {
     setProgress(null);
+    setPhase(null);
     setCancelling(false);
   }, [transfer]);
 
@@ -69,8 +73,12 @@ export function useTransferJob({ path, load, revisionForMutation, showToast }: T
       }
       operation.current = result.id;
       setProgress(result.progress);
+      setPhase(result.phase);
       try {
-        await waitForOperation(result, setProgress);
+        await waitForOperation(result, (current) => {
+          setProgress(current.progress);
+          setPhase(current.phase);
+        });
       } catch (caught) {
         throw caught instanceof Error ? caught : new Error(t("drive.transferFailed"));
       } finally {
@@ -97,6 +105,7 @@ export function useTransferJob({ path, load, revisionForMutation, showToast }: T
   return {
     transfer,
     progress,
+    phase,
     cancelling,
     open: (mode, item) => setTransfer({ mode, item }),
     close: () => setTransfer(null),

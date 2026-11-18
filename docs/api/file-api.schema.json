@@ -628,6 +628,10 @@
           "kind": "string",
           "optional": false
         },
+        "phase": {
+          "kind": "string",
+          "optional": false
+        },
         "progress": {
           "kind": "object",
           "optional": false

@@ -291,6 +291,10 @@ export interface FileOperation {
   id: string;
   kind: "mkdir" | "move" | "copy" | "delete" | "upload_commit" | "thumbnail";
   state: "queued" | "running" | "outcome_unknown" | "succeeded" | "failed" | "cancelled" | "unresolved";
+  // The step inside a nonterminal operation. `native_applied` on a move or copy means every
+  // entry is applied and the index settlement is running; it is one transaction, so
+  // `progress` stays at its total until it commits.
+  phase: "admitted" | "receiving" | "staged_ready" | "effect_started" | "native_applied" | "settled";
   progress: { completed: number; total: number | null; unit: string };
   // A deletion answers with what happened to the bytes, and only once the purge has
   // settled: `purged` counts objects removed, `adopted` those left because a newer intent
