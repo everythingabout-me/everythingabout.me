@@ -1034,11 +1034,23 @@ func (s *Server) filesAction(w http.ResponseWriter, r *http.Request, f *fileRequ
 	if err != nil {
 		return err
 	}
-	op, replay, err := actions.Prepare(r.Context(), request, native)
+	// An async move or copy is accepted before its manifest is frozen: the walk is
+	// the operation, not the request, and doing it inline held the 202 open for
+	// minutes on a large tree. A synchronous request keeps the old shape — it runs
+	// the whole operation before answering — so only the client that asked to poll
+	// pays the split.
+	async := strings.Contains(strings.ToLower(r.Header.Get("Prefer")), "respond-async")
+	var op fileops.Operation
+	var replay bool
+	if async {
+		op, replay, err = actions.Accept(r.Context(), request, native)
+	} else {
+		op, replay, err = actions.Prepare(r.Context(), request, native)
+	}
 	if err != nil {
 		return filesMutationProblem(err)
 	}
-	if !op.Terminal() && strings.Contains(strings.ToLower(r.Header.Get("Prefer")), "respond-async") {
+	if !op.Terminal() && async {
 		if err = s.startFilesAction(r, f, op); err != nil && !errors.Is(err, errFilesWorkerBusy) {
 			return filesMutationProblem(err)
 		}

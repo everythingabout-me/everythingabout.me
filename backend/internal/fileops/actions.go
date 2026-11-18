@@ -198,6 +198,29 @@ func actionGuards(req ActionRequest) []Guard {
 // public revision conditions, then freezes a finite manifest and exact liability.
 // Idempotent retries consult immutable client intent before inspecting live paths.
 func (a *Actions) Prepare(ctx context.Context, req ActionRequest, native NativeActions) (Operation, bool, error) {
+	return a.prepare(ctx, req, native, false)
+}
+
+// Accept admits a move or copy and answers before its manifest exists, so the
+// caller's 202 is not held open by a walk over the tree (delete has worked this way
+// since acceptance, for the same reason). It still answers what the caller can act
+// on — source missing, destination parent missing, destination taken — and leaves
+// the walk to the worker that runs the operation, where a provider failure is a
+// retried attempt instead of a failed HTTP request.
+//
+// The frozen manifest, its reservation and its entry rows are written by
+// `captureDeferred` in the same journal and with the same shape Prepare would have
+// written; only their position moved. Until then `entry_count` is 0 and
+// `entries_layout` has no frozen binding, which is exactly the state `Run` already
+// resumes (a deletion interrupted between acceptance and freeze looks the same).
+func (a *Actions) Accept(ctx context.Context, req ActionRequest, native NativeActions) (Operation, bool, error) {
+	if req.Kind != "move" && req.Kind != "copy" {
+		return a.prepare(ctx, req, native, false)
+	}
+	return a.prepare(ctx, req, native, true)
+}
+
+func (a *Actions) prepare(ctx context.Context, req ActionRequest, native NativeActions, deferCapture bool) (Operation, bool, error) {
 	if err := validateActionAuthority(req, native); err != nil {
 		return Operation{}, false, err
 	}
@@ -259,6 +282,15 @@ func (a *Actions) Prepare(ctx context.Context, req ActionRequest, native NativeA
 		}
 		return accepted, false, nil
 	}
+	if deferCapture {
+		// The guard taken by Begin stays in force, so no application write can enter
+		// either subtree while the walk is still ahead of us; only a native writer
+		// outside the service can, and capture re-reads the tree for exactly that.
+		if err = preflightAction(work, req, native); err != nil {
+			return fail(err)
+		}
+		return op, false, nil
+	}
 	binding, manifest, reservation, err := captureAction(work, req, native)
 	if err != nil {
 		return fail(err)
@@ -298,6 +330,41 @@ func validateActionName(p storage.Path, rules storage.NameRules) error {
 	}
 	return nil
 }
+
+// preflightAction answers the failures a caller can still act on before the
+// manifest exists: no source, a missing destination parent, a destination that is
+// taken or unusable. Accept uses it so an early 202 does not turn a request that
+// cannot succeed into an accepted operation that fails later. Everything else —
+// the walk, the destination prefix probe, every per-entry revision — is decided by
+// captureDeferred in the worker, which is the same capture Prepare runs inline.
+func preflightAction(ctx context.Context, req ActionRequest, native NativeActions) error {
+	if _, err := observe(ctx, native, req.From); err != nil {
+		if storage.IsCode(err, "not_found") {
+			return E("not_found", err)
+		}
+		return err
+	}
+	parent, err := observe(ctx, native, parentPath(req.To))
+	if err != nil {
+		if storage.IsCode(err, "not_found") {
+			return E("parent_missing", err)
+		}
+		return err
+	}
+	if parent.Kind != storage.Folder {
+		return E("parent_missing", nil)
+	}
+	if err := validateActionName(req.To, native.StorageNameRules()); err != nil {
+		return err
+	}
+	if _, err := native.Stat(ctx, req.To); err == nil {
+		return E("name_conflict", nil)
+	} else if !storage.IsCode(err, "not_found") {
+		return err
+	}
+	return nil
+}
+
 func parentPath(p storage.Path) storage.Path {
 	if i := strings.LastIndexByte(string(p), '/'); i >= 0 {
 		return p[:i]
@@ -793,11 +860,12 @@ func (a *Actions) Run(ctx context.Context, root Root, actor Actor, id string, na
 		return a.purgePrefix(ctx, root, actor, op, native)
 	}
 	binding, err := a.journal.ActionBinding(ctx, op)
-	if IsCode(err, "manifest_not_frozen") && op.Kind == "delete" {
-		// The accepted deletion has no manifest yet: this worker collects it, under the
-		// guard Prepare already took. Re-collecting is safe — the walk only observes, and
-		// nothing has been deleted yet — so a crash between acceptance and freeze costs a
-		// second walk instead of an operation that can never proceed.
+	if IsCode(err, "manifest_not_frozen") && (op.Kind == "delete" || op.Kind == "move" || op.Kind == "copy") {
+		// The accepted operation has no manifest yet: this worker collects it, under
+		// the guard Begin already took. Re-collecting is safe — the walk only observes,
+		// and nothing has been moved yet — so an accepted move whose plan was
+		// interrupted costs a second walk instead of an operation that can never
+		// proceed.
 		if op, err = a.captureDeferred(ctx, root, actor, op, native); err != nil {
 			return op, err
 		}
@@ -934,10 +1002,10 @@ func (a *Actions) reassertMarker(ctx context.Context, op Operation, req ActionRe
 	return err
 }
 
-// captureDeferred freezes the manifest an accepted deletion did not collect. It runs
-// the same capture and consistency re-read Prepare used to run inline, so the frozen
-// set is identical; only its position moved, from the request that returns 202 to the
-// worker that owns the purge.
+// captureDeferred freezes the manifest an accepted operation did not collect. It
+// runs the same capture and consistency re-read Prepare used to run inline, so the
+// frozen set is identical; only its position moved, from the request that returns
+// 202 to the worker that owns the operation.
 func (a *Actions) captureDeferred(ctx context.Context, root Root, actor Actor, op Operation, native NativeActions) (Operation, error) {
 	req, err := actionRequest(op)
 	if err != nil {
@@ -950,9 +1018,18 @@ func (a *Actions) captureDeferred(ctx context.Context, root Root, actor Actor, o
 	work, stop := a.service.keepLease(ctx, op.Lease)
 	defer stop()
 	fail := func(cause error) (Operation, error) {
+		code := actionErrorCode(cause)
+		// A provider that did not answer is not the tree's answer. The operation is
+		// still admitted, nothing has been applied, and the worker's backoff re-walks
+		// it; finishing it as failed would throw away a plan that a transient error
+		// interrupted. Anything the tree itself decided — a taken destination, a source
+		// that changed, an intent that cannot be read — ends the operation here.
+		if code == "storage_failure" || code == "backend_error" || code == "unavailable" {
+			return op, cause
+		}
 		persist, cancel := durableContext(ctx)
 		defer cancel()
-		if finishErr := a.journal.FinishWithoutEffect(persist, op.Lease, Failed, problem(actionErrorCode(cause), cause, &op)); finishErr != nil {
+		if finishErr := a.journal.FinishWithoutEffect(persist, op.Lease, Failed, problem(code, cause, &op)); finishErr != nil {
 			return op, errors.Join(cause, finishErr)
 		}
 		saved, readErr := a.journal.Get(persist, root, actor, op.ID)

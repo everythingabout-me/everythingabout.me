@@ -400,6 +400,12 @@ Completed rename/move returns `200` file/folder metadata; copy returns `201`; de
 commit returns `200` with the published file and the destination folder's new `parentRevision` (see
 [§7](#7-upload-sessions-and-transfer-classes)). Work the server does not settle inside the request returns
 `202 + Operation + Location`. The public action is the same even when backend work differs.
+An asynchronous move or copy is accepted before its manifest is frozen: the `202` carries the operation with
+`progress.total` at 0 and `state` already in progress, and the frozen total appears once the worker has planned
+the tree. The request still answers what the caller can fix — a missing source, a missing destination parent,
+an occupied destination — so an impossible rename never becomes an accepted operation. A plan interrupted by
+the provider is retried from its walk; a plan the tree decided against (the destination appeared, the source
+changed) fails the operation with that cause.
 Cancellation/failure of multi-file work can leave native partial effects; the Operation records them.
 A non-atomic move must never expose one ID at both source and independent destination. Reserve source IDs
 under guards until coherent settlement. If terminal partial failure leaves both copies, source retains its ID

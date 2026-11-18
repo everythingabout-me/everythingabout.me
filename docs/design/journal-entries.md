@@ -214,6 +214,11 @@ the manifest by it, and `mkdir` asks whether the manifest is empty — all of wh
 otherwise force a query for a number the freeze already knows. It is authoritative **only**
 when `entries_layout='table'`; a `'document'` row's count is in its document.
 
+An accepted (`202`) move or copy can also exist before its first freeze. The request proves the source, the
+destination parent and the destination name; the worker that owns the operation freezes the manifest, exactly
+as an accepted deletion does. `entry_count` is 0 until then, which is why the operation resource reports
+`total: 0` while it is still planning — that is the unfrozen state, not a missing progress update.
+
 ### 2.2 Incremental write protocol
 
 Freeze (one transaction, one statement that cannot be partly applied):

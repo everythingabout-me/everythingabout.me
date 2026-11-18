@@ -651,4 +651,27 @@ func TestFilesMutationsPostgresLocalConformance(t *testing.T) {
 			t.Fatal("cancelled copy altered source")
 		}
 	})
+	t.Run("async accept returns before the plan", func(t *testing.T) {
+		mkdir(t, "/PlanSource/Sub", true, 201)
+		put(t, "/PlanSource/Sub/file", []byte("plan"), nil, 201)
+		root := metadata(t, "/PlanSource")
+		accepted := action("POST", "move", "/PlanSource", "/PlanTarget", root["revision"].(string), http.Header{"Prefer": {"respond-async"}})
+		body := object(t, accepted, 202)
+		progress, _ := body["progress"].(map[string]any)
+		if total, _ := progress["total"].(float64); total != 0 {
+			t.Fatalf("the 202 waited for the plan: progress=%v", progress)
+		}
+		done := poll(t, operationPath(t, accepted), bearer)
+		if done["state"] != "succeeded" {
+			t.Fatalf("async move failed: %v", done)
+		}
+		settled, _ := done["progress"].(map[string]any)
+		if total, _ := settled["total"].(float64); total <= 0 {
+			t.Fatalf("settled move reports no entries: %v", settled)
+		}
+		if string(nativeBytes(t, owners[0], "PlanTarget/Sub/file")) != "plan" {
+			t.Fatal("async move did not move the tree")
+		}
+		assertAbsent(t, owners[0], "PlanSource")
+	})
 }
