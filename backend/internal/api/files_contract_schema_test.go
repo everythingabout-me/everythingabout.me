@@ -72,6 +72,7 @@ var fileAPIContractShapes = []struct {
 	{"FileAudit", filechanges.Audit{}},
 	{"FileAuditActor", filechanges.Actor{}},
 	{"FileAuditPage", fc.Collection[filechanges.Audit]{}},
+	{"FileBrowsePage", fc.BrowsePage{}},
 	{"FileCapabilities", filesCapabilitiesResource{}},
 	{"FileChange", filesChangeItem{}},
 	{"FileChangeFilter", filesChangeFilter{}},

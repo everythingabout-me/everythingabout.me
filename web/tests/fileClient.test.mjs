@@ -39,40 +39,43 @@ test("file paths and byte URLs preserve accepted names and encode query values o
   assert.equal(new URL(api.downloadHref(name), "https://drive.example").searchParams.get("disposition"), "attachment");
 });
 
-test("path navigation composes metadata and every page without an ID lookup or envelopes", async (t) => {
+test("path navigation opens with one page that names the folder, then every page", async (t) => {
   const { api } = await client();
   const calls = [];
   mockFetch(t, async (input) => {
     const url = new URL(input, "https://drive.example");
     calls.push(url);
     assert.equal(url.searchParams.get("path"), "/Photos");
-    if (url.pathname === "/api/files") return json(resource("/Photos", "folder"));
-    if (!url.searchParams.has("cursor")) return json({ items: [resource("/Photos/a.jpg")], nextCursor: "opaque+cursor" });
+    const node = resource("/Photos", "folder");
+    if (!url.searchParams.has("cursor")) return json({ node, items: [resource("/Photos/a.jpg")], nextCursor: "opaque+cursor" });
     assert.equal(url.searchParams.get("cursor"), "opaque+cursor");
-    return json({ items: [resource("/Photos/a.jpg"), resource("/Photos/b.jpg")], nextCursor: null });
+    return json({ node, items: [resource("/Photos/a.jpg"), resource("/Photos/b.jpg")], nextCursor: null });
   });
   const listing = await api.list("Photos");
   assert.deepEqual(listing.items.map((file) => file.path), ["/Photos/a.jpg", "/Photos/b.jpg"]);
   assert.deepEqual(listing.breadcrumb, [{ name: "", path: "/" }, { name: "Photos", path: "/Photos" }]);
   assert.equal(listing.node.kind, "folder");
   assert.equal(listing.path, "/Photos");
-  assert.equal(calls.length, 3);
+  // The page carries the folder, so the first paint is one request and no metadata read.
+  assert.equal(calls.length, 2);
+  assert.equal(calls[0].pathname, "/api/files/list");
 });
 
-test("file detail resolves from metadata while the speculative page read stays harmless", async (t) => {
+test("a file opens from its own page instead of a refused listing", async (t) => {
   const { api } = await client();
   const calls = [];
   mockFetch(t, async (input) => {
     const url = new URL(input, "https://drive.example");
     calls.push(url.pathname);
     if (url.searchParams.get("path") === "/missing") return json(problem(404, "not_found"), 404);
-    return url.pathname === "/api/files/list" ? json(problem(409, "not_a_folder"), 409) : json(resource("/a.txt"));
+    return json({ node: resource("/a.txt"), items: [], nextCursor: null });
   });
-  assert.equal((await api.list("a.txt")).node.kind, "file");
+  const file = await api.list("a.txt");
+  assert.equal(file.node.kind, "file");
+  assert.deepEqual(file.items, []);
   assert.equal((await api.list("missing")).node, null);
-  // Opening an entry is one round trip: metadata and the first page are requested together and
-  // the page read of a non-folder is discarded, not awaited or reported.
-  assert.deepEqual(calls, ["/api/files", "/api/files/list", "/api/files", "/api/files/list"]);
+  // A file is a browse target: one request says what the path is, and no listing is refused.
+  assert.deepEqual(calls, ["/api/files/list", "/api/files/list"]);
 });
 
 test("a hovered listing answers exactly one open, then reads again", async (t) => {
@@ -81,20 +84,18 @@ test("a hovered listing answers exactly one open, then reads again", async (t) =
   mockFetch(t, async (input) => {
     const url = new URL(input, "https://drive.example");
     calls.push(url.pathname);
-    return url.pathname === "/api/files/list"
-      ? json({ items: [resource("/Photos/a.jpg")], nextCursor: null })
-      : json(resource("/Photos", "folder"));
+    return json({ node: resource("/Photos", "folder"), items: [resource("/Photos/a.jpg")], nextCursor: null });
   });
   prefetchListing("/Photos");
   await new Promise((resolve) => setTimeout(resolve, 10));
   const warmed = calls.length;
-  assert.equal(warmed, 2);
+  assert.equal(warmed, 1);
   const listing = await api.list("/Photos");
   assert.deepEqual(listing.items.map((item) => item.path), ["/Photos/a.jpg"]);
   assert.equal(calls.length, warmed);
   // Prefetches are single use: the next open reads current state instead of a stale snapshot.
   await api.list("/Photos");
-  assert.equal(calls.length, warmed + 2);
+  assert.equal(calls.length, warmed + 1);
 });
 
 test("Problem errors preserve code and operation identity without cookie fallback", async (t) => {

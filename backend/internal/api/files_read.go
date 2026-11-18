@@ -251,8 +251,12 @@ func (s *Server) filesBrowsePage(w http.ResponseWriter, r *http.Request, f *file
 	if q.SelectorID != "" && parent.ID != q.SelectorID {
 		return fc.NewProblem(404, "not_found", "The selected folder changed location.")
 	}
+	// A file is a legitimate browse target: the page carries the selected entry, so one
+	// request tells the caller what the path is and, for a folder, fills the first page
+	// (BrowsePage records why this replaced the 409 not_a_folder refusal). A file has no
+	// children, so it answers without running the keyset query.
 	if route == "list" && parent.Kind != "folder" {
-		return fc.NewProblem(409, "not_a_folder", "The selected path is not a folder.")
+		return writeFilesJSON(w, 200, fc.NewBrowsePage(filesRedactParent(f, parent), nil, nil))
 	}
 	query := nodes.FileBrowseQuery{ExpectedID: parent.ID, Path: q.Path.Relative(), List: route == "list", Limit: q.Limit + 1, After: previous, HiddenRoots: filesHiddenRoots(f)}
 	if route == "search" {
@@ -293,6 +297,9 @@ func (s *Server) filesBrowsePage(w http.ResponseWriter, r *http.Request, f *file
 			return err
 		}
 		next = &cursor
+	}
+	if route == "list" {
+		return writeFilesJSON(w, 200, fc.NewBrowsePage(filesRedactParent(f, parent), items, next))
 	}
 	return writeFilesJSON(w, 200, fc.NewCollection(items, next))
 }

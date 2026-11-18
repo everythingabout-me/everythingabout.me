@@ -362,7 +362,7 @@ existing separate endpoints and envelopes.
 | Method | Path | Description |
 |---|---|---|
 | GET | `/api/files?path=` or `?id=` | Indexed metadata by either selector; no synchronous storage lookup |
-| GET | `/api/files/list?path=&limit=&cursor=` (or `id=`) | Indexed immediate children; owner-scoped SQL keyset pagination |
+| GET | `/api/files/list?path=&limit=&cursor=` (or `id=`) | The selected entry plus its indexed immediate children; owner-scoped SQL keyset pagination; a file answers with `node` and no items |
 | GET | `/api/files/search?q=&path=&kind=&mediaType=` (or `id=`) | Authorized indexed search below selected folder; scoped opaque cursors |
 | GET | `/api/files/me` · `/api/files/capabilities` | Indexed scope/usage and effective limits (id/path or visible-root default); cookie CSRF bootstrap |
 | GET, HEAD | `/api/files/content?path=` or `?id=` | Class C same-origin bytes; HEAD representation headers on every class; single Range support |

@@ -140,7 +140,7 @@ backing up their mapping; a native scan alone can rebuild files with new IDs, no
 ## 2. HTTP and representations
 
 JSON successes are the resource directly, without an `ok/data` envelope. Collections use
-`{"items":[],"nextCursor":null}`. Errors use `application/problem+json`:
+`{"items":[],"nextCursor":null}`; `/list` adds `node`, the selected entry (§4). Errors use `application/problem+json`:
 
 ```json
 {
@@ -255,7 +255,7 @@ All suffixes are below `B`:
 | GET | `/me` | Current principal, authorized path scope, indexed usage and reservations; see §8 for `usage` vs `quota` |
 | GET | `/capabilities?path=/Photos` or `?id=1f12cfd6-b93b-41ad-ae71-52a4299c3421` | Effective limits/features at an authorized entry |
 | GET | `?path=/Photos/a.jpg` or `?id=f7ca1104-12f0-4bbf-8c77-41d341f7d120` | Indexed metadata by either selector; no native lookup |
-| GET | `/list?path=/Photos&limit=&cursor=` or `id=1f12cfd6-b93b-41ad-ae71-52a4299c3421` in place of path | Indexed immediate children with SQL keyset pagination |
+| GET | `/list?path=/Photos&limit=&cursor=` or `id=1f12cfd6-b93b-41ad-ae71-52a4299c3421` in place of path | The selected entry (`node`) plus its indexed immediate children, with SQL keyset pagination; a file answers with `node` and no items |
 | GET | `/search?q=&path=/Photos&kind=&mediaType=&limit=&cursor=` or `id=1f12cfd6-b93b-41ad-ae71-52a4299c3421` in place of path | Indexed search below selected folder; authorized-root default |
 | GET, HEAD, PUT | `/content?path=/Photos/a.jpg` or `?id=f7ca1104-12f0-4bbf-8c77-41d341f7d120` | Download/headers/conditional replace; creation uses a destination |
 | POST | (base) | Create folder using `{kind:"folder",destination:Destination,parents?}`; retained full-path shortcut |
@@ -294,9 +294,19 @@ they do not select drivers or arbitrary upload origins. Storage connection admin
 
 `GET B?path=/` and `GET B?id=73ea6c34-2c46-4349-b3b8-d5fb7be0fb7c` return the same root metadata when authorized; scoped callers use
 their authorized root selector. Metadata/list require one selector. Search/capabilities default to the authorized
-root only when both selectors are absent. Listing/search use opaque keyset cursors and stable sorting: folders
-first, NFC comparison-name bytes, then a deterministic indexed tie-breaker. Search is case-insensitive substring
-matching on name and resolved visible path and includes descendants of the selected folder.
+root only when both selectors are absent.
+
+`/list` returns `node` — the selected entry itself — beside `items`. The entry is part of the page because a
+listing alone cannot say what the selected path is: a client that opens a path (a preview, a deep link, a
+folder) would otherwise have to read metadata first, and a `list` of a file could only be refused, so every
+file open cost a second request that was guaranteed to fail and a folder's first paint could not finish in one
+round trip. A file is therefore a valid list target: `node.kind` is `file` and `items` is empty. That is still
+distinguishable from an empty folder, which is what the old `409 not_a_folder` protected; the entry itself now
+says which one it is. Mutation destinations whose parent is a file keep `409 not_a_folder` (section 5).
+
+Listing/search use opaque keyset cursors and stable sorting: folders first, NFC comparison-name bytes, then a
+deterministic indexed tie-breaker. Search is case-insensitive substring matching on name and resolved visible
+path and includes descendants of the selected folder.
 A cursor binds principal/scope, selector mode, selected folder, query and sort. An ID-selected folder follows
 completed moves only while authorized. A path-selected cursor whose folder moved/recreated returns
 `409 cursor_stale`; recheck current ancestry on every page. Ordinary concurrent writes do not globally

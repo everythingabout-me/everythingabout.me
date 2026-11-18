@@ -24,7 +24,11 @@ const resource = (path, kind = "file") => ({
   sourceModifiedAt: null, createdAt: "2026-11-01T00:00:00Z", updatedAt: "2026-11-01T00:00:00Z", checksum: null,
 });
 const json = (body, status = 200) => new Response(JSON.stringify(body), { status, headers: { "Content-Type": "application/json" } });
-const page = (paths, nextCursor) => ({ items: paths.map((path) => resource(path)), nextCursor });
+// GET /list answers with the selected entry as well as its children: the page names what the
+// path is, which is what lets a file open (and a folder paint) from one request.
+const page = (nodePath, paths, nextCursor, kind = "folder") => ({
+  node: resource(nodePath, kind), items: paths.map((path) => resource(path)), nextCursor,
+});
 const tick = () => new Promise((resolve) => setImmediate(resolve));
 
 async function until(predicate, label) {
@@ -57,18 +61,17 @@ test("the first page resolves before the last page does", async (t) => {
   mockFetch(t, async (input) => {
     const url = new URL(input, "https://drive.example");
     calls.push({ path: url.pathname, cursor: url.searchParams.get("cursor"), limit: url.searchParams.get("limit") });
-    if (url.pathname === "/api/files") return json(resource("/Big", "folder"));
     const cursor = url.searchParams.get("cursor");
-    if (!cursor) return json(page(["/Big/a", "/Big/b"], "cursor-2"));
+    if (!cursor) return json(page("/Big", ["/Big/a", "/Big/b"], "cursor-2"));
     inFlight += 1;
     peak = Math.max(peak, inFlight);
     try {
       if (cursor === "cursor-2") {
         await secondPage.promise;
-        return json(page(["/Big/c", "/Big/d"], "cursor-3"));
+        return json(page("/Big", ["/Big/c", "/Big/d"], "cursor-3"));
       }
       await lastPage.promise;
-      return json(page(["/Big/e"], null));
+      return json(page("/Big", ["/Big/e"], null));
     } finally {
       inFlight -= 1;
     }
@@ -109,14 +112,14 @@ test("page reads across listings stay inside the derived request bound", async (
   let peak = 0;
   mockFetch(t, async (input) => {
     const url = new URL(input, "https://drive.example");
-    if (url.pathname === "/api/files") return json(resource(url.searchParams.get("path"), "folder"));
+    const folder = url.searchParams.get("path");
     const cursor = url.searchParams.get("cursor");
-    if (!cursor) return json(page([`${url.searchParams.get("path")}/a`], `next:${url.searchParams.get("path")}`));
+    if (!cursor) return json(page(folder, [`${folder}/a`], `next:${folder}`));
     inFlight += 1;
     peak = Math.max(peak, inFlight);
     try {
       await gate.promise;
-      return json(page([`${url.searchParams.get("path")}/b`], null));
+      return json(page(folder, [`${folder}/b`], null));
     } finally {
       inFlight -= 1;
     }
@@ -147,25 +150,24 @@ test("hovering during the first read joins it instead of issuing a duplicate", a
   mockFetch(t, async (input) => {
     const url = new URL(input, "https://drive.example");
     calls.push(url.pathname);
-    if (url.pathname === "/api/files") return json(resource("/Photos", "folder"));
     await gate.promise;
-    return json(page(["/Photos/a"], null));
+    return json(page("/Photos", ["/Photos/a"], null));
   });
 
   // Two hovers in the same turn are one prefetch, and opening the folder consumes that
-  // request rather than starting a second metadata/list pair.
+  // request rather than starting a second one.
   prefetchListing("/Photos");
   prefetchListing("/Photos");
-  await until(() => calls.length === 2, "the hover should request metadata and one page");
-  assert.equal(calls.length, 2);
+  await until(() => calls.length === 1, "the hover should request the page");
+  assert.equal(calls.length, 1);
   const stream = openListing("/Photos");
   prefetchListing("/Photos");
   await tick();
-  assert.equal(calls.length, 2);
+  assert.equal(calls.length, 1);
   gate.resolve();
   const first = await stream.first;
   assert.equal(first.items.length, 1);
-  assert.equal(calls.length, 2);
+  assert.equal(calls.length, 1);
 });
 
 test("hovering while the rest streams cannot re-request the folder", async (t) => {
@@ -175,17 +177,16 @@ test("hovering while the rest streams cannot re-request the folder", async (t) =
   mockFetch(t, async (input) => {
     const url = new URL(input, "https://drive.example");
     calls += 1;
-    if (url.pathname === "/api/files") return json(resource("/Big", "folder"));
-    if (!url.searchParams.has("cursor")) return json(page(["/Big/a"], "cursor-2"));
+    if (!url.searchParams.has("cursor")) return json(page("/Big", ["/Big/a"], "cursor-2"));
     await gate.promise;
-    return json(page(["/Big/b"], null));
+    return json(page("/Big", ["/Big/b"], null));
   });
 
   const stream = openListing("/Big");
   await stream.first;
   const delivered = [];
   const rest = stream.rest((items) => delivered.push(...items));
-  await until(() => calls === 3, "the continuation should be in flight");
+  await until(() => calls === 2, "the continuation should be in flight");
   const before = calls;
   prefetchListing("/Big");
   prefetchListing("/Big");

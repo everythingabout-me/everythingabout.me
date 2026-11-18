@@ -266,6 +266,15 @@ export interface FileCollection {
   nextCursor: string | null;
 }
 
+/**
+ * GET /list: the selected entry itself, then its children page by page. A file is a valid
+ * target and answers with itself and no items — that is what lets a preview open from one
+ * request instead of asking for metadata separately.
+ */
+export interface FileBrowsePage extends FileCollection {
+  node: FileResource;
+}
+
 export interface FileQuota {
   logicalBytes: number;
   logicalLimitBytes: number;
@@ -1112,7 +1121,7 @@ export const files = {
   metadata(selector: FileSelector, signal?: AbortSignal): Promise<FileResource> {
     return fileRequest(fileURL("", entrySelector(selector)), { signal });
   },
-  list(selector: FileSelector, options: { limit?: number; cursor?: string; signal?: AbortSignal } = {}): Promise<FileCollection> {
+  list(selector: FileSelector, options: { limit?: number; cursor?: string; signal?: AbortSignal } = {}): Promise<FileBrowsePage> {
     return fileRequest(fileURL("/list", { limit: options.limit, cursor: options.cursor, ...entrySelector(selector) }), { signal: options.signal });
   },
   search(options: FileSearchOptions): Promise<FileCollection> {
@@ -1200,7 +1209,7 @@ function missingPathAsNull(error: unknown, selected: EntrySelector): null {
  */
 export interface ListingStream {
   readonly key: string;
-  /** Metadata and the first page, requested together. */
+  /** The selected entry and the first page, from one request. */
   readonly first: Promise<ListResult>;
   /** Deliver every page after the first, in order; resolves when the folder is exhausted. */
   rest(onPage: (items: Item[]) => void): Promise<void>;
@@ -1244,10 +1253,10 @@ function isListingAbort(error: unknown): boolean {
 }
 
 /**
- * One hovered folder may warm, and only while nothing else is reading. Its two requests
- * then occupy two of the pool's slots and leave the other two for the open that follows;
- * a slower prefetch can never take capacity the first paint needs. A pointer sweeping
- * across many rows therefore warms the first one and drops the rest.
+ * One hovered folder may warm, and only while nothing else is reading. Its single request
+ * then occupies one of the pool's slots and leaves the rest for the open that follows; a
+ * slower prefetch can never take capacity the first paint needs. A pointer sweeping across
+ * many rows therefore warms the first one and drops the rest.
  */
 function canPrefetchListing(): boolean {
   return listingInFlight === 0 && listingWaiters.length === 0 && listingRequestConcurrency >= 2;
@@ -1324,23 +1333,15 @@ function createListingSession(selected: EntrySelector, queueReads = true): Listi
   let cursor: string | null = null;
   let restPromise: Promise<void> | null = null;
 
-  const metadata = withListingSlot(controller.signal, () =>
-    files.metadata(selected, controller.signal).catch((error: unknown) => missingPathAsNull(error, selected)), queueReads);
+  // One request opens a path: the page carries the entry itself, so the first paint never
+  // spends a second round trip learning that the target is a file.
   const firstPage = withListingSlot(controller.signal, () => files.list(selected, { signal: controller.signal }), queueReads);
-  // A file selector only needs its metadata; /list answers 409 there. Keep that rejection
-  // from surfacing as unhandled even though the branch below never awaits it.
-  firstPage.catch(() => undefined);
 
   const first = (async (): Promise<ListResult> => {
-    const node = await metadata;
-    const header = listingHeader(node, selected);
-    let items: Item[] = [];
-    if (node?.kind === "folder") {
-      const page = await firstPage;
-      items = page.items;
-      cursor = page.nextCursor ?? null;
-    }
-    return { ...header, items };
+    const page = await firstPage.catch((error: unknown) => missingPathAsNull(error, selected));
+    if (!page) return { ...listingHeader(null, selected), items: [] };
+    cursor = page.nextCursor ?? null;
+    return { ...listingHeader(page.node, selected), items: page.items };
   })();
 
   const session: ListingStream = {
@@ -1356,7 +1357,7 @@ function createListingSession(selected: EntrySelector, queueReads = true): Listi
         try {
           while (cursor !== null && !controller.signal.aborted) {
             const at = cursor;
-            let page: FileCollection;
+            let page: FileBrowsePage;
             try {
               page = await withListingSlot(controller.signal, () =>
                 files.list(selected, { cursor: at, limit: listingContinuationLimit, signal: controller.signal }));

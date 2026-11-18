@@ -126,6 +126,22 @@
         }
       }
     },
+    "FileBrowsePage": {
+      "fields": {
+        "items": {
+          "kind": "array",
+          "optional": false
+        },
+        "nextCursor": {
+          "kind": "string",
+          "optional": false
+        },
+        "node": {
+          "kind": "object",
+          "optional": false
+        }
+      }
+    },
     "FileCapabilities": {
       "fields": {
         "atomicCreate": {

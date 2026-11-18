@@ -323,6 +323,25 @@ func filesReadCollection(t *testing.T, w *httptest.ResponseRecorder) fc.Collecti
 	}
 	return result
 }
+
+// filesReadBrowse decodes a GET /list page: the selected entry and its children. A test
+// that decoded the collection alone would not notice the entry leaving the page, and the
+// entry is what lets a file open from one request instead of a refused second one.
+func filesReadBrowse(t *testing.T, w *httptest.ResponseRecorder) fc.BrowsePage {
+	t.Helper()
+	var result fc.BrowsePage
+	if err := json.Unmarshal(w.Body.Bytes(), &result); err != nil {
+		t.Fatal(err)
+	}
+	if result.Items == nil {
+		t.Fatal("items must be an array")
+	}
+	if result.Node.Kind == "" {
+		t.Fatal("a browse page must carry the selected entry")
+	}
+	return result
+}
+
 func filesReadProblem(t *testing.T, err error, status int, code string) {
 	t.Helper()
 	var problem *fc.Problem
@@ -445,7 +464,7 @@ func TestFilesReadListUsesBoundedIndexKeysetPagination(t *testing.T) {
 	for _, p := range []string{"z.txt", "A.txt", "e\u0301.txt", "éz.txt"} {
 		index.rows = append(index.rows, filesReadRow(p, false))
 	}
-	first := filesReadCollection(t, filesReadCall(t, s, f, s.handleFilesList, "path=%2F&limit=2"))
+	first := filesReadBrowse(t, filesReadCall(t, s, f, s.handleFilesList, "path=%2F&limit=2"))
 	if len(first.Items) != 2 || first.Items[0].Path != "/folder-A" || first.Items[1].Path != "/folder-Z" || first.NextCursor == nil {
 		t.Fatalf("first=%+v", first)
 	}
@@ -455,7 +474,7 @@ func TestFilesReadListUsesBoundedIndexKeysetPagination(t *testing.T) {
 	index.rows = append(index.rows, filesReadRow("folder-0", true), filesReadRow("B.txt", false))
 	restarted := &Server{cfg: &config.Config{AppSecret: s.cfg.AppSecret}, filesIndex: index}
 	query := url.Values{"path": {"/"}, "limit": {"1000"}, "cursor": {*first.NextCursor}}.Encode()
-	second := filesReadCollection(t, filesReadCall(t, restarted, f, restarted.handleFilesList, query))
+	second := filesReadBrowse(t, filesReadCall(t, restarted, f, restarted.handleFilesList, query))
 	want := []fc.Path{"/A.txt", "/B.txt", "/z.txt", "/e\u0301.txt", "/éz.txt"}
 	if len(second.Items) != len(want) {
 		t.Fatalf("second=%+v", second)
@@ -586,9 +605,9 @@ func TestFilesReadSyntheticRootAndEmptyList(t *testing.T) {
 	if root.Path != "/" || root.ParentPath != "" || root.Name != "" || root.Kind != "folder" || root.ContentRevision != nil {
 		t.Fatalf("synthetic root=%+v", root)
 	}
-	w := filesReadCall(t, s, f, s.handleFilesList, "path=%2F")
-	if strings.TrimSpace(w.Body.String()) != `{"items":[],"nextCursor":null}` {
-		t.Fatalf("empty list=%s", w.Body.String())
+	empty := filesReadBrowse(t, filesReadCall(t, s, f, s.handleFilesList, "path=%2F"))
+	if len(empty.Items) != 0 || empty.NextCursor != nil || empty.Node.Kind != "folder" || empty.Node.Path != "/" {
+		t.Fatalf("empty list=%+v", empty)
 	}
 	filesReadCall(t, s, f, s.handleFilesSearch, "")
 	filesReadCall(t, s, f, s.handleFilesMe, "")
@@ -688,7 +707,7 @@ func TestFilesReadSearchFullPathTieBreaker(t *testing.T) {
 func TestFilesReadCursorRejectsTamperingAndDifferentBindings(t *testing.T) {
 	s, f, _, index := filesReadFixture()
 	index.rows = []nodes.Row{filesReadRow("a", false), filesReadRow("b", false)}
-	first := filesReadCollection(t, filesReadCall(t, s, f, s.handleFilesList, "path=%2F&limit=1"))
+	first := filesReadBrowse(t, filesReadCall(t, s, f, s.handleFilesList, "path=%2F&limit=1"))
 	token := *first.NextCursor
 	for _, test := range []struct {
 		name   string
@@ -749,7 +768,7 @@ func TestFilesReadRejectsUnknownQueryParameters(t *testing.T) {
 		}
 	}
 	// The supported keys keep working: a normal list pages with limit and its cursor.
-	page := filesReadCollection(t, filesReadCall(t, s, f, s.handleFilesList, "path=%2FDocs&limit=1"))
+	page := filesReadBrowse(t, filesReadCall(t, s, f, s.handleFilesList, "path=%2FDocs&limit=1"))
 	if page.NextCursor == nil {
 		t.Fatal("fixture missing next page")
 	}

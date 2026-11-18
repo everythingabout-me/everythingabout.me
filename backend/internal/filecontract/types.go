@@ -83,6 +83,32 @@ func NewCollection[T any](items []T, nextCursor *string) Collection[T] {
 	return Collection[T]{Items: items, NextCursor: nextCursor}
 }
 
+// BrowsePage is GET /list's answer: the selected entry itself, then its immediate
+// children page by page. A file is a legitimate browse target and answers with itself and
+// no items.
+//
+// The entry is part of the page because a listing alone cannot say what the selected path
+// is. Without it a client that opens a path — a file preview is the common case — has to
+// ask for metadata too, and a `list` of a file had to be refused with 409 not_a_folder:
+// two requests (one rejected) per open, and a folder open that cannot finish its first
+// paint in one round trip. With the entry in the page, one request answers both, and the
+// "is this an empty folder or a file?" ambiguity the refusal existed to avoid disappears
+// because the answer names the kind.
+type BrowsePage struct {
+	Node       Metadata   `json:"node"`
+	Items      []Metadata `json:"items"`
+	NextCursor *string    `json:"nextCursor"`
+}
+
+// NewBrowsePage guarantees the empty-array shape, like NewCollection: a page with no
+// children (an empty folder, or a file) must still encode `items: []`.
+func NewBrowsePage(node Metadata, items []Metadata, nextCursor *string) BrowsePage {
+	if items == nil {
+		items = []Metadata{}
+	}
+	return BrowsePage{Node: node, Items: items, NextCursor: nextCursor}
+}
+
 type CreateFolderRequest struct {
 	Kind    string `json:"kind"`
 	Path    Path   `json:"path"`

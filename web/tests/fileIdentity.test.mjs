@@ -88,9 +88,9 @@ test("ID folder navigation retains selector across pages and deduplicates moved 
   const calls = capture(t, ({ url }) => {
     assert.equal(url.searchParams.get("id"), folderID);
     assert.equal(url.searchParams.has("path"), false);
-    if (url.pathname === "/api/files") return json(resource(folderID, "/Current", "folder"));
-    if (!url.searchParams.has("cursor")) return json({ items: [resource(fileID, "/Current/old.txt")], nextCursor: "next" });
-    return json({ items: [resource(fileID, "/Current/new.txt"), resource(rootID, "/Current/old.txt")], nextCursor: null });
+    const node = resource(folderID, "/Current", "folder");
+    if (!url.searchParams.has("cursor")) return json({ node, items: [resource(fileID, "/Current/old.txt")], nextCursor: "next" });
+    return json({ node, items: [resource(fileID, "/Current/new.txt"), resource(rootID, "/Current/old.txt")], nextCursor: null });
   });
   const listing = await api.list({ id: folderID });
   assert.equal(listing.path, "/Current");
@@ -98,16 +98,18 @@ test("ID folder navigation retains selector across pages and deduplicates moved 
   assert.deepEqual(listing.items.map(({ id, path }) => ({ id, path })), [
     { id: fileID, path: "/Current/new.txt" }, { id: rootID, path: "/Current/old.txt" },
   ]);
-  assert.equal(calls.length, 3);
+  // The first page names the folder, so a navigation is one page read per page, not a
+  // metadata request plus a listing.
+  assert.equal(calls.length, 2);
 });
 
 test("retired ID navigation preserves not_found and never invents a destination", async (t) => {
   const { api, FileApiError } = await client();
   const calls = capture(t, () => json({ type: "urn:eam:error:not_found", title: "Not found", status: 404, code: "not_found", detail: "Not found.", requestId: "req_test" }, 404));
   await assert.rejects(api.list({ id: fileID }), (error) => error instanceof FileApiError && error.status === 404);
-  // The speculative first page rides along with the metadata read, so a vanished ID costs one
-  // round trip rather than a metadata wait followed by a page read.
-  assert.equal(calls.length, 2);
+  // A vanished ID costs exactly one round trip: the page read is the only request, and its
+  // 404 is the answer rather than a metadata wait followed by a page read.
+  assert.equal(calls.length, 1);
   for (const { url } of calls) assert.deepEqual([...url.searchParams], [["id", fileID]]);
 });
 

@@ -31,7 +31,7 @@ func TestFilesPathPaginationRecognizesNewFolderIncarnation(t *testing.T) {
 	s, f, index := mutationIdentityFixture()
 	index.rows = []nodes.Row{filesReadRow("Scope", true), filesReadRow("Scope/a", false), filesReadRow("Scope/b", false)}
 	index.rows[0].ID = mutationFolderID
-	page := filesReadCollection(t, filesReadCall(t, s, f, s.handleFilesList, "path=%2FScope&limit=1"))
+	page := filesReadBrowse(t, filesReadCall(t, s, f, s.handleFilesList, "path=%2FScope&limit=1"))
 	if page.NextCursor == nil {
 		t.Fatal("fixture missing next page")
 	}
