@@ -79,6 +79,36 @@ func (j *effectJournal) BeginEntry(_ context.Context, l Lease, n int) error {
 	}
 	return E("not_found", nil)
 }
+
+// BeginEntries is the wave form: the fake mirrors the real journal's one guard
+// evaluation for a whole set of entries.
+func (j *effectJournal) BeginEntries(ctx context.Context, l Lease, numbers []int) error {
+	j.calls = append(j.calls, "begin")
+	if j.beginErr != nil {
+		return j.beginErr
+	}
+	if l.Epoch != j.op.Lease.Epoch {
+		return E("lease_lost", nil)
+	}
+	for _, n := range numbers {
+		found := false
+		for i := range j.op.Entries {
+			e := &j.op.Entries[i]
+			if e.Number == n {
+				if e.State != "pending" {
+					return E("recovery_required", nil)
+				}
+				e.State = "started"
+				found = true
+			}
+		}
+		if !found {
+			return E("not_found", nil)
+		}
+	}
+	return nil
+}
+
 func (j *effectJournal) SaveEntry(_ context.Context, l Lease, n int, state string, checkpoint, evidence []byte, result json.RawMessage) error {
 	j.calls = append(j.calls, "save:"+state)
 	if j.failState == state && j.saveErr != nil {

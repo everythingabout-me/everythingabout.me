@@ -265,6 +265,31 @@ row must never be written outside a transaction that already holds the parent ro
 direct `UPDATE … FROM` the API, or a batch that updates entries before reading the parent,
 would reintroduce the interleaving the current code prevents.
 
+### One lease per run, one start per wave
+
+Entries cannot be applied one at a time. A copy entry is six to eight provider round
+trips, so 35,374 entries at the measured ~1.6 s each is fifteen hours to move 398 MB.
+They are still applied in dependency order — every destination folder before the copies
+into it, every copy before the first source removal, and removals deepest first — but a
+level is applied concurrently under one run lease. Two journal facts made that
+impossible before, and both are contracts rather than accidents:
+
+- `ApplyEntry` claims the operation per entry, and `Claim` refuses a second holder while
+  a lease is live. The run therefore claims once for the whole level, and every
+  transition — begin, checkpoint, save — carries that one lease.
+- `BeginEntry` refuses to start an entry while *any* entry is uncertain, which is what
+  stops a second effect while an earlier outcome is unknown. A level evaluates that
+  guard once, in `BeginEntries`, before any of its rows starts; evaluated per entry it
+  would see the level's own earlier starts and refuse everything after the first.
+
+The guard's reason still holds: a process that dies mid-level leaves its started rows
+for the next `Claim` to call uncertain, and the recovery pass inspects every one of them
+before anything else is attempted. The level is begun in chunks of
+`entryConcurrency × 4` so that "unknown effects after a crash" stays a constant an
+operator can reason about instead of the size of the manifest. `BeginEntries` updates
+its rows in one transaction that already holds the parent row lock, so the rule above —
+an entry row is never written outside that lock — is unchanged.
+
 ### 2.3 Atomicity with index settlement (the part that must not break)
 
 Settlement stays one transaction, and that is what preserves atomicity: the entry rows are

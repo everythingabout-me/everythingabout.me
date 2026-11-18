@@ -798,13 +798,29 @@ func actionErrorCode(err error) string {
 type runEntries struct {
 	tracked bool
 	list    []EntryEffect
+	// mu guards list because a wave applies its entries concurrently. Readers that
+	// share the list (step validation) only run while no worker is starting, and the
+	// wave itself takes a snapshot before it starts, so the lock protects the
+	// per-entry updates rather than a hot read path.
+	mu sync.Mutex
 }
 
 func (r *runEntries) attach(op Operation) Operation {
 	if r.tracked {
+		r.mu.Lock()
 		op.Entries = r.list
+		r.mu.Unlock()
 	}
 	return op
+}
+
+// snapshot copies the manifest for one wave. Workers never see the live list: a
+// step validates against the state the wave started from, which is exactly right
+// because a wave contains no entry that depends on another entry in it.
+func (r *runEntries) snapshot() []EntryEffect {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]EntryEffect(nil), r.list...)
 }
 
 // absorb refreshes one entry after a transition. A table-backed run cannot read the
@@ -820,7 +836,9 @@ func (a *Actions) absorb(ctx context.Context, r *runEntries, op Operation, numbe
 	if err != nil {
 		return op, err
 	}
+	r.mu.Lock()
 	setEntryEffect(r.list, entry)
+	r.mu.Unlock()
 	op.Entries = r.list
 	return op, nil
 }
@@ -832,6 +850,173 @@ func setEntryEffect(entries []EntryEffect, entry EntryEffect) {
 			return
 		}
 	}
+}
+
+// entryConcurrency is how many manifest entries one run applies at once. An entry
+// is a handful of provider round trips inside one operation (a copy is six to eight
+// at roughly 0.3 s each) and the loop used to run them strictly one after another:
+// 35,374 entries, 12,466 files and 398 MB, took a measured 15 hours. It is also the
+// uncertainty bound — a process that dies with a wave in flight leaves that many
+// entries `started` for recovery to inspect — so it is a compromise between
+// throughput and the blast radius of a crash. Sixteen is the first value that turns
+// an hour per thousand entries into minutes; it is not a number to raise because
+// the provider would accept more concurrent requests.
+const entryConcurrency = 16
+
+// manifestWaves splits the pending manifest into groups whose entries are
+// independent of each other. The manifest's order encodes folder ordering, not
+// cost: a destination folder exists before anything is copied into it, and a source
+// folder is removed after its children. Grouping by action and depth keeps both
+// facts true while letting one level overlap.
+//
+// Copies share one wave: their only dependency is the mkdir level, and the paths
+// within one copy phase never contain one another.
+func manifestWaves(entries []EntryEffect) [][]EntryEffect {
+	var waves [][]EntryEffect
+	group := func(action string, depthOf func(EntryEffect) int, ascending bool) {
+		byDepth := map[int][]EntryEffect{}
+		var depths []int
+		for _, entry := range entries {
+			if entry.State != "pending" || entry.Action != action {
+				continue
+			}
+			d := depthOf(entry)
+			if byDepth[d] == nil {
+				depths = append(depths, d)
+			}
+			byDepth[d] = append(byDepth[d], entry)
+		}
+		sort.Ints(depths)
+		if !ascending {
+			sort.Sort(sort.Reverse(sort.IntSlice(depths)))
+		}
+		for _, d := range depths {
+			waves = append(waves, byDepth[d])
+		}
+	}
+	// A native tree move is one entry whose action is the move itself; it has no
+	// siblings and no folder ordering.
+	var other []EntryEffect
+	for _, entry := range entries {
+		if entry.State == "pending" && entry.Action != "mkdir" && entry.Action != "copy" && entry.Action != "delete" {
+			other = append(other, entry)
+		}
+	}
+	if len(other) > 0 {
+		waves = append(waves, other)
+	}
+	group("mkdir", func(e EntryEffect) int { return strings.Count(string(e.Target), "/") }, true)
+	var copies []EntryEffect
+	for _, entry := range entries {
+		if entry.State == "pending" && entry.Action == "copy" {
+			copies = append(copies, entry)
+		}
+	}
+	if len(copies) > 0 {
+		waves = append(waves, copies)
+	}
+	group("delete", func(e EntryEffect) int { return strings.Count(string(e.Source), "/") }, false)
+	return waves
+}
+
+// entryBeginChunk bounds how many entries one BeginEntries may start ahead of their
+// effects. A wave is begun in chunks so a crash leaves at most this many started rows
+// for recovery to inspect — the uncertainty the wave is allowed to create — while the
+// chunk is large enough that one transaction amortizes over several worker rounds.
+const entryBeginChunk = entryConcurrency * 4
+
+// runWave applies one dependency level. Every entry in it is independent of the
+// others, so they run concurrently under the run's lease.
+//
+// snapshot is the manifest as it stood when the wave started. A step validates
+// against it (an applied parent mkdir, or every destination applied before a
+// delete), and nothing writes it, which is what makes sharing one operation copy
+// across the workers safe.
+//
+// A wave is started in chunks: BeginEntries marks the chunk's rows in one
+// transition (the uncertainty guard refuses a second effect while another entry is
+// unresolved, so per-entry starts would serialize the whole wave), then the chunk
+// is dispatched to the workers. Every begun entry is dispatched, so nothing is left
+// `started` without an attempt; a failure stops the next chunk, and the entries of
+// this one that have not run yet are answered with the inspection the recovery path
+// already uses.
+func (a *Actions) runWave(ctx context.Context, root Root, actor Actor, req ActionRequest, b actionBinding, op Operation, wave, snapshot []EntryEffect, tracked *runEntries, native NativeActions) error {
+	base := op
+	base.Entries = snapshot
+	var cause error
+	for start := 0; start < len(wave); start += entryBeginChunk {
+		end := min(start+entryBeginChunk, len(wave))
+		chunk := wave[start:end]
+		numbers := make([]int, len(chunk))
+		for i, entry := range chunk {
+			numbers[i] = entry.Number
+		}
+		if err := a.options.Authorize(ctx, base); err != nil {
+			return err
+		}
+		if err := a.journal.BeginEntries(ctx, op.Lease, numbers); err != nil {
+			return err
+		}
+		if chunkErr := a.runChunk(ctx, root, actor, req, b, base, chunk, tracked, native); chunkErr != nil {
+			cause = chunkErr
+			break
+		}
+	}
+	return cause
+}
+
+// runChunk dispatches one started chunk to the workers. It always dispatches every
+// entry: an entry whose row is started must get an outcome, and a validation
+// failure is answered by the same inspection that resolves an interrupted effect.
+func (a *Actions) runChunk(ctx context.Context, root Root, actor Actor, req ActionRequest, b actionBinding, base Operation, chunk []EntryEffect, tracked *runEntries, native NativeActions) error {
+	var (
+		mu    sync.Mutex
+		cause error
+	)
+	fail := func(err error) {
+		mu.Lock()
+		if cause == nil {
+			cause = err
+		}
+		mu.Unlock()
+	}
+	queue := make(chan EntryEffect)
+	var wg sync.WaitGroup
+	for i := 0; i < entryConcurrency; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for entry := range queue {
+				if err := a.options.Authorize(ctx, base); err != nil {
+					fail(err)
+					continue
+				}
+				next, callErr := a.service.ApplyEntryStarted(ctx, root, actor, base, entry.Number, native, func(work context.Context, intent storage.EffectIntent, save storage.Checkpoint) (storage.MutationResult, error) {
+					// Repeat identity checks after the durable entry start and immediately before
+					// passing the actual immutable intent to the admitted native executor.
+					if checkErr := validateActionStep(work, native, req, b, base, entry); checkErr != nil {
+						return storage.MutationResult{}, checkErr
+					}
+					return executeAction(work, native, intent, save)
+				})
+				if next.ID != "" {
+					if _, err := a.absorb(ctx, tracked, next, entry.Number); err != nil {
+						fail(err)
+						continue
+					}
+				}
+				if callErr != nil {
+					fail(callErr)
+				}
+			}
+		}()
+	}
+	for _, entry := range chunk {
+		queue <- entry
+	}
+	close(queue)
+	wg.Wait()
+	return cause
 }
 
 // Run resumes only the saved manifest. Each native entry has its own short worker
@@ -886,13 +1071,6 @@ func (a *Actions) Run(ctx context.Context, root Root, actor Actor, id string, na
 		tracked.list = list
 		op.Entries = list
 	}
-	refresh := func(ctx context.Context) (Operation, error) {
-		next, err := a.journal.Get(ctx, root, actor, id)
-		if err != nil {
-			return next, err
-		}
-		return tracked.attach(next), nil
-	}
 	var cause error
 	// First repair every uncertain effect. Recovery never depends on creator rights
 	// that may have been revoked after its native effect, and never publishes again.
@@ -922,56 +1100,55 @@ func (a *Actions) Run(ctx context.Context, root Root, actor Actor, id string, na
 		}
 	}
 	if op.Phase != NativeApplied && cause == nil {
-		destinationsVerified := false
-		for _, entry := range op.Entries {
-			if entry.State != "pending" {
-				continue
+		// The manifest is ordered by dependency, not by cost: every destination folder
+		// exists before anything is copied into it, and no source folder is removed
+		// before its children. That order used to force one entry at a time, because
+		// ApplyEntry claims the operation per entry and Claim refuses a second holder.
+		// The run now holds one lease for all of them and applies one dependency level
+		// at a time, with the level's entries overlapping their provider round trips.
+		op, err = a.journal.Claim(ctx, root, actor, op.ID, a.options.LeaseTTL)
+		if err != nil {
+			return op, err
+		}
+		op = tracked.attach(op)
+		work, stop := a.service.keepLease(ctx, op.Lease)
+		waves := manifestWaves(op.Entries)
+		verified := false
+		for i := 0; i < len(waves) && cause == nil; i++ {
+			// One read per wave is the granularity a cancel can be honoured at: entries
+			// already started finish (their effects are journaled and recoverable), and
+			// no entry of the next level starts.
+			latest, readErr := a.journal.Get(work, root, actor, op.ID)
+			if readErr != nil {
+				stop()
+				return latest, readErr
 			}
-			op, err = refresh(ctx)
-			if err != nil {
-				return op, err
-			}
-			if op.CancelRequested {
+			if latest.CancelRequested || latest.Terminal() {
+				op = latest
 				break
 			}
-			if err = a.options.Authorize(ctx, op); err != nil {
-				cause = err
-				break
-			}
-			if err = validateActionStep(ctx, native, req, binding, op, entry); err != nil {
-				cause = err
-				break
-			}
-			if req.Kind == "move" && entry.Action == "delete" && !destinationsVerified {
+			if req.Kind == "move" && waves[i][0].Action == "delete" && !verified {
 				// One proof of the whole destination set, immediately before the first
-				// removal. Recovery restarts run it again from the saved manifest.
-				if err = verifyMoveDestinations(ctx, native, op); err != nil {
+				// removal. The deletes that follow cannot change a destination.
+				if err = verifyMoveDestinations(work, native, tracked.attach(latest)); err != nil {
 					cause = err
 					break
 				}
-				destinationsVerified = true
+				verified = true
 			}
-			next, callErr := a.service.ApplyEntry(ctx, root, actor, id, entry.Number, native, func(work context.Context, intent storage.EffectIntent, save storage.Checkpoint) (storage.MutationResult, error) {
-				// Repeat identity checks after the durable entry start and immediately before
-				// passing the actual immutable intent to the admitted native executor.
-				if checkErr := validateActionStep(work, native, req, binding, op, entry); checkErr != nil {
-					return storage.MutationResult{}, checkErr
-				}
-				return executeAction(work, native, intent, save)
-			})
-			if next.ID != "" {
-				if next, err = a.absorb(ctx, tracked, next, entry.Number); err != nil {
-					return next, errors.Join(callErr, err)
-				}
+			if waveErr := a.runWave(work, root, actor, req, binding, latest, waves[i], tracked.snapshot(), tracked, native); waveErr != nil {
+				cause = waveErr
 			}
-			op, err = next, callErr
-			if uncertainEntries(&op) {
-				return a.accountUnknown(ctx, root, actor, op, err)
+			latest, readErr = a.journal.Get(work, root, actor, op.ID)
+			if readErr != nil {
+				stop()
+				return latest, readErr
 			}
-			if err != nil {
-				cause = err
-				break
-			}
+			op = tracked.attach(latest)
+		}
+		stop()
+		if uncertainEntries(&op) {
+			return a.accountUnknown(ctx, root, actor, op, cause)
 		}
 	}
 	return a.settle(ctx, root, actor, op, tracked, binding, native, cause)

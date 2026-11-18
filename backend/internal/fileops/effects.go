@@ -49,8 +49,7 @@ func (s *Service) coordinateEntry(ctx context.Context, root Root, actor Actor, i
 	if err != nil {
 		return op, err
 	}
-	entry, intent, err := manifestEffect(op, entry)
-	if err != nil {
+	if _, _, err := manifestEffect(op, entry); err != nil {
 		return op, err
 	}
 	if done, err := recordedEntry(entry); done {
@@ -68,32 +67,71 @@ func (s *Service) coordinateEntry(ctx context.Context, root Root, actor Actor, i
 	}
 	work, stop := s.keepLease(ctx, op.Lease)
 	defer stop()
-	entry, err = s.entryOf(ctx, op, number)
+	return s.applyEntry(ctx, work, root, actor, op, number, recovery, effect, true, false)
+}
+
+// ApplyEntryStarted executes one manifest entry the caller already marked started
+// under a lease it holds, for a run that applies a whole wave at once.
+//
+// Claim refuses a second holder while a lease is live, so calling ApplyEntry per
+// entry made every manifest strictly serial: 35,374 entries, one claim and one
+// release each, ran one provider round trip at a time. The run holds the lease for
+// its whole wave instead, renews it, and releases it before settlement — which
+// claims again — so entries can overlap their native work while every transition
+// still carries the same lease and the same epoch.
+func (s *Service) ApplyEntryStarted(ctx context.Context, root Root, actor Actor, op Operation, number int, recovery storage.EffectRecovery, effect func(context.Context, storage.EffectIntent, storage.Checkpoint) (storage.MutationResult, error)) (Operation, error) {
+	if recovery == nil || effect == nil {
+		return Operation{}, E("unsupported", nil)
+	}
+	bound, ok := recovery.(storage.BoundEffectRecovery)
+	if !ok {
+		return Operation{}, E("unsupported", nil)
+	}
+	if err := validateNativeBinding(root, bound.StorageBinding(), bound.StorageNameRules()); err != nil {
+		return Operation{}, err
+	}
+	return s.applyEntry(ctx, ctx, root, actor, op, number, recovery, effect, false, true)
+}
+
+// applyEntry is the part of coordinateEntry that runs under a held lease. base is
+// the caller's context and work is the lease-bound context: the durable writes use
+// base so evidence survives a lost lease, and the native call uses work so it stops
+// with it. record says whether the caller owns its own copy of the operation (the
+// serial path) or shares one with other workers (the parallel path); a shared copy
+// is never mutated.
+func (s *Service) applyEntry(base, work context.Context, root Root, actor Actor, op Operation, number int, recovery storage.EffectRecovery, effect func(context.Context, storage.EffectIntent, storage.Checkpoint) (storage.MutationResult, error), record, begun bool) (Operation, error) {
+	entry, err := s.entryOf(work, op, number)
 	if err != nil {
 		return op, err
 	}
-	entry, intent, err = manifestEffect(op, entry)
+	entry, intent, err := manifestEffect(op, entry)
 	if err != nil {
 		return op, err
 	}
 	if done, err := recordedEntry(entry); done {
 		return op, err
 	}
-	if entry.State == "started" || entry.State == "outcome_unknown" {
-		return s.inspectEntry(work, root, actor, op, entry, intent, recovery, nil)
-	}
-	if entry.State != "pending" || effect == nil || op.CancelRequested || op.State == Unknown {
+	if !begun {
+		if entry.State == "started" || entry.State == "outcome_unknown" {
+			return s.inspectEntry(work, root, actor, op, entry, intent, recovery, nil)
+		}
+		if entry.State != "pending" || effect == nil || op.CancelRequested || op.State == Unknown {
+			return op, E("recovery_required", nil)
+		}
+		// Fresh authorization is checked immediately before journaling the final effect.
+		if err = s.options.Authorize(work, op); err != nil {
+			return op, err
+		}
+		if err = s.journal.BeginEntry(work, op.Lease, number); err != nil {
+			return op, err
+		}
+	} else if entry.State != "started" {
 		return op, E("recovery_required", nil)
 	}
-	// Fresh authorization is checked immediately before journaling the final effect.
-	if err = s.options.Authorize(work, op); err != nil {
-		return op, err
-	}
-	if err = s.journal.BeginEntry(work, op.Lease, number); err != nil {
-		return op, err
-	}
 	entry.State = "started"
-	setOperationEntry(&op, entry)
+	if record {
+		setOperationEntry(&op, entry)
+	}
 	op.Phase = EffectStarted
 	// If revocation wins after the durable start marker, native inspection must still
 	// resolve that marker; do not reset it to pending or declare a safe rollback.
@@ -120,16 +158,18 @@ func (s *Service) coordinateEntry(ctx context.Context, root Root, actor Actor, i
 	active = false
 	entry.Checkpoint = bytes.Clone(checkpoint)
 	mu.Unlock()
-	setOperationEntry(&op, entry)
+	if record {
+		setOperationEntry(&op, entry)
+	}
 	if nativeErr != nil {
 		// NoFinalEffect describes this attempt only, never a proof about earlier native
 		// requests. It follows the same InspectEffect path as any other native error.
-		return s.inspectEntry(ctx, root, actor, op, entry, intent, recovery, nativeErr)
+		return s.inspectEntry(base, root, actor, op, entry, intent, recovery, nativeErr)
 	}
 	if err = validateEntryResult(entry, result); err != nil {
-		return s.saveEntryUnknown(ctx, root, actor, op, entry, nil, err)
+		return s.saveEntryUnknown(base, root, actor, op, entry, nil, err)
 	}
-	persist, cancel := durableContext(ctx)
+	persist, cancel := durableContext(base)
 	defer cancel()
 	encoded, err := json.Marshal(result)
 	if err != nil {

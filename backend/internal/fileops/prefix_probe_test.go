@@ -2,6 +2,7 @@ package fileops
 
 import (
 	"context"
+	"sync"
 	"testing"
 
 	"everythingabout.me/backend/internal/storage"
@@ -13,6 +14,7 @@ import (
 // target costs its own three-request absence proof.
 type probeNative struct {
 	NativeActions
+	mu         sync.Mutex
 	statByPath map[storage.Path]int
 	probes     int
 	probePath  storage.Path
@@ -25,10 +27,12 @@ func (n *probeNative) StorageNameRules() storage.NameRules {
 }
 
 func (n *probeNative) Stat(_ context.Context, p storage.Path) (storage.Entry, error) {
+	n.mu.Lock()
 	if n.statByPath == nil {
 		n.statByPath = map[storage.Path]int{}
 	}
 	n.statByPath[p]++
+	n.mu.Unlock()
 	if p == "from" {
 		return storage.Entry{Path: p, Kind: storage.Folder, Revision: []byte("rev:from")}, nil
 	}
@@ -36,8 +40,10 @@ func (n *probeNative) Stat(_ context.Context, p storage.Path) (storage.Entry, er
 }
 
 func (n *probeNative) PrefixEmpty(_ context.Context, p storage.Path) (bool, error) {
+	n.mu.Lock()
 	n.probes++
 	n.probePath = p
+	n.mu.Unlock()
 	if n.probeErr != nil {
 		return false, n.probeErr
 	}

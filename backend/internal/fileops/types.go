@@ -311,6 +311,10 @@ type Journal interface {
 	Settle(context.Context, Lease, Settlement, IndexCommit) (Operation, error)
 	RequestCancel(context.Context, Root, Actor, string) (Operation, error)
 	BeginEntry(context.Context, Lease, int) error
+	// BeginEntries marks one wave's entries started in a single transition. The
+	// uncertainty guard is evaluated once, before any of them starts: per entry it
+	// would see the wave's own earlier starts and refuse the rest.
+	BeginEntries(context.Context, Lease, []int) error
 	SaveEntry(context.Context, Lease, int, string, []byte, []byte, json.RawMessage) error
 }
 

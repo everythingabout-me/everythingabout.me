@@ -563,3 +563,56 @@ func (p *Postgres) Settle(ctx context.Context, l Lease, s Settlement, commit Ind
 	})
 	return out, err
 }
+
+// BeginEntries marks one dependency wave's entries started in a single
+// transition. BeginEntry is the one-entry form and keeps its own guard; this form
+// exists because that guard is evaluated once per call, and a wave calls it once
+// for all of its entries. Evaluating it per entry would see the wave's own earlier
+// starts as "an uncertain outcome exists" and refuse everything after the first —
+// which is exactly the serialization a wave is meant to remove.
+//
+// The safety property is unchanged: a crash leaves these rows started, the next
+// Claim treats them as uncertain because they were not started by its lease, and
+// the recovery pass inspects every one of them before anything else is attempted.
+func (p *Postgres) BeginEntries(ctx context.Context, l Lease, numbers []int) error {
+	if len(numbers) == 0 {
+		return nil
+	}
+	return p.leasedOwnRow(ctx, l, func(tx pgx.Tx, op *Operation, _ time.Time) error {
+		uncertain, err := operationEntriesUncertain(ctx, tx, op)
+		if err != nil {
+			return err
+		}
+		if op.Terminal() || op.CancelRequested || op.Phase == NativeApplied || op.State == Unknown || uncertain {
+			return E("recovery_required", nil)
+		}
+		if op.EntriesLayout == EntriesLayoutTable {
+			tag, err := tx.Exec(ctx, beginEntriesSQL, op.ID, op.Root.OwnerID, numbers)
+			if err != nil {
+				return err
+			}
+			if int(tag.RowsAffected()) != len(numbers) {
+				// A row was not pending: another attempt claimed it or it is terminal.
+				// Answer recovery_required and leave the started rows for inspection.
+				return E("recovery_required", nil)
+			}
+			op.Phase = EffectStarted
+			return nil
+		}
+		wanted := make(map[int]bool, len(numbers))
+		for _, number := range numbers {
+			wanted[number] = true
+		}
+		for i := range op.Entries {
+			if !wanted[op.Entries[i].Number] {
+				continue
+			}
+			if op.Entries[i].State != "pending" {
+				return E("recovery_required", nil)
+			}
+			op.Entries[i].State = "started"
+		}
+		op.Phase = EffectStarted
+		return nil
+	})
+}

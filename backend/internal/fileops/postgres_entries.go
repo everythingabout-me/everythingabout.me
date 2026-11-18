@@ -128,6 +128,13 @@ const beginEntrySQL = `update file_operation_entries
    set state='started', updated_at=clock_timestamp()
  where operation_id=$1 and owner_id=$2 and number=$3 and state='pending'`
 
+// beginEntriesSQL starts one whole wave. The rows are independent by
+// construction, so the only thing that has to be decided once is whether the
+// operation may start any effect at all.
+const beginEntriesSQL = `update file_operation_entries
+   set state='started', updated_at=clock_timestamp()
+ where operation_id=$1 and owner_id=$2 and number = any($3) and state='pending'`
+
 // saveEntrySQL records the outcome or checkpoint of one entry. It is an UPDATE, not
 // an upsert: the frozen manifest is the only writer of rows, so a missing row here is
 // a missing manifest entry and must fail rather than be re-created from a transition.

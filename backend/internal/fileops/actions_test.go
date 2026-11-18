@@ -28,7 +28,10 @@ type actionNative struct {
 	receipts    map[string]storage.Inspection
 	calls       []storage.EffectIntent
 	serial      int
+	mu          sync.Mutex
 	statMu      sync.Mutex
+	inflight    atomic.Int32
+	maxInflight atomic.Int32
 	beforeStat  func(storage.Path)
 	afterEffect func(storage.EffectIntent)
 	failAt      int
@@ -71,13 +74,17 @@ func (n *actionNative) Describe() storage.Descriptor {
 }
 func (n *actionNative) Close() error { return nil }
 func (n *actionNative) Stat(_ context.Context, p storage.Path) (storage.Entry, error) {
-	// Observations run concurrently, so the hook must not be entered twice at once:
-	// tests use it to count or to mutate the fake from inside a single step.
+	// Observations run concurrently with effects, so the hook must not be entered
+	// twice at once: tests use it to count or to mutate the fake from inside a step.
 	if n.beforeStat != nil {
 		n.statMu.Lock()
+		n.mu.Lock()
 		n.beforeStat(p)
+		n.mu.Unlock()
 		n.statMu.Unlock()
 	}
+	n.mu.Lock()
+	defer n.mu.Unlock()
 	e, ok := n.entries[p]
 	if !ok {
 		return e, storage.NewError("not_found", p, nil)
@@ -148,12 +155,23 @@ func (n *actionNative) Move(context.Context, storage.MoveRequest, storage.Checkp
 	return storage.MutationResult{}, errors.New("service must use captured copy/verify/delete")
 }
 func (n *actionNative) InspectEffect(_ context.Context, i storage.EffectIntent, _ []byte) (storage.Inspection, error) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
 	if receipt, ok := n.receipts[i.ID]; ok {
 		return receipt, nil
 	}
 	return storage.Inspection{State: storage.NotApplied, Evidence: []byte("quiescent unused native intent")}, nil
 }
 func (n *actionNative) effect(ctx context.Context, i storage.EffectIntent, save storage.Checkpoint) (storage.MutationResult, error) {
+	// One wave applies several entries at once. The counter is taken before the lock
+	// so a test can see that the runner overlapped the effects themselves; the
+	// fake's tree and receipts are shared state and are serialized after it.
+	if active := n.inflight.Add(1); active > n.maxInflight.Load() {
+		n.maxInflight.Store(active)
+	}
+	defer n.inflight.Add(-1)
+	n.mu.Lock()
+	defer n.mu.Unlock()
 	if err := save(ctx, []byte(i.ID)); err != nil {
 		return storage.MutationResult{}, err
 	}
