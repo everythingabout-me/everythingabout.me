@@ -164,6 +164,23 @@ func filesStorageBackendProblem(e *storage.Error) error {
 	return fc.NewProblem(502, "storage_failure", detail+".")
 }
 func (s *Server) fileMutationContext(ctx context.Context, f *fileRequest) (fileops.NativeActions, fileops.Root, fileops.Actor, error) {
+	native, root, actor, err := s.fileOperationContext(ctx, f)
+	if err != nil {
+		return nil, root, actor, err
+	}
+	// This internal readiness query does not disclose owner-wide usage to a token.
+	if _, err := s.filesUsage(ctx, native, root); err != nil {
+		return nil, root, actor, filesMutationProblem(err)
+	}
+	return native, root, actor, nil
+}
+
+// fileOperationContext is fileMutationContext without the budget readiness check. Reads
+// use it: filesUsage runs in the owner's write transaction (fileops.Postgres.Usage takes
+// the owner advisory lock), so a GET that only needs to name the root and the principal
+// queued behind a settlement holding that lock — a status poll hung for as long as the
+// settlement ran, which is exactly when a client most needs to poll.
+func (s *Server) fileOperationContext(ctx context.Context, f *fileRequest) (fileops.NativeActions, fileops.Root, fileops.Actor, error) {
 	if !s.cfg.Storage.CoordinatedWrites || s.filesJournal == nil {
 		return nil, fileops.Root{}, fileops.Actor{}, fc.NewProblem(501, "not_implemented", "Native file writes are not enabled.")
 	}
@@ -186,10 +203,6 @@ func (s *Server) fileMutationContext(ctx context.Context, f *fileRequest) (fileo
 		if f.Principal.Token != nil {
 			actor.PolicyVersion = f.Principal.Token.PolicyVersion
 		}
-	}
-	// This internal readiness query does not disclose owner-wide usage to a token.
-	if _, err := s.filesUsage(ctx, native, root); err != nil {
-		return nil, root, actor, filesMutationProblem(err)
 	}
 	return native, root, actor, nil
 }

@@ -127,7 +127,10 @@ func filesOperationFailure(op fileops.Operation) error {
 	return p
 }
 func (s *Server) handleFilesGetOperation(w http.ResponseWriter, r *http.Request, f *fileRequest) error {
-	native, root, actor, err := s.fileMutationContext(r.Context(), f)
+	// A poll is a read, and it must stay one: the write-side context takes the owner's
+	// advisory lock for its readiness query, so a settlement holding that lock made the
+	// status poll hang exactly while the client was waiting for progress.
+	native, root, actor, err := s.fileOperationContext(r.Context(), f)
 	if err != nil {
 		return err
 	}
@@ -147,6 +150,11 @@ func (s *Server) handleFilesGetOperation(w http.ResponseWriter, r *http.Request,
 			return filesMutationProblem(e)
 		}
 		if op.Kind == "upload_commit" {
+			// Recovery here publishes or repairs staged bytes, so this branch keeps the
+			// write-side readiness gate: unlike a status poll, it is a mutation.
+			if _, e := s.filesUsage(r.Context(), native, root); e != nil {
+				return filesMutationProblem(e)
+			}
 			service, e := s.filesPutRecovery(r, f, native)
 			if e != nil {
 				return e
