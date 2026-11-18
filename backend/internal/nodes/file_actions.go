@@ -104,35 +104,61 @@ func commitFileAction(ctx context.Context, tx pgx.Tx, op fileops.Operation, nati
 	}
 	sort.Slice(applied, func(i, j int) bool { return applied[i].effect.Number < applied[j].effect.Number })
 	removedFolders := make(map[storage.Path]bool)
+	var unknownFolders []string
 	for source, effect := range deletes {
 		if effect.SourceEntry != nil {
 			removedFolders[source] = effect.SourceEntry.Kind == storage.Folder
-		} else {
-			var folder bool
-			if err := tx.QueryRow(ctx, `select exists(select 1 from file_entries where owner_id=$1::uuid and path=$2 and is_dir)`, op.Root.OwnerID, string(source)).Scan(&folder); err != nil {
-				return nil, err
-			}
-			removedFolders[source] = folder
+			continue
+		}
+		unknownFolders = append(unknownFolders, string(source))
+	}
+	if len(unknownFolders) > 0 {
+		folders, err := foldersAt(ctx, tx, op.Root.OwnerID, unknownFolders)
+		if err != nil {
+			return nil, err
+		}
+		for _, path := range unknownFolders {
+			removedFolders[storage.Path(path)] = folders[path]
+		}
+	}
+	var removedPaths []string
+	for source, folder := range removedFolders {
+		if folder {
+			removedPaths = append(removedPaths, string(source))
 		}
 	}
 
+	// The sources a move relinks, resolved in one round trip. This was one point query
+	// per entry inside the owner's lock -- 35,374 of them for a move of 12k files.
+	movedFrom := make([]storage.Path, len(applied))
+	var resolve []string
+	if op.Kind == "move" {
+		for i, item := range applied {
+			movedFrom[i] = moveSource(request, item.effect)
+			if movedFrom[i] != "" {
+				resolve = append(resolve, string(movedFrom[i]))
+			}
+		}
+	}
+	targets := make([]string, 0, len(applied))
+	for _, item := range applied {
+		if item.effect.Action != "delete" {
+			targets = append(targets, string(item.result.Entry.Path))
+		}
+	}
+	ids, err := resolveIDs(ctx, tx, op.Root.OwnerID, resolve)
+	if err != nil {
+		return nil, err
+	}
 	sourceIDs := make(map[storage.Path]string)
 	sourceRevisions := make(map[storage.Path]*string)
 	if op.Kind == "move" {
-		for _, item := range applied {
-			source := item.effect.Source
-			if item.effect.Action == "mkdir" && (item.effect.Target == request.To || strings.HasPrefix(string(item.effect.Target), string(request.To)+"/")) {
-				source = storage.Path(string(request.From) + strings.TrimPrefix(string(item.effect.Target), string(request.To)))
-			}
+		for i, item := range applied {
+			source := movedFrom[i]
 			if source == "" {
 				continue
 			}
-			var id string
-			err := tx.QueryRow(ctx, `select id::text from nodes where owner_id=$1::uuid and id=file_tree_resolve($1::uuid,$2)`, op.Root.OwnerID, string(source)).Scan(&id)
-			if err != nil && err != pgx.ErrNoRows {
-				return nil, err
-			}
-			if err == nil {
+			if id, ok := ids[string(source)]; ok {
 				sourceIDs[source] = id
 			}
 			if item.effect.SourceEntry != nil && item.effect.SourceEntry.Kind == storage.File {
@@ -144,41 +170,39 @@ func commitFileAction(ctx context.Context, tx pgx.Tx, op fileops.Operation, nati
 			}
 		}
 	}
-	removedDescendantIDs := make(map[storage.Path][]string)
-	for source, folder := range removedFolders {
-		if !folder {
-			continue
-		}
-		rows, err := tx.Query(ctx, `select id::text from file_entries where owner_id=$1::uuid and path like $2`, op.Root.OwnerID, EscapeLike(string(source))+"/%")
-		if err != nil {
-			return nil, err
-		}
-		for rows.Next() {
-			var id string
-			if err := rows.Scan(&id); err != nil {
-				rows.Close()
-				return nil, err
-			}
-			removedDescendantIDs[source] = append(removedDescendantIDs[source], id)
-		}
-		rows.Close()
-		if err := rows.Err(); err != nil {
-			return nil, err
-		}
+	// Only the outermost removed folders need expanding: a nested one is inside another
+	// root, and the result below is "everything under any removed folder", so expanding it
+	// again would return the same rows once per ancestor (56,648 rows for 12,322 distinct
+	// descendants on a 12k-file move).
+	removedRoots := topmostPaths(removedPaths)
+	removedDescendantIDs, err := subtreeIDs(ctx, tx, op.Root.OwnerID, removedRoots)
+	if err != nil {
+		return nil, err
 	}
 	// A newly created native folder was absent before this effect. Retained
 	// descendant index rows at that destination are stale, not copied contents.
+	var created []string
 	for _, item := range applied {
-		if item.effect.Action != "mkdir" {
-			continue
+		if item.effect.Action == "mkdir" {
+			created = append(created, string(item.effect.Target))
 		}
-		pattern := EscapeLike(string(item.effect.Target)) + "/%"
-		if _, err := tx.Exec(ctx, `delete from nodes where id in(select id from file_entries where owner_id=$1::uuid and path like $2)`, op.Root.OwnerID, pattern); err != nil {
-			return nil, err
-		}
-		if _, err := tx.Exec(ctx, `delete from file_content_generations where owner_id=$1::uuid and root_namespace=$2 and node_id is null and path like $3`, op.Root.OwnerID, fileRootNamespace(op.Root), pattern); err != nil {
-			return nil, err
-		}
+	}
+	if err := deleteSubtrees(ctx, tx, op.Root.OwnerID, created); err != nil {
+		return nil, err
+	}
+	// Settlement is about to replace the index entries that own these paths, so a content
+	// revision keyed by a path (`node_id IS NULL`) that describes the earlier incarnation is
+	// stale, and leaving it would collide with the path key a replacement writes. It has to
+	// happen here rather than per entry: see purgeStaleRevisions.
+	purged := make(map[string]bool, len(targets)+len(removedPaths))
+	for _, path := range targets {
+		purged[path] = true
+	}
+	for _, path := range removedPaths {
+		purged[path] = true
+	}
+	if err := purgeStaleRevisions(ctx, tx, op.Root, purged); err != nil {
+		return nil, err
 	}
 	// A copy/delete move retains an old private ID only when both halves are
 	// proven. A copied destination whose source survives is an independent entry.
@@ -237,25 +261,22 @@ func commitFileAction(ctx context.Context, tx pgx.Tx, op fileops.Operation, nati
 	}
 	// A proven removed folder cannot contain live native descendants. Drop stale
 	// index-only descendants too, without expanding the captured native effects.
-	for source, folder := range removedFolders {
-		if !folder {
-			continue
-		}
-		keep := make(map[string]bool)
-		for moved := range movedSources {
-			keep[sourceIDs[moved]] = true
-		}
-		var staleIDs []string
-		for _, id := range removedDescendantIDs[source] {
+	// Their path-keyed content revisions went with purgeStaleRevisions above; bound
+	// ones cascade with the rows.
+	keep := make(map[string]bool, len(movedSources))
+	for moved := range movedSources {
+		keep[sourceIDs[moved]] = true
+	}
+	var staleIDs []string
+	for _, root := range removedRoots {
+		for _, id := range removedDescendantIDs[root] {
 			if !keep[id] {
 				staleIDs = append(staleIDs, id)
 			}
 		}
-		pattern := EscapeLike(string(source)) + "/%"
+	}
+	if len(staleIDs) > 0 {
 		if _, err := tx.Exec(ctx, `delete from nodes where owner_id=$1::uuid and id=any($2::uuid[])`, op.Root.OwnerID, staleIDs); err != nil {
-			return nil, err
-		}
-		if _, err := tx.Exec(ctx, `delete from file_content_generations where owner_id=$1::uuid and root_namespace=$2 and node_id is null and (path=$3 or path like $4)`, op.Root.OwnerID, fileRootNamespace(op.Root), string(source), pattern); err != nil {
 			return nil, err
 		}
 	}
@@ -346,6 +367,207 @@ func actualEntryKey(root fileops.Root, entry storage.Entry) string {
 	return paths.KeyFor(string(entry.Path), root.OwnerID)
 }
 
+// moveSource names the index path a move's entry leaves behind: the effect's own source, or,
+// for the folder the move creates at its destination, the same folder at the origin.
+func moveSource(request fileops.ActionRequest, effect fileops.EntryEffect) storage.Path {
+	if effect.Action == "mkdir" && (effect.Target == request.To || strings.HasPrefix(string(effect.Target), string(request.To)+"/")) {
+		return storage.Path(string(request.From) + strings.TrimPrefix(string(effect.Target), string(request.To)))
+	}
+	return effect.Source
+}
+
+// resolveIDs maps each path to the id of the index row currently at it, in one round trip.
+// A path that resolves to nothing is absent from the result.
+func resolveIDs(ctx context.Context, tx pgx.Tx, owner string, list []string) (map[string]string, error) {
+	out := make(map[string]string, len(list))
+	if len(list) == 0 {
+		return out, nil
+	}
+	rows, err := tx.Query(ctx, `select p.path,file_tree_resolve($1::uuid,p.path)::text from unnest($2::text[]) as p(path)`, owner, list)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var path string
+		var id *string
+		if err := rows.Scan(&path, &id); err != nil {
+			return nil, err
+		}
+		if id != nil {
+			out[path] = *id
+		}
+	}
+	return out, rows.Err()
+}
+
+// foldersAt reports which of the given paths are folders in the current index.
+func foldersAt(ctx context.Context, tx pgx.Tx, owner string, list []string) (map[string]bool, error) {
+	out := make(map[string]bool, len(list))
+	if len(list) == 0 {
+		return out, nil
+	}
+	rows, err := tx.Query(ctx, `select p.path from unnest($2::text[]) as p(path) where exists(
+ select 1 from nodes n where n.owner_id=$1::uuid and n.id=file_tree_resolve($1::uuid,p.path) and n.is_dir)`, owner, list)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var path string
+		if err := rows.Scan(&path); err != nil {
+			return nil, err
+		}
+		out[path] = true
+	}
+	return out, rows.Err()
+}
+
+// subtreeIDs returns, for every root path that resolves, the ids of the index rows strictly
+// below it, keyed by the root path. A root that resolves to nothing contributes nothing.
+//
+// This is the shape every "which index rows are under this path" question has to take.
+// file_entries derives each row's current path with file_tree_path(), so `path LIKE 'x/%'`
+// against the view cannot use an index: it read the whole tree and walked every row's
+// ancestry — 2.7 s and 2.0 M buffer hits on an 89k-row index — and settlement asked that
+// question once per removed folder and twice per created folder. Ancestry answers the same
+// question with one index probe per child: 22 ms for the same 10k-row subtree.
+//
+// `union` rather than `union all` bounds a corrupt index: ancestry that cycles is a bug, and
+// a walk that never ends would be the worse one. Each root is excluded from its own result
+// because the caller handles the root row itself; a root that also sits below another root is
+// still handled by its own entry.
+func subtreeIDs(ctx context.Context, tx pgx.Tx, owner string, roots []string) (map[string][]string, error) {
+	out := make(map[string][]string, len(roots))
+	if len(roots) == 0 {
+		return out, nil
+	}
+	rows, err := tx.Query(ctx, `with recursive roots as (
+ select p.path,file_tree_resolve($1::uuid,p.path) as id from unnest($2::text[]) as p(path)
+), sub as (
+ select path,id from roots where id is not null
+ union
+ select s.path,n.id from sub s join nodes n on n.owner_id=$1::uuid and n.parent_id=s.id
+)
+select path,id::text from sub where id not in(select id from roots where id is not null)`, owner, roots)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var path, id string
+		if err := rows.Scan(&path, &id); err != nil {
+			return nil, err
+		}
+		out[path] = append(out[path], id)
+	}
+	return out, rows.Err()
+}
+
+// topmostPaths drops every path that already sits under another path in the set. Expanding
+// a nested root returns rows the outer root's expansion already returned.
+func topmostPaths(list []string) []string {
+	sorted := append([]string(nil), list...)
+	sort.Slice(sorted, func(i, j int) bool { return len(sorted[i]) < len(sorted[j]) })
+	kept := make([]string, 0, len(sorted))
+	for _, path := range sorted {
+		nested := false
+		for _, root := range kept {
+			if strings.HasPrefix(path, root+"/") {
+				nested = true
+				break
+			}
+		}
+		if !nested {
+			kept = append(kept, path)
+		}
+	}
+	return kept
+}
+
+// deleteSubtrees removes every index row strictly below each root path.
+func deleteSubtrees(ctx context.Context, tx pgx.Tx, owner string, roots []string) error {
+	if len(roots) == 0 {
+		return nil
+	}
+	descendants, err := subtreeIDs(ctx, tx, owner, roots)
+	if err != nil {
+		return err
+	}
+	var ids []string
+	for _, list := range descendants {
+		ids = append(ids, list...)
+	}
+	if len(ids) == 0 {
+		return nil
+	}
+	_, err = tx.Exec(ctx, `delete from nodes where owner_id=$1::uuid and id=any($2::uuid[])`, owner, ids)
+	return err
+}
+
+// purgeStaleRevisions removes the path-keyed content revisions that describe index entries
+// settlement is about to replace. `list` is every path this settlement writes (each effect's
+// destination and each removed folder), and a revision under one of them cannot describe the
+// entry that will own the path: the path is the revision's unique key, so leaving it would
+// collide with the row a replacement writes.
+//
+// It is one pass over the owner's unbound revisions because the per-entry alternative — a
+// `path LIKE 'dir/%'` delete for each settled entry — cannot use the unique path index; it
+// scanned the whole table (81k rows) 35,374 times, and again for every removed folder. Bound
+// revisions (`node_id IS NOT NULL`) are not here: they cascade with their node row.
+func purgeStaleRevisions(ctx context.Context, tx pgx.Tx, root fileops.Root, list map[string]bool) error {
+	if len(list) == 0 {
+		return nil
+	}
+	rows, err := tx.Query(ctx, `select path from file_content_generations where owner_id=$1::uuid and root_namespace=$2 and node_id is null and path is not null`, root.OwnerID, fileRootNamespace(root))
+	if err != nil {
+		return err
+	}
+	var stale []string
+	for rows.Next() {
+		var path string
+		if err := rows.Scan(&path); err != nil {
+			rows.Close()
+			return err
+		}
+		if coversPath(list, path) {
+			stale = append(stale, path)
+		}
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	if len(stale) == 0 {
+		return nil
+	}
+	_, err = tx.Exec(ctx, `delete from file_content_generations where owner_id=$1::uuid and root_namespace=$2 and node_id is null and path=any($3::text[])`, root.OwnerID, fileRootNamespace(root), stale)
+	return err
+}
+
+// purgeStaleRevisionsUnder is purgeStaleRevisions for one path and everything below it. It
+// keeps the standalone retireStaleDestination callers (a native tree move, an upload
+// publication) correct without making them load the owner's whole set.
+func purgeStaleRevisionsUnder(ctx context.Context, tx pgx.Tx, root fileops.Root, path string) error {
+	pattern := EscapeLike(path) + "/%"
+	_, err := tx.Exec(ctx, `delete from file_content_generations where owner_id=$1::uuid and root_namespace=$2 and node_id is null and (path=$3 or path like $4)`, root.OwnerID, fileRootNamespace(root), path, pattern)
+	return err
+}
+
+// coversPath reports whether path, or any ancestor directory of it, is in the set: what
+// `path LIKE 'dir/%'` meant for a fixed set of directories, without scanning for it.
+func coversPath(set map[string]bool, path string) bool {
+	if set[path] {
+		return true
+	}
+	for parent := paths.ParentOf(path); parent != ""; parent = paths.ParentOf(parent) {
+		if set[parent] {
+			return true
+		}
+	}
+	return false
+}
+
 // settleNewEntry is used only after native absence/create proof. A retained
 // index row describes an earlier incarnation and must not donate its identity.
 //
@@ -361,20 +583,27 @@ func actualEntryKey(root fileops.Root, entry storage.Entry) string {
 // `union` rather than `union all` bounds a corrupt index: ancestry that cycles is a bug, and
 // a delete that loops forever over it would be the worse one.
 func retireStaleDestination(ctx context.Context, tx pgx.Tx, root fileops.Root, path storage.Path) error {
-	if _, err := tx.Exec(ctx, `with recursive stale as (
+	if err := retireStaleRows(ctx, tx, root, path); err != nil {
+		return err
+	}
+	return purgeStaleRevisionsUnder(ctx, tx, root, string(path))
+}
+
+// retireStaleRows is the index half of retireStaleDestination. Settlement calls it directly
+// because it purges every path-keyed revision in one pass (purgeStaleRevisions), and the
+// per-path `path LIKE 'dir/%'` delete cannot use the unique path index: it scanned the whole
+// revisions table for each of the 35,374 settled entries.
+func retireStaleRows(ctx context.Context, tx pgx.Tx, root fileops.Root, path storage.Path) error {
+	_, err := tx.Exec(ctx, `with recursive stale as (
  select id from nodes where owner_id=$1::uuid and id=file_tree_resolve($1::uuid,$2)
  union
  select n.id from nodes n join stale s on n.parent_id=s.id where n.owner_id=$1::uuid
-) delete from nodes where id in (select id from stale)`, root.OwnerID, string(path)); err != nil {
-		return err
-	}
-	pattern := EscapeLike(string(path)) + "/%"
-	_, err := tx.Exec(ctx, `delete from file_content_generations where owner_id=$1::uuid and root_namespace=$2 and node_id is null and (path=$3 or path like $4)`, root.OwnerID, fileRootNamespace(root), string(path), pattern)
+) delete from nodes where id in (select id from stale)`, root.OwnerID, string(path))
 	return err
 }
 
 func settleNewEntry(ctx context.Context, tx pgx.Tx, root fileops.Root, entry storage.Entry) error {
-	if err := retireStaleDestination(ctx, tx, root, entry.Path); err != nil {
+	if err := retireStaleRows(ctx, tx, root, entry.Path); err != nil {
 		return err
 	}
 	return settleActualEntry(ctx, tx, root, entry)
@@ -399,6 +628,9 @@ func settleIndexEntry(ctx context.Context, tx pgx.Tx, root fileops.Root, entry s
 }
 
 func settleMovedEntry(ctx context.Context, tx pgx.Tx, root fileops.Root, source storage.Path, sourceID string, revision *string, entry storage.Entry) error {
+	// Resolved per entry, not up front: a moved folder relinks its descendants' ancestry,
+	// so the answer for a child changes as its parent settles. A child already hanging
+	// off the destination parent resolves there and must not be retired as stale.
 	var alreadyLinked bool
 	if sourceID != "" {
 		if err := tx.QueryRow(ctx, `select coalesce(file_tree_resolve($1::uuid,$2)=$3::uuid,false)`, root.OwnerID, string(entry.Path), sourceID).Scan(&alreadyLinked); err != nil {
@@ -406,7 +638,7 @@ func settleMovedEntry(ctx context.Context, tx pgx.Tx, root fileops.Root, source 
 		}
 	}
 	if !alreadyLinked {
-		if err := retireStaleDestination(ctx, tx, root, entry.Path); err != nil {
+		if err := retireStaleRows(ctx, tx, root, entry.Path); err != nil {
 			return err
 		}
 	}

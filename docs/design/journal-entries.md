@@ -329,6 +329,43 @@ together, and a crash before the commit rolls all of them back. What must hold:
 
 Everything else in `Settle` (budget, reservation, guards, problem) is untouched.
 
+### Settlement asks for a subtree by ancestry, not by path
+
+Settlement is one transaction holding the owner's advisory lock, so every statement inside it
+is charged to the whole database for as long as it runs. The per-entry writes are cheap (one
+row, one focused index); what is not is asking *"which index rows are under this path"*.
+
+`file_entries` is a view that derives each row's current path with `file_tree_path()`, so
+`path LIKE 'x/%'` against it cannot use an index. It read the whole tree and walked every
+row's ancestry: measured 2.7 s and 2.0 M buffer hits on an 89k-row index. Settlement asked
+that question once per removed folder and twice per created folder — 16,095 times for a move
+of 12,466 files and 5,365 folders — which is where "settlement takes a day" comes from.
+
+The same question answered by ancestry costs one index probe per child: 22 ms for the same
+10k-row subtree. `nodes` has the canonical `(owner_id, parent_id, comparison_name)` unique
+index, so resolving a root path once and then walking `parent_id` visits exactly the rows the
+prefix meant, and `union` bounds a corrupt index whose ancestry cycles. Settlement now
+resolves every path it will ask about in one round trip and expands each subtree in a single
+query (`subtreeIDs`), not one query per folder.
+
+Two consequences are worth stating because they look like shortcuts:
+
+- **The cached `path` column is not the answer.** It is nullable and stale by contract (a
+  metadata-only write retains it, an ancestor move does not rewrite descendants), so an index
+  on it would return rows that used to be at the prefix. Ancestry is the current answer.
+- **Path-keyed content revisions are purged once, not per entry.** A
+  `file_content_generations` row with `node_id IS NULL` is keyed by path (unique), and a path
+  settlement is about to rewrite must not keep the revision of the entry that used to own it.
+  The per-entry `path LIKE 'dir/%'` delete cannot use the path key and scanned 81k rows for
+  each of 35,374 entries; the settlement now loads that owner's unbound revisions once, keeps
+  the ones under a path it is about to write, and deletes them by exact key. Bound revisions
+  are not in that set: they cascade with their node row.
+
+There is one read that must stay per entry: whether a moved destination already resolves to
+the same ID (`alreadyLinked`). A moved folder relinks its descendants' ancestry, so a child's
+answer changes while its parent settles; resolving the set up front deleted the descendants
+of the folder that had just moved. It is one point probe on the primary key, not a tree walk.
+
 ### 2.4 What reads entries today, and where each goes
 
 **The loading rule is part of the design.** Today `Get`/`readOperation` decode the document
