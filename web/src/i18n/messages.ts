@@ -301,6 +301,23 @@ const en = {
   "preview.htmlFailed": "The HTML file could not be read for rendering. Downloading it still works.",
   "preview.heicFailed": "This HEIC image could not be decoded. Downloading the original still works.",
 
+  "pdf.passwordTitle": "This PDF is password-protected",
+  "pdf.passwordText":
+    "Enter the password that opens the file. It unlocks this preview only and is not stored anywhere.",
+  "pdf.passwordLabel": "Password",
+  "pdf.passwordPlaceholder": "Password",
+  "pdf.open": "Open",
+  "pdf.opening": "Opening…",
+  "pdf.wrongPassword": "That password did not open this file.",
+  "pdf.unlockFailed": "This PDF could not be opened",
+  "pdf.unlockFailedText":
+    "The file is encrypted, but the password is not what is wrong — the download may be incomplete, or the protection is not one this reader supports. Downloading the original still works.",
+  "pdf.downloadOriginal": "Download the original",
+  "pdf.zoomIn": "Zoom in",
+  "pdf.zoomOut": "Zoom out",
+  "pdf.fitWidth": "Fit width",
+  "pdf.pageOf": "{total} pages",
+
   "zip.reading": "Reading archive…",
   "zip.readFailed": "The archive could not be read.",
   "zip.notArchive": "This file is not a readable ZIP archive.",
@@ -805,6 +822,22 @@ const zh: Record<MessageKey, string> = {
   "preview.failed": "预览加载失败，可以试试下载这个文件。",
   "preview.htmlFailed": "无法读取这个 HTML 文件用于渲染，可以下载后用浏览器打开。",
   "preview.heicFailed": "这张 HEIC 图片无法解码，可以下载原图。",
+
+  "pdf.passwordTitle": "这个 PDF 需要密码",
+  "pdf.passwordText": "输入打开文件的密码。它只用来解锁这次预览，不会保存到任何地方。",
+  "pdf.passwordLabel": "密码",
+  "pdf.passwordPlaceholder": "打开密码",
+  "pdf.open": "打开",
+  "pdf.opening": "正在打开…",
+  "pdf.wrongPassword": "密码不对，文件没有打开。",
+  "pdf.unlockFailed": "这个 PDF 打不开",
+  "pdf.unlockFailedText":
+    "文件确实加密，但问题不在密码——可能是下载不完整，或者用了这个阅读器不支持的保护方式。可以下载原文件再试。",
+  "pdf.downloadOriginal": "下载原文件",
+  "pdf.zoomIn": "放大",
+  "pdf.zoomOut": "缩小",
+  "pdf.fitWidth": "适应宽度",
+  "pdf.pageOf": "共 {total} 页",
 
   "zip.reading": "正在读取压缩包…",
   "zip.readFailed": "无法读取这个压缩包。",
