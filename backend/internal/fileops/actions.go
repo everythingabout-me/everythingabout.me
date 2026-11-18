@@ -73,10 +73,14 @@ const nativeTreeMoveStrategy = "native_tree_move"
 // driver that pages without progress is refused where it happens (see listFolder).
 const maxActionEntries = 100000
 
-// listConcurrency is how many folders one BFS level lists at once. It matches the
-// observation pool: enough to turn a wide folder's round trips into one wave, small
-// enough not to read as a burst against the provider.
-const listConcurrency = 6
+// listConcurrency is how many folders one BFS level lists at once. It is a page of
+// the walk, not a burst against the provider: a recursive capture of the 5,365-folder
+// tree needs 5,365 listings, and six at a time turned that into twelve minutes of
+// planning — a quarter of the operation once its effects run in parallel. A listing
+// is one small metadata request, and the provider sees the whole walk either way, so
+// the bound that actually protects it is the entry budget (maxActionEntries), not
+// this constant.
+const listConcurrency = 32
 
 func validateActionAuthority(req ActionRequest, native NativeActions) error {
 	if err := validateRoot(req.Root); err != nil {
