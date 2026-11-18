@@ -124,7 +124,7 @@ func TestProviderCopyMovesNoBytes(t *testing.T) {
 	ctx := context.Background()
 	source := publishSource(t, d, "source", "source.bin", "provider-side payload")
 	before := backend.puts
-	copied, err := d.Copy(ctx, storage.MoveRequest{ID: "copy", Source: "source.bin", Target: "copy.bin", SourceRevision: source.Revision, TargetConditions: storage.Conditions{Absent: true}}, cpOK)
+	copied, err := d.Copy(ctx, storage.MoveRequest{ID: "copy", Source: "source.bin", Target: "copy.bin", SourceRevision: source.Revision, TargetConditions: storage.Conditions{Absent: true}, Size: source.Size, MediaType: source.MediaType}, cpOK)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -148,7 +148,7 @@ func TestProviderCopyRefusesOccupiedTarget(t *testing.T) {
 	ctx := context.Background()
 	source := publishSource(t, d, "source", "source.bin", "payload")
 	backend.current[cfg.ContentRoot+"taken.bin"] = Object{Key: cfg.ContentRoot + "taken.bin", VersionID: "v-taken", ETag: "etag-taken", Size: 3}
-	_, err := d.Copy(ctx, storage.MoveRequest{ID: "copy", Source: "source.bin", Target: "taken.bin", SourceRevision: source.Revision, TargetConditions: storage.Conditions{Absent: true}}, cpOK)
+	_, err := d.Copy(ctx, storage.MoveRequest{ID: "copy", Source: "source.bin", Target: "taken.bin", SourceRevision: source.Revision, TargetConditions: storage.Conditions{Absent: true}, Size: source.Size}, cpOK)
 	requireCode(t, err, "precondition_failed")
 	object, err := backend.Head(ctx, cfg.ContentRoot+"taken.bin")
 	if err != nil || object.ETag != "etag-taken" {
@@ -156,14 +156,20 @@ func TestProviderCopyRefusesOccupiedTarget(t *testing.T) {
 	}
 }
 
-func TestProviderCopyBindsSourceRevision(t *testing.T) {
-	d, backend, _ := copyFixture(t)
+func TestProviderCopyBindsSourceRevisionAtTheProvider(t *testing.T) {
+	d, backend, cfg := copyFixture(t)
 	ctx := context.Background()
-	publishSource(t, d, "source", "source.bin", "payload")
-	_, err := d.Copy(ctx, storage.MoveRequest{ID: "copy", Source: "source.bin", Target: "copy.bin", SourceRevision: nativeRevision("stale-etag"), TargetConditions: storage.Conditions{Absent: true}}, cpOK)
-	requireCode(t, err, "changed")
-	if backend.copies != 0 {
-		t.Fatal("stale source reached the provider")
+	source := publishSource(t, d, "source", "source.bin", "payload")
+	_, err := d.Copy(ctx, storage.MoveRequest{ID: "copy", Source: "source.bin", Target: "copy.bin", SourceRevision: nativeRevision("stale-etag"), TargetConditions: storage.Conditions{Absent: true}, Size: source.Size}, cpOK)
+	// The source HEAD used to refuse this before any effect. The copy itself carries
+	// the source ETag as a native condition, so the provider refuses it instead, and
+	// the coordinator still records "no effect" rather than a change it did not make.
+	requireCode(t, err, "precondition_failed")
+	if backend.copies != 1 {
+		t.Fatalf("copies=%d, want the single refused copy", backend.copies)
+	}
+	if _, err := backend.Head(ctx, cfg.ContentRoot+"copy.bin"); err == nil {
+		t.Fatal("refused copy produced a target")
 	}
 }
 
@@ -172,7 +178,7 @@ func TestProviderCopyLostReplyResolvesFromIntent(t *testing.T) {
 	ctx := context.Background()
 	source := publishSource(t, d, "source", "source.bin", "payload")
 	backend.copyErr = io.ErrUnexpectedEOF
-	request := storage.MoveRequest{ID: "copy", Source: "source.bin", Target: "copy.bin", SourceRevision: source.Revision, TargetConditions: storage.Conditions{Absent: true}}
+	request := storage.MoveRequest{ID: "copy", Source: "source.bin", Target: "copy.bin", SourceRevision: source.Revision, TargetConditions: storage.Conditions{Absent: true}, Size: source.Size}
 	if _, err := d.Copy(ctx, request, cpOK); err == nil {
 		t.Fatal("lost reply reported success")
 	}
@@ -195,7 +201,7 @@ func TestProviderCopyFailureWithoutEffectIsNotApplied(t *testing.T) {
 	source := publishSource(t, d, "source", "source.bin", "payload")
 	backend.failBeforeCopy = true
 	backend.copyErr = io.ErrUnexpectedEOF
-	request := storage.MoveRequest{ID: "copy", Source: "source.bin", Target: "copy.bin", SourceRevision: source.Revision, TargetConditions: storage.Conditions{Absent: true}}
+	request := storage.MoveRequest{ID: "copy", Source: "source.bin", Target: "copy.bin", SourceRevision: source.Revision, TargetConditions: storage.Conditions{Absent: true}, Size: source.Size}
 	if _, err := d.Copy(ctx, request, cpOK); err == nil {
 		t.Fatal("failed copy reported success")
 	}
@@ -211,7 +217,7 @@ func TestProviderCopyAboveSingleRequestLimitUsesParts(t *testing.T) {
 	const size int64 = 6 << 30
 	source := Object{Key: cfg.ContentRoot + "big.bin", VersionID: "v-big", ETag: "etag-big", Size: size, MediaType: "video/mp4"}
 	backend.current[source.Key] = source
-	copied, err := d.Copy(ctx, storage.MoveRequest{ID: "copy", Source: "big.bin", Target: "big-copy.bin", SourceRevision: nativeRevision(source.ETag), TargetConditions: storage.Conditions{Absent: true}}, cpOK)
+	copied, err := d.Copy(ctx, storage.MoveRequest{ID: "copy", Source: "big.bin", Target: "big-copy.bin", SourceRevision: nativeRevision(source.ETag), TargetConditions: storage.Conditions{Absent: true}, Size: source.Size, MediaType: source.MediaType}, cpOK)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -234,7 +240,7 @@ func TestProviderCopyPartFailureAbortsAndReportsNoEffect(t *testing.T) {
 	source := Object{Key: cfg.ContentRoot + "big.bin", VersionID: "v-big", ETag: "etag-big", Size: size, MediaType: "video/mp4"}
 	backend.current[source.Key] = source
 	backend.partErr = io.ErrUnexpectedEOF
-	_, err := d.Copy(ctx, storage.MoveRequest{ID: "copy", Source: "big.bin", Target: "big-copy.bin", SourceRevision: nativeRevision(source.ETag), TargetConditions: storage.Conditions{Absent: true}}, cpOK)
+	_, err := d.Copy(ctx, storage.MoveRequest{ID: "copy", Source: "big.bin", Target: "big-copy.bin", SourceRevision: nativeRevision(source.ETag), TargetConditions: storage.Conditions{Absent: true}, Size: source.Size, MediaType: source.MediaType}, cpOK)
 	var noEffect *storage.NoFinalEffect
 	if !errors.As(err, &noEffect) {
 		t.Fatalf("aborted part copy reported %v", err)
@@ -255,7 +261,7 @@ func TestProviderCopyWithoutMultipartAdmissionRefusesLargeObject(t *testing.T) {
 	defer d.Close()
 	source := Object{Key: cfg.ContentRoot + "big.bin", VersionID: "v-big", ETag: "etag-big", Size: 6 << 30, MediaType: "video/mp4"}
 	backend.current[source.Key] = source
-	_, err = d.Copy(context.Background(), storage.MoveRequest{ID: "copy", Source: "big.bin", Target: "big-copy.bin", SourceRevision: nativeRevision(source.ETag), TargetConditions: storage.Conditions{Absent: true}}, cpOK)
+	_, err = d.Copy(context.Background(), storage.MoveRequest{ID: "copy", Source: "big.bin", Target: "big-copy.bin", SourceRevision: nativeRevision(source.ETag), TargetConditions: storage.Conditions{Absent: true}, Size: source.Size, MediaType: source.MediaType}, cpOK)
 	var noEffect *storage.NoFinalEffect
 	if !errors.As(err, &noEffect) || !storage.IsCode(err, "too_large") {
 		t.Fatalf("oversized copy reported %v", err)

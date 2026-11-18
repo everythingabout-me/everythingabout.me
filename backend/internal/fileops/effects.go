@@ -276,7 +276,11 @@ func manifestEffect(op Operation, selected EntryEffect) (EntryEffect, storage.Ef
 	selected.Checkpoint = bytes.Clone(selected.Checkpoint)
 	selected.Evidence = bytes.Clone(selected.Evidence)
 	selected.Result = bytes.Clone(selected.Result)
-	intent := storage.EffectIntent{ID: fmt.Sprintf("%s/entry/%d", op.ID, selected.Number), Action: e.Action, Source: e.Source, Target: e.Target, Conditions: storage.Conditions{Absent: e.TargetConditions.Absent, ExpectedRevision: bytes.Clone(e.TargetConditions.ExpectedRevision)}, SourceRevision: bytes.Clone(e.SourceRevision)}
+	mediaType := ""
+	if e.SourceEntry != nil {
+		mediaType = e.SourceEntry.MediaType
+	}
+	intent := storage.EffectIntent{ID: fmt.Sprintf("%s/entry/%d", op.ID, selected.Number), Action: e.Action, Source: e.Source, Target: e.Target, Conditions: storage.Conditions{Absent: e.TargetConditions.Absent, ExpectedRevision: bytes.Clone(e.TargetConditions.ExpectedRevision)}, SourceRevision: bytes.Clone(e.SourceRevision), Size: e.Size, MediaType: mediaType}
 	return selected, intent, nil
 }
 

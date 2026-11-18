@@ -386,6 +386,23 @@ And it is a preflight, not a fence: a target occupied after the probe is still r
 absence condition, which is where the guarantee has always lived. The probe decides how a large plan fails,
 not whether an effect is safe.
 
+### A copy costs one request, not a survey
+
+A provider-side copy is one conditional request: the source ETag and the target's absence are
+conditions on the copy itself, so a changed source or an occupied target is refused before
+anything exists. The coordinator still observes what a refusal would not explain cheaply — the
+destination parent, to answer `parent_missing` before the request, and the target's prefix, to
+answer an occupied destination without issuing one — and those are two observations, not the six
+to eight a copy used to spend: a source HEAD that only repeated the frozen manifest's size and
+media type, the parent twice, and a three-request `Stat` for a target whose absence one prefix
+probe answers.
+
+The rule behind the cut: optimism is allowed where the fallback is "this effect did not happen",
+because the native condition refuses it, and not where the fallback would be "this effect
+happened wrongly". A source that changed is the first kind — the copy is refused and the entry is
+recorded `not_applied`. A copy that lands under the wrong parent is the second, which is why the
+parent observation stays.
+
 ### Why a listing does not establish a revision
 
 A revision is only ever taken from an observation that returns one *for that exact entry*, and only from the

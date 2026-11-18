@@ -613,31 +613,24 @@ func (d *Driver) copyProvider(ctx context.Context, in storage.MoveRequest, sourc
 	} else {
 		return storage.MutationResult{}, err
 	}
-	source, err := d.Stat(ctx, in.Source)
-	if err != nil {
-		return storage.MutationResult{}, err
+	// The frozen manifest already describes the source: its size, its media type and
+	// the revision the copy is conditional on. Observing it here was a HEAD that only
+	// repeated those facts, and every copy paid for it. The copy request carries the
+	// source ETag as a native condition, so a source that changed is refused by the
+	// provider before any target exists.
+	if in.Size < 0 {
+		return storage.MutationResult{}, fail("invalid_request", in.Source)
 	}
-	if source.Kind != storage.File || !bytes.Equal(source.Revision, in.SourceRevision) {
-		return storage.MutationResult{}, fail("changed", in.Source)
-	}
-	if _, ok := d.backend.(PartCopyBackend); source.Size > singleCopyLimit && (!ok || !d.options.Admission.MultipartUploads) {
+	if _, ok := d.backend.(PartCopyBackend); in.Size > singleCopyLimit && (!ok || !d.options.Admission.MultipartUploads) {
 		// Deterministic refusal: no native request is issued, so the intent is never
 		// published and the coordinator may report it without a recovery cycle.
 		return storage.MutationResult{}, &storage.NoFinalEffect{Cause: fail("too_large", in.Source)}
 	}
-	intent := storage.WriteIntent{ID: in.ID, Target: in.Target, Conditions: in.TargetConditions, Size: source.Size, MediaType: source.MediaType}
+	intent := storage.WriteIntent{ID: in.ID, Target: in.Target, Conditions: in.TargetConditions, Size: in.Size, MediaType: in.MediaType}
 	if err = validateRecoveryIntent(intent); err != nil {
 		return storage.MutationResult{}, err
 	}
-	parent, err := d.Stat(ctx, parentPath(in.Target))
-	if err != nil {
-		return storage.MutationResult{}, &storage.NoFinalEffect{Cause: err}
-	}
-	if parent.Kind != storage.Folder {
-		return storage.MutationResult{}, &storage.NoFinalEffect{Cause: fail("parent_missing", in.Target)}
-	}
 	r.Intent = cloneIntent(intent)
-	r.ParentRevision = bytes.Clone(parent.Revision)
 	r.Provider, r.Attempt, r.Native = true, "", nil
 	r.Phase = "ready"
 	if err = d.save(r); err != nil {
@@ -650,14 +643,20 @@ func (d *Driver) copyProvider(ctx context.Context, in storage.MoveRequest, sourc
 		r.Phase = "not_applied"
 		return storage.MutationResult{}, errors.Join(&storage.NoFinalEffect{Cause: err}, d.save(r))
 	}
-	// A delayed checkpoint can let the parent or the target change. Revalidate the
-	// indexed view, then let the native condition refuse an occupied target.
-	parent, err = d.Stat(ctx, parentPath(in.Target))
-	if err == nil && !bytes.Equal(parent.Revision, r.ParentRevision) {
-		err = fail("changed", in.Target)
+	// The checkpoint may be delayed, so the observations that matter are the ones
+	// taken here, immediately before the copy: the parent is a folder now, and the
+	// target is free now. Both were previously observed twice, once before the save
+	// and once after, which bought a comparison against a view that could already be
+	// stale; one observation after the save answers the same question.
+	parent, err := d.Stat(ctx, parentPath(in.Target))
+	if err == nil {
+		r.ParentRevision = bytes.Clone(parent.Revision)
+	}
+	if err == nil && parent.Kind != storage.Folder {
+		err = fail("parent_missing", in.Target)
 	}
 	if err == nil {
-		err = d.checkTarget(ctx, r)
+		err = d.checkAbsentTarget(ctx, r)
 	}
 	if err != nil {
 		r.Phase = "not_applied"
@@ -670,7 +669,7 @@ func (d *Driver) copyProvider(ctx context.Context, in storage.MoveRequest, sourc
 	if err = checkpoint(ctx, cp, d.receipt(r)); err != nil {
 		return storage.MutationResult{}, err
 	}
-	obj, err := d.nativeCopy(ctx, r, source, sourceETag, copier)
+	obj, err := d.nativeCopy(ctx, r, sourceETag, copier)
 	if err != nil {
 		if storage.IsCode(err, "precondition_failed") || storage.IsCode(err, "name_conflict") || storage.IsCode(err, "not_found") || storage.IsCode(err, "changed") {
 			// The provider proved no final effect, but a failed completion can leave
@@ -706,7 +705,37 @@ func (d *Driver) copyProvider(ctx context.Context, in storage.MoveRequest, sourc
 	return cloneResult(*r.Result), checkpoint(ctx, cp, d.receipt(r))
 }
 
-func (d *Driver) nativeCopy(ctx context.Context, r *ledger, source storage.Entry, sourceETag string, copier CopyBackend) (Object, error) {
+// checkAbsentTarget proves a create-only copy's target is free in two requests: one
+// byte-exact HEAD for a file at the path, then the prefix probe for a folder marker
+// or any child under it. Stat answers the same question in three, because it probes
+// the marker key separately from the listing that would already have reported it,
+// and a copy pays that per file. The copy request itself still carries the native
+// absence condition, so this is a preflight and not the guarantee.
+func (d *Driver) checkAbsentTarget(ctx context.Context, r *ledger) error {
+	if _, err := d.backend.Head(ctx, d.key(r.Intent.Target, storage.File)); err == nil {
+		return fail("precondition_failed", r.Intent.Target)
+	} else if !storage.IsCode(err, "not_found") {
+		return err
+	}
+	if probe, ok := d.tree.(storage.PrefixProbe); ok {
+		empty, err := probe.PrefixEmpty(ctx, r.Intent.Target)
+		if err != nil {
+			return err
+		}
+		if !empty {
+			return fail("precondition_failed", r.Intent.Target)
+		}
+		return nil
+	}
+	if _, err := d.tree.Stat(ctx, r.Intent.Target); err == nil {
+		return fail("precondition_failed", r.Intent.Target)
+	} else if !storage.IsCode(err, "not_found") {
+		return err
+	}
+	return nil
+}
+
+func (d *Driver) nativeCopy(ctx context.Context, r *ledger, sourceETag string, copier CopyBackend) (Object, error) {
 	request := Copy{
 		Source:       d.key(r.Effect.Source, storage.File),
 		Target:       d.key(r.Intent.Target, storage.File),
@@ -717,7 +746,7 @@ func (d *Driver) nativeCopy(ctx context.Context, r *ledger, source storage.Entry
 		Absent:       r.Intent.Conditions.Absent,
 		ExpectedETag: r.ExpectedETag,
 	}
-	if source.Size <= singleCopyLimit {
+	if r.Intent.Size <= singleCopyLimit {
 		return copier.CopyObject(ctx, request)
 	}
 	// Part copies finish with one conditional completion, which only an admitted

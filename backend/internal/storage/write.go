@@ -123,6 +123,12 @@ type EffectIntent struct {
 	Source, Target Path
 	Conditions     Conditions
 	SourceRevision []byte
+	// Size and MediaType describe the source object a copy intends to produce. They
+	// come from the frozen manifest rather than a fresh HEAD: the copy request already
+	// carries the source ETag as a native condition, so that HEAD only repeated a fact
+	// the manifest recorded and the provider will enforce.
+	Size      int64
+	MediaType string
 }
 type EffectRecovery interface {
 	InspectEffect(context.Context, EffectIntent, []byte) (Inspection, error)
@@ -198,6 +204,11 @@ type MoveRequest struct {
 	Source, Target   Path
 	SourceRevision   []byte
 	TargetConditions Conditions
+	// Size and MediaType are the frozen manifest's description of the source. A copy
+	// uses them instead of observing the source first; its condition is the source
+	// ETag, which the provider enforces on the copy itself.
+	Size      int64
+	MediaType string
 }
 type NativeMover interface {
 	Move(context.Context, MoveRequest, Checkpoint) (MutationResult, error)

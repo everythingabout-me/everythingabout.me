@@ -1324,7 +1324,7 @@ func executeAction(ctx context.Context, native NativeActions, intent storage.Eff
 		}
 		return native.Move(ctx, storage.MoveRequest{ID: intent.ID, Source: intent.Source, Target: intent.Target, SourceRevision: intent.SourceRevision, TargetConditions: intent.Conditions}, save)
 	case "copy":
-		return native.Copy(ctx, storage.MoveRequest{ID: intent.ID, Source: intent.Source, Target: intent.Target, SourceRevision: intent.SourceRevision, TargetConditions: intent.Conditions}, save)
+		return native.Copy(ctx, storage.MoveRequest{ID: intent.ID, Source: intent.Source, Target: intent.Target, SourceRevision: intent.SourceRevision, TargetConditions: intent.Conditions, Size: intent.Size, MediaType: intent.MediaType}, save)
 	default:
 		return storage.MutationResult{}, E("invalid_intent", nil)
 	}
