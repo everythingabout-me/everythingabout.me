@@ -60,7 +60,18 @@ func runServer(args []string) error {
 	if err != nil {
 		return fmt.Errorf("failed to connect to database: %w", err)
 	}
-	defer db.Close()
+	// The pool close is skipped when the drain was cut short. pgxpool.Close() waits for
+	// every borrowed connection to come back, and the work the shutdown budget gave up on
+	// is exactly what is holding one: closing here turned Ctrl-C into a process with no
+	// listener that stayed alive until that settlement finished (hours), which is the
+	// shape of every "make dev ended but eam is still running" report. The journal holds
+	// the truth; the next start resumes from it.
+	drainCut := false
+	defer func() {
+		if !drainCut {
+			db.Close()
+		}
+	}()
 
 	// Connections are data. The environment seeds the first authority row of a fresh
 	// database and is not consulted again for an owner that already has a binding, so
@@ -169,6 +180,7 @@ func runServer(args []string) error {
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownBudget)
 	defer cancel()
 	if err := server.Shutdown(shutdownCtx); err != nil {
+		drainCut = true
 		slog.Warn("http drain did not finish within the shutdown budget; some requests were cut", "budget", shutdownBudget, "error", err)
 	}
 	// Collect the listener result now that Shutdown has closed it; this also keeps
@@ -177,15 +189,19 @@ func runServer(args []string) error {
 		slog.Warn("http server stopped with an error", "error", err)
 	}
 	if err := apiServer.WaitBackground(shutdownCtx); err != nil {
+		drainCut = true
 		slog.Warn("background work did not stop within the shutdown budget; some work was cut", "budget", shutdownBudget, "error", err)
 	}
 	// A backup started through the web is deliberately not waited for: copying a
 	// whole tree can outlive any drain budget, and the process exit is what stops
 	// it. Record that interruption while the pool is still open, so a deploy leaves
 	// a failed run instead of a row that claims "running" forever. This shares the
-	// one shutdown budget; it adds no timer of its own.
-	if err := apiServer.MarkInterruptedBackups(shutdownCtx); err != nil {
-		slog.Warn("could not record backups interrupted by this shutdown", "error", err)
+	// one shutdown budget; it adds no timer of its own, and a cut drain has none left
+	// to record it — the next start marks it interrupted before it serves anything.
+	if !drainCut {
+		if err := apiServer.MarkInterruptedBackups(shutdownCtx); err != nil {
+			slog.Warn("could not record backups interrupted by this shutdown", "error", err)
+		}
 	}
 	return nil
 }
