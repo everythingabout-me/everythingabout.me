@@ -15,11 +15,12 @@ install:
 # entry point — supplies development. An exported APP_ENV still wins, so a developer can
 # deliberately run production semantics; nothing here touches a deployed host, which runs
 # bin/eam from its own unit and .env.
+#
+# Ctrl-C stops both halves and the recipe exits only once they are gone: the two-line
+# version left `go run`'s server alive behind a returned prompt, because make dies on the
+# first signal and the shell then had nothing to stop it with. scripts/dev.sh says why.
 dev:
-	@echo "backend http://127.0.0.1:8080 · frontend http://127.0.0.1:5173"
-	@( cd backend && APP_ENV="$${APP_ENV:-development}" $(GO) run ./cmd/eam server ) & \
-	 ( cd web && npm run dev ) & \
-	 wait
+	@bash scripts/dev.sh
 
 # Backend only (also serves web/dist if make build has run)
 server:

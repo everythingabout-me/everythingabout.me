@@ -71,16 +71,27 @@ func TestAppEnvMustBeExplicit(t *testing.T) {
 
 // APP_ENV has no default, so the documented local entry point has to supply it or
 // `make dev` stops before listening and the login page never receives a code. This
-// asserts the recipe, not just the documentation: removing the assignment is exactly the
-// change that would break a fresh clone without failing any other test.
+// asserts the entry point, not just the documentation: removing the assignment is exactly
+// the change that would break a fresh clone without failing any other test.
+//
+// The recipe delegates to scripts/dev.sh so that Ctrl-C can stop both halves and the
+// recipe exits only once they are gone; the assignment moved with it, so the assertion
+// follows it there rather than pinning one file.
 func TestMakeDevSuppliesDevelopmentEnvironment(t *testing.T) {
 	data, err := os.ReadFile("../../../Makefile")
 	if err != nil {
 		t.Fatal(err)
 	}
-	recipe := devRecipe(t, string(data))
-	if !strings.Contains(recipe, "APP_ENV") || !strings.Contains(recipe, EnvDevelopment) {
-		t.Fatalf("make dev does not set APP_ENV=%s for the backend, so it cannot start without a .env value:\n%s", EnvDevelopment, recipe)
+	entry := devRecipe(t, string(data))
+	if strings.Contains(entry, "scripts/dev.sh") {
+		script, err := os.ReadFile("../../../scripts/dev.sh")
+		if err != nil {
+			t.Fatal(err)
+		}
+		entry = string(script)
+	}
+	if !strings.Contains(entry, "APP_ENV") || !strings.Contains(entry, EnvDevelopment) {
+		t.Fatalf("make dev does not set APP_ENV=%s for the backend, so it cannot start without a .env value:\n%s", EnvDevelopment, entry)
 	}
 }
 
