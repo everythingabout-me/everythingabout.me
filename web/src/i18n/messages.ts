@@ -307,16 +307,7 @@ const en = {
   "pdf.passwordLabel": "Password",
   "pdf.passwordPlaceholder": "Password",
   "pdf.open": "Open",
-  "pdf.opening": "Opening…",
   "pdf.wrongPassword": "That password did not open this file.",
-  "pdf.unlockFailed": "This PDF could not be opened",
-  "pdf.unlockFailedText":
-    "The file is encrypted, but the password is not what is wrong — the download may be incomplete, or the protection is not one this reader supports. Downloading the original still works.",
-  "pdf.downloadOriginal": "Download the original",
-  "pdf.zoomIn": "Zoom in",
-  "pdf.zoomOut": "Zoom out",
-  "pdf.fitWidth": "Fit width",
-  "pdf.pageOf": "{total} pages",
 
   "zip.reading": "Reading archive…",
   "zip.readFailed": "The archive could not be read.",
@@ -828,16 +819,7 @@ const zh: Record<MessageKey, string> = {
   "pdf.passwordLabel": "密码",
   "pdf.passwordPlaceholder": "打开密码",
   "pdf.open": "打开",
-  "pdf.opening": "正在打开…",
   "pdf.wrongPassword": "密码不对，文件没有打开。",
-  "pdf.unlockFailed": "这个 PDF 打不开",
-  "pdf.unlockFailedText":
-    "文件确实加密，但问题不在密码——可能是下载不完整，或者用了这个阅读器不支持的保护方式。可以下载原文件再试。",
-  "pdf.downloadOriginal": "下载原文件",
-  "pdf.zoomIn": "放大",
-  "pdf.zoomOut": "缩小",
-  "pdf.fitWidth": "适应宽度",
-  "pdf.pageOf": "共 {total} 页",
 
   "zip.reading": "正在读取压缩包…",
   "zip.readFailed": "无法读取这个压缩包。",

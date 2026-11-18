@@ -1,11 +1,9 @@
-import { useCallback, useEffect, useState } from "react";
+import { useEffect, useState } from "react";
 import { FileViewer } from "@open-file-viewer/react";
 import "@open-file-viewer/core/style.css";
 import { api, isNativeAbsent } from "../../api/client";
 import { locale, t } from "../../i18n";
 import { StorageNotice } from "../StorageNotice";
-import { pdfTailLooksEncrypted } from "./pdfEncryption";
-import PdfPasswordPreview from "./PdfPasswordPreview";
 import { previewPlugins } from "./plugins";
 import { isArchiveFile } from "./supported";
 import ZipPreview from "./ZipPreview";
@@ -39,15 +37,9 @@ function MediaPreview({ path, name, mediaType }: { path: string; name: string; m
   // has would look like an eternal spinner. The grant itself now fails, and that answer
   // decides between "moved outside the app" and an ordinary preview failure.
   const [failure, setFailure] = useState<"missing" | "error" | null>(null);
-  // A PDF's bytes can carry a password. That is not a failure, but the bundled viewer answers it
-  // with a download card, so the file is mounted here instead — see `pdfEncryption` for how the
-  // question is answered without parsing the document twice.
-  const isPdf = mediaType === "application/pdf" || /\.pdf$/i.test(name);
-  const [locked, setLocked] = useState<boolean | null>(isPdf ? null : false);
   useEffect(() => {
     setURL(null);
     setFailure(null);
-    setLocked(isPdf ? null : false);
     const controller = new AbortController();
     let created: string | null = null;
     void api.downloadURL(path, safeInline ? "inline" : "attachment", controller.signal).then((next) => {
@@ -61,25 +53,7 @@ function MediaPreview({ path, name, mediaType }: { path: string; name: string; m
       controller.abort();
       if (created?.startsWith("blob:")) URL.revokeObjectURL(created);
     };
-  }, [path, safeInline, isPdf]);
-
-  useEffect(() => {
-    if (!url || !isPdf) return;
-    const controller = new AbortController();
-    void pdfTailLooksEncrypted(url, controller.signal).then(
-      (encrypted) => {
-        if (!controller.signal.aborted) setLocked(encrypted);
-      },
-      () => {
-        // A tail that cannot be read leaves the ordinary viewer in place: it is the better answer
-        // for every file that is not locked, and its own card is unchanged for the rest.
-        if (!controller.signal.aborted) setLocked(false);
-      },
-    );
-    return () => controller.abort();
-  }, [url, isPdf]);
-
-  const openWithoutPassword = useCallback(() => setLocked(false), []);
+  }, [path, safeInline]);
 
   if (!url) {
     if (failure === "missing") {
@@ -100,14 +74,6 @@ function MediaPreview({ path, name, mediaType }: { path: string; name: string; m
     }
     return <div className={styles.viewer} aria-busy="true" />;
   }
-  if (locked) {
-    return (
-      <div className={styles.viewer}>
-        <PdfPasswordPreview url={url} onOpenWithoutPassword={openWithoutPassword} />
-      </div>
-    );
-  }
-  if (locked === null) return <div className={styles.viewer} aria-busy="true" />;
   return (
     <div className={styles.viewer}>
       <FileViewer

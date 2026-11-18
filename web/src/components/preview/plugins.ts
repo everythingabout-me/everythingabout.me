@@ -6,10 +6,13 @@ import {
   textPlugin,
   videoPlugin,
 } from "@open-file-viewer/core";
+import * as pdfjs from "pdfjs-dist";
 import pdfLegacyWorkerSrc from "pdfjs-dist/legacy/build/pdf.worker.mjs?url";
 import pdfWorkerSrc from "pdfjs-dist/build/pdf.worker.mjs?url";
 import { heicPlugin } from "./heicPlugin";
 import { htmlPlugin } from "./htmlPlugin";
+import { pdfWithPasswordPrompt } from "./pdfPassword";
+import { askPdfPassword } from "./pdfPasswordDialog";
 
 /**
  * The renderers a file may claim, in match order.
@@ -32,7 +35,13 @@ export const previewPlugins = [
   heicPlugin(),
   imagePlugin(),
   textPlugin(),
-  pdfPlugin({ workerSrc: pdfWorkerSrc, legacyWorkerSrc: pdfLegacyWorkerSrc }),
+  // The PDF viewer keeps its own renderer; the only thing it cannot do is ask for a password, so
+  // the pdf.js module it drives is the one that can (see `pdfPassword`).
+  pdfPlugin({
+    pdfjs: pdfWithPasswordPrompt(pdfjs, askPdfPassword),
+    workerSrc: pdfWorkerSrc,
+    legacyWorkerSrc: pdfLegacyWorkerSrc,
+  }),
   officePlugin(),
   videoPlugin(),
   audioPlugin(),
