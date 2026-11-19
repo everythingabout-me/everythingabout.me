@@ -162,11 +162,21 @@ func (c *Config) BackendName() string {
 }
 
 func (c *Config) ValidateStorage() error {
-	if c.Storage.CoordinatedWrites && c.BackendName() != "local" && (!filepath.IsAbs(c.Storage.ObjectAdmissionFile) || !filepath.IsAbs(c.Storage.ObjectSpoolRoot)) {
-		return fmt.Errorf("object writes require explicit absolute FILE_OBJECT_ADMISSION_FILE and FILE_OBJECT_SPOOL_ROOT")
-	}
 	if err := c.validateTransferClass(); err != nil {
 		return err
+	}
+	return c.ValidateReadOnlyStorage()
+}
+
+// ValidateReadOnlyStorage is the half of ValidateStorage a process needs when it only
+// reads the native tree. A transfer class describes how this process would publish an
+// upload, so it says nothing about a driver opened for reads — and validating it there
+// made a class A deployment unable to run `eam reconcile` or `eam storage-admit` at all:
+// class A requires coordinated writes, which is exactly what those read-only drivers turn
+// off. The full check still runs on the configuration as loaded, before any of this.
+func (c *Config) ValidateReadOnlyStorage() error {
+	if c.Storage.CoordinatedWrites && c.BackendName() != "local" && (!filepath.IsAbs(c.Storage.ObjectAdmissionFile) || !filepath.IsAbs(c.Storage.ObjectSpoolRoot)) {
+		return fmt.Errorf("object writes require explicit absolute FILE_OBJECT_ADMISSION_FILE and FILE_OBJECT_SPOOL_ROOT")
 	}
 	switch c.BackendName() {
 	case "cos":

@@ -60,10 +60,23 @@ func newBackend(cfg *config.Config, tolerateUnprovenWrites bool) (*Backend, erro
 	if cfg == nil {
 		return nil, fmt.Errorf("storage configuration is required")
 	}
-	if err := cfg.ValidateStorage(); err != nil {
+	// A read-only driver serves no upload, so the transfer class it could not use is not
+	// its business; the full check already ran on the configuration as loaded.
+	validate := cfg.ValidateStorage
+	if !cfg.Storage.CoordinatedWrites {
+		validate = cfg.ValidateReadOnlyStorage
+	}
+	if err := validate(); err != nil {
 		return nil, err
 	}
 	b := &Backend{cfg: *cfg}
+	// A read-only backend publishes nothing, so it has no transfer class: the class is a
+	// property of uploads, and the reduced driver this mode opens does not advertise one.
+	// Keeping it made every read-only open fail `checkTransferClass` — `eam reconcile` and
+	// `eam storage-admit` exited with `storage unsupported` on a class A deployment.
+	if !b.cfg.Storage.CoordinatedWrites {
+		b.cfg.Storage.TransferClass = ""
+	}
 	// Defaults support configuration assembled directly by maintenance/test callers.
 	if b.cfg.Storage.ConnectionID == "" {
 		b.cfg.Storage.ConnectionID = "default"

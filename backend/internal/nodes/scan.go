@@ -39,6 +39,17 @@ type ScanApplyOptions struct {
 // maxReportedRemovals bounds the dry-run list handed to a CLI or API caller.
 const maxReportedRemovals = 1000
 
+// A changed imported observation invalidates any saved native generation; browsing must not
+// attach the old revision to an external replacement. Naming the namespace is what makes
+// both branches index probes — (owner_id,root_namespace,node_id) and
+// (owner_id,root_namespace,path) — instead of reading every generation the owner has, which
+// is 13 ms per scanned entry: 24 minutes for a 111,750-entry drive. A caller that cannot
+// name a namespace keeps the owner-wide statement it had.
+const (
+	invalidateGenerationScoped   = `delete from file_content_generations where owner_id=$1::uuid and root_namespace=$2 and (node_id=$3::uuid or (node_id is null and path=$4))`
+	invalidateGenerationUnscoped = `delete from file_content_generations where owner_id=$1::uuid and (node_id=$2::uuid or (node_id is null and path=$3))`
+)
+
 type ScanApplyReport struct {
 	Scanned, Inserted, Updated, Unchanged, Removed int
 	// RemovedPaths carries the dry-run preview; it is empty once rows are deleted.
@@ -197,20 +208,37 @@ func ApplyScan(ctx context.Context, db ScanDB, ownerID string, result *treescan.
 			v := entry.MediaType
 			mime = &v
 		}
+		// The identity this entry settles, resolved once and shared by the dry-run comparison
+		// and the generation invalidation below. file_tree_resolve is a plpgsql function, not
+		// a constant, so a call written inside a predicate is evaluated for every candidate
+		// row: the invalidation cost 13.9 s per entry on a 111,750-entry index, and a
+		// reconcile of that drive could not finish. As a parameter it is one index probe per
+		// path segment.
+		var nodeID *string
+		if err := tx.QueryRow(ctx, `select file_tree_resolve($1::uuid,$2)::text`, ownerID, p).Scan(&nodeID); err != nil {
+			return ScanApplyReport{}, fmt.Errorf("resolve scanned entry %q: %w", p, err)
+		}
 		// Unknown source attributes preserve prior values. Repeated unchanged imports
 		// do not UPDATE, preserving updated_at as well as event/annotation references.
 		args := []any{ownerID, key, p, paths.ParentOf(p), paths.NameOf(p), folder, entry.Size, mime, record.ETag, record.StorageClass, modified}
 		report.Scanned++
 		if opts.DryRun {
+			// Select the row by the identity the import settles — the upsert's conflict target
+			// is (owner_id,parent_id,comparison_name), which is exactly what file_tree_resolve
+			// walks — instead of by file_entries.path. That column is derived per row by
+			// file_tree_path(), so a path predicate scans the owner's whole index and walks
+			// every row's ancestry: 3.1 s for each of the two questions below, per entry.
+			dryArgs := append([]any{}, args...)
+			dryArgs[2] = nodeID
 			var exists, changed bool
-			err := tx.QueryRow(ctx, `select exists(select 1 from file_entries where owner_id=$1::uuid and path=$3),
-     exists(select 1 from file_entries where owner_id=$1::uuid and path=$3 and (
+			err := tx.QueryRow(ctx, `select exists(select 1 from file_entries where owner_id=$1::uuid and id=$3::uuid),
+     exists(select 1 from file_entries where owner_id=$1::uuid and id=$3::uuid and (
        key is distinct from $2::text or parent is distinct from $4::text or name is distinct from $5::text
        or is_dir is distinct from $6::boolean or size is distinct from $7::bigint
        or mime is distinct from coalesce($8::text,mime)
        or etag is distinct from coalesce($9::text,etag)
        or storage_class is distinct from coalesce($10::text,storage_class)
-       or source_modified_at is distinct from coalesce($11::timestamptz,source_modified_at)))`, args...).Scan(&exists, &changed)
+       or source_modified_at is distinct from coalesce($11::timestamptz,source_modified_at)))`, dryArgs...).Scan(&exists, &changed)
 			if err != nil {
 				return ScanApplyReport{}, err
 			}
@@ -257,8 +285,14 @@ func ApplyScan(ctx context.Context, db ScanDB, ownerID string, result *treescan.
 		}
 		// A changed imported observation invalidates any saved native generation.
 		// Browsing must not attach the old content revision to external replacements.
-		if _, err := tx.Exec(ctx, `delete from file_content_generations where owner_id=$1::uuid and (node_id=file_tree_resolve($1::uuid,$2) or (node_id is null and path=$2))`, ownerID, p); err != nil {
-			return ScanApplyReport{}, fmt.Errorf("invalidate scanned content revision %q: %w", p, err)
+		var invalidateErr error
+		if namespace != "" {
+			_, invalidateErr = tx.Exec(ctx, invalidateGenerationScoped, ownerID, namespace, nodeID, p)
+		} else {
+			_, invalidateErr = tx.Exec(ctx, invalidateGenerationUnscoped, ownerID, nodeID, p)
+		}
+		if invalidateErr != nil {
+			return ScanApplyReport{}, fmt.Errorf("invalidate scanned content revision %q: %w", p, invalidateErr)
 		}
 		if opts.ChangeRoot != nil {
 			changes = append(changes, scanChangeCapture{path: p, before: before})

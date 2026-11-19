@@ -321,6 +321,10 @@ At millions of objects, switch to a COS **inventory** to avoid the request fees 
 go run ./cmd/eam reconcile --owner you@example.com --inventory ./inventory.csv
 ```
 
+On a 111,750-entry index the import costs 4m45s and `--dry-run` 1m17s; the native walk adds one listing per
+folder on top (about 16 minutes for that drive against COS). The import is one index probe and one upsert per
+entry — it does not grow with the drive's depth or with the size of the tree outside the owner.
+
 `reconcile` adds new entries and updates observed metadata (including size/etag). Add `--sync` to make the
 index equal the tree: entries the native tree no longer has are removed, and each removal leaves a
 `file.deleted` / `native_absent` audit record plus a deleted change fact. The native tree is authoritative, so
