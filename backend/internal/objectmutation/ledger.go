@@ -277,6 +277,11 @@ func (d *Driver) inspect(ctx context.Context, kind, id string, in *storage.Write
 	} else if err != nil {
 		return storage.Inspection{}, err
 	}
+	if effect != nil {
+		if err = d.adoptEffectDescription(r, effect); err != nil {
+			return storage.Inspection{}, err
+		}
+	}
 	if in != nil && !sameJSON(r.Intent, *in) || effect != nil && !sameJSON(r.Effect, effect) {
 		return storage.Inspection{}, fail("intent_conflict", r.Intent.Target)
 	}
@@ -485,11 +490,40 @@ func (d *Driver) Copy(ctx context.Context, in storage.MoveRequest, cp storage.Ch
 	return d.copyRelay(ctx, in, etag, cp)
 }
 
+// copyEffect is the native effect identity of one copy. Size and MediaType describe the
+// object the copy produces, and the coordinator rebuilds both from the frozen manifest
+// every time it inspects an interrupted entry; a journal that omitted them made the
+// driver refuse its own copy with intent_conflict, an error no retry can ever change.
+func (d *Driver) copyEffect(in storage.MoveRequest) storage.EffectIntent {
+	return storage.EffectIntent{ID: in.ID, Action: "copy", Source: in.Source, Target: in.Target, Conditions: in.TargetConditions, SourceRevision: bytes.Clone(in.SourceRevision), Size: in.Size, MediaType: in.MediaType}
+}
+
+// adoptEffectDescription completes an effect that was journaled before its source
+// description became part of it. A copy record written by an older binary carries Size 0
+// and no media type, while the coordinator rebuilds both from the frozen manifest;
+// without this, every inspection of such a copy returned intent_conflict, so one
+// interrupted entry could never resolve and the operation kept its path guarded forever.
+//
+// Only a record with no description at all is filled. A recorded value that disagrees is
+// a real conflict about which copy this is and stays one. Size and MediaType are
+// descriptive — the identity of a copy is its SourceRevision and the target condition —
+// so adopting the manifest's values cannot make two different effects compare equal.
+func (d *Driver) adoptEffectDescription(r *ledger, effect *storage.EffectIntent) error {
+	if r.Effect == nil || effect == nil || r.Effect.Size != 0 || r.Effect.MediaType != "" {
+		return nil
+	}
+	if r.Effect.Size == effect.Size && r.Effect.MediaType == effect.MediaType {
+		return nil
+	}
+	r.Effect.Size, r.Effect.MediaType = effect.Size, effect.MediaType
+	return d.save(r)
+}
+
 // copyRelay streams the source through the private spool and publishes a single
 // PUT. It stays the fallback for backends without a provider-side copy.
 func (d *Driver) copyRelay(ctx context.Context, in storage.MoveRequest, etag string, cp storage.Checkpoint) (storage.MutationResult, error) {
 	intent := storage.WriteIntent{ID: in.ID, Target: in.Target, Conditions: in.TargetConditions, MediaType: "application/octet-stream"}
-	effect := storage.EffectIntent{ID: in.ID, Action: "copy", Source: in.Source, Target: in.Target, Conditions: in.TargetConditions, SourceRevision: bytes.Clone(in.SourceRevision)}
+	effect := d.copyEffect(in)
 	ctx, done, err := d.operation(ctx)
 	if err != nil {
 		return storage.MutationResult{}, err
@@ -502,6 +536,9 @@ func (d *Driver) copyRelay(ctx context.Context, in storage.MoveRequest, etag str
 	defer unlock()
 	r, err := d.load("copy", in.ID)
 	if err == nil {
+		if err = d.adoptEffectDescription(r, &effect); err != nil {
+			return storage.MutationResult{}, err
+		}
 		if !sameJSON(r.Effect, &effect) {
 			return storage.MutationResult{}, fail("intent_conflict", in.Target)
 		}
@@ -575,7 +612,7 @@ const copyPartBytes int64 = 512 << 20
 // reply is resolved from the intent marker this exact request wrote, never by
 // replaying the copy.
 func (d *Driver) copyProvider(ctx context.Context, in storage.MoveRequest, sourceETag string, cp storage.Checkpoint, copier CopyBackend) (storage.MutationResult, error) {
-	effect := storage.EffectIntent{ID: in.ID, Action: "copy", Source: in.Source, Target: in.Target, Conditions: in.TargetConditions, SourceRevision: bytes.Clone(in.SourceRevision)}
+	effect := d.copyEffect(in)
 	ctx, done, err := d.operation(ctx)
 	if err != nil {
 		return storage.MutationResult{}, err
@@ -588,6 +625,9 @@ func (d *Driver) copyProvider(ctx context.Context, in storage.MoveRequest, sourc
 	defer unlock()
 	r, err := d.load("copy", in.ID)
 	if err == nil {
+		if err = d.adoptEffectDescription(r, &effect); err != nil {
+			return storage.MutationResult{}, err
+		}
 		if !sameJSON(r.Effect, &effect) {
 			return storage.MutationResult{}, fail("intent_conflict", in.Target)
 		}

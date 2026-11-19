@@ -39,7 +39,17 @@ func (w *MutationDriver) actionReceipt(r *actionLedger) []byte {
 	b, _ := json.Marshal(actionReceipt{1, w.driver.binding, r.Intent.ID, r.Intent.Action, r.Phase})
 	return b
 }
+
+// sameEffect compares one effect identity. A copy record written before Size and
+// MediaType became part of it carries neither, while the coordinator rebuilds both from
+// the frozen manifest on every inspection; comparing them literally refused such a copy
+// with intent_conflict forever, so an interrupted copy could never resolve. The identity
+// of a copy is its source revision and its target condition, so ignoring a description
+// the record does not have cannot make two different effects compare equal.
 func sameEffect(a, b storage.EffectIntent) bool {
+	if a.Action == "copy" && b.Action == "copy" && b.Size == 0 && b.MediaType == "" {
+		a.Size, a.MediaType = 0, ""
+	}
 	aa, _ := json.Marshal(a)
 	bb, _ := json.Marshal(b)
 	return bytes.Equal(aa, bb)
@@ -225,7 +235,7 @@ func (w *MutationDriver) Move(ctx context.Context, in storage.MoveRequest, cp st
 	return w.runAction(ctx, storage.EffectIntent{ID: in.ID, Action: "move", Source: in.Source, Target: in.Target, SourceRevision: in.SourceRevision, Conditions: in.TargetConditions}, cp)
 }
 func (w *MutationDriver) Copy(ctx context.Context, in storage.MoveRequest, cp storage.Checkpoint) (storage.MutationResult, error) {
-	return w.runAction(ctx, storage.EffectIntent{ID: in.ID, Action: "copy", Source: in.Source, Target: in.Target, SourceRevision: in.SourceRevision, Conditions: in.TargetConditions}, cp)
+	return w.runAction(ctx, storage.EffectIntent{ID: in.ID, Action: "copy", Source: in.Source, Target: in.Target, SourceRevision: in.SourceRevision, Conditions: in.TargetConditions, Size: in.Size, MediaType: in.MediaType}, cp)
 }
 func (w *MutationDriver) runAction(ctx context.Context, in storage.EffectIntent, cp storage.Checkpoint) (storage.MutationResult, error) {
 	// Clone caller-owned conditions before durable comparison/callbacks.

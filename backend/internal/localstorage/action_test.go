@@ -433,3 +433,42 @@ func TestMutationRefusesAnImplicitFolderRemoval(t *testing.T) {
 		t.Fatalf("the refused removal deleted the folder: %v", err)
 	}
 }
+
+// A copy effect's identity is the source revision; Size and MediaType only describe the
+// object it produces. The coordinator rebuilds both from the frozen manifest on every
+// inspection, so a record that did not carry them refused its own interrupted copy with
+// intent_conflict — an error no retry can change, which pinned the guarded path forever.
+func TestLocalCopyInspectionAcceptsTheManifestDescription(t *testing.T) {
+	w, _, _ := mutationFixture(t)
+	ctx := context.Background()
+	in := writeIntent("file", "source.bin", "payload")
+	staged := stageFile(t, w.StagedWriter, in, "payload")
+	if _, err := w.Publish(ctx, staged, stageOK); err != nil {
+		t.Fatal(err)
+	}
+	source := mutationStat(t, w, in.Target)
+	request := storage.MoveRequest{ID: "copy", Source: "source.bin", Target: "copy.bin", SourceRevision: source.Revision, TargetConditions: storage.Conditions{Absent: true}, Size: source.Size}
+	var receipt []byte
+	lost := errors.New("checkpoint reply lost")
+	if _, err := w.Copy(ctx, request, func(_ context.Context, value []byte) error {
+		receipt = bytes.Clone(value)
+		return lost
+	}); err == nil {
+		t.Fatal("interrupted copy reported success")
+	}
+	effect := storage.EffectIntent{ID: "copy", Action: "copy", Source: "source.bin", Target: "copy.bin", SourceRevision: source.Revision, Conditions: storage.Conditions{Absent: true}, Size: source.Size}
+	actionInspection(t, w, effect, receipt, storage.NotApplied)
+
+	// A record from before the description was part of the effect must still resolve:
+	// its identity is the revision and the condition, not the description.
+	legacy := storage.EffectIntent{ID: "legacy", Action: "copy", Source: "source.bin", Target: "legacy.bin", SourceRevision: source.Revision, Conditions: storage.Conditions{Absent: true}}
+	var legacyReceipt []byte
+	if _, err := w.Copy(ctx, storage.MoveRequest{ID: "legacy", Source: "source.bin", Target: "legacy.bin", SourceRevision: source.Revision, TargetConditions: storage.Conditions{Absent: true}}, func(_ context.Context, value []byte) error {
+		legacyReceipt = bytes.Clone(value)
+		return lost
+	}); err == nil {
+		t.Fatal("legacy interrupted copy reported success")
+	}
+	legacy.Size, legacy.MediaType = source.Size, source.MediaType
+	actionInspection(t, w, legacy, legacyReceipt, storage.NotApplied)
+}

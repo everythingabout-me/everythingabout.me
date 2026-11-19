@@ -183,7 +183,7 @@ func TestProviderCopyLostReplyResolvesFromIntent(t *testing.T) {
 		t.Fatal("lost reply reported success")
 	}
 	backend.copyErr = nil
-	inspection, err := d.InspectEffect(ctx, storage.EffectIntent{ID: "copy", Action: "copy", Source: "source.bin", Target: "copy.bin", Conditions: storage.Conditions{Absent: true}, SourceRevision: source.Revision}, nil)
+	inspection, err := d.InspectEffect(ctx, storage.EffectIntent{ID: "copy", Action: "copy", Source: "source.bin", Target: "copy.bin", Conditions: storage.Conditions{Absent: true}, SourceRevision: source.Revision, Size: source.Size}, nil)
 	if err != nil || inspection.State != storage.Applied {
 		t.Fatalf("inspection=%+v %v", inspection, err)
 	}
@@ -205,7 +205,7 @@ func TestProviderCopyFailureWithoutEffectIsNotApplied(t *testing.T) {
 	if _, err := d.Copy(ctx, request, cpOK); err == nil {
 		t.Fatal("failed copy reported success")
 	}
-	inspection, err := d.InspectEffect(ctx, storage.EffectIntent{ID: "copy", Action: "copy", Source: "source.bin", Target: "copy.bin", Conditions: storage.Conditions{Absent: true}, SourceRevision: source.Revision}, nil)
+	inspection, err := d.InspectEffect(ctx, storage.EffectIntent{ID: "copy", Action: "copy", Source: "source.bin", Target: "copy.bin", Conditions: storage.Conditions{Absent: true}, SourceRevision: source.Revision, Size: source.Size}, nil)
 	if err != nil || inspection.State != storage.NotApplied {
 		t.Fatalf("inspection=%+v %v", inspection, err)
 	}
