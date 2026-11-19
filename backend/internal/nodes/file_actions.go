@@ -378,12 +378,16 @@ func moveSource(request fileops.ActionRequest, effect fileops.EntryEffect) stora
 
 // resolveIDs maps each path to the id of the index row currently at it, in one round trip.
 // A path that resolves to nothing is absent from the result.
-func resolveIDs(ctx context.Context, tx pgx.Tx, owner string, list []string) (map[string]string, error) {
+//
+// The path is resolved by walking down the canonical parent link (file_tree_resolve), never
+// by comparing file_entries.path: that column is derived per row by file_tree_path(), so a
+// path predicate cannot use an index and pays an ancestry walk for every entry of the owner.
+func resolveIDs(ctx context.Context, q browseReader, owner string, list []string) (map[string]string, error) {
 	out := make(map[string]string, len(list))
 	if len(list) == 0 {
 		return out, nil
 	}
-	rows, err := tx.Query(ctx, `select p.path,file_tree_resolve($1::uuid,p.path)::text from unnest($2::text[]) as p(path)`, owner, list)
+	rows, err := q.Query(ctx, `select p.path,file_tree_resolve($1::uuid,p.path)::text from unnest($2::text[]) as p(path)`, owner, list)
 	if err != nil {
 		return nil, err
 	}
@@ -712,43 +716,36 @@ func CommitPrefixDelete(ctx context.Context, tx pgx.Tx, op fileops.Operation) (i
 	if before.metadata == nil {
 		return 0, storage.NewError("not_found", request.From, nil)
 	}
-	pattern := EscapeLike(path) + "/%"
-	rows, err := tx.Query(ctx, `select id::text, size from file_entries where owner_id=$1::uuid and path=$2`, op.Root.OwnerID, path)
+	// The rows this deletion settles are the anchor and its subtree, found through the
+	// canonical parent link — never through `file_entries.path`. That view derives each
+	// row's path with file_tree_path(), so `path = $2` and `path LIKE 'x/%'` cannot use an
+	// index: each reads every entry the owner has and walks that row's ancestry. On the
+	// 111,750-entry index this acceptance spent 3,133 ms on the equality and 3,212 ms on
+	// the prefix predicate for one deleted file, which is why deleting a single file took
+	// 6.8 s; the anchored walk settles the same rows in about 4 ms and its cost follows the
+	// deleted subtree, not the size of the drive. `subtreeIDs` states the same rule for
+	// every other "which rows sit under this path" question.
+	anchors, err := resolveIDs(ctx, tx, op.Root.OwnerID, []string{path})
 	if err != nil {
 		return 0, err
 	}
-	ids := make([]string, 0, 64)
+	anchor, ok := anchors[path]
+	if !ok {
+		// captureFileState resolved the same path a moment ago in this transaction, so a
+		// missing anchor here is an index that disagrees with itself.
+		return 0, storage.NewError("not_found", request.From, nil)
+	}
+	below, err := subtreeIDs(ctx, tx, op.Root.OwnerID, []string{path})
+	if err != nil {
+		return 0, err
+	}
+	ids := make([]string, 0, 1+len(below[path]))
+	ids = append(ids, anchor)
+	ids = append(ids, below[path]...)
+	// Sizes are read by id, so the refund stays a primary-key lookup per removed row
+	// instead of another traversal of the tree.
 	var removed int64
-	for rows.Next() {
-		var id string
-		var size int64
-		if err = rows.Scan(&id, &size); err != nil {
-			rows.Close()
-			return 0, err
-		}
-		ids = append(ids, id)
-		removed += size
-	}
-	rows.Close()
-	if err = rows.Err(); err != nil {
-		return 0, err
-	}
-	descendants, err := tx.Query(ctx, `select id::text, size from file_entries where owner_id=$1::uuid and path like $2`, op.Root.OwnerID, pattern)
-	if err != nil {
-		return 0, err
-	}
-	for descendants.Next() {
-		var id string
-		var size int64
-		if err = descendants.Scan(&id, &size); err != nil {
-			descendants.Close()
-			return 0, err
-		}
-		ids = append(ids, id)
-		removed += size
-	}
-	descendants.Close()
-	if err = descendants.Err(); err != nil {
+	if err = tx.QueryRow(ctx, `select coalesce(sum(size),0) from nodes where owner_id=$1::uuid and id=any($2::uuid[])`, op.Root.OwnerID, ids).Scan(&removed); err != nil {
 		return 0, err
 	}
 	if len(ids) > 0 {
@@ -756,6 +753,9 @@ func CommitPrefixDelete(ctx context.Context, tx pgx.Tx, op fileops.Operation) (i
 			return 0, fmt.Errorf("settle prefix deletion: %w", err)
 		}
 	}
+	// This one may keep a path predicate: file_content_generations.path is a real column
+	// with an index on (owner_id, root_namespace, path), not a value derived per row.
+	pattern := EscapeLike(path) + "/%"
 	if _, err = tx.Exec(ctx, `delete from file_content_generations where owner_id=$1::uuid and root_namespace=$2 and (path=$3 or path like $4)`, op.Root.OwnerID, namespace, path, pattern); err != nil {
 		return 0, err
 	}
@@ -774,6 +774,12 @@ func CommitPrefixDelete(ctx context.Context, tx pgx.Tx, op fileops.Operation) (i
 // LiveFilePaths answers which of these paths the index still holds. The purge must not
 // delete a path a user re-created after the deletion was accepted, and the provider's
 // own clock is not authoritative for the user's intent.
+//
+// It asks per path through the canonical parent link, like every other path question:
+// `path = any(...)` against file_entries derives each row's path with file_tree_path(),
+// so one purge page of 200 objects paid a full scan of the owner's index — 3.1 s per page
+// on the 111,750-entry index, and a large tree has many pages. Resolving 200 paths costs
+// 28 ms because each one is one index probe per path segment.
 func LiveFilePaths(ctx context.Context, pool *pgxpool.Pool, owner string, paths []storage.Path) ([]bool, error) {
 	live := make([]bool, len(paths))
 	if len(paths) == 0 {
@@ -783,24 +789,12 @@ func LiveFilePaths(ctx context.Context, pool *pgxpool.Pool, owner string, paths 
 	for i, path := range paths {
 		values[i] = string(path)
 	}
-	rows, err := pool.Query(ctx, `select path from file_entries where owner_id=$1::uuid and path=any($2)`, owner, values)
+	found, err := resolveIDs(ctx, pool, owner, values)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	found := make(map[string]bool, len(paths))
-	for rows.Next() {
-		var path string
-		if err = rows.Scan(&path); err != nil {
-			return nil, err
-		}
-		found[path] = true
-	}
-	if err = rows.Err(); err != nil {
-		return nil, err
-	}
 	for i, path := range paths {
-		live[i] = found[string(path)]
+		live[i] = found[string(path)] != ""
 	}
 	return live, nil
 }

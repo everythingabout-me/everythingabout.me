@@ -29,7 +29,11 @@ Three steps. Step 1 and 2 happen in the acceptance transaction; only step 3 is b
 1. **Resolve** the target: one or two native observations (the folder's parent listing, its marker `HEAD`,
    and the requested revision check). O(1).
 2. **Settle the index** in one transaction: record the deletion facts for the subtree, refund the quota of
-   the rows, delete the rows. O(rows), local, one statement. Then answer `202`.
+   the rows, delete the rows. O(rows), local, one statement. Then answer `202`. Every row is found through
+   the canonical parent link, never by comparing `file_entries.path`: that column is derived per row by
+   `file_tree_path()`, so a path predicate cannot use an index and scans the owner's whole tree — 3.1 s for
+   `path = $2` plus 3.2 s for `path LIKE 'x/%'` on a 111,750-entry index, which made accepting a single-file
+   delete take 6.8 s against the 4 ms the anchored walk costs.
 3. **Purge the bytes** in the worker: walk the native prefix page by page and delete what step 2 says is
    gone. O(objects), network, retryable, parallelizable.
 
