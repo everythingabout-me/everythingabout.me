@@ -1490,20 +1490,57 @@ export interface StorageConnection {
   runs: number;
   /** The newest of those runs; absent when no backup ever ran here. */
   lastRun?: BackupRun | null;
-  /** Last reachability/latency/throughput test, if this account ever ran one. */
+  /** Last measurement, if this account ever ran one. */
   probe?: StorageTestResult | null;
+  /** A measurement is running for this provider in the server process. */
+  probeRunning?: boolean;
 }
 
 export interface StorageTestResult {
   testedAt: string;
+  /** Identifies the run that produced this result; absent on a result cached before runs had ids. */
+  runId?: string;
   ok: boolean;
   writable: boolean;
   error?: string;
+  /** Median metadata round trip, in milliseconds. */
   latencyMs: number;
   uploadBytes: number;
   downloadBytes: number;
   uploadBytesPerSecond: number;
   downloadBytesPerSecond: number;
+  /** The small-file batch, written one file at a time; absent on an older cached result. */
+  smallFiles?: FileOpsTest | null;
+  /** The same batch renamed (provider-side copy + delete), then deleted. */
+  renames?: FileOpsTest | null;
+  deletes?: FileOpsTest | null;
+  /** Overlapping writes: the aggregate, and the average part each stream contributed. */
+  concurrency?: ConcurrencyTest | null;
+}
+
+/** One file-operation phase: how many files, and how fast, because a small file costs a round trip. */
+export interface FileOpsTest {
+  files: number;
+  bytesPerFile?: number;
+  elapsedMs: number;
+  perSecond: number;
+  error?: string;
+}
+
+/** Overlapping writes: the aggregate, and the average part each stream contributed. */
+export interface ConcurrencyTest {
+  streams: number;
+  bytesPerStream: number;
+  bytesPerSecond: number;
+  perStreamBytesPerSecond: number;
+  error?: string;
+}
+
+/** A measurement runs off the request; the page waits for the result with this run id. */
+export interface StorageTestStart {
+  started: boolean;
+  runId: string;
+  testedAt: string;
 }
 
 export interface BackupRun {
@@ -1573,8 +1610,8 @@ export const api = {
     await request(`/api/storage/connections/${encodeURIComponent(id)}`, { method: "DELETE" });
   },
 
-  testStorageConnection(id: string): Promise<StorageTestResult> {
-    return post<StorageTestResult>(`/api/storage/connections/${encodeURIComponent(id)}/test`);
+  testStorageConnection(id: string): Promise<StorageTestStart> {
+    return post<StorageTestStart>(`/api/storage/connections/${encodeURIComponent(id)}/test`);
   },
 
   /** The backup feature's placement on one provider; not a property of the provider. */

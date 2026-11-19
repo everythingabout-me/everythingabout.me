@@ -2,6 +2,8 @@ package api
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -56,6 +58,9 @@ type storageConnectionView struct {
 	LastRun *backupRunView `json:"lastRun,omitempty"`
 	// Probe is the last measurement this account asked for, nil if it never did.
 	Probe json.RawMessage `json:"probe,omitempty"`
+	// ProbeRunning reports a measurement this process is running right now, so a page
+	// reloaded mid-test waits instead of showing the stale result as the answer.
+	ProbeRunning bool `json:"probeRunning,omitempty"`
 }
 
 func connectionView(c connections.Connection, runCount int, last *backupRunView) storageConnectionView {
@@ -74,19 +79,53 @@ type backupTargetView struct {
 	Name string `json:"name"`
 }
 
-// storageTestView is one reachability/latency/throughput measurement. It is
-// returned by the test endpoint and cached on the row, so the page can render the
-// number without repeating the measurement.
+// storageTestView is one measurement, returned when it finishes and cached on the row.
+//
+// Each phase is its own field rather than one blended score: a large upload says nothing
+// about whether a backup of 100k small files can finish before morning, and the phases are
+// what the page lists side by side. The file-operation phases are pointers because a probe
+// cached before they existed has no answer for them — absent is "never measured", which
+// the page can show, while a zero would read as "measured zero".
 type storageTestView struct {
-	TestedAt               string `json:"testedAt"`
-	OK                     bool   `json:"ok"`
-	Writable               bool   `json:"writable"`
-	Error                  string `json:"error,omitempty"`
-	LatencyMS              int64  `json:"latencyMs"`
-	UploadBytes            int64  `json:"uploadBytes"`
-	DownloadBytes          int64  `json:"downloadBytes"`
-	UploadBytesPerSecond   int64  `json:"uploadBytesPerSecond"`
-	DownloadBytesPerSecond int64  `json:"downloadBytesPerSecond"`
+	TestedAt string `json:"testedAt"`
+	// RunID identifies the run that produced this result. A start request answers with the
+	// id before any bytes move, so a page can wait for exactly this answer instead of
+	// comparing timestamps.
+	RunID                  string               `json:"runId,omitempty"`
+	OK                     bool                 `json:"ok"`
+	Writable               bool                 `json:"writable"`
+	Error                  string               `json:"error,omitempty"`
+	LatencyMS              int64                `json:"latencyMs"`
+	UploadBytes            int64                `json:"uploadBytes"`
+	DownloadBytes          int64                `json:"downloadBytes"`
+	UploadBytesPerSecond   int64                `json:"uploadBytesPerSecond"`
+	DownloadBytesPerSecond int64                `json:"downloadBytesPerSecond"`
+	SmallFiles             *fileOpsTestView     `json:"smallFiles,omitempty"`
+	Renames                *fileOpsTestView     `json:"renames,omitempty"`
+	Deletes                *fileOpsTestView     `json:"deletes,omitempty"`
+	Concurrency            *concurrencyTestView `json:"concurrency,omitempty"`
+}
+
+// fileOpsTestView is one file-operation phase. The rate is files per second rather than
+// bytes per second, because the cost of a small file is its round trip, not its length:
+// at 1 KB the two numbers differ only by a constant.
+type fileOpsTestView struct {
+	Files        int     `json:"files"`
+	BytesPerFile int64   `json:"bytesPerFile,omitempty"`
+	ElapsedMS    int64   `json:"elapsedMs"`
+	PerSecond    float64 `json:"perSecond"`
+	Error        string  `json:"error,omitempty"`
+}
+
+// concurrencyTestView is the overlapping-write phase. PerStreamBytesPerSecond is the
+// average part of the aggregate that each stream contributed, which is the number to
+// compare against the single-stream upload rate to see whether concurrency helps.
+type concurrencyTestView struct {
+	Streams                 int    `json:"streams"`
+	BytesPerStream          int64  `json:"bytesPerStream"`
+	BytesPerSecond          int64  `json:"bytesPerSecond"`
+	PerStreamBytesPerSecond int64  `json:"perStreamBytesPerSecond"`
+	Error                   string `json:"error,omitempty"`
 }
 
 type backupRunView struct {
@@ -129,7 +168,9 @@ func (s *Server) handleStorageGet(w http.ResponseWriter, r *http.Request) error 
 	}
 	views := make([]storageConnectionView, 0, len(rows))
 	for _, c := range rows {
-		views = append(views, connectionView(c, runCounts[c.ID], lastRuns[c.ID]))
+		view := connectionView(c, runCounts[c.ID], lastRuns[c.ID])
+		view.ProbeRunning = s.probeRunning(c.ID)
+		views = append(views, view)
 	}
 	target, err := s.backupTarget(ctx, user.ID)
 	if err != nil {
@@ -263,8 +304,10 @@ func (s *Server) handleStorageConnectionGet(w http.ResponseWriter, r *http.Reque
 	if err != nil {
 		return err
 	}
+	view := connectionView(target, counts[target.ID], last)
+	view.ProbeRunning = s.probeRunning(target.ID)
 	return s.ok(w, map[string]any{
-		"connection":   connectionView(target, counts[target.ID], last),
+		"connection":   view,
 		"backupTarget": chosen,
 		"runs":         runs,
 	})
@@ -425,14 +468,21 @@ func (s *Server) visibleConnection(r *http.Request, userID, id string) (connecti
 	return connections.Connection{}, false, nil
 }
 
-// handleStorageConnectionTest measures one destination and caches the answer.
+// handleStorageConnectionTest starts a measurement of one destination. It answers
+// `202` with the run id and measures off the request.
 //
-// The measurement writes a payload and reads it back, then runs the admission probe
-// the backup path itself depends on. A person attaching a NAS is asking three
-// questions — is it there, how far away is it, how fast is it — and every answer is
-// only worth something if it was produced by the same native path a backup would
-// use. The admission half is what turns "the bytes went up" into "a snapshot can
-// be published here": conditional create is a separate promise from reachability.
+// The work is a 100 MB transfer plus a few hundred file operations, bounded by what it
+// does rather than by a clock — which can be minutes on a home NAS, longer than a browser
+// request should hold, and a request cancelled by navigation must not leave a
+// half-measured provider. The answer is cached on the row, which is what the page polls;
+// there is no task resource because the result belongs to the provider, not to the run.
+//
+// The measurement runs the phases `storagebackend.Measure` defines — metadata latency, a
+// large upload and read-back, a small-file batch written, renamed and deleted, overlapping
+// writes — then runs the admission probe the backup path itself depends on. Every answer
+// is only worth something if it was produced by the same native path a backup would use.
+// The admission half is what turns "the bytes went up" into "a snapshot can be published
+// here": conditional create is a separate promise from reachability.
 func (s *Server) handleStorageConnectionTest(w http.ResponseWriter, r *http.Request) error {
 	if s.db == nil || s.conns == nil {
 		return httpx.ServiceUnavailable("Storage settings are unavailable on this instance.")
@@ -451,13 +501,35 @@ func (s *Server) handleStorageConnectionTest(w http.ResponseWriter, r *http.Requ
 	if !ok {
 		return httpx.NotFound("No such storage connection on this account.")
 	}
-	result := storageTestView{TestedAt: time.Now().UTC().Format(time.RFC3339)}
+	if !s.claimProbe(target.ID) {
+		return httpx.Conflict("A test is already running for this provider.")
+	}
+	runID, err := newProbeRunID()
+	if err != nil {
+		s.releaseProbe(target.ID)
+		return err
+	}
+	result := storageTestView{TestedAt: time.Now().UTC().Format(time.RFC3339), RunID: runID}
+	go s.runStorageTest(target, result)
+	// The start time travels back because it is also the finished result's TestedAt: the
+	// page can name the moment it asked, not the moment it happened to read.
+	httpx.WriteOKStatus(w, http.StatusAccepted, map[string]any{
+		"started": true, "runId": runID, "testedAt": result.TestedAt,
+	})
+	return nil
+}
+
+// runStorageTest is the measurement itself. It is started by handleStorageConnectionTest
+// and owns the probe claim until the answer is cached.
+func (s *Server) runStorageTest(target connections.Connection, result storageTestView) {
+	defer s.releaseProbe(target.ID)
+	ctx := context.Background()
 	effective, err := target.ApplyEnvironment(*s.cfg)
 	switch {
 	case err != nil:
 		result.Error = err.Error()
 	default:
-		measurement, measureErr := storagebackend.Measure(r.Context(), &effective)
+		measurement, measureErr := storagebackend.Measure(ctx, &effective)
 		if measureErr != nil {
 			result.Error = measureErr.Error()
 			break
@@ -466,23 +538,83 @@ func (s *Server) handleStorageConnectionTest(w http.ResponseWriter, r *http.Requ
 		result.LatencyMS = measurement.Latency.Milliseconds()
 		result.UploadBytes, result.DownloadBytes = measurement.Uploaded, measurement.Downloaded
 		result.UploadBytesPerSecond, result.DownloadBytesPerSecond = measurement.UploadRate, measurement.DownloadRate
+		result.SmallFiles = fileOpsView(measurement.SmallFiles)
+		result.Renames = fileOpsView(measurement.Renames)
+		result.Deletes = fileOpsView(measurement.Deletes)
+		result.Concurrency = &concurrencyTestView{
+			Streams:                 measurement.Concurrency.Streams,
+			BytesPerStream:          measurement.Concurrency.BytesPerStream,
+			BytesPerSecond:          measurement.Concurrency.Rate,
+			PerStreamBytesPerSecond: measurement.Concurrency.Share,
+			Error:                   measurement.Concurrency.Error,
+		}
 		// Publishability is a different question from reachability, so a store that
 		// answered but cannot be admitted is "reachable, not ready" rather than a
 		// failed connection test.
-		if _, probeErr := storagebackend.ProbeConnection(r.Context(), &effective); probeErr != nil {
+		if _, probeErr := storagebackend.ProbeConnection(ctx, &effective); probeErr != nil {
 			result.Error = probeErr.Error()
 		} else {
 			result.Writable = true
 		}
 	}
-	if encoded, marshalErr := json.Marshal(result); marshalErr == nil {
-		if recordErr := s.conns.SetProbe(r.Context(), target.ID, encoded); recordErr != nil {
-			// The person still gets the answer they asked for; failing the request
-			// because the cache write failed would hide a working measurement.
-			slog.Warn("record storage test result", "connection", target.ID, "error", recordErr)
-		}
+	encoded, marshalErr := json.Marshal(result)
+	if marshalErr != nil {
+		slog.Error("encode storage test result", "connection", target.ID, "error", marshalErr)
+		return
 	}
-	return s.ok(w, result)
+	if recordErr := s.conns.SetProbe(ctx, target.ID, encoded); recordErr != nil {
+		// The measurement itself may have been fine; a failed cache write loses the
+		// answer, which is the only way anyone reads it, so it is logged as an error.
+		slog.Error("record storage test result", "connection", target.ID, "error", recordErr)
+	}
+}
+
+func fileOpsView(phase storagebackend.FileOpsPhase) *fileOpsTestView {
+	return &fileOpsTestView{
+		Files:        phase.Files,
+		BytesPerFile: phase.BytesPerFile,
+		ElapsedMS:    phase.Elapsed.Milliseconds(),
+		PerSecond:    phase.PerSecond,
+		Error:        phase.Error,
+	}
+}
+
+// claimProbe marks a measurement as running for one provider. It lives in this process,
+// like the backup runner: a deployment runs one instance, and a probe that outlived its
+// process is meaningless because its transfers are gone.
+func (s *Server) claimProbe(id string) bool {
+	s.probeMu.Lock()
+	defer s.probeMu.Unlock()
+	if s.probeJobs == nil {
+		s.probeJobs = map[string]bool{}
+	}
+	if s.probeJobs[id] {
+		return false
+	}
+	s.probeJobs[id] = true
+	return true
+}
+
+func (s *Server) releaseProbe(id string) {
+	s.probeMu.Lock()
+	delete(s.probeJobs, id)
+	s.probeMu.Unlock()
+}
+
+func (s *Server) probeRunning(id string) bool {
+	s.probeMu.Lock()
+	defer s.probeMu.Unlock()
+	return s.probeJobs[id]
+}
+
+// newProbeRunID names one measurement so a page can wait for exactly the answer it asked
+// for. A timestamp would not do: two runs within the same second are indistinguishable.
+func newProbeRunID() (string, error) {
+	var raw [8]byte
+	if _, err := rand.Read(raw[:]); err != nil {
+		return "", fmt.Errorf("generate a measurement run id: %w", err)
+	}
+	return hex.EncodeToString(raw[:]), nil
 }
 
 // connectionSettingsInput carries the backup settings an account may change on a

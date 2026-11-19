@@ -2,6 +2,7 @@ import { useState } from "react";
 import { useLoaderData, useOutletContext, useRevalidator } from "react-router";
 import type { StorageData } from "../../api/client";
 import { AddProvider, ProviderCard } from "../../components/StoragePanels";
+import { PlusIcon } from "../../components/icons";
 import { legacyFilesText, t } from "../../i18n";
 import type { SettingsContext } from "../SettingsPage";
 import panel from "../../components/StoragePanels.module.css";
@@ -27,6 +28,9 @@ export function StorageSettings() {
         ))}
         {adding ? null : (
           <button className={panel.addTile} onClick={() => setAdding(true)}>
+            <span className={panel.addTileIcon}>
+              <PlusIcon size={15} />
+            </span>
             {t("drives.add")}
           </button>
         )}
@@ -34,6 +38,7 @@ export function StorageSettings() {
 
       {adding ? (
         <section className={panel.section}>
+          <h2 className={panel.title}>{t("drives.add")}</h2>
           <AddProvider
             onCancel={() => setAdding(false)}
             onAdded={() => {

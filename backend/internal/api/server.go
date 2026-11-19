@@ -39,6 +39,8 @@ type Server struct {
 	conns        connections.Store
 	backupMu     sync.Mutex
 	backupJobs   map[string]bool
+	probeMu      sync.Mutex
+	probeJobs    map[string]bool
 	filesAuth    FilesAuthenticator
 	filesIndex   FileReadIndex
 	mediaCache   mediameta.Cache

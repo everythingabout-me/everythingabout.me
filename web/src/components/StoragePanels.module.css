@@ -7,79 +7,52 @@
   background: var(--surface);
 }
 
+/*
+ * A panel's head is one row: the title and its explanation on the left, the one action
+ * that belongs to the whole panel on the right. Putting the action here instead of at
+ * the bottom is what lets the body be read top-down.
+ */
+.sectionHead {
+  display: flex;
+  align-items: flex-start;
+  gap: 16px;
+}
+
+.sectionHeadText {
+  flex: 1;
+  min-width: 0;
+}
+
 .title {
-  margin: 0 0 6px;
+  margin: 0;
   font-size: 15px;
   font-weight: 600;
 }
 
 .lead {
-  margin: 0 0 16px;
+  margin: 5px 0 0;
   color: var(--text-2);
   font-size: 13px;
-  line-height: 1.55;
-}
-
-.list {
-  list-style: none;
-  margin: 0 0 14px;
-  padding: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-}
-
-.row {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 12px;
-  padding-bottom: 10px;
-  border-bottom: 1px solid var(--border);
-}
-
-
-.rowBody {
-  flex: 1;
-  min-width: 0;
-}
-
-.row:last-child {
-  padding-bottom: 0;
-  border-bottom: none;
-}
-
-.name {
-  font-weight: 600;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
-.badge {
-  font-size: 11px;
-  font-weight: 500;
-  color: var(--text-3);
-  border: 1px solid var(--border-strong);
-  border-radius: 999px;
-  padding: 1px 8px;
+  line-height: 1.6;
 }
 
 .muted {
   color: var(--text-3);
   font-size: 13px;
-  margin-top: 3px;
+  margin: 12px 0 0;
 }
 
-.mutedInline {
+.hint {
+  margin: 10px 0 0;
   color: var(--text-3);
+  font-size: 12.5px;
+  line-height: 1.6;
 }
 
-.status {
-  margin: 6px 0 0;
+.subtitle {
+  margin: 22px 0 0;
   font-size: 13px;
-  color: var(--text-2);
+  font-weight: 600;
 }
 
 .actions {
@@ -90,6 +63,7 @@
 
 .button,
 .quiet {
+  flex: none;
   padding: 7px 12px;
   border-radius: 9px;
   border: 1px solid var(--border-strong);
@@ -97,6 +71,7 @@
   color: var(--text);
   font: inherit;
   cursor: pointer;
+  transition: background-color 120ms ease, border-color 120ms ease;
 }
 
 .button:hover,
@@ -115,11 +90,22 @@
   font-size: 13px;
 }
 
+.tableWrap {
+  overflow-x: auto;
+  margin-top: 12px;
+}
+
+/*
+ * Fixed columns, because the one variable-width cell is a failure message: with auto
+ * layout a long error widened the status column until the date and the file count
+ * wrapped, and the table read as broken rather than as a table with a long word in it.
+ */
 .table {
   width: 100%;
+  min-width: 460px;
   border-collapse: collapse;
+  table-layout: fixed;
   font-size: 14px;
-  margin-top: 12px;
 }
 
 .table th {
@@ -136,11 +122,29 @@
   vertical-align: middle;
 }
 
-.hint {
-  margin: 10px 0 0;
-  color: var(--text-3);
-  font-size: 13px;
-  line-height: 1.55;
+/* A date is one token; wrapping it to "2026-11-" / "17" makes the column read as a
+   number that changed, and squeezes the columns that can legitimately wrap. */
+.table td:first-child,
+.table th:first-child {
+  width: 15%;
+  white-space: nowrap;
+}
+
+.table th:nth-child(2),
+.table td:nth-child(2) {
+  width: 40%;
+}
+
+.table th:nth-child(3),
+.table td:nth-child(3) {
+  width: 31%;
+}
+
+.table th:nth-child(4),
+.table td:nth-child(4) {
+  width: 14%;
+  padding-right: 0;
+  text-align: right;
 }
 
 .form {
@@ -175,6 +179,12 @@
   color: var(--text-2);
 }
 
+/* A panel's first choice starts away from the lead above it; inside the add form the
+   grid gap already does that, so the margin lives on this variant. */
+.choice {
+  margin-top: 16px;
+}
+
 .check input {
   margin: 0;
 }
@@ -183,91 +193,214 @@
   margin: 8px 0 0;
   color: var(--danger);
   font-size: 13px;
+  line-height: 1.6;
 }
 
 /*
- * The storage list is a grid of providers, and a provider's page is a short stack of
- * blocks. Both read as the same surface as the rest of settings: one border, one radius,
- * no shadow — a card here is a place, not an alert.
+ * The storage list is a grid of providers. A card is a place, not an alert: one hairline,
+ * one radius, no shadow at rest. The only lift is on hover, and only to say the whole card
+ * is the link — the same affordance every other clickable surface in the app has.
  */
 .grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(248px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(252px, 1fr));
   gap: 12px;
 }
 
 .card {
   display: flex;
   flex-direction: column;
-  gap: 5px;
-  padding: 16px 18px;
+  justify-content: space-between;
+  gap: 14px;
+  min-height: 118px;
+  padding: 16px;
   border: 1px solid var(--border);
   border-radius: 14px;
   background: var(--surface);
   color: inherit;
   text-decoration: none;
+  transition: border-color 120ms ease, box-shadow 120ms ease, transform 120ms ease;
 }
 
 .card:hover {
   border-color: var(--border-strong);
-  background: var(--hover);
+  box-shadow: var(--shadow-soft);
+  transform: translateY(-1px);
+}
+
+.cardTop {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: start;
+  gap: 11px;
+}
+
+/* The glyph tile is the only place a card carries the accent: an icon fill, never text. */
+.glyph {
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: 32px;
+  height: 32px;
+  border-radius: 9px;
+  background: var(--blue-light);
+  color: var(--blue-ink);
+}
+
+.glyphLarge {
+  width: 40px;
+  height: 40px;
+  border-radius: 11px;
+}
+
+.cardIdentity {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
 }
 
 .cardName {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 7px;
   min-width: 0;
   font-weight: 600;
+  line-height: 1.4;
 }
 
-.cardLocation,
-.cardMeta {
-  color: var(--text-3);
-  font-size: 12.5px;
-  line-height: 1.5;
-}
-
-.cardLocation {
+.cardNameText {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.chip {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  margin-top: 2px;
-  color: var(--text-2);
-  font-size: 12.5px;
+/*
+ * The location is a bucket and a region, and the region is the half a person is looking
+ * for — one ellipsised line drops it. Two lines, then clamp: a longer identifier is
+ * truncated, not hidden on the page that exists to show where the bytes are.
+ */
+.cardLocation {
+  display: -webkit-box;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow-wrap: anywhere;
+  color: var(--text-3);
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  line-height: 1.5;
 }
 
-/* A dot is a fill, so it may carry the accent; the label next to it stays text-coloured. */
+.badge {
+  flex: none;
+  padding: 1px 7px;
+  border: 1px solid var(--border-strong);
+  border-radius: 999px;
+  color: var(--text-3);
+  font-size: 11px;
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.cardFoot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding-top: 11px;
+  border-top: 1px solid var(--border);
+  color: var(--text-3);
+  font-size: 12px;
+}
+
+.cardMeta {
+  overflow: hidden;
+  text-align: right;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/*
+ * A chip is a dot and a word. The dot is a fill, so it may carry the accent; the label
+ * next to it stays text-coloured. States differ by shape as well as by colour — a filled
+ * dot is a live store, a hollow one is a store that answered and refused — because a
+ * colour-only difference disappears in a screenshot and for a colour-blind reader.
+ */
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  color: var(--text-2);
+  font-size: 12.5px;
+  line-height: 1.4;
+}
+
 .dot {
   flex: none;
-  width: 6px;
-  height: 6px;
+  width: 7px;
+  height: 7px;
   border-radius: 50%;
   background: var(--border-strong);
 }
 
-.dotReady {
+.chip[data-tone="ready"] .dot {
   background: var(--blue);
+  box-shadow: 0 0 0 3px var(--blue-light);
+}
+
+.chip[data-tone="failed"] .dot {
+  background: transparent;
+  box-shadow: inset 0 0 0 1.5px var(--text-3);
+}
+
+.chipLabel {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* The panel repeats the card's status, so it gets a plate: one is a line inside a list,
+   the other is the headline of a measurement the page exists to report. */
+.chipPlate {
+  padding: 3px 10px 3px 9px;
+  border-radius: 999px;
+  background: var(--hover);
+}
+
+.chipValue {
+  flex: none;
+  color: var(--text-3);
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  font-variant-numeric: tabular-nums;
 }
 
 .addTile {
   display: flex;
+  flex-direction: column;
   align-items: center;
   justify-content: center;
-  min-height: 110px;
-  padding: 16px 18px;
+  gap: 8px;
+  min-height: 118px;
+  padding: 16px;
   border: 1px dashed var(--border-strong);
   border-radius: 14px;
   background: transparent;
-  color: var(--text-2);
+  color: var(--text-3);
   font: inherit;
+  font-size: 13px;
   cursor: pointer;
+  transition: background-color 120ms ease, border-color 120ms ease, color 120ms ease;
+}
+
+.addTileIcon {
+  display: grid;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  border: 1px dashed var(--border-strong);
+  border-radius: 50%;
 }
 
 .addTile:hover {
@@ -276,20 +409,22 @@
   color: var(--text);
 }
 
+.addTile:hover .addTileIcon {
+  border-color: var(--text-3);
+}
+
+/* One provider's page: a back link, an identity block, then the panels about it. */
 .pageStack {
   display: flex;
   flex-direction: column;
   gap: 16px;
 }
 
-.head {
-  display: grid;
-  gap: 4px;
+.backBar {
+  display: flex;
 }
 
 .backLink {
-  justify-self: start;
-  margin-bottom: 2px;
   color: var(--text-3);
   font-size: 13px;
   text-decoration: none;
@@ -299,6 +434,22 @@
   color: var(--text);
 }
 
+.identity {
+  display: flex;
+  align-items: flex-start;
+  gap: 14px;
+  padding: 20px 22px;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: var(--surface);
+}
+
+.identityText {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
 .providerName {
   display: flex;
   align-items: center;
@@ -306,28 +457,129 @@
   margin: 0;
   font-size: 17px;
   font-weight: 600;
+  line-height: 1.35;
 }
 
 .providerMeta {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
   margin: 0;
   color: var(--text-3);
   font-size: 13px;
 }
 
-.subtitle {
-  margin: 20px 0 0;
-  font-size: 13.5px;
-  font-weight: 600;
+.locationCode {
+  overflow-wrap: anywhere;
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+}
+
+.metaSep {
+  color: var(--border-strong);
+}
+
+.identityNote {
+  margin: 6px 0 0;
+  color: var(--text-2);
+  font-size: 12.5px;
+  line-height: 1.6;
+}
+
+/*
+ * The measurement rows. A label column, a value column, an explanation column: the same
+ * shape for every phase, which is what makes two providers — or two runs — comparable at
+ * a glance. Rows are separated by hairlines rather than by boxes, so the panel stays one
+ * surface.
+ */
+.probeStatus {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 16px;
+  padding-bottom: 13px;
+  border-bottom: 1px solid var(--border);
+}
+
+.probeWhen {
+  margin-left: auto;
+  color: var(--text-3);
+  font-size: 12px;
+}
+
+/*
+ * A measurement is a spec sheet: the label owns the left edge, the number owns the right
+ * edge, and no row carries an explanation. Fixed positions are what make two providers —
+ * or two runs — comparable at a glance.
+ */
+.metrics {
+  display: grid;
+  margin: 2px 0 0;
+}
+
+.metric {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: baseline;
+  gap: 3px 16px;
+  padding: 12px 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.metric:last-child {
+  border-bottom: none;
+}
+
+.metricLabel {
+  color: var(--text-3);
+  font-size: 12.5px;
+}
+
+.metricValue {
+  text-align: right;
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: 14px;
+  font-variant-numeric: tabular-nums;
+  font-weight: 500;
+  letter-spacing: -0.01em;
+  white-space: nowrap;
+}
+
+.metricValueFailed {
+  color: var(--danger);
+}
+
+/* The one thing that may sit under a row: the phase's own failure, not a footnote. */
+.metricError {
+  grid-column: 1 / -1;
+  color: var(--danger);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.emptyProbe {
+  margin-top: 16px;
+  padding: 14px 16px;
+  border: 1px dashed var(--border-strong);
+  border-radius: 11px;
+}
+
+.emptyTitle {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 500;
 }
 
 .folderForm {
   display: grid;
   gap: 10px;
   max-width: 420px;
-  margin: 12px 0 14px;
+  margin: 14px 0;
 }
 
 .danger {
+  flex: none;
   padding: 7px 12px;
   border: 1px solid var(--danger);
   border-radius: 9px;
@@ -335,8 +587,37 @@
   color: var(--danger);
   font: inherit;
   cursor: pointer;
+  transition: background-color 120ms ease;
 }
 
 .danger:hover {
   background: var(--danger-soft);
+}
+
+@media (max-width: 640px) {
+  .section {
+    padding: 18px 16px;
+  }
+
+  .identity {
+    padding: 18px 16px;
+  }
+
+  .sectionHead {
+    flex-direction: column;
+    gap: 12px;
+  }
+
+  .metric {
+    grid-template-columns: 1fr;
+    gap: 3px;
+  }
+
+  .cardFoot {
+    flex-wrap: wrap;
+  }
+
+  .cardMeta {
+    text-align: left;
+  }
 }

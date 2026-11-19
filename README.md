@@ -461,7 +461,7 @@ Legacy `/api/fs/*` routes and the old root file routes (`/capabilities`, `/list`
 | GET | `/api/storage` | Providers this account may use, each with its run count, newest run and last test result; the backup feature's chosen provider (owner session only) |
 | GET | `/api/storage/connections/{id}` | One provider's page: its newest run, the chosen backup provider, and that provider's own restore points |
 | POST, PATCH, DELETE | `/api/storage/connections` · `/api/storage/connections/{id}` | Attach an account-owned provider, set the backup feature's folder on it, or remove it |
-| POST | `/api/storage/connections/{id}/test` | Measure reachability, throughput and publishability; the answer is cached on the row |
+| POST | `/api/storage/connections/{id}/test` | Start a measurement (`202`) of latency, a 100 MB transfer, small-file write/rename/delete rates, concurrency and publishability; the answer is cached on the row |
 | PUT, POST | `/api/storage/backup-target` · `/api/storage/backup` | Choose the one backup destination, or start a snapshot/restore on a destination |
 | POST | `/api/auth/email/current-code` | Send an email-change code to the **current address** (requires a session, used to confirm identity) |
 | POST | `/api/auth/email/code` | Send an email-change code to the **new address** (requires a session) |

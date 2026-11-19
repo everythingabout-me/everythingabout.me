@@ -182,6 +182,28 @@ export function AppIcon(props: IconProps) {
   );
 }
 
+/** A bucket: an object store this account attached over the network. */
+export function BucketIcon(props: IconProps) {
+  return (
+    <svg {...base(props)}>
+      <ellipse cx="8" cy="4.4" rx="4.85" ry="1.9" />
+      <path d="M3.15 4.4v7.2c0 1.05 2.17 1.9 4.85 1.9s4.85-.85 4.85-1.9V4.4" />
+      <path d="M3.15 8c0 1.05 2.17 1.9 4.85 1.9s4.85-.85 4.85-1.9" />
+    </svg>
+  );
+}
+
+/** A server: a self-hosted S3-compatible endpoint. */
+export function ServerIcon(props: IconProps) {
+  return (
+    <svg {...base(props)}>
+      <rect x="2.25" y="2.75" width="11.5" height="4.6" rx="1.25" />
+      <rect x="2.25" y="8.65" width="11.5" height="4.6" rx="1.25" />
+      <path d="M4.6 5.05h.01M4.6 10.95h.01" />
+    </svg>
+  );
+}
+
 /** A key: a temporary token. */
 export function KeyIcon(props: IconProps) {
   return (

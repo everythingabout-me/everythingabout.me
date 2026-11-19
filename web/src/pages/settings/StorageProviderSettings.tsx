@@ -1,7 +1,7 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Link, useLoaderData, useNavigate, useRevalidator } from "react-router";
 import { api, type StorageConnectionDetail } from "../../api/client";
-import { BackupSection, ProbeLine, providerRoleLabel } from "../../components/StoragePanels";
+import { BackupSection, ProbeSection, ProviderGlyph, providerRoleLabel } from "../../components/StoragePanels";
 import { StorageSync } from "../../components/StorageSync";
 import { t } from "../../i18n";
 import panel from "../../components/StoragePanels.module.css";
@@ -19,23 +19,58 @@ export function StorageProviderSettings() {
   const navigate = useNavigate();
   const connection = data.connection;
   const authority = connection.role === "authority";
-  const [testing, setTesting] = useState(false);
+  // The measurement runs off the request, so the page waits for the run it started and
+  // then revalidates until that run's answer is cached on the connection.
+  const [runId, setRunId] = useState<string | null>(null);
+  const startedAt = useRef(0);
+  const polls = useRef(0);
   // Two blocks, two errors: a failed measurement must not appear under the remove
   // button, where it would read as the reason removal failed.
   const [testError, setTestError] = useState("");
   const [removeError, setRemoveError] = useState("");
   const roleLabel = providerRoleLabel(connection, data.backupTarget?.id ?? "");
+  // A page reloaded mid-test knows the server is still working even though it no longer
+  // knows the run id, so the panel stays in its measuring state until the server says so.
+  const testing = runId !== null || connection.probeRunning === true;
+
+  useEffect(() => {
+    if (!testing) return;
+    if (runId !== null && connection.probe?.runId === runId) {
+      setRunId(null);
+      return;
+    }
+    // One poll has happened by now, so "not measuring and no answer for this run" means the
+    // run ended without caching a result (a restart, or a failed write of the result), not
+    // that the first request has not reached the server yet.
+    if (runId !== null && polls.current > 0 && connection.probeRunning !== true) {
+      setRunId(null);
+      setTestError(t("probe.stalled"));
+      return;
+    }
+    // A run that outlives every plausible measurement is stuck in this process; say so
+    // instead of leaving the page saying "measuring" with no way out.
+    if (runId !== null && Date.now() - startedAt.current > 10 * 60_000) {
+      setRunId(null);
+      setTestError(t("probe.stalled"));
+      return;
+    }
+    const poll = setInterval(() => {
+      polls.current += 1;
+      revalidator.revalidate();
+    }, 2000);
+    return () => clearInterval(poll);
+  }, [testing, runId, connection.probe?.runId, connection.probeRunning, revalidator]);
 
   async function test() {
     setTestError("");
-    setTesting(true);
     try {
-      await api.testStorageConnection(connection.id);
+      const started = await api.testStorageConnection(connection.id);
+      startedAt.current = Date.now();
+      polls.current = 0;
+      setRunId(started.runId);
       revalidator.revalidate();
     } catch (e) {
       setTestError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setTesting(false);
     }
   }
 
@@ -52,41 +87,39 @@ export function StorageProviderSettings() {
 
   return (
     <div className={panel.pageStack}>
-      <div className={panel.head}>
+      <div className={panel.backBar}>
         <Link className={panel.backLink} to="/settings/storage">
-          {t("provider.back")}
+          ← {t("provider.back")}
         </Link>
-        <h3 className={panel.providerName}>
-          {connection.name}
-          <span className={panel.badge}>{roleLabel}</span>
-        </h3>
-        <p className={panel.providerMeta}>
-          {backendLabel(connection.backend)} · {connection.location}
-        </p>
-        {authority ? <p className={panel.muted}>{t("provider.authorityNote")}</p> : null}
       </div>
 
-      {/* A local root is a host path: it has no credential and no round trip to measure. */}
-      {connection.backend !== "local" ? (
-        <section className={panel.section}>
-          <h2 className={panel.title}>{t("provider.reachability")}</h2>
-          {connection.probe ? (
-            <ProbeLine probe={connection.probe} />
-          ) : (
-            <p className={panel.muted}>{t("provider.neverTested")}</p>
-          )}
-          <p className={panel.hint}>{t("drives.testHint")}</p>
-          <div className={panel.actions}>
-            <button className={panel.button} disabled={testing} onClick={() => void test()}>
-              {testing ? t("drives.testing") : t("drives.test")}
-            </button>
-          </div>
-          {testError ? <p className={panel.error}>{testError}</p> : null}
-        </section>
-      ) : null}
+      <header className={panel.identity}>
+        <ProviderGlyph backend={connection.backend} large />
+        <div className={panel.identityText}>
+          <h3 className={panel.providerName}>
+            {connection.name}
+            <span className={panel.badge}>{roleLabel}</span>
+          </h3>
+          <p className={panel.providerMeta}>
+            <span>{backendLabel(connection.backend)}</span>
+            <span className={panel.metaSep}>·</span>
+            <code className={panel.locationCode}>{connection.location}</code>
+          </p>
+          {authority ? <p className={panel.identityNote}>{t("provider.authorityNote")}</p> : null}
+        </div>
+      </header>
+
+      <ProbeSection
+        probe={connection.probe}
+        testing={testing}
+        error={testError}
+        local={connection.backend === "local"}
+        onTest={() => void test()}
+      />
 
       {authority ? (
         <section className={panel.section}>
+          <h2 className={panel.title}>{t("provider.indexTitle")}</h2>
           <p className={panel.lead}>{t("provider.indexLead")}</p>
           <StorageSync />
         </section>
