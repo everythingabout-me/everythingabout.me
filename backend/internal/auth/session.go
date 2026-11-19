@@ -83,9 +83,8 @@ func (s *Service) SessionUser(ctx context.Context, r *http.Request) (*User, erro
 		return nil, nil
 	}
 	row, err := scanUserRow(s.db.Pool().QueryRow(ctx,
-		`select `+userColumns("u")+`
-		   from sessions s
-		   join users u on u.id = s.user_id
+		userSelectFrom+`
+		   join sessions s on s.user_id = u.id
 		  where s.token_hash = $1
 		    and s.expires_at > now()
 		  limit 1`, hashToken(token)))

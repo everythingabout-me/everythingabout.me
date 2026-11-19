@@ -564,3 +564,71 @@ func labelCodeError(err error, label string) error {
 	}
 	return err
 }
+
+type usernameBody struct {
+	Username string `json:"username"`
+}
+
+/**
+ * claims the account's handle, or renames the one it has.
+ *
+ * This is deliberately not a credential change: a handle is derived addressing, the old
+ * one keeps redirecting after a rename, and nothing about authorization keys off it. So
+ * it needs neither a second verification code nor a session revocation — unlike an email
+ * or password change, a stolen cookie gains nothing here that it did not already have.
+ */
+func (s *Server) handleSetUsername(w http.ResponseWriter, r *http.Request) error {
+	if err := httpx.AssertSameOrigin(r); err != nil {
+		return err
+	}
+	user, err := s.requireUser(r)
+	if err != nil {
+		return err
+	}
+	body, err := httpx.ReadJSON[usernameBody](r)
+	if err != nil {
+		return err
+	}
+	handle, err := validation.NormalizeUsername(body.Username)
+	if err != nil {
+		return err
+	}
+	if user.Username != nil && *user.Username == handle {
+		// Re-saving the current handle is a no-op, not a rename, so it cannot burn the
+		// change budget or produce a spurious "already taken" from its own alias.
+		return s.ok(w, map[string]any{"user": user})
+	}
+	if err := s.limiter.Enforce("username:"+user.ID, 30, hour); err != nil {
+		return err
+	}
+	updated, err := s.auth.SetUsername(r.Context(), user.ID, handle)
+	if errors.Is(err, auth.ErrUsernameTaken) {
+		return httpx.Conflict("the username " + handle + " is already taken")
+	}
+	if err != nil {
+		return err
+	}
+	return s.ok(w, map[string]any{"user": auth.ToUser(updated)})
+}
+
+/**
+ * resolves one of the caller's own handles to the current one.
+ *
+ * Old links must survive a rename, but a handle must not become a directory of who exists:
+ * only names this account used to hold answer here, and everyone else's 404.
+ */
+func (s *Server) handleResolveUsername(w http.ResponseWriter, r *http.Request) error {
+	user, err := s.requireUser(r)
+	if err != nil {
+		return err
+	}
+	candidate := strings.ToLower(strings.TrimSpace(r.PathValue("handle")))
+	handle, err := s.auth.ResolveOwnUsername(r.Context(), user.ID, candidate)
+	if err != nil {
+		return err
+	}
+	if handle == "" {
+		return httpx.NotFound("no username " + candidate + " belongs to this account")
+	}
+	return s.ok(w, map[string]any{"username": handle})
+}

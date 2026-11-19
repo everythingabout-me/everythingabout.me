@@ -486,6 +486,11 @@ export interface FileCapabilities {
 export interface AuthUser {
   id: string;
   email: string;
+  /**
+   * The account's drive address, /<username>/... — null until it has been claimed, which
+   * the app sends a signed-in account to /welcome for.
+   */
+  username: string | null;
   hasPassword: boolean;
   createdAt: string;
   emailChangedAt: string | null;
@@ -1727,6 +1732,22 @@ export const api = {
     code: string;
   }): Promise<{ user: AuthUser }> {
     return post("/api/auth/email", input);
+  },
+
+  /** Claims the account's handle, or renames the one it has; old handles keep redirecting. */
+  async setUsername(username: string): Promise<{ user: AuthUser }> {
+    return post("/api/auth/username", { username });
+  },
+
+  /**
+   * Resolves one of this account's own handles to the current one. Another account's
+   * handle does not resolve — a 404 here is what keeps a handle from being a directory.
+   */
+  async resolveUsername(handle: string): Promise<string> {
+    const data = await request<{ username: string }>(
+      `/api/auth/username/${encodeURIComponent(handle)}`,
+    );
+    return data.username;
   },
 
   /** Owner cookie management view; this resource uses plain JSON and Problems. */

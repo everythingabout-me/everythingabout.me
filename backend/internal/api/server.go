@@ -185,6 +185,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/auth/logout", s.wrap(s.handleLogout))
 	mux.HandleFunc("GET /api/auth/me", s.wrap(s.handleMe))
 	mux.HandleFunc("POST /api/auth/password", s.wrap(s.handleSetPassword))
+	mux.HandleFunc("POST /api/auth/username", s.wrap(s.handleSetUsername))
+	mux.HandleFunc("GET /api/auth/username/{handle}", s.wrap(s.handleResolveUsername))
 	mux.HandleFunc("DELETE /api/auth/password", s.wrap(s.handleRemovePassword))
 	mux.HandleFunc("POST /api/auth/email/current-code", s.wrap(s.handleCurrentEmailCode))
 	mux.HandleFunc("POST /api/auth/email/code", s.wrap(s.handleNewEmailCode))

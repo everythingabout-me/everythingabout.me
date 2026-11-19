@@ -3,6 +3,7 @@ import { useLoaderData, useOutletContext } from "react-router";
 import { api, type ConnectData, type Connection, type CreatedConnection } from "../../api/client";
 import { ActivityList } from "../../components/ActivityList";
 import { PathPicker } from "../../components/PathPicker";
+import { BrowserProtocol } from "../../components/BrowserProtocol";
 import { SaveLinks } from "../../components/SaveLinks";
 import { AppIcon, CheckIcon, CopyIcon, KeyIcon } from "../../components/icons";
 import { t, type MessageKey } from "../../i18n";
@@ -188,6 +189,8 @@ export function ConnectSettings() {
       ) : null}
 
       {error && <p className={styles.error}>{error}</p>}
+
+      <BrowserProtocol handle={summary.user.username} />
 
       <section className={settingsStyles.card}>
         <div className={settingsStyles.cardHead}>

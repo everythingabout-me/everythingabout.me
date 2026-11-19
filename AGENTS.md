@@ -186,6 +186,17 @@ while its tests were skipping. CI (`.github/workflows/test.yml`) runs `make migr
   and database-only moves/copies/deletes are rejected. Keep current COS key construction in `internal/paths`.
 - Multi-user isolation rests on `owner_id` (`users.id`, a UUID) — new tables and queries must always carry the
   user dimension.
+- **The web address is `/<handle>/<path>`; the handle is addressing, not identity and not authorization.**
+  `usernames` (sql/058) holds every handle an account has ever held, one primary key over current and
+  superseded names, because a rename must keep old links redirecting *and* keep the freed name out of
+  anyone else's reach; a `users.username` column plus an alias table would need a transaction lock to say
+  the same thing and could still disagree with itself. Authorization never keys off a handle — the session
+  owns the tree, so `/someone-else/...` cannot grant anything. `/f/<id>` is the stable pointer to one entry
+  and resolves the id before redirecting, because a path copied from the location bar dies on the next
+  rename; share links for other people remain `/s/<code>`. `/` and `/files` stay unmounted (the drive is
+  not at the site root) and `/files/...` only redirects. Revisit this if handles ever need to address
+  *another* account's data: that would be a sharing model, not an address, and it belongs in the access
+  contract instead.
 - Dependencies are wired in `api.New`; define an interface first for a new service (see `storage.Storage`,
   `timeline.Analyzer`) and never construct clients inside a handler.
 - **Deletion is permanent** (there is no trash); deleting a nonempty directory requires explicit `?recursive=true`, and
@@ -305,6 +316,10 @@ while its tests were skipping. CI (`.github/workflows/test.yml`) runs `make migr
   server-side. Class A/B transfer grants are the narrow exception documented below.
 - Styling: global tokens live in `src/styles/globals.css` (warm paper feel + blue accent + automatic
   light/dark via `prefers-color-scheme`); page layouts use `*.module.css`. **No Tailwind, no CSS-in-JS.**
+- Drive addresses are built only by `web/src/filesPath.ts`: `filesHref` writes `/<handle>/…` and
+  `filesRoutePath` reads the logical path back. The base is module state set by each authenticated route
+  loader from the signed-in account, so no link builder can forget it; a page must not hand-encode
+  `/<handle>/...` itself. Before a handle exists `filesHref` falls back to `/files/...`, which redirects.
 - i18n: the locale is chosen once at module load from the browser language (zh / en), with no switcher. New
   copy must be added to both the `en` and `zh` entries in `messages.ts`; a missing key fails `tsc`. Never
   hard-code Chinese UI copy.

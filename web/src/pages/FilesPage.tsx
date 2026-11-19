@@ -634,9 +634,10 @@ function MediaMetadataRows({ media }: { media: FileMediaMetadata }) {
 }
 
 /** A file's own page: the path bar above it already names the file, so this adds only facts. */
-function FileDetail({ file, onDelete, deleteDisabled, deleteHint }: {
+function FileDetail({ file, onDelete, onCopyLink, deleteDisabled, deleteHint }: {
   file: Item;
   onDelete: () => void;
+  onCopyLink: () => void;
   deleteDisabled: boolean;
   deleteHint?: string;
 }) {
@@ -719,6 +720,10 @@ function FileDetail({ file, onDelete, deleteDisabled, deleteHint }: {
           {media && <MediaMetadataRows media={media} />}
         </dl>
         <div className={styles.detailActions}>
+          <button className={styles.secondaryBtn} onClick={onCopyLink}>
+            <CopyIcon size={14} />
+            {t("file.copyLink")}
+          </button>
           <button
             className={`${styles.secondaryBtn} ${styles.deleteBtn}`}
             onClick={onDelete}
@@ -783,6 +788,21 @@ export function FilesPage() {
       if (!sticky) toastTimer.current = window.setTimeout(() => setToast(null), 2600);
     },
     [],
+  );
+
+  /**
+   * A link that names the entry, not its path: /f/<id> keeps working after a rename or a
+   * move, which is the whole reason to copy it into a note instead of the address bar.
+   */
+  const copyLink = useCallback(
+    (item: { id: string; name: string }) => {
+      const url = `${window.location.origin}/f/${item.id}`;
+      void navigator.clipboard?.writeText(url).then(
+        () => showToast(t("drive.linkCopied", { name: item.name })),
+        () => showToast(t("drive.linkCopyFailed"), "error"),
+      );
+    },
+    [showToast],
   );
 
   const rememberPanelHeight = useCallback((key: string) => {
@@ -1442,6 +1462,19 @@ export function FilesPage() {
                               {t("drive.rename")}
                             </button>
                           )}
+                          {!pending && current && (
+                            <button
+                              className={styles.menuItem}
+                              role="menuitem"
+                              onClick={() => {
+                                setMenuOpen(false);
+                                copyLink(current);
+                              }}
+                            >
+                              <CopyIcon size={14} />
+                              {t("drive.copyLink")}
+                            </button>
+                          )}
                           {!pending && current && path !== "" && (
                             <>
                               <button
@@ -1630,6 +1663,7 @@ export function FilesPage() {
             <FileDetail
               file={file}
               onDelete={() => startDelete(file)}
+              onCopyLink={() => copyLink(file)}
               deleteDisabled={pending || Boolean(rename.job) || deleteBlocked
                 || deletingPaths.includes(file.path)}
               deleteHint={deleteBlocked ? t("drive.deleteUploadBlocked")

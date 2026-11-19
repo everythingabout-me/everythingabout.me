@@ -245,7 +245,7 @@ export function useListing({ path, rememberHeight, showToast }: ListingOptions):
 
   const invalidateRevision = useCallback(() => { revision.current?.tracker.invalidate(); }, []);
 
-  // The path is the URL (/files/Photos/2024), so back/forward and direct visits open the right place.
+  // The path is the URL (/<handle>/Photos/2024), so back/forward and direct visits open the right place.
   useEffect(() => {
     void load(path);
   }, [path, load]);

@@ -151,7 +151,8 @@ make dev
 
 ## User system
 
-- **Email code sign-in and sign-up are merged**: enter an email → receive a code → existing accounts sign in, missing accounts are created on the spot. There are no usernames, and by default no password either.
+- **Email code sign-in and sign-up are merged**: enter an email → receive a code → existing accounts sign in, missing accounts are created on the spot. By default there is no password either.
+- **Every account has a handle, and it is the drive's address**: `<handle>` is globally unique, lowercase, and lives at the root of the site (`everythingabout.me/<handle>/…`). It is addressing, not identity (the UUID is) and not a credential (the session is), so a rename keeps the old name redirecting instead of breaking every link ever pasted. A signed-in account that has never claimed one finishes at `/welcome` first.
 - Every account has a **unique, immutable `users.id` (a UUID)** as its internal identity; users never need to care about it, and on screen the email is the only identifier. Changing the email leaves the id and file ownership untouched.
 - Passwords are **optional**: settings lets you set, change, or remove one; once set, sign in at `/login?mode=password` (the login page does not show the password entry). Passwords are salted and hashed with Go's `scrypt`, and **the format is exactly the same as before the rewrite** (`scrypt$N$r$p$salt$hash`), so old passwords keep working.
 - The session is an httpOnly cookie (`eam_session`); the database stores only the token's SHA-256, and it expires after 30 days by default. The token format also matches the old version, so existing sessions survive the migration.
@@ -182,10 +183,10 @@ The key sits directly on the path (`drive/<userID>/Photos/2024/a.jpg`), which me
 
 - **Bilingual**: the locale follows the system/browser preferred language (`zh` → Chinese, everything else → English) with no language switcher; the stream's months, card subtitles, and relative times follow it too
 - Sign-in (sign up is merged into it) and settings follow the system light/dark setting
-- `/` is the file browser, opened at the root of the tree: the app opens on the files themselves rather than on a menu that leads to them
+- `/<handle>` is the file browser, opened at the root of the tree, and it is the app's home: the account's own name is the address, so opening the drive is as direct as typing it. `/` redirects there
 - `/stream` is a flat event stream: one card is one event (a photo / a sentence / a group of numbers / an app's own HTML), with no year or month headings and no statistics
-- Folders below the root are the URL (`/files/Photos/2024`), with breadcrumbs, relative times, type icons and hover actions
-- Every file has its own page at `/files/<path>`, built like a folder page (same header, breadcrumbs and title block): an inline preview for images, PDF, Office (docx / xlsx / pptx), plain text and source code, audio and video, plus type, size and timestamps;
+- Folders below the root are the URL (`/<handle>/Photos/2024`), with breadcrumbs, relative times, type icons and hover actions
+- Every file has its own page at `/<handle>/<path>` and a stable link at `/f/<id>` (copy link names the entry, not the path, so it survives a rename), built like a folder page (same header, breadcrumbs and title block): an inline preview for images, PDF, Office (docx / xlsx / pptx), plain text and source code, audio and video, plus type, size and timestamps;
   the viewer ([open-file-viewer](https://github.com/xushanpei/open-file-viewer)) plus pdfjs go through `React.lazy`,
   so nothing downloads on first paint and a single chunk (~196KB gzip) is fetched when you open one, with the per-format renderer loading on top of that; formats without a preview still offer a download
 - A ZIP is previewed as its contents: the entry list comes from two ranged reads of the archive's directory, and selecting a file inflates just that entry into the same plugin chain, so a photo or a document inside a `.zip` looks like the same file on its own. A nested `.zip` is drilled into with a breadcrumb; entries that cannot be previewed still download individually. [docs/design/zip-preview.md](docs/design/zip-preview.md) records why this is parsed in the browser instead of the server
@@ -196,8 +197,9 @@ The key sits directly on the path (`drive/<userID>/Photos/2024/a.jpg`), which me
 - New directories use an inline input, and deletion has a confirmation dialog (it is permanent)
 - One shared top bar on every signed-in page: the brand (which is the way home) on the left, the account chip (which opens settings) on the right, and the file page's search and upload actions in the page body. There is no navigation list: `/` is the files, `/settings` is everything else
 - `/settings` is one page with a left section list and the selected section on the right: **General** (the account, its email and password, sign out), **Connect** (apps, tokens, save links, recent activity), **Storage** (providers, backups, index sync)
-- The current folder or file is the URL itself (`/files/...`), so you can share or refresh straight into it; old `/drive?path=...` links redirect
-- Frontend routes: `/` (file browser at the root), `/files/<path>` (folder or file detail), `/stream` (timeline, URL only), `/settings` (General), `/settings/connect`, `/settings/storage`, `/login` (code sign-in, `?mode=password` goes straight to password sign-in); old `/files`, `/account` and `/connect` URLs redirect
+- The current folder or file is the URL itself (`/<handle>/...`), so you can refresh straight into it; a copied `/f/<id>` link redirects to wherever that entry lives now, and old `/files/...` and `/drive?path=...` links redirect
+- Frontend routes: `/<handle>` (file browser at the root), `/<handle>/<path>` (folder or file detail), `/f/<id>` (stable entry link), `/stream` (timeline, URL only), `/welcome` (claiming an address), `/open?url=` (the `web+eam://` handler), `/settings` (General), `/settings/connect`, `/settings/storage`, `/login` (code sign-in, `?mode=password` goes straight to password sign-in); `/` redirects to the account's address and old `/files/...`, `/account` and `/connect` URLs redirect too
+- **Addresses outside the browser**: `web+eam://<handle>/<path>` is what a browser can register (Settings → Connect → Register; the HTML rule only allows custom schemes that start with `web+`), and `eam://<handle>/<path>` needs a native bundle because the OS resolves schemes through LaunchServices, not a web page. [scripts/eam-scheme](scripts/eam-scheme/README.md) builds that bundle for macOS
 
 ## Getting started
 
@@ -466,6 +468,8 @@ Legacy `/api/fs/*` routes and the old root file routes (`/capabilities`, `/list`
 | POST | `/api/auth/email/current-code` | Send an email-change code to the **current address** (requires a session, used to confirm identity) |
 | POST | `/api/auth/email/code` | Send an email-change code to the **new address** (requires a session) |
 | POST | `/api/auth/email` | Change the email (requires codes for both the current and the new address) |
+| POST | `/api/auth/username` | Claim the account's handle, or rename it; a rename keeps the old handle redirecting, so no verification code is involved |
+| GET | `/api/auth/username/{handle}` | Resolve one of **this account's own** handles to the current one (old links), 404 for anyone else's |
 | GET | `/api/timeline?cursor=&limit=` | Read the event stream with authorized same-origin media references |
 | DELETE | `/api/events/{id}` | Delete one event (a tombstone, so it cannot come back) |
 | GET | `/api/timeline/status` | Organizing progress (unfinished tasks, files organized, earliest/latest month) |

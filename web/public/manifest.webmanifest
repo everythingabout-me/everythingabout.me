@@ -1,0 +1,24 @@
+{
+  "name": "Everything About Me",
+  "short_name": "EAM",
+  "description": "A personal data foundation",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#faf8f4",
+  "theme_color": "#faf8f4",
+  "icons": [
+    {
+      "src": "/logo.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any"
+    }
+  ],
+  "protocol_handlers": [
+    {
+      "protocol": "web+eam",
+      "url": "/open?url=%s"
+    }
+  ]
+}

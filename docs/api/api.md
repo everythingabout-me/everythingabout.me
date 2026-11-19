@@ -60,6 +60,29 @@ Authentication is selected explicitly at the same endpoint:
 API paths have no version segment. Optional fields may be added; required behavior cannot silently change.
 Any future incompatible change needs an explicit contract decision and rollout plan, not an assumed `/v1` path.
 
+### Human addresses are web routes, not API routes
+
+The file API is selected by id or path and never by a username. A person-facing address is
+`/<handle>/<path>`, where the handle is an account's globally unique name (`POST /api/auth/username`
+claims or renames it; `GET /api/auth/username/{handle}` resolves the caller's own old names). Three
+distinctions keep that split honest:
+
+- **The handle is addressing, not identity and not authorization.** `id` still identifies an entry and
+  the session still decides what may be read; `/<handle>/…` carries no rights, so a handle cannot leak
+  access and a rename cannot break a reference that names an entry.
+- **A rename keeps the old name redirecting.** The old handle stays reserved for its account, so a link
+  pasted before the rename still opens the tree instead of 404ing — and no other account can take the
+  freed name while that is true. That is why handles live in one `usernames` table with a single primary
+  key over current and superseded names (sql/058), not in a `users` column plus an alias table.
+- **A path is mutable, an id is not.** `/f/<id>` is the stable pointer to one entry: it resolves the id
+  and redirects to the entry's current address, because an address copied from the location bar dies on
+  the next rename. Share links for other people stay `/s/<code>`; `/f/<id>` is the owner's own pointer and
+  requires the owner's session.
+
+`/files/...` was the pre-handle spelling of the same tree and now redirects to `/<handle>/...`. `/` and
+`/files` are not where the drive is mounted, so the site root stays available for pages that are not an
+account's files.
+
 ### Identity, selectors, and unique paths
 
 **Every file and folder, including the root, has an opaque service-managed `id`.** Metadata returns `id`,

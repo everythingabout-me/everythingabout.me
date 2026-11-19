@@ -8,17 +8,32 @@ async function load(path) {
   const { code } = await transformWithOxc(source, path);
   return import(`data:text/javascript;base64,${Buffer.from(code).toString("base64")}`);
 }
-const { filesHref, filesRoutePath } = await load("../src/filesPath.ts");
+const { filesHref, filesRoutePath, setDriveBase } = await load("../src/filesPath.ts");
 const { canPreviewFile } = await load("../src/components/preview/supported.ts");
 const { htmlCardPolicy } = await load("../src/components/preview/htmlCardPolicy.ts");
 
 test("the root is the home page and absolute resources map to the /files SPA route", () => {
+  // No handle yet: the legacy spelling, which the router redirects once a base exists.
   assert.equal(filesHref("/"), "/");
   assert.equal(filesHref(""), "/");
   assert.equal(filesHref("/Photos/a.jpg"), "/files/Photos/a.jpg");
   assert.equal(filesRoutePath("/"), "");
   assert.equal(filesRoutePath("/files"), "");
   assert.equal(filesRoutePath("/files/Photos/a.jpg"), "Photos/a.jpg");
+});
+
+test("a handle address prefixes the tree and reads back to the logical path", () => {
+  setDriveBase("iloahz");
+  assert.equal(filesHref("/"), "/iloahz");
+  assert.equal(filesHref(""), "/iloahz");
+  assert.equal(filesHref("/Photos/a.jpg"), "/iloahz/Photos/a.jpg");
+  assert.equal(filesRoutePath("/iloahz"), "");
+  assert.equal(filesRoutePath("/iloahz/Photos/a.jpg"), "Photos/a.jpg");
+  // A pre-handle bookmark still reads while the account is known.
+  assert.equal(filesRoutePath("/files/Photos/a.jpg"), "Photos/a.jpg");
+  setDriveBase(null);
+  assert.equal(filesHref("/"), "/");
+  assert.equal(filesHref("/Photos/a.jpg"), "/files/Photos/a.jpg");
 });
 
 test("authored HTML permits same-origin data and blob media while blocking remote sources", () => {

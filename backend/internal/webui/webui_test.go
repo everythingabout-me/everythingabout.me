@@ -9,8 +9,8 @@ import (
 	"testing"
 )
 
-// File detail routes are real visual paths and usually carry an extension, so they must get the
-// SPA fallback rather than the "missing asset" 404.
+// A drive address is /<handle>/<path>: real visual paths that usually carry an extension, so
+// everything below the first segment gets the SPA fallback rather than the "missing asset" 404.
 func TestSPAFallbackServesFileDetailPaths(t *testing.T) {
 	root := t.TempDir()
 	index := filepath.Join(root, "index.html")
@@ -24,9 +24,10 @@ func TestSPAFallbackServesFileDetailPaths(t *testing.T) {
 		body   string
 	}{
 		{path: "/", status: http.StatusOK, body: "<!doctype html>spa"},
-		{path: "/files", status: http.StatusOK, body: "<!doctype html>spa"},
 		{path: "/files/Photos/2024/a.jpg", status: http.StatusOK, body: "<!doctype html>spa"},
-		{path: "/files/%E7%BE%BD%E6%AF%9B%E7%90%83/a.pdf", status: http.StatusOK, body: "<!doctype html>spa"},
+		{path: "/iloahz", status: http.StatusOK, body: "<!doctype html>spa"},
+		{path: "/iloahz/Photos/2024/a.jpg", status: http.StatusOK, body: "<!doctype html>spa"},
+		{path: "/iloahz/%E7%BE%BD%E6%AF%9B%E7%90%83/a.pdf", status: http.StatusOK, body: "<!doctype html>spa"},
 		{path: "/assets/app.js", status: http.StatusNotFound},
 		{path: "/missing.png", status: http.StatusNotFound},
 	}

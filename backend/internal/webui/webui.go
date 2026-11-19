@@ -55,16 +55,28 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			http.ServeFile(w, r, full)
 			return
 		}
-		// A missing asset with an extension is a 404; never return index.html in place of a .js file.
-		// File detail routes are real SPA paths and usually end in an extension
-		// (/files/Photos/2024/a.jpg), so they must fall through to index.html.
-		if strings.Contains(path.Base(clean), ".") && !strings.HasPrefix(clean, "/files/") {
+		// A missing top-level file with an extension is an asset and must 404 rather than
+		// receiving index.html in place of a .js. Everything below a first segment is an
+		// app address: /<handle>/Photos/2024/a.jpg is a real file detail page and ends in
+		// an extension, so the rule cannot be "contains a dot".
+		if missingAsset(clean) {
 			http.NotFound(w, r)
 			return
 		}
 	}
 
 	h.serveIndex(w, r)
+}
+
+// missingAsset reports paths that are assets by shape: one segment ending in an
+// extension (/logo.svg, /missing.png), or anything under the build's /assets/ directory.
+// A path with a first segment and anything after it is a drive address.
+func missingAsset(clean string) bool {
+	if strings.HasPrefix(clean, "/assets/") {
+		return true
+	}
+	trimmed := strings.Trim(clean, "/")
+	return !strings.Contains(trimmed, "/") && strings.Contains(path.Base(clean), ".")
 }
 
 func (h *Handler) serveIndex(w http.ResponseWriter, r *http.Request) {

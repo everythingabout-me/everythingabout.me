@@ -2,6 +2,7 @@ import { useState } from "react";
 import { useNavigate, useOutletContext } from "react-router";
 import { api } from "../../api/client";
 import { ChangeEmailForm } from "../../components/ChangeEmailForm";
+import { UsernameForm } from "../../components/UsernameForm";
 import { PasswordForm } from "../../components/PasswordForm";
 import { t } from "../../i18n";
 import authStyles from "../../styles/auth.module.css";
@@ -17,6 +18,7 @@ export function GeneralSettings() {
   const { summary } = useOutletContext<SettingsContext>();
   const navigate = useNavigate();
   const [email, setEmail] = useState(summary.user.email);
+  const [username, setUsername] = useState(summary.user.username);
   const [hasPassword, setHasPassword] = useState(summary.user.hasPassword);
   const [busy, setBusy] = useState(false);
 
@@ -48,6 +50,13 @@ export function GeneralSettings() {
             <dd className={authStyles.metaValue}>{summary.user.createdAt.slice(0, 10)}</dd>
           </div>
         </dl>
+      </section>
+
+      <section className={roomy}>
+        <UsernameForm
+          current={username}
+          onSaved={(user) => setUsername(user.username)}
+        />
       </section>
 
       <section className={roomy}>
