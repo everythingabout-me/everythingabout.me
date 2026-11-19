@@ -294,7 +294,8 @@ func (s *Server) fileOperationRetained(ctx context.Context, op fileops.Operation
 		retry = &fileWorkerRetry{}
 		worker.retries[op.ID] = retry
 	}
-	if completed > retry.completed {
+	progressed := completed > retry.completed
+	if progressed {
 		retry.attempts = 0
 		retry.completed = completed
 	}
@@ -311,7 +312,7 @@ func (s *Server) fileOperationRetained(ctx context.Context, op fileops.Operation
 	worker.mu.Unlock()
 
 	if latest.Kind != "upload_commit" {
-		retired, retireErr := s.retireActionAfterAttempt(ctx, latest, attempts, err)
+		retired, retireErr := s.retireActionAfterAttempt(ctx, latest, attempts, progressed, err)
 		if retireErr != nil {
 			slog.Warn("could not retire a stalled file operation", "operation", op.ID, "cause", errorCauseChain(retireErr))
 		}
@@ -420,12 +421,13 @@ const actionRetirementAttempts = 6
 // a copy may have landed and the service cannot prove it did. The source is untouched in
 // that case, so the owner loses nothing; the destination can hold a partial copy, which
 // is why the problem says so rather than claiming the move never happened.
-func stalledActionState(latest fileops.Operation, attempts int, attemptErr error) (fileops.State, bool) {
+func stalledActionState(latest fileops.Operation, attempts int, progressed bool, attemptErr error) (fileops.State, bool) {
 	uncertain := latest.Phase == fileops.EffectStarted || latest.Phase == fileops.NativeApplied || latest.State == fileops.Unknown
-	// The owner already asked to stop, and this attempt still could not resolve an
-	// uncertain native effect. Waiting out the rest of the budget would hold the same
-	// paths for the same non-answer, so the cancel is honoured now.
-	if latest.CancelRequested && latest.State == fileops.Unknown {
+	// The owner already asked to stop and this attempt could not even resolve one more
+	// entry. An attempt that did resolve entries is making progress, and cancelling it
+	// there would throw away the answer it was about to settle; only a pass with nothing
+	// to show for itself is honoured at once.
+	if latest.CancelRequested && latest.State == fileops.Unknown && !progressed {
 		return fileops.Unresolved, true
 	}
 	// A refusal that comes from configuration or from the admitted intent cannot be
@@ -481,14 +483,14 @@ func retiredActionProblem(state fileops.State, cancelRequested bool, attemptErr 
 // operation alive only while an attempt can still change its answer, and a retry loop
 // with no terminal state is the one failure that leaves a user's directory permanently
 // unusable.
-func (s *Server) retireActionAfterAttempt(ctx context.Context, latest fileops.Operation, attempts int, attemptErr error) (bool, error) {
+func (s *Server) retireActionAfterAttempt(ctx context.Context, latest fileops.Operation, attempts int, progressed bool, attemptErr error) (bool, error) {
 	if s.filesJournal == nil || ctx.Err() != nil || latest.ID == "" {
 		return false, nil
 	}
 	if latest.Terminal() {
 		return true, nil
 	}
-	state, ok := stalledActionState(latest, attempts, attemptErr)
+	state, ok := stalledActionState(latest, attempts, progressed, attemptErr)
 	if !ok {
 		return false, nil
 	}

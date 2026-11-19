@@ -358,6 +358,47 @@ func TestActionsPostgres(t *testing.T) {
 		_, _, err = a.Prepare(ctx, req, n)
 		requireCode(t, err, "idempotency_conflict")
 	})
+	t.Run("one pass resolves every uncertain entry", func(t *testing.T) {
+		p, r, actor := seedOwner(t, pool, provenBaseline(4, 4, 100, 100))
+		n := newActionNative(r)
+		n.put("src", storage.Folder, "")
+		n.put("src/a", storage.File, "aa")
+		n.put("src/b", storage.File, "bb")
+		a := actionCoordinator(t, p, nil)
+		op := prepareAction(t, a, ActionRequest{Root: r, Actor: actor, Kind: "copy", From: "src", To: "dst", IfRevision: "revision"}, n)
+		entries := mustEntries(t, p, op)
+		if len(entries) < 3 {
+			t.Fatalf("copy manifest = %d entries, want the folder and both files", len(entries))
+		}
+		// A crash after every effect was issued: all entries are started and none of
+		// their native outcomes is recorded.
+		claimed := mustClaim(t, p, op, actor)
+		numbers := make([]int, len(entries))
+		for i, entry := range entries {
+			numbers[i] = entry.Number
+		}
+		if err := p.BeginEntries(ctx, claimed.Lease, numbers); err != nil {
+			t.Fatal(err)
+		}
+		if err := p.Release(ctx, claimed.Lease); err != nil {
+			t.Fatal(err)
+		}
+		out, runErr := a.Run(ctx, r, actor, op.ID, n)
+		if runErr != nil {
+			for _, entry := range mustEntries(t, p, op) {
+				t.Logf("entry %d action=%s state=%s", entry.Number, entry.Action, entry.State)
+			}
+			t.Fatalf("recovery: %v", runErr)
+		}
+		if len(n.calls) != 0 {
+			t.Fatalf("recovery reissued %d native effects", len(n.calls))
+		}
+		for _, entry := range mustEntries(t, p, out) {
+			if entry.State == "started" || entry.State == "outcome_unknown" {
+				t.Fatalf("entry %d is still %s after one recovery pass", entry.Number, entry.State)
+			}
+		}
+	})
 	t.Run("guards fence only the affected paths", func(t *testing.T) {
 		p, r, actor := seedOwner(t, pool, provenBaseline(4, 4, 100, 100))
 		n := newActionNative(r)

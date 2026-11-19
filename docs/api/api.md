@@ -1104,9 +1104,10 @@ or the operation is `outcome_unknown`, it ends `unresolved`: a copy may have lan
 so the owner loses nothing. An action that never started an effect ends `failed`, or `cancelled` when its owner
 asked to stop; a permanent refusal (`permission_denied`, `invalid_config`, `invalid_intent`, `unsupported`,
 `baseline_required`, `root_conflict`, `quota_exceeded`, `staging_full`) ends it immediately. A cancel recorded
-while an entry's outcome is still unknown ends the operation `unresolved` on its next failed attempt instead of
-waiting out the budget: the owner already asked to stop, and holding the same guard for the same non-answer
-only extends the 409. Retirement releases the path guards and the reservation exactly as a settled failure
+while an entry's outcome is still unknown ends the operation `unresolved` on its next attempt that resolves no
+entry, instead of waiting out the budget: the owner already asked to stop, and holding the same guard for the
+same non-answer only extends the 409. An attempt that does resolve an entry is making progress, so the cancel
+does not throw that answer away; the run keeps its ordinary budget and settles as `cancelled` when it can. Retirement releases the path guards and the reservation exactly as a settled failure
 does.
 
 The two ways a move or copy can stop differ in what they do with entries that already landed. A cancel the
@@ -1133,7 +1134,7 @@ final publication starts, a winning upload cancellation sets the session aborted
 never a false `cancelled`. A pre-effect multipart commit that is failing for another reason but carries a
 cancel ends `cancelled` as soon as no live worker owns it. A tree action honours the same rule: entries already
 started finish and are resolved, no entry of the next level starts, and an effect it can still prove settles as
-`cancelled`; one it cannot prove ends `unresolved` without waiting out the claim budget. A worker that still holds its lease is not
+`cancelled`; one it cannot prove ends `unresolved` on the next attempt that resolves no entry. A worker that still holds its lease is not
 force-failed; the log/restart is the escape for a blocked syscall. Repeat commit on a definitely aborted
 session returns `410 upload_aborted`.
 A running commit must seal/migrate its native data before its provider retention deadline, retain a replayable

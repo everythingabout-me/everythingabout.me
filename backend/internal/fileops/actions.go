@@ -1087,7 +1087,13 @@ func (a *Actions) Run(ctx context.Context, root Root, actor Actor, id string, na
 				}
 			}
 			op, err = next, callErr
-			if uncertainEntries(&op) {
+			if entryUncertain(op, entry.Number) {
+				// This entry's outcome is still unknown, so no later entry may start:
+				// the service cannot tell whether its effect landed. Checking the whole
+				// manifest here instead ended the pass at the first entry whenever any
+				// other entry was also uncertain, so an operation with N uncertain
+				// entries needed N attempts — one recovery per retry — and could not
+				// settle in a single run.
 				return a.accountUnknown(ctx, root, actor, op, err)
 			}
 			if err != nil {
@@ -1236,6 +1242,18 @@ func (a *Actions) captureDeferred(ctx context.Context, root Root, actor Actor, o
 		return fail(err)
 	}
 	return a.journal.Get(work, root, actor, op.ID)
+}
+
+// entryUncertain reports whether one manifest entry still has an unresolved native
+// outcome. A recovery that cannot settle this entry stops the pass; one that settles it
+// leaves the remaining uncertain entries to be repaired in the same pass.
+func entryUncertain(op Operation, number int) bool {
+	for _, entry := range op.Entries {
+		if entry.Number == number {
+			return entry.State == "started" || entry.State == "outcome_unknown"
+		}
+	}
+	return false
 }
 
 func (a *Actions) accountUnknown(ctx context.Context, root Root, actor Actor, op Operation, cause error) (Operation, error) {

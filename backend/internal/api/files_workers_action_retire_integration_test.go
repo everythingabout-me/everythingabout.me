@@ -70,7 +70,7 @@ func TestStalledActionRetirementReleasesThePath(t *testing.T) {
 	root, actor, latest := f.uncertainMove(t)
 	server := f.server()
 	transient := storage.NewError("backend_error", "target", errors.New("HTTP 503 SlowDown"))
-	retired, err := server.retireActionAfterAttempt(f.ctx, latest, actionRetirementAttempts, transient)
+	retired, err := server.retireActionAfterAttempt(f.ctx, latest, actionRetirementAttempts, false, transient)
 	if err != nil || !retired {
 		t.Fatalf("retired=%v err=%v, want the operation ended", retired, err)
 	}
@@ -102,7 +102,7 @@ func TestStalledActionRetirementReleasesThePath(t *testing.T) {
 
 	// Retirement is repeatable: observing a terminal operation again changes nothing and
 	// does not error.
-	if again, err := server.retireActionAfterAttempt(f.ctx, done, actionRetirementAttempts, transient); err != nil || !again {
+	if again, err := server.retireActionAfterAttempt(f.ctx, done, actionRetirementAttempts, false, transient); err != nil || !again {
 		t.Fatalf("second retirement=%v err=%v", again, err)
 	}
 }
@@ -121,7 +121,7 @@ func TestCancelledUncertainActionRetiresWithoutTheClaimBudget(t *testing.T) {
 		t.Fatal(err)
 	}
 	server := f.server()
-	retired, err := server.retireActionAfterAttempt(f.ctx, latest, 1, fileops.E("outcome_unknown", nil))
+	retired, err := server.retireActionAfterAttempt(f.ctx, latest, 1, false, fileops.E("outcome_unknown", nil))
 	if err != nil || !retired {
 		t.Fatalf("cancelled retirement=%v err=%v, want the operation ended", retired, err)
 	}

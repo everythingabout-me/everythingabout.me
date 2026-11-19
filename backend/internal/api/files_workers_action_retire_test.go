@@ -24,33 +24,38 @@ func TestStalledActionState(t *testing.T) {
 	// honoured immediately instead of waiting out a budget for the same non-answer.
 	cancelled := uncertain
 	cancelled.CancelRequested = true
-	if state, ok := stalledActionState(cancelled, 1, fileops.E("outcome_unknown", nil)); !ok || state != fileops.Unresolved {
+	if state, ok := stalledActionState(cancelled, 1, false, fileops.E("outcome_unknown", nil)); !ok || state != fileops.Unresolved {
 		t.Fatalf("cancelled uncertain effect: state=%q ok=%v, want unresolved", state, ok)
 	}
+	// An attempt that resolved an entry is making progress, and a cancel must not throw
+	// that answer away: it keeps the ordinary attempt budget instead of ending at once.
+	if state, ok := stalledActionState(cancelled, 1, true, fileops.E("outcome_unknown", nil)); ok {
+		t.Fatalf("cancel retired an attempt that made progress as %q", state)
+	}
 	// Without the cancel, the claim budget still applies: five attempts keep retrying.
-	if state, ok := stalledActionState(uncertain, actionRetirementAttempts-1, transient); ok {
+	if state, ok := stalledActionState(uncertain, actionRetirementAttempts-1, false, transient); ok {
 		t.Fatalf("uncertain effect one attempt early retired as %q", state)
 	}
-	if state, ok := stalledActionState(uncertain, actionRetirementAttempts, transient); !ok || state != fileops.Unresolved {
+	if state, ok := stalledActionState(uncertain, actionRetirementAttempts, false, transient); !ok || state != fileops.Unresolved {
 		t.Fatalf("uncertain effect at the bound: state=%q ok=%v, want unresolved", state, ok)
 	}
 
 	// Nothing reached the native tree, so the answer is the refusal or the owner's intent.
-	if state, ok := stalledActionState(preEffect, 1, permanent); !ok || state != fileops.Failed {
+	if state, ok := stalledActionState(preEffect, 1, false, permanent); !ok || state != fileops.Failed {
 		t.Fatalf("permanent refusal before any effect: state=%q ok=%v, want failed", state, ok)
 	}
 	cancelledPre := preEffect
 	cancelledPre.CancelRequested = true
-	if state, ok := stalledActionState(cancelledPre, 1, permanent); !ok || state != fileops.Cancelled {
+	if state, ok := stalledActionState(cancelledPre, 1, false, permanent); !ok || state != fileops.Cancelled {
 		t.Fatalf("cancelled permanent refusal: state=%q ok=%v, want cancelled", state, ok)
 	}
-	if state, ok := stalledActionState(cancelledPre, actionRetirementAttempts, transient); !ok || state != fileops.Cancelled {
+	if state, ok := stalledActionState(cancelledPre, actionRetirementAttempts, false, transient); !ok || state != fileops.Cancelled {
 		t.Fatalf("cancelled pre-effect stall: state=%q ok=%v, want cancelled", state, ok)
 	}
-	if state, ok := stalledActionState(preEffect, actionRetirementAttempts-1, transient); ok {
+	if state, ok := stalledActionState(preEffect, actionRetirementAttempts-1, false, transient); ok {
 		t.Fatalf("pre-effect stall one attempt early retired as %q", state)
 	}
-	if state, ok := stalledActionState(preEffect, actionRetirementAttempts, transient); !ok || state != fileops.Failed {
+	if state, ok := stalledActionState(preEffect, actionRetirementAttempts, false, transient); !ok || state != fileops.Failed {
 		t.Fatalf("pre-effect stall at the bound: state=%q ok=%v, want failed", state, ok)
 	}
 }
