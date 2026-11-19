@@ -64,7 +64,7 @@ func TestFileOperationRetainedRecordsAndBacksOff(t *testing.T) {
 	op := fileops.Operation{ID: "6f1f8fd7-3a2c-4c9b-9d5e-9d2e6b1d1a11", Kind: "delete", State: "running", Phase: "native_applied"}
 	err := fileops.E("recovery_required", nil)
 
-	server.fileOperationRetained(op, err)
+	server.fileOperationRetained(context.Background(), op, err)
 	first := server.fileOperationRetry(op.ID)
 	if first == nil {
 		t.Fatal("no retry record after a failed attempt")
@@ -72,7 +72,7 @@ func TestFileOperationRetainedRecordsAndBacksOff(t *testing.T) {
 	if first.Attempts != 1 || first.Code != "recovery_required" {
 		t.Fatalf("retry record = %v", first)
 	}
-	server.fileOperationRetained(op, err)
+	server.fileOperationRetained(context.Background(), op, err)
 	second := server.fileOperationRetry(op.ID)
 	if second.Attempts != 2 {
 		t.Fatalf("attempts = %v, want 2", second.Attempts)

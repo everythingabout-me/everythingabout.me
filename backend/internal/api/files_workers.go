@@ -91,6 +91,10 @@ type fileWorkerRetry struct {
 	code     string
 	lastAt   time.Time
 	nextTry  time.Time
+	// completed is how many manifest entries were decided when this record last
+	// advanced. It is the progress mark the attempt budget resets on: entries decided
+	// is the only measure that tells a slow move from one that can never settle.
+	completed int
 }
 
 // An operation that keeps failing backs off instead of retrying once per lease TTL
@@ -245,7 +249,7 @@ func (s *Server) startFileOperation(op fileops.Operation) (bool, <-chan struct{}
 			s.fileOperationProgressed(op.ID)
 			slog.Debug("upload cleanup deferred to its last receiver", "operation", op.ID)
 		default:
-			s.fileOperationRetained(op, err)
+			s.fileOperationRetained(parentCtx, op, err)
 		}
 	}()
 	return true, done, nil
@@ -273,13 +277,26 @@ func (s *Server) fileOperationProgressed(id string) {
 //
 // A failure that repeats is the only way to diagnose a stuck operation, so the record
 // escalates to Error after a few attempts instead of staying one unremarkable warning.
-func (s *Server) fileOperationRetained(op fileops.Operation, err error) {
+//
+// Progress is what separates a slow operation from one that can never settle. A
+// manifest move legitimately runs for hours, so elapsed time alone must not end it; an
+// attempt that decided at least one more entry is not a repeat of the same stall, and
+// resets the budget. This is why the count lives here next to the backoff rather than in
+// a wall clock: the number of attempts that made no progress is the fact, and the
+// backoff between them is derived from it.
+func (s *Server) fileOperationRetained(ctx context.Context, op fileops.Operation, err error) {
+	latest := s.freshFileOperation(ctx, op)
+	completed := s.fileOperationProgress(ctx, latest)
 	worker := s.workers()
 	worker.mu.Lock()
 	retry := worker.retries[op.ID]
 	if retry == nil {
 		retry = &fileWorkerRetry{}
 		worker.retries[op.ID] = retry
+	}
+	if completed > retry.completed {
+		retry.attempts = 0
+		retry.completed = completed
 	}
 	retry.attempts++
 	retry.code = fileOperationErrorCode(err)
@@ -293,29 +310,29 @@ func (s *Server) fileOperationRetained(op fileops.Operation, err error) {
 	attempts, code, nextTry := retry.attempts, retry.code, retry.nextTry
 	worker.mu.Unlock()
 
-	applied, total := op.EntryCompleted, op.EntryTotal()
-	if op.EntriesLayout != fileops.EntriesLayoutTable {
-		applied = 0
-		for _, entry := range op.Entries {
-			if entry.State == "applied" {
-				applied++
-			}
+	if latest.Kind != "upload_commit" {
+		retired, retireErr := s.retireActionAfterAttempt(ctx, latest, attempts, err)
+		if retireErr != nil {
+			slog.Warn("could not retire a stalled file operation", "operation", op.ID, "cause", errorCauseChain(retireErr))
+		}
+		if retired {
+			// The operation is terminal now, so it must stop advertising a retry that
+			// will never happen.
+			s.fileOperationProgressed(op.ID)
+			return
 		}
 	}
-	var intent storage.WriteIntent
-	target := ""
-	if json.Unmarshal(op.Intent, &intent) == nil {
-		target = string(intent.Target)
-	}
+
+	target := fileOperationTarget(latest)
 	age := time.Duration(0)
-	if !op.CreatedAt.IsZero() {
-		age = time.Since(op.CreatedAt).Round(time.Second)
+	if !latest.CreatedAt.IsZero() {
+		age = time.Since(latest.CreatedAt).Round(time.Second)
 	}
 	attributes := []any{
-		"operation", op.ID, "kind", op.Kind, "state", op.State, "phase", op.Phase,
-		"owner", op.Root.OwnerID, "target", target, "age", age,
-		"cancelRequested", op.CancelRequested, "attempt", attempts, "code", code,
-		"cause", errorCauseChain(err), "entriesApplied", applied, "entriesTotal", total,
+		"operation", latest.ID, "kind", latest.Kind, "state", latest.State, "phase", latest.Phase,
+		"owner", latest.Root.OwnerID, "target", target, "age", age,
+		"cancelRequested", latest.CancelRequested, "attempt", attempts, "code", code,
+		"cause", errorCauseChain(err), "entriesCompleted", completed, "entriesTotal", latest.EntryTotal(),
 		"retryIn", time.Until(nextTry).Round(time.Second),
 	}
 	if attempts > 3 {
@@ -323,6 +340,175 @@ func (s *Server) fileOperationRetained(op fileops.Operation, err error) {
 		return
 	}
 	slog.Warn("file operation retained for recovery", attributes...)
+}
+
+// freshFileOperation reloads an operation the pending scan handed over. That copy is
+// decoded from the document alone: entries_layout and entry_count live in the parent row
+// and are json:"-", so a scanned move reports zero entries and no layout. Counting
+// progress from it would always answer zero, and a move that is merely slow would look
+// stalled — which is exactly the distinction the retirement policy must not get wrong.
+func (s *Server) freshFileOperation(ctx context.Context, op fileops.Operation) fileops.Operation {
+	if s.filesJournal == nil || op.Root.OwnerID == "" || ctx.Err() != nil {
+		return op
+	}
+	actor := fileops.Actor{ID: "owner:" + op.Root.OwnerID, CanRead: true, CanWrite: true, ManageOwner: true}
+	latest, err := s.filesJournal.Get(ctx, op.Root, actor, op.ID)
+	if err != nil {
+		return op
+	}
+	return latest
+}
+
+// fileOperationTarget names the destination a log line is about. An upload journal
+// carries a WriteIntent; a tree action carries an ActionRequest with From/To, so reading
+// only the write shape left every action log line saying target="" — the one field an
+// operator uses to find which folder is stuck.
+func fileOperationTarget(op fileops.Operation) string {
+	var write storage.WriteIntent
+	if json.Unmarshal(op.Intent, &write) == nil && write.Target != "" {
+		return string(write.Target)
+	}
+	var action fileops.ActionRequest
+	if json.Unmarshal(op.Intent, &action) != nil {
+		return ""
+	}
+	if action.To != "" {
+		return string(action.To)
+	}
+	return string(action.From)
+}
+
+// fileOperationProgress is how many manifest entries this attempt decided. It is the
+// attempt's only honest measure of progress: a move of fifty thousand entries may take
+// hours, and one that is merely slow keeps raising this number.
+func (s *Server) fileOperationProgress(ctx context.Context, op fileops.Operation) int {
+	if op.Purge != nil {
+		return int(op.Purge.Deleted + op.Purge.Adopted)
+	}
+	if op.EntriesLayout == fileops.EntriesLayoutTable {
+		if s.filesJournal == nil {
+			return 0
+		}
+		completed, err := s.filesJournal.EntryProgress(ctx, op)
+		if err != nil {
+			return 0
+		}
+		return completed
+	}
+	completed := 0
+	for _, entry := range op.Entries {
+		if entry.State == "applied" || entry.State == "not_applied" {
+			completed++
+		}
+	}
+	return completed
+}
+
+// actionRetirementAttempts is the bound on consecutive attempts that decided no entry.
+//
+// Six attempts at the worker's backoff is the same budget an upload commit gets, and it
+// is the same reason: attempts are the one number that says "the service really tried",
+// while a wall clock would either fire during a provider outage that still had a chance
+// or wait hours after a permanent refusal. A manifest move whose entries keep resolving
+// never reaches it, because fileOperationRetained resets the count on any progress.
+const actionRetirementAttempts = 6
+
+// stalledActionState decides whether one action operation can no longer make
+// progress. It is pure so every case can be tested without a provider or a journal.
+//
+// Unresolved, not Cancelled, is the truthful answer once any native effect is uncertain:
+// a copy may have landed and the service cannot prove it did. The source is untouched in
+// that case, so the owner loses nothing; the destination can hold a partial copy, which
+// is why the problem says so rather than claiming the move never happened.
+func stalledActionState(latest fileops.Operation, attempts int, attemptErr error) (fileops.State, bool) {
+	uncertain := latest.Phase == fileops.EffectStarted || latest.Phase == fileops.NativeApplied || latest.State == fileops.Unknown
+	// The owner already asked to stop, and this attempt still could not resolve an
+	// uncertain native effect. Waiting out the rest of the budget would hold the same
+	// paths for the same non-answer, so the cancel is honoured now.
+	if latest.CancelRequested && latest.State == fileops.Unknown {
+		return fileops.Unresolved, true
+	}
+	// A refusal that comes from configuration or from the admitted intent cannot be
+	// changed by another attempt.
+	if !uncertain && permanentOperationError(attemptErr) {
+		if latest.CancelRequested {
+			return fileops.Cancelled, true
+		}
+		return fileops.Failed, true
+	}
+	if attempts < actionRetirementAttempts {
+		return "", false
+	}
+	if uncertain {
+		return fileops.Unresolved, true
+	}
+	if latest.CancelRequested {
+		return fileops.Cancelled, true
+	}
+	return fileops.Failed, true
+}
+
+// retiredActionProblem is the stored reason an action retirement leaves behind. It names
+// what the owner has to know: the source survived, a destination copy may exist, and the
+// service will not try again.
+func retiredActionProblem(state fileops.State, cancelRequested bool, attemptErr error) json.RawMessage {
+	code := permanentOperationCode(attemptErr)
+	detail := ""
+	switch state {
+	case fileops.Unresolved:
+		code = "outcome_unknown"
+		if cancelRequested {
+			detail = "The operation was cancelled while the service could not prove which entries had already been copied. The source is unchanged; a partial copy may exist at the destination. Nothing further will be retried for this operation."
+		} else {
+			detail = "The operation stopped after repeated attempts could not prove whether its entries had been copied. The source is unchanged; a partial copy may exist at the destination. Nothing further will be retried for this operation."
+		}
+	case fileops.Cancelled:
+		code = "cancelled"
+		detail = "The operation was cancelled. The source is unchanged; entries that were already copied may exist at the destination."
+	default:
+		detail = "The operation could not complete: " + code + "."
+		if cause := retirementCause(attemptErr); cause != "" && cause != code {
+			detail += " Cause: " + cause + "."
+		}
+	}
+	value, _ := json.Marshal(map[string]string{"code": code, "detail": detail})
+	return value
+}
+
+// retireActionAfterAttempt ends a move, copy, delete or mkdir whose retries have stopped
+// making progress, releasing the path guards that made every later mutation answer 409.
+// It is the action counterpart of retireUploadAfterAttempt: the journal keeps an
+// operation alive only while an attempt can still change its answer, and a retry loop
+// with no terminal state is the one failure that leaves a user's directory permanently
+// unusable.
+func (s *Server) retireActionAfterAttempt(ctx context.Context, latest fileops.Operation, attempts int, attemptErr error) (bool, error) {
+	if s.filesJournal == nil || ctx.Err() != nil || latest.ID == "" {
+		return false, nil
+	}
+	if latest.Terminal() {
+		return true, nil
+	}
+	state, ok := stalledActionState(latest, attempts, attemptErr)
+	if !ok {
+		return false, nil
+	}
+	actor := fileops.Actor{ID: "owner:" + latest.Root.OwnerID, CanRead: true, CanWrite: true, ManageOwner: true}
+	retired, err := s.filesJournal.RetireStalled(ctx, latest.Root, actor, latest.ID, state, retiredActionProblem(state, latest.CancelRequested, attemptErr))
+	if err != nil {
+		// A live attempt owns the row; it is not ours to force-fail, and the next
+		// failure applies the same policy.
+		if fileops.IsCode(err, "operation_in_progress") || fileops.IsCode(err, "lease_lost") {
+			return false, nil
+		}
+		return false, err
+	}
+	target := fileOperationTarget(retired)
+	slog.Warn("file operation retired without a proven outcome",
+		"operation", retired.ID, "kind", retired.Kind, "state", retired.State, "phase", latest.Phase,
+		"owner", retired.Root.OwnerID, "target", target, "attempts", attempts,
+		"cancelRequested", latest.CancelRequested,
+		"code", fileOperationErrorCode(attemptErr), "cause", errorCauseChain(attemptErr))
+	return true, nil
 }
 
 // fileOperationErrorCode names the layer that refused, without the parameters a
@@ -350,7 +536,7 @@ func fileOperationErrorCode(err error) string {
 // message a person can act on.
 func errorCauseChain(err error) string {
 	var parts []string
-	for current := err; current != nil; current = errors.Unwrap(current) {
+	walkCauseChain(err, func(current error) {
 		var part string
 		switch typed := current.(type) {
 		case *fileops.Error:
@@ -366,11 +552,32 @@ func errorCauseChain(err error) string {
 			part = current.Error()
 		}
 		if part == "" || len(parts) > 0 && parts[len(parts)-1] == part {
-			continue
+			return
 		}
 		parts = append(parts, part)
-	}
+	})
 	return strings.Join(parts, " <- ")
+}
+
+// walkCauseChain visits every cause, including the branches of an errors.Join.
+//
+// errors.Unwrap returns nil for a joined error, so the old loop stopped at the first
+// join and logged "file operation outcome_unknown\nfile operation outcome_unknown" while
+// the actual leaf — intent_conflict, backend_error, a provider status — was never printed.
+// That is the one line an operator has for a stuck operation, and it was the line that
+// named nothing.
+func walkCauseChain(err error, visit func(error)) {
+	if err == nil {
+		return
+	}
+	if joined, ok := err.(interface{ Unwrap() []error }); ok {
+		for _, child := range joined.Unwrap() {
+			walkCauseChain(child, visit)
+		}
+		return
+	}
+	visit(err)
+	walkCauseChain(errors.Unwrap(err), visit)
 }
 
 // fileOperationRetry exposes the retry state on the operation resource, so a stuck
@@ -609,7 +816,7 @@ func stalledUploadState(phase fileops.Phase, mode string, epoch int64, cancelReq
 	if preEffect && !direct && cancelRequested {
 		return fileops.Cancelled, true
 	}
-	if preEffect && !direct && permanentUploadError(attemptErr) {
+	if preEffect && !direct && permanentOperationError(attemptErr) {
 		return fileops.Failed, true
 	}
 	if epoch < uploadRetirementClaims {
@@ -627,10 +834,12 @@ func stalledUploadState(phase fileops.Phase, mode string, epoch int64, cancelReq
 	return fileops.Unresolved, true
 }
 
-// permanentUploadError names the refusals a retry cannot change. It deliberately excludes
+// permanentOperationError names the refusals a retry cannot change. It deliberately excludes
 // generic storage 5xx/timeouts: those are the failures a later attempt may still recover,
-// and the claim bound is what ends them if they never do.
-func permanentUploadError(err error) bool {
+// and the claim bound is what ends them if they never do. Uploads and actions share the
+// list because the reason is the same: these are answers about configuration or about the
+// admitted intent, not about the provider's current mood.
+func permanentOperationError(err error) bool {
 	if err == nil {
 		return false
 	}
@@ -656,7 +865,7 @@ func stalledUploadProblem(state fileops.State, attemptErr error) json.RawMessage
 	if state == fileops.Unresolved {
 		return json.RawMessage(`{"code":"outcome_unknown","detail":"The upload stopped before the service could prove whether it published. Start a new upload with a new Idempotency-Key; if the destination exists, the create returns 409 and the overwrite condition replaces it."}`)
 	}
-	code := permanentUploadCode(attemptErr)
+	code := permanentOperationCode(attemptErr)
 	detail := "The upload was ended before it published: " + code + "."
 	if cause := retirementCause(attemptErr); cause != "" && cause != code {
 		detail += " Cause: " + cause + "."
@@ -666,9 +875,9 @@ func stalledUploadProblem(state fileops.State, attemptErr error) json.RawMessage
 	return value
 }
 
-// permanentUploadCode keeps the failing step, not a canned sentence: a client reading
+// permanentOperationCode keeps the failing step, not a canned sentence: a client reading
 // `invalid_config` can ask the owner to check the connection, while `error` cannot.
-func permanentUploadCode(err error) string {
+func permanentOperationCode(err error) string {
 	var failure *fileops.Error
 	if errors.As(err, &failure) {
 		return failure.Code
@@ -684,7 +893,7 @@ func permanentUploadCode(err error) string {
 // (including the driver's private cause) stays in the log line the retirement writes.
 func retirementCause(err error) string {
 	var parts []string
-	for current := err; current != nil; current = errors.Unwrap(current) {
+	walkCauseChain(err, func(current error) {
 		var part string
 		switch typed := current.(type) {
 		case *fileops.Error:
@@ -700,10 +909,10 @@ func retirementCause(err error) string {
 			}
 		}
 		if part == "" || len(parts) > 0 && parts[len(parts)-1] == part {
-			continue
+			return
 		}
 		parts = append(parts, part)
-	}
+	})
 	return strings.Join(parts, " <- ")
 }
 

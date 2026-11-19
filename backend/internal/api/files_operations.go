@@ -205,6 +205,12 @@ func (s *Server) handleFilesCancelOperation(w http.ResponseWriter, r *http.Reque
 	if err != nil {
 		return filesMutationProblem(err)
 	}
+	// A cancel is a new instruction, not a repeat of the work that failed: it must not
+	// wait out the backoff that work earned. The attempt this request starts either
+	// settles the operation as cancelled or gives it the terminal answer a cancel in an
+	// unknown state deserves; without this the owner clicked a button that would not be
+	// looked at for up to the retry ceiling.
+	s.fileOperationProgressed(op.ID)
 	if op.State == fileops.Succeeded {
 		return fc.NewProblem(409, "already_committed", "The operation has already completed.")
 	}

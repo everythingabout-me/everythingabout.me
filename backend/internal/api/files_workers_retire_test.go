@@ -84,23 +84,23 @@ func TestStalledUploadState(t *testing.T) {
 
 	// A permission refusal is permanent, whether it arrives bare or wrapped in a fileops
 	// error, and the client-visible reason keeps the failing step.
-	if !permanentUploadError(permission) || !permanentUploadError(fileops.E("invalid_intent", permission)) {
+	if !permanentOperationError(permission) || !permanentOperationError(fileops.E("invalid_intent", permission)) {
 		t.Fatal("permission refusal not classified as permanent")
 	}
-	if permanentUploadError(transient) || permanentUploadError(nil) {
+	if permanentOperationError(transient) || permanentOperationError(nil) {
 		t.Fatal("transient/nil error classified as permanent")
 	}
 	for _, code := range []string{"invalid_config", "invalid_intent", "unsupported", "baseline_required", "root_conflict", "quota_exceeded", "staging_full"} {
-		if !permanentUploadError(fileops.E(code, nil)) {
+		if !permanentOperationError(fileops.E(code, nil)) {
 			t.Fatalf("%s not classified as permanent", code)
 		}
 	}
 	for _, code := range []string{"storage_failure", "upload_incomplete", "forbidden", "not_found"} {
-		if permanentUploadError(fileops.E(code, nil)) {
+		if permanentOperationError(fileops.E(code, nil)) {
 			t.Fatalf("%s classified as permanent", code)
 		}
 	}
-	if code := permanentUploadCode(permission); code != "permission_denied" {
+	if code := permanentOperationCode(permission); code != "permission_denied" {
 		t.Fatalf("permission code = %q", code)
 	}
 }

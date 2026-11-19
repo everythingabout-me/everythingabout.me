@@ -1077,9 +1077,9 @@ folder's new `parentRevision`, as the commit answer does), `{deleted,purged,adop
 `{contentUrl,mediaType,size,contentRevision}` for thumbnail; contentUrl is a same-origin representation endpoint.
 The committed upload also stores its file metadata result in session status. Errors use the same Problem structure.
 
-`unresolved` is terminal and exists only for `upload_commit`. It means the service stopped trying and cannot
-prove whether the publication landed: the object may be in the native tree, but the index and quota were
-**not** settled as a success. It therefore releases the path guard and the logical/physical reservation
+`unresolved` is terminal and is used for an `upload_commit` or a tree action (`mkdir/move/copy/delete`) that
+cannot make progress. It means the service stopped trying and cannot prove whether the native effect landed:
+the object may be in the native tree, but the index and quota were **not** settled as a success. It therefore releases the path guard and the logical/physical reservation
 exactly as a failure does, marks the upload session `aborted`, and never reports a result. The client answers
 it by starting a new upload with a new Idempotency-Key; if the destination object exists, that create returns
 `409 name_conflict` and `condition:{"mode":"overwrite"}` publishes over it and repairs the index. A full
@@ -1095,6 +1095,25 @@ may already have published, ends `unresolved`. No sweep, time window or scoped r
 provider/session lifecycle and the existing full `eam reconcile` remain the backstops. A recorded cancel is
 honoured earlier: a pre-effect multipart session ends `cancelled` as soon as no live worker owns it, while a
 cancel after the effect can only end `unresolved` (see Cancel below).
+
+A tree action uses the same bound for the same reason, measured in decided manifest entries rather than
+claims: six consecutive attempts that leave `progress.completed` unchanged retire it, while an attempt that
+resolves at least one entry resets the count, so a move of fifty thousand entries that is merely slow is never
+retired. The terminal state follows the same proof rule. If any entry reached `effect_started`/`native_applied`,
+or the operation is `outcome_unknown`, it ends `unresolved`: a copy may have landed, and the source is untouched,
+so the owner loses nothing. An action that never started an effect ends `failed`, or `cancelled` when its owner
+asked to stop; a permanent refusal (`permission_denied`, `invalid_config`, `invalid_intent`, `unsupported`,
+`baseline_required`, `root_conflict`, `quota_exceeded`, `staging_full`) ends it immediately. A cancel recorded
+while an entry's outcome is still unknown ends the operation `unresolved` on its next failed attempt instead of
+waiting out the budget: the owner already asked to stop, and holding the same guard for the same non-answer
+only extends the 409. Retirement releases the path guards and the reservation exactly as a settled failure
+does.
+
+The two ways a move or copy can stop differ in what they do with entries that already landed. A cancel the
+worker can still settle breaks at the next dependency level and settles those entries as `cancelled`, so a
+copied destination whose source survives becomes an independent indexed entry — visible and deletable. A
+retirement commits nothing, because settling a manifest no attempt can finish would claim a final answer the
+service does not have; those native objects stay unindexed until a full `eam reconcile` adopts them.
 
 Operation/session visibility uses owner, creator principal and captured authorization anchors. Before creation,
 the anchor is the destination parent, not the nonexistent output file or folder. While source/destination files or folders still exist,
@@ -1112,7 +1131,9 @@ final publication starts, a winning upload cancellation sets the session aborted
 `cancelled`. After the native effect starts, the service resolves the real outcome: committed returns
 `409 already_committed`; a publication it cannot prove ends `unresolved` after the bounded no-progress claims,
 never a false `cancelled`. A pre-effect multipart commit that is failing for another reason but carries a
-cancel ends `cancelled` as soon as no live worker owns it. A worker that still holds its lease is not
+cancel ends `cancelled` as soon as no live worker owns it. A tree action honours the same rule: entries already
+started finish and are resolved, no entry of the next level starts, and an effect it can still prove settles as
+`cancelled`; one it cannot prove ends `unresolved` without waiting out the claim budget. A worker that still holds its lease is not
 force-failed; the log/restart is the escape for a blocked syscall. Repeat commit on a definitely aborted
 session returns `410 upload_aborted`.
 A running commit must seal/migrate its native data before its provider retention deadline, retain a replayable

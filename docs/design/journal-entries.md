@@ -500,8 +500,8 @@ require: stop the writers, let every non-terminal operation settle (or end it th
 explicit recovery commands), confirm
 `select count(*) from file_operations where entries_layout='table' and state not in
 ('succeeded','failed','cancelled','unresolved')` is zero, and only then start the older
-binary. `unresolved` is terminal (the current binary's cleanup of a stalled upload commit)
-and its phase is already `settled`, so it is not work a downgrade has to drain. That
+binary. `unresolved` is terminal (the current binary's answer for work whose outcome it
+cannot prove; `docs/api/api.md` §8) and its phase is already `settled`, so it is not work a downgrade has to drain. That
 procedure is the whole rollback, and it is deliberately *not* automated. The same statement
 is written next to the column (`sql/051`'s column comment), because that is where someone
 about to redeploy an older commit will look.
