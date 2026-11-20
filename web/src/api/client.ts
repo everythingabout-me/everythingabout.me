@@ -275,6 +275,17 @@ export interface FileBrowsePage extends FileCollection {
   node: FileResource;
 }
 
+/**
+ * GET /neighbors: the sibling files a viewer steps between, in the same order the folder
+ * lists them. A null at either end means there is no neighbor in that direction — the
+ * folder's first or last file — and both keys are always present, so absence is a null and
+ * not a missing field.
+ */
+export interface FileNeighbors {
+  previous: FileResource | null;
+  next: FileResource | null;
+}
+
 export interface FileQuota {
   logicalBytes: number;
   logicalLimitBytes: number;
@@ -1133,6 +1144,10 @@ export const files = {
   list(selector: FileSelector, options: { limit?: number; cursor?: string; signal?: AbortSignal } = {}): Promise<FileBrowsePage> {
     return fileRequest(fileURL("/list", { limit: options.limit, cursor: options.cursor, ...entrySelector(selector) }), { signal: options.signal });
   },
+  /** The two files a viewer steps to from this one, in the folder's listing order. */
+  neighbors(selector: FileSelector, signal?: AbortSignal): Promise<FileNeighbors> {
+    return fileRequest(fileURL("/neighbors", entrySelector(selector)), { signal });
+  },
   search(options: FileSearchOptions): Promise<FileCollection> {
     const selected = Object.fromEntries(["id", "path"].filter((key) => hasOwn(options, key)).map((key) => [key, options[key as "id" | "path"]]));
     return fileRequest(fileURL("/search", { ...options, ...(Object.keys(selected).length ? entrySelector(selected as EntrySelector) : {}) }));
@@ -1772,6 +1787,7 @@ export const api = {
   subscriptionEventsURL: files.subscriptionEventsURL,
 
   metadata: files.metadata,
+  neighbors: files.neighbors,
   mediaMetadata: files.mediaMetadata,
   fileMe: files.me,
   capabilities: files.capabilities,

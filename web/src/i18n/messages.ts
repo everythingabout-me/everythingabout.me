@@ -305,6 +305,10 @@ const en = {
   "file.notFoundTitle": "File not found",
   "file.notFoundText": "It may have been deleted or moved.",
   "file.backToRoot": "Back to all files",
+  "file.previousFile": "Previous file (←)",
+  "file.nextFile": "Next file (→)",
+  "file.previousFileTitle": "Previous file (←) · {name}",
+  "file.nextFileTitle": "Next file (→) · {name}",
 
   "preview.loading": "Loading preview…",
   "preview.failed": "The preview could not load. Downloading the file may still work.",
@@ -864,6 +868,10 @@ const zh: Record<MessageKey, string> = {
   "file.notFoundTitle": "文件不存在",
   "file.notFoundText": "它可能已被删除或移动。",
   "file.backToRoot": "回到全部文件",
+  "file.previousFile": "上一个文件（←）",
+  "file.nextFile": "下一个文件（→）",
+  "file.previousFileTitle": "上一个文件（←）· {name}",
+  "file.nextFileTitle": "下一个文件（→）· {name}",
 
   "preview.loading": "正在加载预览…",
   "preview.failed": "预览加载失败，可以试试下载这个文件。",

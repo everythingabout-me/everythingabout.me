@@ -40,6 +40,7 @@ const (
 type FileReadIndex interface {
 	FileBrowseMetadata(context.Context, string, string, string, ...string) (*nodes.FileBrowseRecord, error)
 	FileBrowsePage(context.Context, string, string, nodes.FileBrowseQuery) ([]nodes.FileBrowseRecord, error)
+	FileBrowseNeighbors(context.Context, string, string, string, ...string) (nodes.FileBrowseNeighbors, error)
 	FileBrowseUsage(context.Context, string, string, ...string) (int64, int64, error)
 }
 
@@ -318,6 +319,75 @@ func (s *Server) handleFilesSearch(w http.ResponseWriter, r *http.Request, f *fi
 		return err
 	}
 	return s.filesBrowsePage(w, r, f, q, "search")
+}
+
+// handleFilesNeighbors answers the two files a viewer can step to from the selected one:
+// the sibling immediately before and after it in the order a listing of that folder shows.
+//
+// Why this is its own read rather than the two adjacent /list pages: the neighbor is only
+// expressible against the listing's sort key, and a page is anchored at the folder's first
+// row, so a file late in a large folder would cost the whole folder in pages to find. This
+// read sorts the same folder's members once, as one listing page of it already does, and
+// returns at most one row per direction.
+//
+// Folders are refused instead of answered with an empty pair. A folder is not a page in a
+// viewer: stepping to one would replace the content with a listing, which is a different
+// action the caller already has (opening the path). Answering "no neighbors" would hide
+// that the question was wrong.
+func (s *Server) handleFilesNeighbors(w http.ResponseWriter, r *http.Request, f *fileRequest) error {
+	q, err := s.filesReadSelectorQuery(r, f, true)
+	if err != nil {
+		return err
+	}
+	record, err := s.filesIndexedRecord(r.Context(), f, q.Path)
+	if err != nil {
+		return err
+	}
+	metadata, err := nodes.IndexedMetadata(f.ContentNamespace, *record)
+	if err != nil {
+		return err
+	}
+	if err := f.RequireRead(metadata.Path); err != nil {
+		return err
+	}
+	if !filesEqualPath(f, metadata.Path, q.Path) {
+		return fc.NewProblem(404, "not_found", "The indexed path was not found.")
+	}
+	if q.SelectorID != "" && metadata.ID != q.SelectorID {
+		return fc.NewProblem(404, "not_found", "The selected file changed location.")
+	}
+	if metadata.Kind != "file" {
+		return fc.NewProblem(409, "not_a_file", "Neighbors are only defined for a file; this path names a folder.")
+	}
+	pair, err := s.filesIndex.FileBrowseNeighbors(r.Context(), f.Principal.User.ID, f.ContentNamespace, metadata.Path.Relative(), filesHiddenRoots(f)...)
+	if err != nil {
+		return err
+	}
+	result := filesNeighborsResource{}
+	for _, side := range []struct {
+		record *nodes.FileBrowseRecord
+		target **fc.Metadata
+	}{{pair.Previous, &result.Previous}, {pair.Next, &result.Next}} {
+		if side.record == nil {
+			continue
+		}
+		neighbor, err := nodes.IndexedMetadata(f.ContentNamespace, *side.record)
+		if err != nil {
+			return err
+		}
+		// The index restricts the read to the selected entry's parent, so a neighbor from
+		// anywhere else means the index disagrees with itself. Refuse it: rendering a file
+		// from another folder under this file's arrows would step outside what the page shows.
+		if !filesEqualPath(f, neighbor.ParentPath, metadata.ParentPath) {
+			return fc.NewProblem(500, "internal_error", "The index returned a neighbor outside the selected folder.")
+		}
+		if err := f.RequireRead(neighbor.Path); err != nil {
+			return err
+		}
+		redacted := filesRedactParent(f, neighbor)
+		*side.target = &redacted
+	}
+	return writeFilesJSON(w, 200, result)
 }
 
 func (s *Server) handleFilesMe(w http.ResponseWriter, r *http.Request, f *fileRequest) error {

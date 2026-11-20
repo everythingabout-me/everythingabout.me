@@ -279,6 +279,7 @@ All suffixes are below `B`:
 | GET | `/capabilities?path=/Photos` or `?id=1f12cfd6-b93b-41ad-ae71-52a4299c3421` | Effective limits/features at an authorized entry |
 | GET | `?path=/Photos/a.jpg` or `?id=f7ca1104-12f0-4bbf-8c77-41d341f7d120` | Indexed metadata by either selector; no native lookup |
 | GET | `/list?path=/Photos&limit=&cursor=` or `id=1f12cfd6-b93b-41ad-ae71-52a4299c3421` in place of path | The selected entry (`node`) plus its indexed immediate children, with SQL keyset pagination; a file answers with `node` and no items |
+| GET | `/neighbors?path=/Photos/a.jpg` or `id=f7ca1104-12f0-4bbf-8c77-41d341f7d120` in place of path | The sibling files immediately before and after the selected one, in listing order; `null` at either end; a folder is `409 not_a_file` |
 | GET | `/search?q=&path=/Photos&kind=&mediaType=&limit=&cursor=` or `id=1f12cfd6-b93b-41ad-ae71-52a4299c3421` in place of path | Indexed search below selected folder; authorized-root default |
 | GET, HEAD, PUT | `/content?path=/Photos/a.jpg` or `?id=f7ca1104-12f0-4bbf-8c77-41d341f7d120` | Download/headers/conditional replace; creation uses a destination |
 | POST | (base) | Create folder using `{kind:"folder",destination:Destination,parents?}`; retained full-path shortcut |
@@ -330,6 +331,7 @@ says which one it is. Mutation destinations whose parent is a file keep `409 not
 Listing/search use opaque keyset cursors and stable sorting: folders first, NFC comparison-name bytes, then a
 deterministic indexed tie-breaker. Search is case-insensitive substring matching on name and resolved visible
 path and includes descendants of the selected folder.
+
 A cursor binds principal/scope, selector mode, selected folder, query and sort. An ID-selected folder follows
 completed moves only while authorized. A path-selected cursor whose folder moved/recreated returns
 `409 cursor_stale`; recheck current ancestry on every page. Ordinary concurrent writes do not globally
@@ -339,6 +341,16 @@ checkpoint in section 10. Native backup/import validation still requires a coord
 Default page size is 200; maximum 1000. SQL applies owner, subtree, search filters and the keyset before
 returning at most the requested limit plus one row. The API does not scan storage or load the whole indexed
 subtree to paginate. Authorization filters apply before pagination and never leak totals.
+
+`/neighbors` answers the pair a preview steps between, and it exists because that pair is not expressible
+from a page. The neighbor is defined by the listing's own sort key, which a client cannot fabricate into an
+opaque cursor, so walking pages until the open file appeared would cost one page per step — the whole folder
+for a file late in it. The read instead sorts that one folder's members, exactly as one `/list` page of it
+already does, and returns at most one row per direction. `previous` and `next` are always present and `null`
+at the ends of the folder, so a client can hide an arrow without treating absence as an error. Only sibling
+*files* are neighbors: a folder is an entry point that opens a listing, not a page a viewer can turn to, so
+a folder selector is refused with `409 not_a_file` rather than answered with an empty pair. Entries a pending
+delete conceals are skipped like every other read.
 
 Create a folder:
 

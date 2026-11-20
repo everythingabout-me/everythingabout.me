@@ -368,6 +368,8 @@ func (s *Server) filesHandler() http.Handler {
 			routes["DELETE"] = s.handleFilesDelete
 		case fc.Base + "/list":
 			routes["GET"] = s.handleFilesList
+		case fc.Base + "/neighbors":
+			routes["GET"] = s.handleFilesNeighbors
 		case fc.Base + "/search":
 			routes["GET"] = s.handleFilesSearch
 		case fc.Base + "/me":

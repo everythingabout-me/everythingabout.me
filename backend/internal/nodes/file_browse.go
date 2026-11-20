@@ -178,6 +178,49 @@ const browsePageQuery = `select ` + browseColumns + ` from file_entries nodes
  order by case when is_dir then 0 else 1 end,normalize(name,NFC) collate "C",normalize(path,NFC) collate "C"
  limit $14`
 
+// FileBrowseNeighbors is the pair of sibling files a viewer steps between: the entry
+// immediately before and after one file in the same order a listing of its folder uses.
+//
+// Folders are not neighbors. Stepping is how a viewer turns to the next piece of content
+// it can show; a folder is an entry point that would replace the viewer with a listing, so
+// the arrows skip them and opening one stays a separate action. The caller must therefore
+// ask about a file: a folder answers with no neighbors at all, because the question has no
+// meaning for it.
+//
+// Why an index read instead of a client-side walk: a key for "the next sibling" can only be
+// expressed against the same ordering the listing uses (folders first, NFC name bytes), and
+// a client cannot invent a keyset cursor. Paging a folder until the open file appears would
+// cost one page of rows per neighbor — the whole folder for a file late in the listing —
+// while this read sorts one folder's members exactly as a single listing page of it does.
+type FileBrowseNeighbors struct {
+	Previous *FileBrowseRecord
+	Next     *FileBrowseRecord
+}
+
+// browseNeighborQuery anchors on the current entry and reads one candidate on each side of
+// it. The key comes from the canonical row (file_tree_resolve($1,$4) + normalize(name,NFC)),
+// not from the caller's spelling, so a differently-cased path still steps from where the
+// listing would show it. Only the name compares: two siblings can never share one, because
+// nodes_owner_parent_comparison_uniq forbids it, so the path tie-break that orders a search
+// across folders can never decide anything inside one folder.
+//
+// $1 owner, $2 namespace, $3 pending-delete roots, $4 relative path of the current entry.
+// The direction is spliced in rather than parameterized: `<`/`desc` and `>`/`asc` are the
+// same read backwards, and either operator inside the statement would leave the ordering
+// unable to be its own. The anchor's columns are aliased because nodeColumns names its
+// columns unqualified and file_entries already exposes name/is_dir/parent; a cross join
+// over that spelling is ambiguous.
+func browseNeighborQuery(operator, direction string) string {
+	return `with cur as (
+ select parent_id as anchor_parent,is_dir as anchor_folder,normalize(name,NFC) collate "C" as anchor_name
+  from file_entries where owner_id=$1::uuid and id=file_tree_resolve($1::uuid,$4))
+select ` + browseColumns + ` from file_entries nodes cross join cur
+ where nodes.owner_id=$1::uuid and nodes.parent_id=cur.anchor_parent and not nodes.is_dir and not cur.anchor_folder
+  and normalize(nodes.name,NFC) collate "C" ` + operator + ` cur.anchor_name
+  and ` + browsePathVisible + `
+ order by normalize(nodes.name,NFC) collate "C" ` + direction + ` limit 1`
+}
+
 // Usage takes the pending-delete roots at $2 (its handle queries have no namespace
 // parameter), so both statements below are prefixed with this CTE instead of browseHidden.
 var browseUsageHidden = browseHiddenCTE("$2", "")
@@ -288,6 +331,43 @@ func (s *Service) FileBrowsePage(ctx context.Context, owner, namespace string, q
 	}
 	return records, rows.Err()
 }
+
+// FileBrowseNeighbors answers "which file comes next to this one", one candidate per
+// direction. The two sides are separate probes because their order is opposite, and each is
+// limited to one row: nothing else about the folder is read.
+func (s *Service) FileBrowseNeighbors(ctx context.Context, owner, namespace, path string, hiddenRoots ...string) (FileBrowseNeighbors, error) {
+	var pair FileBrowseNeighbors
+	for _, side := range []struct {
+		operator, direction string
+		target              **FileBrowseRecord
+	}{{"<", "desc", &pair.Previous}, {">", "asc", &pair.Next}} {
+		rows, err := s.db.Pool().Query(ctx, browseNeighborQuery(side.operator, side.direction), owner, namespace, hiddenRoots, path)
+		if err != nil {
+			return FileBrowseNeighbors{}, err
+		}
+		record, err := browseFirst(rows)
+		if err != nil {
+			return FileBrowseNeighbors{}, err
+		}
+		*side.target = record
+	}
+	return pair, nil
+}
+
+// browseFirst reads the one row a limited statement may return, and reports its error
+// instead of swallowing it: "no neighbor" and "the read failed" must not look alike.
+func browseFirst(rows pgx.Rows) (*FileBrowseRecord, error) {
+	defer rows.Close()
+	if !rows.Next() {
+		return nil, rows.Err()
+	}
+	record, err := scanBrowseRecord(rows)
+	if err != nil {
+		return nil, err
+	}
+	return record, nil
+}
+
 func keywordPattern(keyword string) string {
 	if keyword == "" {
 		return ""

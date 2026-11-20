@@ -188,7 +188,10 @@ The key sits directly on the path (`drive/<userID>/Photos/2024/a.jpg`), which me
 - Folders below the root are the URL (`/<handle>/Photos/2024`), with breadcrumbs, relative times, type icons and hover actions
 - Every file has its own page at `/<handle>/<path>` and a stable link at `/f/<id>` (copy link names the entry, not the path, so it survives a rename), built like a folder page (same header, breadcrumbs and title block): an inline preview for images, PDF, Office (docx / xlsx / pptx), plain text and source code, audio and video, plus type, size and timestamps;
   the viewer ([open-file-viewer](https://github.com/xushanpei/open-file-viewer)) plus pdfjs go through `React.lazy`,
-  so nothing downloads on first paint and a single chunk (~196KB gzip) is fetched when you open one, with the per-format renderer loading on top of that; formats without a preview still offer a download
+  so nothing downloads on first paint and a single chunk (~196KB gzip) is fetched when you open one, with the per-format renderer loading on top of that; formats without a preview still offer a download.
+  The open file also has arrows over the viewer (and ← / → on the keyboard) that step to the previous or next
+  file of the same folder in the listing's order, so a folder of photos is browsed without going back to the
+  list; stepping replaces the history entry, so Back still returns to the folder. Folders are not in that walk
 - A ZIP is previewed as its contents: the entry list comes from two ranged reads of the archive's directory, and selecting a file inflates just that entry into the same plugin chain, so a photo or a document inside a `.zip` looks like the same file on its own. A nested `.zip` is drilled into with a breadcrumb; entries that cannot be previewed still download individually. [docs/design/zip-preview.md](docs/design/zip-preview.md) records why this is parsed in the browser instead of the server
 - Drag / multi-select upload: placeholder rows appear immediately, with a queue, progress, and speed, cancelable, retryable on failure; `/` focuses search. Selecting a file again after refresh/close starts a new upload without extra confirmation for an abandoned open session. An active upload in another cooperating same-origin tab in the same browser produces an inline retryable conflict, with no popup.
 - Folder uploads: drag folders or choose **Upload → Upload folder** to retain the selected root and nested paths. The list shows only immediate children throughout upload; each folder summarizes selected descendant file counts, confirmed files, bytes and percentage. Pending folders are navigable, completed rows lose their progress bars, and folder actions cancel/retry the remaining descendants. Dragged folders also preserve empty directories; the browser folder picker only exposes directories containing files. Existing directories merge, while replacing files requires confirmation.
@@ -369,6 +372,7 @@ existing separate endpoints and envelopes.
 |---|---|---|
 | GET | `/api/files?path=` or `?id=` | Indexed metadata by either selector; no synchronous storage lookup |
 | GET | `/api/files/list?path=&limit=&cursor=` (or `id=`) | The selected entry plus its indexed immediate children; owner-scoped SQL keyset pagination; a file answers with `node` and no items |
+| GET | `/api/files/neighbors?path=` (or `id=`) | The sibling files immediately before and after this one in listing order; `null` at either end of the folder; a folder is `409 not_a_file` |
 | GET | `/api/files/search?q=&path=&kind=&mediaType=` (or `id=`) | Authorized indexed search below selected folder; scoped opaque cursors |
 | GET | `/api/files/me` · `/api/files/capabilities` | Indexed scope/usage and effective limits (id/path or visible-root default); cookie CSRF bootstrap |
 | GET, HEAD | `/api/files/content?path=` or `?id=` | Class C same-origin bytes; HEAD representation headers on every class; single Range support |

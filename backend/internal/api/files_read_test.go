@@ -111,7 +111,9 @@ type filesReadTestIndex struct {
 	limit, calls                int
 	queries                     []nodes.FileBrowseQuery
 	metadataPaths               []string
+	neighborPaths               []string
 	metadataHidden, usageHidden []string
+	neighborHidden              []string
 	usageCalls                  int
 	err, pageErr, usageErr      error
 }
@@ -173,6 +175,58 @@ func filesReadIndexKey(row nodes.Row) nodes.FileBrowseKey {
 	}
 	return nodes.FileBrowseKey{Kind: kind, Name: norm.NFC.String(row.Name), Path: norm.NFC.String(row.Path)}
 }
+
+// FileBrowseNeighbors mirrors the production read in the terms this fake keeps: the
+// sibling files of the selected entry's folder in listing order, one candidate per
+// direction, and none for a folder or a concealed entry.
+func (i *filesReadTestIndex) FileBrowseNeighbors(ctx context.Context, owner, namespace, p string, hidden ...string) (nodes.FileBrowseNeighbors, error) {
+	i.calls++
+	i.owner, i.namespace = owner, namespace
+	i.neighborPaths = append(i.neighborPaths, p)
+	i.neighborHidden = append([]string{}, hidden...)
+	if err := ctx.Err(); err != nil {
+		return nodes.FileBrowseNeighbors{}, err
+	}
+	if i.err != nil {
+		return nodes.FileBrowseNeighbors{}, i.err
+	}
+	var current *nodes.Row
+	for index := range i.rows {
+		if i.rows[index].Path == p {
+			current = &i.rows[index]
+			break
+		}
+	}
+	if current == nil || current.IsDir || filesReadHidden(p, hidden) {
+		return nodes.FileBrowseNeighbors{}, nil
+	}
+	siblings := make([]nodes.Row, 0)
+	for _, row := range i.rows {
+		if !row.IsDir && row.Parent == current.Parent && !filesReadHidden(row.Path, hidden) {
+			siblings = append(siblings, row)
+		}
+	}
+	sort.SliceStable(siblings, func(a, b int) bool {
+		return filesKeyLess(filesReadIndexKey(siblings[a]), filesReadIndexKey(siblings[b]))
+	})
+	var pair nodes.FileBrowseNeighbors
+	for index, row := range siblings {
+		if row.Path != p {
+			continue
+		}
+		if index > 0 {
+			record := i.record(siblings[index-1], hidden)
+			pair.Previous = &record
+		}
+		if index+1 < len(siblings) {
+			record := i.record(siblings[index+1], hidden)
+			pair.Next = &record
+		}
+		break
+	}
+	return pair, nil
+}
+
 func (i *filesReadTestIndex) FileBrowsePage(ctx context.Context, owner, namespace string, q nodes.FileBrowseQuery) ([]nodes.FileBrowseRecord, error) {
 	i.calls++
 	i.owner, i.namespace, i.prefix, i.limit = owner, namespace, q.Path, q.Limit

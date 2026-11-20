@@ -11,11 +11,12 @@ import {
   type ReactNode,
 } from "react";
 import { Link, useBlocker, useLoaderData, useLocation, useNavigate } from "react-router";
-import { ApiError, api, filePath, isFileOperation, isNativeAbsent, prefetchListing, type AuthUser, type Crumb, type FileMediaMetadata, type Item, type FileOperation } from "../api/client";
+import { ApiError, api, filePath, isFileOperation, isNativeAbsent, prefetchListing, type AuthUser, type Crumb, type FileMediaMetadata, type FileNeighbors, type FileOperation, type Item } from "../api/client";
 import { AppHeader } from "../components/AppHeader";
 import { StorageNotice } from "../components/StorageNotice";
 import {
   ChevronDownIcon,
+  ChevronLeftIcon,
   ChevronRightIcon,
   CloseIcon,
   CopyIcon,
@@ -633,9 +634,95 @@ function MediaMetadataRows({ media }: { media: FileMediaMetadata }) {
   );
 }
 
+/**
+ * The two files this page can step to, read once per open file.
+ *
+ * The pair comes from the index rather than from a listing page: a neighbor is only
+ * expressible against the folder's sort key, so walking a listing to find it would cost one
+ * page per step (the whole folder for a file late in it). A failed read hides the arrows and
+ * nothing else — the file still renders, and its preview already reports bytes that are gone.
+ */
+function useNeighbors(file: Item): FileNeighbors | null {
+  const [pair, setPair] = useState<FileNeighbors | null>(null);
+  useEffect(() => {
+    setPair(null);
+    const controller = new AbortController();
+    api.neighbors(file.path, controller.signal).then(
+      (answer) => { if (!controller.signal.aborted) setPair(answer); },
+      () => { if (!controller.signal.aborted) setPair({ previous: null, next: null }); },
+    );
+    return () => controller.abort();
+    // The path identifies the page: replaced bytes keep it, so the arrows stay put.
+  }, [file.path]);
+  return pair;
+}
+
+/**
+ * Page-turn controls over the viewer, and the arrow keys with them.
+ *
+ * They step through exactly the files the folder lists, in the listing's order — whatever
+ * row sits next to this file in that folder is what the arrow opens. Folders are not part of
+ * the walk (they are entry points, not pages), and neither is anything a pending delete has
+ * hidden. A side with no neighbor renders no button, so the control itself says where the
+ * folder ends instead of offering a click that does nothing.
+ */
+function ViewerNav({ neighbors, onOpen }: {
+  neighbors: FileNeighbors | null;
+  onOpen: (path: string) => void;
+}) {
+  const previous = neighbors?.previous ?? null;
+  const next = neighbors?.next ?? null;
+  useEffect(() => {
+    if (!previous && !next) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+      if (event.defaultPrevented || event.metaKey || event.ctrlKey || event.altKey || event.shiftKey) return;
+      // A modal dialog owns the keyboard while it is open, and the arrows inside a focused
+      // field or player belong to it: a video seeks, a text area moves its caret.
+      if (document.querySelector("dialog[open]")) return;
+      const target = event.target as HTMLElement | null;
+      if (target?.closest("input, textarea, select, [contenteditable='true'], video, audio")) return;
+      const step = event.key === "ArrowLeft" ? previous : next;
+      if (!step) return;
+      event.preventDefault();
+      onOpen(step.path);
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [next, onOpen, previous]);
+  if (!neighbors) return null;
+  return (
+    <>
+      {previous && (
+        <button
+          type="button"
+          className={`${styles.viewerNav} ${styles.viewerNavPrev}`}
+          onClick={() => onOpen(previous.path)}
+          aria-label={t("file.previousFile")}
+          title={t("file.previousFileTitle", { name: previous.name })}
+        >
+          <ChevronLeftIcon size={20} />
+        </button>
+      )}
+      {next && (
+        <button
+          type="button"
+          className={`${styles.viewerNav} ${styles.viewerNavNext}`}
+          onClick={() => onOpen(next.path)}
+          aria-label={t("file.nextFile")}
+          title={t("file.nextFileTitle", { name: next.name })}
+        >
+          <ChevronRightIcon size={20} />
+        </button>
+      )}
+    </>
+  );
+}
+
 /** A file's own page: the path bar above it already names the file, so this adds only facts. */
-function FileDetail({ file, onDelete, onCopyLink, deleteDisabled, deleteHint }: {
+function FileDetail({ file, onOpenNeighbor, onDelete, onCopyLink, deleteDisabled, deleteHint }: {
   file: Item;
+  onOpenNeighbor: (path: string) => void;
   onDelete: () => void;
   onCopyLink: () => void;
   deleteDisabled: boolean;
@@ -645,6 +732,7 @@ function FileDetail({ file, onDelete, onCopyLink, deleteDisabled, deleteHint }: 
   const [downloadMissing, setDownloadMissing] = useState(false);
   useEffect(() => { setDownloadError(null); setDownloadMissing(false); }, [file.path]);
   const media = useMediaMetadata(file);
+  const neighbors = useNeighbors(file);
   const download = async () => {
     setDownloadError(null);
     setDownloadMissing(false);
@@ -665,6 +753,7 @@ function FileDetail({ file, onDelete, onCopyLink, deleteDisabled, deleteHint }: 
       </p>
 
       <section className={styles.viewerPanel}>
+        <ViewerNav neighbors={neighbors} onOpen={onOpenNeighbor} />
         {canPreviewFile(file.name, file.mediaType) ? (
           <Suspense
             fallback={
@@ -803,6 +892,17 @@ export function FilesPage() {
       );
     },
     [showToast],
+  );
+
+  /**
+   * Stepping between neighboring files replaces the history entry instead of adding one:
+   * flipping through a folder is one visit, so Back returns to the folder the person came
+   * from rather than replaying every file the arrows passed. Each file still has its own
+   * address, which stays copyable and reloadable.
+   */
+  const openNeighbor = useCallback(
+    (path: string) => navigate(filesHref(path), { replace: true }),
+    [navigate],
   );
 
   const rememberPanelHeight = useCallback((key: string) => {
@@ -1662,6 +1762,7 @@ export function FilesPage() {
           >
             <FileDetail
               file={file}
+              onOpenNeighbor={openNeighbor}
               onDelete={() => startDelete(file)}
               onCopyLink={() => copyLink(file)}
               deleteDisabled={pending || Boolean(rename.job) || deleteBlocked

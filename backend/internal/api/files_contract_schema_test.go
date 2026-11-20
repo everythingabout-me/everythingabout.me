@@ -84,6 +84,7 @@ var fileAPIContractShapes = []struct {
 	{"FileDownloadGrant", filesDownloadGrantResource{}},
 	{"FileDownloadGrantCollection", filesDownloadGrantPage{}},
 	{"FileMediaMetadata", filesMediaMetadata{}},
+	{"FileNeighbors", filesNeighborsResource{}},
 	{"FileOperation", filesOperationResource{}},
 	{"FilePrincipal", filesPrincipalResource{}},
 	{"FileProblem", fc.Problem{}},
