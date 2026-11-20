@@ -405,5 +405,33 @@ func validateActionSettlement(ctx context.Context, tx pgx.Tx, op Operation, b ac
 			}
 		}
 	}
+	if s.State == Succeeded {
+		// The copy half of a move, or a copy, put these revisions at their targets, so
+		// the removals those rows describe no longer stand (credit.go): the same bytes
+		// that once left a path came back to it, and taking them away again is a new
+		// removal. A native tree move has no manifest to name its files with, so it
+		// releases its target prefix instead.
+		for _, entry := range op.Entries {
+			if entry.Action != "copy" || entry.State != "applied" {
+				continue
+			}
+			var result storage.MutationResult
+			if json.Unmarshal(entry.Result, &result) != nil || result.Entry == nil {
+				return E("invalid_native_result", nil)
+			}
+			if err := releaseCredit(ctx, tx, op.Root.OwnerID, op.Root, result.Entry.Path, result.Entry.Revision); err != nil {
+				return err
+			}
+		}
+		if b.Strategy == nativeTreeMoveStrategy {
+			intent, err := actionRequest(op)
+			if err != nil {
+				return err
+			}
+			if err := releaseCreditSubtree(ctx, tx, op.Root.OwnerID, op.Root, intent.To); err != nil {
+				return err
+			}
+		}
+	}
 	return nil
 }

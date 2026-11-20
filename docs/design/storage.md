@@ -299,11 +299,20 @@ is.
 - **A deletion credit is a permanent receipt.** A delete, or the removal half of a move, is what removed the
   revision; once the bytes are gone the same `(path, revision)` pair must not fund a second refund. The row
   survives settlement, and `prune` keeps its operation. A replacement never inherits one.
+- **A receipt ends when the revision comes back.** The pair above is one *presence*'s removal, and the same
+  revision reappearing at that path begins a new one: unchanged content carries the identical native revision,
+  so a folder moved out and imported back names the same pairs it left. Settlement of the write that
+  establishes the presence — an applied copy entry, a published upload, a native tree move's whole target
+  prefix — releases the row in that transaction, and `sql/059` repairs rows written before the release
+  existed. Without the release, every later delete, move or replacement of those bytes failed with
+  `credit_conflict` at freeze, with no operator command to clear it. A present revision cannot be the test
+  itself, because two concurrent deletions both see it present — that is exactly the race the receipt
+  excludes.
 
-Rows written before this rule are replacement claims held by settled operations. The next operation adopts such
-a row instead of being refused, because a settled replacement no longer spends its credit; adoption is
-restricted to a holder whose action is `upload_commit` and whose state is `succeeded`, so a deletion receipt
-and an unsettled outcome stay conflicts. A stale row therefore needs no operator command.
+Rows written before the replacement release are replacement claims held by settled operations. The next
+operation adopts such a row instead of being refused, because a settled replacement no longer spends its
+credit; adoption is restricted to a holder whose action is `upload_commit` and whose state is `succeeded`, so
+a deletion receipt and an unsettled outcome stay conflicts. A stale row therefore needs no operator command.
 
 Quota for a 100 B file on a non-version-retaining root (logical 100 before):
 
@@ -313,6 +322,7 @@ Quota for a 100 B file on a non-version-retaining root (logical 100 before):
 | replace 100 B with 200 B, then 200 B with 60 B | 100 + 0 | +100 then −140 | 60 |
 | delete 100 B twice concurrently | 0; the second is refused | −100 | 0 |
 | delete 100 B, then delete the same revision again | 0; the second is refused | −100 once | 0 |
+| delete 100 B, re-import the same 100 B, delete it again | 0; the receipt was released | −100, +100, −100 | 0 |
 
 ## 6. Performance within the portability boundary
 

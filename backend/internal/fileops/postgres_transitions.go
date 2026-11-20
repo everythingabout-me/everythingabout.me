@@ -549,6 +549,22 @@ func (p *Postgres) Settle(ctx context.Context, l Lease, s Settlement, commit Ind
 				return err
 			}
 		}
+		// The publication is also the other half of that rule: it established the new
+		// revision at its path, so a deletion receipt for exactly that (path, revision) —
+		// written when those same bytes were removed earlier — no longer describes
+		// anything (credit.go). A creation has no old revision to release, which is why
+		// this is keyed by the published entry rather than by the reservation's credit;
+		// a replacement of identical bytes publishes the revision its own fence names,
+		// so the row it held goes here as well.
+		if !action && s.State == Succeeded {
+			// A settlement whose recorded publication names no entry (a zero-byte marker, a
+			// driver that reports a bare result) established nothing this table can key on.
+			if entry := op.NativeResult.Entry; entry != nil {
+				if err = releaseCredit(ctx, tx, op.Root.OwnerID, op.Root, entry.Path, entry.Revision); err != nil {
+					return err
+				}
+			}
+		}
 		op.ChargedLogical = s.LogicalDelta
 		op.ChargedPhysical = s.PhysicalDelta
 		finish(op, s.State, now)

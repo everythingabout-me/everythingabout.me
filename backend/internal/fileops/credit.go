@@ -40,6 +40,20 @@ import (
 // a succeeded upload_commit: a deletion receipt is never adopted, and an outcome that
 // is not proven (failed, cancelled, unknown) stays a conflict instead of a guess.
 //
+// Either kind describes a revision that is *gone* from its path, and that is why "is
+// this revision present?" cannot be the release test: two concurrent deletions of one
+// present revision both see it present, which is the race the claim exists to exclude.
+// The opposite event is the one that must release: when an operation settles after
+// putting that same revision back at that path — a copy entry of a move or copy, a
+// published upload, a native tree move's target — the removal the row records has been
+// undone. Those bytes were counted into the budget again, so removing them again is a
+// new removal and has to be refundable. Leaving the row would refuse every later
+// delete, move or replacement of those bytes with no operator command to clear it, and
+// coming back to a path is ordinary: unchanged content carries the identical native
+// revision, so a folder moved out and imported back names the same (path, revision)
+// pairs it left. releaseCredit / releaseCreditSubtree, called from the settlement
+// transaction that established the presence, are that release.
+//
 // claimCredit takes the credit for (path, version) for one operation, adopting a
 // predecessor's row when that predecessor is a settled replacement.
 //
@@ -74,4 +88,43 @@ func claimCredit(ctx context.Context, tx pgx.Tx, owner string, root Root, path s
 		return E("credit_conflict", nil)
 	}
 	return nil
+}
+
+// releaseCredit drops the claim on one (path, revision) pair after an operation
+// settled having established that revision at that path. The caller must already hold
+// the owner lock and run inside the settlement transaction, so no concurrent operation
+// can be claiming the row this statement removes: anything admitted after the commit
+// observes the new presence and its removal credits the new removal.
+//
+// The statement is unconditional on the holder because the presence being written is
+// the reason the row is residue: a live holder of this key could only be a replacement
+// fence for a revision that this write is replacing (it would have had to be admitted
+// against the same current revision, which the path guard excludes) or a deletion whose
+// bytes had not been removed yet (and the destination would then not have been free).
+func releaseCredit(ctx context.Context, tx pgx.Tx, owner string, root Root, path storage.Path, version []byte) error {
+	if len(version) == 0 {
+		// A driver that reports no revision cannot hold a claim either: claimCredit is
+		// always called with the revision the reservation captured, and a receipt is
+		// keyed by it.
+		return nil
+	}
+	_, err := tx.Exec(ctx, `delete from file_credit_claims where owner_id=$1 and comparison_path=$2 and version=$3`, owner, comparePath(root, path), version)
+	return err
+}
+
+// releaseCreditSubtree drops every claim under a folder that a native tree move just
+// put in place. The move has no per-file manifest and no revisions of its own, so it
+// cannot name the (path, revision) pairs it re-established.
+//
+// Clearing the whole prefix is still exact enough: a claim under the target can only
+// describe bytes that were removed from that path before, and the subtree now occupies
+// it. A row whose revision is not in the moved-in content is dead weight rather than a
+// protection — removing that revision from the path again is possible only after some
+// later write put it there, and that write counts its bytes. The target's subtree guard
+// covers the same paths for the whole operation, so no concurrent removal can be holding
+// one of these rows while the move runs.
+func releaseCreditSubtree(ctx context.Context, tx pgx.Tx, owner string, root Root, path storage.Path) error {
+	comparison := comparePath(root, path)
+	_, err := tx.Exec(ctx, `delete from file_credit_claims where owner_id=$1 and (comparison_path=$2 or starts_with(comparison_path,$3))`, owner, comparison, comparison+"/")
+	return err
 }

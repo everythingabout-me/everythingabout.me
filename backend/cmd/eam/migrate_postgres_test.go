@@ -170,9 +170,9 @@ func TestMigrateBootstrapsAPreVersioningDatabase(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Files after 044 still execute here (the rule cannot tell a history-less full
-	// schema from a history-less partial one), so the stub must carry the relations
-	// those files extend. 045 needs the timeline tables, 047 promotes columns on the
-	// operation journal and indexes the change feed by the operation that produced a
+	// schema from a history-less partial one), so the stub must carry the relations and
+	// functions those files extend. 045 needs the timeline tables, 047 promotes columns on
+	// the operation journal and indexes the change feed by the operation that produced a
 	// fact. Add another relation when a later file references a pre-044 table: a stub
 	// that lags the migration it exercises fails as a missing relation, which is a
 	// fixture error, not a bootstrap-rule error.
@@ -185,6 +185,11 @@ func TestMigrateBootstrapsAPreVersioningDatabase(t *testing.T) {
 		`create table file_operation_guards (comparison_path text not null)`,
 		`create table file_uploads (comparison_path text not null)`,
 		`create table file_credit_claims (owner_id uuid not null, comparison_path text not null, version bytea not null, operation_id uuid not null)`,
+		// 059 matches each claim's path through the canonical comparison, which reads the
+		// per-owner version 026 introduces and calls 026's function. The fixture has no rows
+		// for either to act on, so the fold branch only has to exist, not to fold.
+		`create table file_identity_roots (owner_id uuid primary key, name_comparison_version text not null default 'nfc-sensitive-v1')`,
+		`create function file_identity_comparison(value text, version text) returns text language sql stable strict as $$ select normalize(value, NFC) $$`,
 	} {
 		if _, err := pool.Exec(ctx, statement); err != nil {
 			t.Fatal(err)

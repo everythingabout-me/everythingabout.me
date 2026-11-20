@@ -687,6 +687,86 @@ func appliedDelete(t *testing.T, p *Postgres, op Operation, size int64) {
 	}
 }
 
+// applyCreate drives one upload that creates a new file at path, publishing the revision
+// the bytes hash to. It is the shape a re-import of a deleted path takes, and the one
+// that has to re-arm the path's deletion receipt.
+func applyCreate(t *testing.T, p *Postgres, r Root, a Actor, path storage.Path, size int64, version []byte) Operation {
+	t.Helper()
+	ctx := context.Background()
+	req := genericRequest(r, a, path, size)
+	req.Kind = "upload_commit"
+	req.Intent, _ = json.Marshal(storage.WriteIntent{Target: path, Size: size, Conditions: storage.Conditions{Absent: true}})
+	op := mustClaim(t, p, mustBegin(t, p, req), a)
+	var intent storage.WriteIntent
+	if err := json.Unmarshal(req.Intent, &intent); err != nil {
+		t.Fatal(err)
+	}
+	intent.ID = op.ID
+	if err := p.SaveStage(ctx, op.Lease, storage.Staged{Intent: intent, Size: intent.Size, Handle: []byte("stage-" + op.ID)}); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.StartEffect(ctx, op.Lease); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.SaveApplied(ctx, op.Lease, storage.MutationResult{
+		Entry:    &storage.Entry{Path: path, Kind: storage.File, Size: size, Revision: version},
+		Evidence: []byte("native create " + op.ID),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	settled, err := p.Settle(ctx, op.Lease, Settlement{State: Succeeded, LogicalDelta: size, PhysicalDelta: size}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return settled
+}
+
+// freezeCopy admits and freezes the copy half of an action that puts one file's bytes at
+// target — how a move creates the entry it then removes the source of.
+func freezeCopy(t *testing.T, p *Postgres, r Root, a Actor, source storage.Path, revision []byte, target storage.Path, size int64) (Operation, error) {
+	t.Helper()
+	ctx := context.Background()
+	intent, err := json.Marshal(ActionRequest{Root: r, Actor: a, Kind: "copy", From: source, To: target})
+	if err != nil {
+		t.Fatal(err)
+	}
+	op := mustClaim(t, p, mustBegin(t, p, BeginRequest{Root: r, Actor: a, Kind: "copy", Intent: intent, Guards: []Guard{{Path: source}, {Path: target}}}), a)
+	captured := storage.Entry{Path: source, Kind: storage.File, Size: size, Revision: revision, NativeRef: []byte("inode-" + string(revision))}
+	copied := captured
+	manifest := []ManifestEntry{{Number: 0, Action: "copy", Source: source, Target: target, SourceRevision: revision, SourceEntry: &copied, Size: size, TargetConditions: storage.Conditions{Absent: true}}}
+	physical, err := PhysicalReservation(r, size)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return op, p.FreezeAction(ctx, op.Lease, actionBinding{Sources: []storage.Entry{captured}}, manifest, ReservationRequest{NewBytes: size, PhysicalBytes: physical})
+}
+
+// appliedCopy proves the entry's native copy and settles the bytes it added at target.
+func appliedCopy(t *testing.T, p *Postgres, op Operation, target storage.Path, revision []byte, size int64) {
+	t.Helper()
+	ctx := context.Background()
+	evidence := []byte("native copy verified")
+	result, err := json.Marshal(storage.MutationResult{Entry: &storage.Entry{Path: target, Kind: storage.File, Size: size, Revision: revision}, Evidence: evidence})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := p.BeginEntry(ctx, op.Lease, 0); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.SaveEntry(ctx, op.Lease, 0, "started", []byte("checkpoint"), nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.SaveEntry(ctx, op.Lease, 0, "applied", []byte("checkpoint"), evidence, result); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.SaveApplied(ctx, op.Lease, storage.MutationResult{Evidence: []byte("copy applied")}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := p.Settle(ctx, op.Lease, Settlement{State: Succeeded, LogicalDelta: size, PhysicalDelta: size}, nil); err != nil {
+		t.Fatal(err)
+	}
+}
+
 // TestPostgresCreditClaims pins the lifetime rule in credit.go: a replacement's claim is
 // a fence that ends at settlement, a deletion's claim is a receipt that never ends, and
 // the quota after each case is exactly the arithmetic the rule promises.
@@ -827,6 +907,58 @@ func TestPostgresCreditClaims(t *testing.T) {
 		}
 		_, _, err = p.Begin(ctx, replacementRequest(r, a, "gone/file", 100, 100, version))
 		requireCode(t, err, "credit_conflict")
+		requireUsage(t, p, r, a, 0, 0, 0, 0)
+		requireClaims(t, pool, r.OwnerID, 1)
+	})
+
+	t.Run("a re-imported revision can be removed again", func(t *testing.T) {
+		// Arithmetic: the delete refunds 100 B, the re-import counts those same 100 B
+		// again, and the second delete refunds them. The receipt describes a removal that
+		// the re-import undid, so keeping it would leave identical bytes at a path they
+		// once left permanently unremovable — and revisions are content-derived, so a
+		// folder moved out and imported back names the identical (path, revision) pairs.
+		p, r, a := seedOwner(t, pool, provenBaseline(100, 100, 1000, 1000))
+		removed, err := freezeDelete(t, p, r, a, "back/file", 100, version)
+		if err != nil {
+			t.Fatal(err)
+		}
+		appliedDelete(t, p, removed, 100)
+		requireUsage(t, p, r, a, 0, 0, 0, 0)
+		requireClaims(t, pool, r.OwnerID, 1)
+		applyCreate(t, p, r, a, "back/file", 100, version)
+		requireUsage(t, p, r, a, 100, 0, 100, 0)
+		requireClaims(t, pool, r.OwnerID, 0)
+		again, err := freezeDelete(t, p, r, a, "back/file", 100, version)
+		if err != nil {
+			t.Fatalf("a re-imported revision could not be removed: %v", err)
+		}
+		appliedDelete(t, p, again, 100)
+		requireUsage(t, p, r, a, 0, 0, 0, 0)
+		requireClaims(t, pool, r.OwnerID, 1)
+	})
+
+	t.Run("a copied-back revision can be removed again", func(t *testing.T) {
+		// The same event through an action: the copy half of a move put the revision at a
+		// path a receipt still described, so the removal that follows must be allowed.
+		p, r, a := seedOwner(t, pool, provenBaseline(100, 100, 1000, 1000))
+		removed, err := freezeDelete(t, p, r, a, "back/file", 100, version)
+		if err != nil {
+			t.Fatal(err)
+		}
+		appliedDelete(t, p, removed, 100)
+		requireClaims(t, pool, r.OwnerID, 1)
+		copied, err := freezeCopy(t, p, r, a, "elsewhere/file", version, "back/file", 100)
+		if err != nil {
+			t.Fatal(err)
+		}
+		appliedCopy(t, p, copied, "back/file", version, 100)
+		requireUsage(t, p, r, a, 100, 0, 100, 0)
+		requireClaims(t, pool, r.OwnerID, 0)
+		again, err := freezeDelete(t, p, r, a, "back/file", 100, version)
+		if err != nil {
+			t.Fatalf("a copied-back revision could not be removed: %v", err)
+		}
+		appliedDelete(t, p, again, 100)
 		requireUsage(t, p, r, a, 0, 0, 0, 0)
 		requireClaims(t, pool, r.OwnerID, 1)
 	})
