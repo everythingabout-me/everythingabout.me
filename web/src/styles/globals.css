@@ -1,5 +1,5 @@
 :root {
-  /* Paper / surface */
+  /* Paper / surface. One warm neutral ramp (paper, ink) — no other hue ever reaches a surface. */
   --bg: #faf8f4;
   --bg-top: #fcfaf6;
   --surface: #fffdfb;
@@ -7,34 +7,37 @@
   --border: #e8e3da;
   --border-strong: #d6cec2;
 
-  /* Text */
+  /* Text: three roles, all from the same ramp. */
   --text: #1a1714;
   --text-2: #615b52;
   --text-3: #786f65;
 
-  /* Blue: icon strokes and fills only — text is never blue, in any state */
+  /*
+   * Blue is the mark's colour, kept for selection, rings, progress and live status. It is never
+   * text and never a surface: at 2.5:1 on paper even a 16px icon fails, so a stroke uses
+   * --blue-ink (4.3:1) and a fill that carries no glyph uses --blue.
+   */
   --blue: #13a7f5;
   --blue-ink: #0b7bc4;
   --blue-light: #eaf6fe;
   --ring: rgba(19, 167, 245, 0.18);
 
-  /* Danger: a muted brick red, only for irreversible actions */
+  /* Danger: a muted brick red, only for irreversible actions. */
   --danger: #b4483f;
   --danger-soft: #fbedec;
   --danger-fg: #ffffff;
 
-  /* Backward compatibility: the old --accent* tokens now map to blue */
+  /* Backward compatibility: the old --accent* tokens now map to blue. */
   --accent: var(--blue-ink);
   --accent-light: var(--blue);
-  --accent-deep: var(--blue-ink);
   --accent-soft: var(--blue-light);
-  --accent-tint: var(--blue-light);
 
-  /* Primary button */
-  --btn-bg: var(--blue);
-  --btn-fg: #ffffff;
-  --btn-from: var(--blue);
-  --btn-to: var(--blue);
+  /*
+   * Primary button: the ink itself, not the accent. On a paper screen the one action that
+   * matters reads like a stamp, and the blue stays free to mean "selected / live".
+   */
+  --btn-bg: var(--text);
+  --btn-fg: var(--surface);
 
   --toast-bg: #1a1714;
   --toast-fg: #fffdfb;
@@ -43,14 +46,22 @@
   --shadow-pop: 0 1px 2px rgba(26, 23, 20, 0.07), 0 24px 60px -30px rgba(26, 23, 20, 0.42);
   --shadow-soft: 0 1px 2px rgba(26, 23, 20, 0.04), 0 14px 34px -28px rgba(26, 23, 20, 0.24);
 
+  /*
+   * Type: the system stack, because the product is read in Chinese, Japanese and Korean as often
+   * as in English and each of those needs the platform's own CJK face. One family for the
+   * interface; the mono carries figures, sizes, paths and codes.
+   */
   --font-ui: -apple-system, BlinkMacSystemFont, "SF Pro Text", "SF Pro Display", "Segoe UI",
     "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans SC",
     "Hiragino Kaku Gothic ProN", "Yu Gothic", "Apple SD Gothic Neo", "Malgun Gothic",
     "Noto Sans JP", "Noto Sans KR", "Helvetica Neue", Arial, sans-serif;
   --font-mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
 
-  /* Layout: one page width for every page (and the header sitting on it) */
-  --page-width: 920px;
+  /* Layout: one page width for every page (and the header sitting on it). */
+  --page-width: 1080px;
+
+  /* One easing curve for the whole product. */
+  --ease: cubic-bezier(0.22, 1, 0.36, 1);
 
   color-scheme: light;
 }
@@ -79,14 +90,11 @@
 
     --accent: var(--blue-ink);
     --accent-light: var(--blue);
-    --accent-deep: var(--blue-ink);
     --accent-soft: var(--blue-light);
-    --accent-tint: var(--blue-light);
 
-    --btn-bg: var(--blue);
-    --btn-fg: #06141c;
-    --btn-from: var(--blue);
-    --btn-to: var(--blue);
+    /* On dark the primary is an off-white from the ramp with dark text, not a coloured block. */
+    --btn-bg: var(--text);
+    --btn-fg: #14120f;
 
     --toast-bg: #1d1a17;
     --toast-fg: #f2eee8;
@@ -117,7 +125,7 @@ body {
   font-family: var(--font-ui);
   font-size: 14px;
   font-weight: 400;
-  line-height: 1.65;
+  line-height: 1.5;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
   font-optical-sizing: auto;

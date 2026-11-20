@@ -6,10 +6,9 @@
   gap: 12px;
   padding: 14px 16px;
   border: 1px solid var(--border);
-  border-left: 3px solid var(--accent);
+  border-left: 3px solid var(--border-strong);
   border-radius: 10px;
   background: var(--surface);
-  box-shadow: var(--shadow-soft);
   /* Empty states center their children; the notice reads left-aligned like prose. */
   width: 100%;
   max-width: 560px;
@@ -25,7 +24,7 @@
 
 .title {
   font-size: 14px;
-  font-weight: 600;
+  font-weight: 500;
   color: var(--text);
 }
 
@@ -41,7 +40,7 @@
   align-self: center;
   color: var(--accent);
   font-size: 13px;
-  font-weight: 600;
+  font-weight: 500;
   text-decoration: none;
   white-space: nowrap;
 }

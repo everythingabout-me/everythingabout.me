@@ -42,14 +42,14 @@ export function BrowserProtocol({ handle }: { handle: string | null }) {
         </div>
       </div>
 
-      <p className={settingsStyles.cardLead}>
+      <p className={settingsStyles.schemeExample}>
         {t("connect.schemeExample", { handle: handle ?? "you" })}
       </p>
 
       {supported ? (
         <>
           <button
-            className={settingsStyles.cardAction}
+            className={settingsStyles.quietButton}
             type="button"
             onClick={register}
             disabled={asked}

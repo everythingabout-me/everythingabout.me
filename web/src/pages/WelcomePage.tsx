@@ -39,7 +39,6 @@ export function WelcomePage() {
   return (
     <section className={styles.card}>
       <title>{`${t("welcome.title")} · ${t("app.name")}`}</title>
-      <div className={styles.eyebrow}>{t("welcome.eyebrow")}</div>
       <h1 className={styles.title}>{t("welcome.title")}</h1>
       <p className={styles.subtitle}>{t("welcome.subtitle")}</p>
       <form className={styles.form} onSubmit={claim}>
@@ -56,7 +55,7 @@ export function WelcomePage() {
           />
         </label>
         {/* The address is the whole point, so show the one this input would produce. */}
-        <p className={styles.fieldHint}>
+        <p className={styles.addressHint}>
           {t("welcome.preview", {
             host: window.location.host,
             handle: value.trim() || "…",

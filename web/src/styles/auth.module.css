@@ -1,30 +1,31 @@
+/*
+ * Front door: the sign-in card and the account forms that share it.
+ *
+ * One family, one accent, hairlines for depth. The primary action is the ink itself — on paper a
+ * black stamp is the loudest thing a form can carry, and it keeps blue free to mean "selected".
+ */
+
 .page {
   min-height: 100vh;
   display: flex;
   flex-direction: column;
 }
 
-.header {
-  width: 100%;
-  max-width: var(--page-width);
-  margin: 0 auto;
-  padding: 20px 24px;
-}
-
 .brand {
   display: inline-flex;
   align-items: center;
-  gap: 9px;
-  font-size: 13.5px;
-  font-weight: 600;
-  letter-spacing: 0.005em;
+  gap: 10px;
+  width: fit-content;
+  font-size: 15px;
+  font-weight: 500;
+  letter-spacing: 0;
   color: var(--text);
 }
 
 .brandMark {
   display: block;
-  width: 21px;
-  height: 21px;
+  width: 20px;
+  height: 20px;
   flex: none;
 }
 
@@ -43,7 +44,36 @@
   width: 100%;
   max-width: var(--page-width);
   margin: 0 auto;
-  padding: 24px 24px 72px;
+  padding: 24px 24px 64px;
+}
+
+/* Sign-in and address claiming: statement on the left, form on the right. */
+.mainSplit {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 380px;
+  align-items: center;
+  justify-content: stretch;
+  gap: 64px;
+  padding: 48px 24px 56px;
+}
+
+.aside {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  min-width: 0;
+}
+
+/* The product's own sentence, not a slogan: what the drive is for, in one line. */
+.asideText {
+  margin: 0;
+  max-width: 18ch;
+  font-size: 27px;
+  font-weight: 400;
+  line-height: 1.3;
+  letter-spacing: -0.01em;
+  color: var(--text);
+  text-wrap: balance;
 }
 
 .authStack {
@@ -55,17 +85,13 @@
 }
 
 .card {
-  width: min(100%, 400px);
-  padding: 30px;
-  border-radius: 22px;
+  width: 100%;
+  max-width: 380px;
+  padding: 28px;
+  border-radius: 14px;
   background: var(--surface);
   border: 1px solid var(--border);
-  box-shadow: var(--shadow-soft);
-  animation: card-in 0.26s cubic-bezier(0.22, 1, 0.36, 1);
-}
-
-.cardWide {
-  width: min(100%, var(--page-width));
+  animation: card-in 0.26s var(--ease);
 }
 
 @keyframes card-in {
@@ -79,26 +105,30 @@
   }
 }
 
+/*
+ * A kicker above a title. Sentence case: an uppercase tracked label is the loudest way to say
+ * nothing, and this one only names where you are.
+ */
 .eyebrow {
-  margin-bottom: 10px;
-  font-size: 10.5px;
-  font-weight: 650;
-  letter-spacing: 0.14em;
-  text-transform: uppercase;
+  margin-bottom: 6px;
+  font-size: 12px;
+  font-weight: 400;
+  letter-spacing: 0;
   color: var(--text-3);
 }
 
 .title {
   margin: 0;
   font-size: 22px;
-  font-weight: 650;
-  letter-spacing: -0.02em;
+  font-weight: 500;
+  letter-spacing: -0.01em;
+  line-height: 1.3;
 }
 
 .subtitle {
   margin: 8px 0 0;
   font-size: 13px;
-  line-height: 1.65;
+  line-height: 1.6;
   color: var(--text-2);
 }
 
@@ -106,34 +136,86 @@
   display: flex;
   flex-direction: column;
   gap: 14px;
-  margin-top: 24px;
+  margin-top: 22px;
 }
 
 .field {
   display: flex;
   flex-direction: column;
-  gap: 7px;
+  gap: 6px;
+}
+
+/*
+ * A read-only fact list: two columns, hairline between the rows. Read as a label/value table so
+ * the eye goes down the values rather than across two lines per fact.
+ */
+.metaList {
+  margin: 16px 0 0;
+}
+
+.metaRow {
+  display: grid;
+  grid-template-columns: 112px minmax(0, 1fr);
+  align-items: baseline;
+  gap: 16px;
+  padding: 8px 0;
+}
+
+.metaRow + .metaRow {
+  border-top: 1px solid var(--border);
+}
+
+.metaLabel {
+  margin: 0;
+  color: var(--text-3);
+  font-size: 12.5px;
+}
+
+.metaValue {
+  margin: 0;
+  min-width: 0;
+  color: var(--text);
+  font-size: 14px;
+  word-break: break-all;
+}
+
+/*
+ * Marker, not a width: the account forms that live inside a settings card read this class to
+ * keep their fields at a reading measure and their submit inline instead of full width.
+ */
+.cardWide .form {
+  max-width: 480px;
+  gap: 12px;
+  margin-top: 16px;
+}
+
+.cardWide .form .submit {
+  align-self: flex-start;
+  width: auto;
+  height: 34px;
+  margin-top: 2px;
+  padding: 0 14px;
+  font-size: 13px;
 }
 
 .label {
   font-size: 12.5px;
-  font-weight: 500;
+  font-weight: 400;
   color: var(--text-2);
 }
 
 .input {
-  height: 44px;
-  padding: 0 14px;
-  border-radius: 13px;
+  height: 40px;
+  padding: 0 12px;
+  border-radius: 8px;
   border: 1px solid var(--border);
   background: var(--bg);
   color: var(--text);
   font-size: 14px;
   outline: none;
   transition:
-    border-color 0.14s ease,
-    box-shadow 0.14s ease,
-    background 0.14s ease;
+    border-color 0.14s var(--ease),
+    background-color 0.14s var(--ease);
 }
 
 .input::placeholder {
@@ -144,10 +226,10 @@
   border-color: var(--border-strong);
 }
 
+/* Focus reads as a hairline change plus the browser's ring, never as a filled accent block. */
 .input:focus {
-  border-color: color-mix(in srgb, var(--accent) 50%, var(--border));
+  border-color: var(--border-strong);
   background: var(--surface);
-  box-shadow: 0 0 0 4px color-mix(in srgb, var(--accent) 10%, transparent);
 }
 
 .inputRow {
@@ -169,10 +251,10 @@
 
 .codeBtn {
   flex: 0 0 auto;
-  min-width: 90px;
-  height: 44px;
-  padding: 0 13px;
-  border-radius: 13px;
+  min-width: 92px;
+  height: 40px;
+  padding: 0 12px;
+  border-radius: 8px;
   border: 1px solid var(--border);
   background: var(--surface);
   color: var(--text-2);
@@ -181,9 +263,9 @@
   text-align: center;
   white-space: nowrap;
   transition:
-    background 0.14s ease,
-    border-color 0.14s ease,
-    color 0.14s ease;
+    background-color 0.14s var(--ease),
+    border-color 0.14s var(--ease),
+    color 0.14s var(--ease);
 }
 
 .codeBtn:hover:not(:disabled) {
@@ -199,45 +281,52 @@
 
 .fieldHint {
   margin: 0;
-  font-size: 11.5px;
+  font-size: 12px;
   line-height: 1.5;
   color: var(--text-3);
 }
 
+/* An address preview is an address: mono, so it reads as the thing you will type. */
+.addressHint {
+  margin: 0;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text-2);
+}
+
 .submit {
-  height: 44px;
+  height: 40px;
   margin-top: 4px;
-  border-radius: 13px;
-  background: linear-gradient(140deg, var(--btn-from) 0%, var(--btn-to) 100%);
+  border-radius: 8px;
+  background: var(--btn-bg);
   color: var(--btn-fg);
   font-size: 14px;
-  font-weight: 600;
-  box-shadow: 0 10px 20px -14px color-mix(in srgb, var(--btn-to) 95%, transparent);
+  font-weight: 500;
   transition:
-    transform 0.14s ease,
-    filter 0.14s ease,
-    box-shadow 0.16s ease;
+    background-color 0.14s var(--ease),
+    opacity 0.14s var(--ease);
 }
 
 .submit:hover:not(:disabled) {
-  transform: translateY(-1px);
-  filter: brightness(1.05);
-  box-shadow: 0 14px 24px -14px color-mix(in srgb, var(--btn-to) 95%, transparent);
+  background: color-mix(in srgb, var(--btn-bg) 88%, var(--btn-fg));
 }
 
 .submit:active:not(:disabled) {
-  transform: translateY(0);
+  transform: scale(0.995);
 }
 
+/* Disabled primary: a plain surface step, so it never reads as a colour you cannot use. */
 .submit:disabled {
-  opacity: 0.6;
+  background: var(--border);
+  color: var(--text-3);
   cursor: default;
 }
 
 .error {
   margin: 0;
   padding: 9px 12px;
-  border-radius: 10px;
+  border-radius: 8px;
   background: var(--danger-soft);
   color: var(--danger);
   font-size: 12.5px;
@@ -247,36 +336,35 @@
 .success {
   margin: 0;
   padding: 9px 12px;
-  border-radius: 10px;
-  background: var(--accent-soft);
+  border-radius: 8px;
+  background: var(--hover);
   color: var(--text);
   font-size: 12.5px;
   line-height: 1.5;
 }
 
 .pageSwitch {
-  padding: 4px 9px;
-  border-radius: 999px;
-  color: var(--text-3);
-  font-size: 12px;
-  transition:
-    background 0.14s ease,
-    color 0.14s ease;
+  padding: 0;
+  border-radius: 0;
+  color: var(--text-2);
+  font-size: 12.5px;
+  font-weight: 500;
+  transition: color 0.14s var(--ease);
 }
 
 .pageSwitch:hover {
-  background: var(--hover);
   color: var(--text);
 }
 
 .removeBtn {
   align-self: center;
   margin-top: 2px;
-  padding: 4px 9px;
-  border-radius: 999px;
+  padding: 3px 8px;
+  border-radius: 6px;
   color: var(--danger);
   font-size: 12.5px;
-  transition: background 0.14s ease;
+  font-weight: 500;
+  transition: background-color 0.14s var(--ease);
 }
 
 .removeBtn:hover {
@@ -285,7 +373,7 @@
 
 .hint {
   margin: 12px 0 0;
-  font-size: 11.5px;
+  font-size: 12px;
   line-height: 1.6;
   color: var(--text-3);
 }
@@ -301,16 +389,17 @@
 
 .ghostBtn {
   flex: 0 0 auto;
-  height: 32px;
-  padding: 0 13px;
-  border-radius: 999px;
+  height: 34px;
+  padding: 0 12px;
+  border-radius: 8px;
   border: 1px solid var(--border);
   color: var(--text-2);
   font-size: 12.5px;
+  font-weight: 500;
   transition:
-    background 0.14s ease,
-    color 0.14s ease,
-    border-color 0.14s ease;
+    background-color 0.14s var(--ease),
+    color 0.14s var(--ease),
+    border-color 0.14s var(--ease);
 }
 
 .ghostBtn:hover:not(:disabled) {
@@ -324,65 +413,19 @@
   cursor: default;
 }
 
-.metaList {
-  display: flex;
-  flex-direction: column;
-  margin: 24px 0 0;
-  border: 1px solid var(--border);
-  border-radius: 14px;
-  overflow: hidden;
-}
-
-.metaRow {
-  display: grid;
-  grid-template-columns: 88px minmax(0, 1fr);
-  gap: 14px;
-  padding: 12px 14px;
-}
-
-.metaRow + .metaRow {
-  border-top: 1px solid var(--border);
-}
-
-.metaLabel {
-  margin: 0;
-  font-size: 12.5px;
-  color: var(--text-3);
-}
-
-.metaValue {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin: 0;
-  min-width: 0;
-  font-size: 13px;
-  color: var(--text);
-  word-break: break-all;
-}
-
-.divider {
-  height: 1px;
-  margin: 24px 0 22px;
-  background: var(--border);
-}
-
 .sectionTitle {
   margin: 0;
-  font-size: 14.5px;
-  font-weight: 600;
-  letter-spacing: -0.005em;
+  font-size: 14px;
+  font-weight: 500;
+  letter-spacing: 0;
+  line-height: 1.4;
 }
 
 .sectionHint {
   margin: 6px 0 0;
   font-size: 12.5px;
-  line-height: 1.65;
+  line-height: 1.6;
   color: var(--text-2);
-}
-
-.cardWide .form {
-  margin-top: 18px;
 }
 
 .footnote {
@@ -397,7 +440,7 @@
   border-radius: 6px;
   background: var(--hover);
   color: var(--text-2);
-  font-size: 11px;
+  font-size: 11.5px;
   word-break: break-all;
 }
 
@@ -405,7 +448,7 @@
   display: block;
   margin: 8px 0;
   padding: 9px 11px;
-  border-radius: 9px;
+  border-radius: 8px;
   background: var(--hover);
   color: var(--text-2);
   font-size: 11.5px;
@@ -413,407 +456,6 @@
   white-space: pre;
   overflow-x: auto;
   word-break: normal;
-}
-
-@media (max-width: 560px) {
-  .header {
-    padding: 16px 18px;
-  }
-
-  .main {
-    align-items: flex-start;
-    padding: 12px 16px 48px;
-  }
-
-  .card {
-    padding: 24px 20px;
-    border-radius: 18px;
-  }
-
-  .cardHead {
-    flex-direction: column;
-  }
-
-  .metaRow {
-    grid-template-columns: 1fr;
-    gap: 4px;
-  }
-}
-
-/* ============================================================
-   Visual system: warm white / light blue / deep blue
-   ============================================================ */
-
-.header {
-  max-width: var(--page-width);
-  padding: 20px 24px;
-}
-
-.brand {
-  gap: 9px;
-  font-size: 14px;
-  font-weight: 600;
-  letter-spacing: 0;
-}
-
-.brandMark {
-  width: 21px;
-  height: 21px;
-}
-
-.loadingMark {
-  width: 32px;
-  height: 32px;
-}
-
-.main {
-  padding: 26px 24px 64px;
-}
-
-.authStack {
-  gap: 13px;
-}
-
-.card {
-  width: min(100%, 420px);
-  padding: 34px;
-  border-radius: 14px;
-  box-shadow: var(--shadow-soft);
-}
-
-.cardWide {
-  width: min(100%, var(--page-width));
-}
-
-.eyebrow {
-  margin-bottom: 10px;
-  font-size: 10.5px;
-  font-weight: 600;
-  letter-spacing: 0.08em;
-  color: var(--text-3);
-}
-
-.title {
-  font-size: 22px;
-  font-weight: 600;
-  letter-spacing: 0;
-  line-height: 1.35;
-}
-
-.subtitle {
-  margin: 7px 0 0;
-  font-size: 12.5px;
-  line-height: 1.65;
-}
-
-.form {
-  gap: 14px;
-  margin-top: 22px;
-}
-
-.field {
-  gap: 6px;
-}
-
-.label {
-  font-size: 12px;
-  font-weight: 500;
-}
-
-.input {
-  height: 44px;
-  border-radius: 10px;
-  font-size: 14px;
-}
-
-.input:focus {
-  border-color: var(--blue);
-  background: var(--surface);
-  box-shadow: 0 0 0 4px var(--ring);
-}
-
-.codeBtn {
-  height: 44px;
-  border-radius: 10px;
-  border-color: var(--border-strong);
-  font-size: 13px;
-  font-weight: 500;
-}
-
-.codeBtn:hover:not(:disabled) {
-  background: var(--hover);
-  border-color: var(--border-strong);
-  color: var(--text);
-}
-
-.fieldHint {
-  font-size: 11.5px;
-}
-
-.submit {
-  height: 44px;
-  border-radius: 10px;
-  background: var(--blue);
-  color: var(--btn-fg);
-  font-size: 14px;
-  font-weight: 600;
-  box-shadow: none;
-  transition: filter 0.14s ease, opacity 0.14s ease;
-}
-
-.submit:hover:not(:disabled) {
-  transform: none;
-  filter: brightness(0.94);
-  box-shadow: none;
-}
-
-.submit:active:not(:disabled) {
-  transform: none;
-  filter: brightness(0.88);
-}
-
-.submit:disabled {
-  opacity: 0.4;
-}
-
-.error {
-  border-radius: 8px;
-  font-size: 12.5px;
-}
-
-.success {
-  border-radius: 8px;
-  background: var(--blue-light);
-  color: var(--text);
-  font-size: 12.5px;
-}
-
-.pageSwitch {
-  padding: 0;
-  border-radius: 0;
-  color: var(--text-2);
-  font-size: 12.5px;
-  font-weight: 500;
-}
-
-.pageSwitch:hover {
-  background: none;
-  color: var(--text);
-  text-decoration: underline;
-  text-underline-offset: 3px;
-}
-
-.hint {
-  font-size: 11.5px;
-}
-
-.ghostBtn {
-  height: 36px;
-  padding: 0 13px;
-  border-radius: 10px;
-  border-color: var(--border-strong);
-  font-size: 13px;
-  font-weight: 500;
-}
-
-.ghostBtn:hover:not(:disabled) {
-  border-color: var(--border-strong);
-  background: var(--hover);
-  color: var(--text);
-}
-
-.metaList {
-  border-radius: 10px;
-}
-
-.metaRow {
-  padding: 10px 13px;
-}
-
-.metaLabel {
-  font-size: 12px;
-}
-
-.metaValue {
-  font-size: 12.5px;
-}
-
-.sectionTitle {
-  font-size: 15px;
-  font-weight: 600;
-  letter-spacing: 0;
-  line-height: 1.4;
-}
-
-.sectionHint {
-  font-size: 12.5px;
-  line-height: 1.6;
-}
-
-.cardWide .form {
-  gap: 12px;
-  margin-top: 14px;
-}
-
-.cardWide .form .submit {
-  align-self: flex-start;
-  width: auto;
-  height: 36px;
-  margin-top: 4px;
-  padding: 0 14px;
-  font-size: 13px;
-}
-
-.footnote {
-  font-size: 12px;
-}
-
-.removeBtn {
-  padding: 3px 8px;
-  border-radius: 6px;
-  color: var(--danger);
-  font-size: 12.5px;
-  font-weight: 500;
-}
-
-.removeBtn:hover {
-  background: var(--danger-soft);
-}
-
-@media (max-width: 560px) {
-  .header {
-    padding: 16px 18px;
-  }
-
-  .main {
-    padding: 20px 16px 48px;
-  }
-
-  .card {
-    padding: 24px;
-  }
-}
-
-/* ---------- Save links ---------- */
-
-.saveLinksHead {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 16px;
-}
-
-.saveLinksHead .ghostBtn {
-  margin-top: 1px;
-}
-
-.linkList {
-  display: flex;
-  flex-direction: column;
-  gap: 9px;
-  margin-top: 16px;
-}
-
-.linkRow {
-  padding: 12px 14px;
-  border: 1px solid var(--border);
-  border-radius: 12px;
-  background: var(--bg);
-}
-
-.linkUrl {
-  display: block;
-  font-size: 12px;
-  line-height: 1.55;
-  color: var(--text-2);
-  word-break: break-all;
-}
-
-.linkMeta {
-  margin: 5px 0 0;
-  font-size: 11.5px;
-  color: var(--text-3);
-}
-
-.linkActions {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin-top: 9px;
-}
-
-.linkActions .removeBtn {
-  margin: 0;
-  padding: 0 10px;
-  height: 32px;
-  border-radius: 999px;
-  font-size: 12px;
-}
-
-@media (max-width: 560px) {
-  .saveLinksHead {
-    flex-direction: column;
-    gap: 10px;
-  }
-}
-
-/* ---------- Recent activity ---------- */
-
-.activityList {
-  display: flex;
-  flex-direction: column;
-  gap: 0;
-  margin: 14px 0 0;
-  padding: 0;
-  list-style: none;
-  border: 1px solid var(--border);
-  border-radius: 12px;
-  overflow: hidden;
-}
-
-.activityRow {
-  display: grid;
-  grid-template-columns: 96px minmax(0, 1fr) auto;
-  gap: 12px;
-  align-items: baseline;
-  padding: 10px 13px;
-  font-size: 12.5px;
-}
-
-.activityRow + .activityRow {
-  border-top: 1px solid var(--border);
-}
-
-.activityAction {
-  color: var(--text-2);
-  white-space: nowrap;
-}
-
-.activityPath {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  color: var(--text);
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  font-size: 11.5px;
-}
-
-.activityMeta {
-  color: var(--text-3);
-  font-size: 11px;
-  white-space: nowrap;
-}
-
-@media (max-width: 560px) {
-  .activityRow {
-    grid-template-columns: 1fr;
-    gap: 3px;
-  }
-
-  .activityMeta {
-    white-space: normal;
-  }
 }
 
 /* ---------- Legal links ---------- */
@@ -835,13 +477,117 @@
 
 .legal a {
   color: var(--text-3);
-  transition: color 0.14s ease;
+  transition: color 0.14s var(--ease);
 }
 
 .legal a:hover {
   color: var(--text);
   text-decoration: underline;
   text-underline-offset: 3px;
+}
+
+/* ---------- Save links ---------- */
+
+.saveLinksHead {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.saveLinksHead .ghostBtn {
+  margin-top: 1px;
+}
+
+.linkList {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 16px;
+}
+
+.linkRow {
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg);
+}
+
+.linkUrl {
+  display: block;
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  line-height: 1.55;
+  color: var(--text-2);
+  word-break: break-all;
+}
+
+.linkMeta {
+  margin: 5px 0 0;
+  font-size: 11.5px;
+  color: var(--text-3);
+}
+
+.linkActions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 9px;
+}
+
+.linkActions .removeBtn {
+  margin: 0;
+  padding: 0 8px;
+  height: 28px;
+  font-size: 12px;
+}
+
+/* ---------- Recent activity ---------- */
+
+.activityList {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  margin: 14px 0 0;
+  padding: 0;
+  list-style: none;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  overflow: hidden;
+}
+
+.activityRow {
+  display: grid;
+  grid-template-columns: 104px minmax(0, 1fr) auto;
+  gap: 12px;
+  align-items: baseline;
+  padding: 9px 12px;
+  font-size: 12.5px;
+}
+
+.activityRow + .activityRow {
+  border-top: 1px solid var(--border);
+}
+
+.activityAction {
+  color: var(--text-2);
+  white-space: nowrap;
+}
+
+.activityPath {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+}
+
+.activityMeta {
+  color: var(--text-3);
+  font-size: 11.5px;
+  white-space: nowrap;
 }
 
 /* Storage sync: the index is a cache of the drive, so this is a refresh control. */
@@ -853,15 +599,15 @@
 
 .syncTitle {
   margin: 0;
-  font-size: 15px;
-  font-weight: 600;
+  font-size: 14px;
+  font-weight: 500;
   color: var(--text);
 }
 
 .syncSubtitle {
   margin: 8px 0 0;
-  font-size: 13px;
-  font-weight: 600;
+  font-size: 12.5px;
+  font-weight: 500;
   color: var(--text-2);
 }
 
@@ -893,4 +639,55 @@
 
 .syncItem code {
   overflow-wrap: anywhere;
+}
+
+/* ---------- Responsive ---------- */
+
+@media (max-width: 880px) {
+  .mainSplit {
+    grid-template-columns: minmax(0, 1fr);
+    justify-items: start;
+    align-content: start;
+    gap: 28px;
+    padding-top: 8px;
+  }
+
+  .aside {
+    gap: 12px;
+    max-width: 420px;
+  }
+
+  .asideText {
+    max-width: none;
+    font-size: 21px;
+  }
+}
+
+@media (max-width: 560px) {
+  .main {
+    padding: 12px 16px 48px;
+  }
+
+  .card {
+    padding: 22px 18px;
+    border-radius: 12px;
+  }
+
+  .cardHead {
+    flex-direction: column;
+  }
+
+  .activityRow {
+    grid-template-columns: 1fr;
+    gap: 3px;
+  }
+
+  .activityMeta {
+    white-space: normal;
+  }
+
+  .saveLinksHead {
+    flex-direction: column;
+    gap: 10px;
+  }
 }

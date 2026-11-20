@@ -14,13 +14,13 @@
   width: 100%;
   max-width: var(--page-width);
   margin: 0 auto;
-  padding: 0 24px 140px;
+  padding: 0 24px 120px;
 }
 
 .feed {
   display: flex;
   flex-direction: column;
-  padding-top: 14px;
+  padding-top: 12px;
 }
 
 .working {
@@ -46,15 +46,14 @@
   animation: pulse 1.8s ease-out infinite;
 }
 
+/* A live indicator fades; it does not glow or ripple. */
 @keyframes pulse {
-  0% {
-    box-shadow: 0 0 0 0 color-mix(in srgb, var(--blue) 40%, transparent);
-  }
-  70% {
-    box-shadow: 0 0 0 5px transparent;
-  }
+  0%,
   100% {
-    box-shadow: 0 0 0 0 transparent;
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.35;
   }
 }
 
@@ -64,16 +63,18 @@
   padding: 22px 0 26px;
 }
 
+/* The date is a margin note, set in the mono so a column of them reads as an index. */
 .kicker {
   display: flex;
   align-items: baseline;
   gap: 8px;
+  font-family: var(--font-mono);
   font-size: 11.5px;
   color: var(--text-3);
 }
 
 .kicker b {
-  font-weight: 500;
+  font-weight: 400;
   color: var(--text-2);
 }
 
@@ -82,10 +83,10 @@
 }
 
 .title {
-  margin: 5px 0 0;
-  font-size: 17px;
-  font-weight: 600;
-  letter-spacing: -0.005em;
+  margin: 4px 0 0;
+  font-size: 16px;
+  font-weight: 500;
+  letter-spacing: 0;
   line-height: 1.45;
   color: var(--text);
 }
@@ -100,14 +101,13 @@
   text-underline-offset: 3px;
 }
 
-/* Media: one large image, or a collage of 2–4. */
+/* Media: one large image, or a collage of 2–4, on a hairline gap. */
 .media {
   display: grid;
-  gap: 2px;
-  margin-top: 12px;
-  border-radius: 12px;
+  gap: 4px;
+  margin-top: 10px;
+  border-radius: 10px;
   overflow: hidden;
-  background: var(--border);
 }
 
 .mediaOne {
@@ -153,19 +153,16 @@
 .tileVideo {
   display: grid;
   place-items: center;
-  background:
-    radial-gradient(120% 90% at 70% 20%, color-mix(in srgb, var(--blue) 14%, transparent), transparent 60%),
-    linear-gradient(140deg, #1c1a17, #0e0d0b);
+  background: #14120f;
 }
 
 .playIcon {
   display: grid;
   place-items: center;
-  width: 42px;
-  height: 42px;
+  width: 40px;
+  height: 40px;
   border-radius: 50%;
-  border: 1px solid rgba(255, 255, 255, 0.55);
-  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid rgba(255, 255, 255, 0.4);
 }
 
 .playIcon::after {
@@ -177,20 +174,21 @@
 }
 
 .tileFallback {
-  background: linear-gradient(135deg, var(--hover), color-mix(in srgb, var(--border) 70%, var(--hover)));
+  background: var(--hover);
 }
 
-/* Text-only events sit on a light panel to set them apart from photo cards. */
+/* Text-only events sit on a sheet of their own, so they are not mistaken for photo captions. */
 .note {
   margin-top: 8px;
-  padding: 22px 24px;
-  border-radius: 14px;
-  background: color-mix(in srgb, var(--surface) 76%, transparent);
+  padding: 20px 22px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--surface);
 }
 
 .note .title {
   margin-top: 0;
-  font-size: 18px;
+  font-size: 17px;
 }
 
 .note .body {
@@ -220,11 +218,13 @@
 }
 
 .stats em {
+  font-family: var(--font-mono);
   font-style: normal;
-  font-size: 16px;
-  font-weight: 600;
-  letter-spacing: -0.01em;
+  font-size: 15px;
+  font-weight: 500;
+  letter-spacing: 0;
   color: var(--text);
+  font-variant-numeric: tabular-nums;
 }
 
 .stats em s {
@@ -238,7 +238,7 @@
 
 .stats i {
   font-style: normal;
-  font-size: 10.5px;
+  font-size: 11px;
   color: var(--text-3);
 }
 
@@ -254,7 +254,7 @@
   width: 100%;
   margin-top: 10px;
   border: 0;
-  border-radius: 12px;
+  border-radius: 10px;
   background: transparent;
   color-scheme: light;
 }
@@ -285,8 +285,9 @@
 }
 
 .emptyTitle {
-  font-size: 28px;
-  font-weight: 600;
+  font-size: 26px;
+  font-weight: 500;
+  letter-spacing: -0.01em;
   line-height: 1.25;
 }
 
@@ -301,18 +302,18 @@
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  height: 36px;
+  height: 34px;
   margin-top: 8px;
-  padding: 0 15px;
-  border-radius: 10px;
-  background: var(--blue);
+  padding: 0 14px;
+  border-radius: 8px;
+  background: var(--btn-bg);
   color: var(--btn-fg);
   font-size: 13px;
-  font-weight: 600;
+  font-weight: 500;
 }
 
 .emptyAction:hover {
-  filter: brightness(0.94);
+  background: color-mix(in srgb, var(--btn-bg) 88%, var(--btn-fg));
 }
 
 .errorBox {
@@ -320,10 +321,10 @@
   flex-direction: column;
   align-items: flex-start;
   gap: 10px;
-  margin-top: 30px;
+  margin-top: 24px;
   padding: 16px;
   border: 1px solid var(--border);
-  border-radius: 14px;
+  border-radius: 12px;
   color: var(--text-2);
   font-size: 12.5px;
 }
@@ -358,10 +359,10 @@
 }
 
 .end {
-  padding: 30px 0 8px;
+  padding: 28px 0 8px;
   text-align: center;
   font-size: 11.5px;
-  letter-spacing: 0.02em;
+  letter-spacing: 0;
   color: var(--text-3);
 }
 
@@ -393,9 +394,9 @@
 
 .skMedia {
   width: 100%;
-  margin-top: 12px;
+  margin-top: 10px;
   aspect-ratio: 3 / 2;
-  border-radius: 12px;
+  border-radius: 10px;
 }
 
 @keyframes shimmer {
@@ -419,16 +420,16 @@
   }
 
   .ev {
-    padding: 18px 0 22px;
+    padding: 16px 0 20px;
   }
 
   .title {
-    font-size: 16px;
+    font-size: 15px;
   }
 
   .note {
-    padding: 18px;
-    border-radius: 12px;
+    padding: 16px;
+    border-radius: 10px;
   }
 
   .note .title {

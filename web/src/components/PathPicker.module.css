@@ -95,7 +95,7 @@
 
 .crumbHere {
   color: var(--text);
-  font-weight: 600;
+  font-weight: 500;
 }
 
 .crumbSep {
@@ -177,7 +177,7 @@
   background: var(--btn-bg);
   color: var(--btn-fg);
   font-size: 12px;
-  font-weight: 600;
+  font-weight: 500;
   white-space: nowrap;
 }
 

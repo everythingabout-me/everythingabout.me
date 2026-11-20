@@ -10,10 +10,10 @@
   align-items: center;
   justify-content: center;
   gap: 5px;
-  height: 32px;
-  padding: 0 12px;
+  height: 30px;
+  padding: 0 11px;
   border: 1px solid var(--border);
-  border-radius: 9px;
+  border-radius: 8px;
   background: var(--surface);
   color: var(--text);
   font-size: 12.5px;
@@ -36,10 +36,9 @@
 
 .handoff {
   padding: 18px 20px;
-  border: 1px solid var(--border-strong);
-  border-radius: 14px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
   background: var(--surface);
-  box-shadow: var(--shadow-soft);
 }
 
 .panelHead {
@@ -51,9 +50,9 @@
 
 .panelTitle {
   margin: 0;
-  font-size: 15px;
-  font-weight: 600;
-  letter-spacing: -0.01em;
+  font-size: 14px;
+  font-weight: 500;
+  letter-spacing: 0;
   line-height: 1.4;
 }
 
@@ -99,7 +98,7 @@
 .optionOn,
 .optionOn:hover {
   border-color: var(--blue);
-  background: var(--blue-light);
+  background: color-mix(in srgb, var(--blue) 8%, var(--surface));
   color: var(--text);
 }
 
@@ -117,9 +116,9 @@
 }
 
 .optionOn .check {
-  border-color: var(--blue);
-  background: var(--blue);
-  color: var(--btn-fg);
+  border-color: transparent;
+  background: var(--text);
+  color: var(--surface);
 }
 
 .error {
@@ -162,9 +161,9 @@
 
 .orText {
   flex: none;
-  font-size: 11px;
-  font-weight: 500;
-  letter-spacing: 0.04em;
+  font-size: 11.5px;
+  font-weight: 400;
+  letter-spacing: 0;
   color: var(--text-3);
 }
 
@@ -197,7 +196,7 @@
 .configTitle {
   margin: 0 0 12px;
   font-size: 13px;
-  font-weight: 600;
+  font-weight: 500;
   color: var(--text);
 }
 
@@ -235,8 +234,7 @@
 }
 
 .codeLabel {
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
+  letter-spacing: 0;
 }
 
 .copyBtn {
@@ -294,16 +292,15 @@
   padding-bottom: 0;
 }
 
+/* One glyph, one colour: the connected apps are a list, not a row of coloured tiles. */
 .glyph {
   display: grid;
   place-items: center;
   flex: none;
-  width: 26px;
-  height: 26px;
-  margin-top: 1px;
-  border-radius: 7px;
-  background: var(--blue-light);
-  color: var(--blue-ink);
+  width: 20px;
+  height: 20px;
+  margin-top: 2px;
+  color: var(--text-3);
 }
 
 .rowMain {
@@ -380,7 +377,7 @@
 .revokeConfirm {
   background: var(--danger-soft);
   color: var(--danger);
-  font-weight: 600;
+  font-weight: 500;
 }
 
 .revoke:disabled {

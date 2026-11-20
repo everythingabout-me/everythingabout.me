@@ -224,6 +224,17 @@ export function KeyIcon(props: IconProps) {
   );
 }
 
+/** More actions for the current page (the folder's own menu). */
+export function MoreIcon(props: IconProps) {
+  return (
+    <svg {...base(props)} fill="currentColor" stroke="none">
+      <circle cx="3.25" cy="8" r="1.15" />
+      <circle cx="8" cy="8" r="1.15" />
+      <circle cx="12.75" cy="8" r="1.15" />
+    </svg>
+  );
+}
+
 export function CopyIcon(props: IconProps) {
   return (
     <svg {...base(props)}>
@@ -252,7 +263,7 @@ export function GlyphFor({ name, mime, isDir }: { name: string; mime?: string | 
   if (type.startsWith("audio/") || ["mp3", "flac", "wav", "m4a"].includes(ext)) return <AudioIcon />;
   if (ext === "pdf") return <PdfIcon />;
   if (["zip", "rar", "7z", "tar", "gz"].includes(ext)) return <ArchiveIcon />;
-  if (["ts", "tsx", "js", "jsx", "go", "py", "rs", "json", "md", "yml", "yaml", "sh"].includes(ext))
+  if (["ts", "tsx", "js", "jsx", "go", "py", "rs", "json", "yml", "yaml", "sh"].includes(ext))
     return <CodeIcon />;
   return <FileIcon />;
 }

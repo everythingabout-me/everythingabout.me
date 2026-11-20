@@ -20,13 +20,13 @@ const en = {
   "settings.title": "Settings",
   "settings.sections": "Settings sections",
   "settings.general.title": "General",
-  "settings.general.lead": "Your account and how you sign in.",
+  "settings.general.lead": "Your account and how you sign in",
   "settings.general.signOutHint":
     "This ends the session in this browser only; other browsers stay signed in.",
   "settings.connect.title": "Connect",
-  "settings.connect.lead": "Apps, agents and links that can reach this drive.",
+  "settings.connect.lead": "Apps, agents and links that can reach this drive",
   "settings.storage.title": "Storage",
-  "settings.storage.lead": "Where the bytes live, and how the index keeps up with them.",
+  "settings.storage.lead": "Where the bytes live, and how the index keeps up with them",
 
   "drives.add": "Add a provider",
   "drives.addHint":
@@ -165,6 +165,9 @@ const en = {
   "stream.durationSeconds": "{n}s",
 
   "drive.root": "All files",
+  "drive.colName": "Name",
+  "drive.colSize": "Size",
+  "drive.colModified": "Modified",
   "drive.searchPlaceholder": "Search files and paths",
   "drive.upload": "Upload",
   "drive.uploadFiles": "Upload files",
@@ -353,6 +356,7 @@ const en = {
 
   "auth.titleCode": "Sign in or sign up",
   "auth.titlePassword": "Sign in with password",
+  "auth.aside": "Files, photos and records, kept under your own address.",
   "auth.email": "Email",
   "auth.code": "Verification code",
   "auth.codePlaceholder": "6 digits",
@@ -528,7 +532,6 @@ const en = {
   "account.addressSaved": "Address updated.",
   "account.addressHint": "Old links keep working: a previous address redirects to this one.",
 
-  "welcome.eyebrow": "One step",
   "welcome.title": "Choose your address",
   "welcome.subtitle": "Your files live at your own address, so opening the drive is as direct as typing your name.",
   "welcome.label": "Address",
@@ -730,6 +733,9 @@ const zh: Record<MessageKey, string> = {
   "stream.durationSeconds": "{n} 秒",
 
   "drive.root": "全部文件",
+  "drive.colName": "名称",
+  "drive.colSize": "大小",
+  "drive.colModified": "修改时间",
   "drive.searchPlaceholder": "搜索文件与路径",
   "drive.upload": "上传",
   "drive.uploadFiles": "上传文件",
@@ -914,6 +920,7 @@ const zh: Record<MessageKey, string> = {
 
   "auth.titleCode": "登录 / 注册",
   "auth.titlePassword": "密码登录",
+  "auth.aside": "文件、照片和记录，都存在你自己的地址下。",
   "auth.email": "邮箱",
   "auth.code": "验证码",
   "auth.codePlaceholder": "6 位数字",
@@ -1084,7 +1091,6 @@ const zh: Record<MessageKey, string> = {
   "account.addressSaved": "地址已更新。",
   "account.addressHint": "旧链接不会失效：上一个地址会自动跳到这里。",
 
-  "welcome.eyebrow": "还差一步",
   "welcome.title": "取一个地址",
   "welcome.subtitle": "文件就住在你自己的地址下，打开网盘和输入你的名字一样直接。",
   "welcome.label": "地址",

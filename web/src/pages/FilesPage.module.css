@@ -1,8 +1,8 @@
 /*
- * Type scale for this page: 14px is the reading size (names, path, buttons, fields and
- * body values), 13px annotates it (sizes, times, hints, captions, labels), and 11px is
- * reserved for pills. Weights: 400 for text, 500 for anything clickable and for the name
- * of a folder. No sizes in between.
+ * Type scale for this page: 14px is the reading size (names, buttons, fields and body values),
+ * 12.5px annotates it (sizes, times, hints, captions), 11.5px is the list's column header and
+ * the only place a figure is set small. Weights: 400 for text, 500 for the page title, for the
+ * name of a folder and for anything clickable. No sizes in between.
  */
 
 .page {
@@ -16,7 +16,7 @@
   width: 100%;
   max-width: var(--page-width);
   margin: 0 auto;
-  padding: 28px 24px 64px;
+  padding: 24px 24px 56px;
 }
 
 /* ---------- Page header: the path, plus this page's controls ---------- */
@@ -24,8 +24,8 @@
 .topbar {
   display: flex;
   align-items: center;
-  gap: 14px;
-  padding: 2px 2px 18px;
+  gap: 16px;
+  padding: 0 0 14px;
 }
 
 .pathArea {
@@ -39,45 +39,64 @@
 /* One uniform line: ancestors, separators and the current folder look the same. */
 .crumbs {
   display: flex;
-  align-items: center;
+  align-items: baseline;
   flex-wrap: wrap;
-  gap: 2px 4px;
+  gap: 2px 6px;
   min-width: 0;
 }
 
 .crumbItem {
   display: inline-flex;
-  align-items: center;
-  gap: 4px;
+  align-items: baseline;
+  gap: 6px;
   min-width: 0;
   max-width: 100%;
 }
 
+/*
+ * The trail is the address: ancestors are set as a mono path, the folder you are in is the
+ * page title. Two sizes make the hierarchy, so the trail never needs a heavier weight.
+ */
 .crumb {
   margin: 0;
   min-width: 0;
   padding: 0;
-  color: var(--text-2);
-  font-size: 14px;
-  font-weight: 500;
-  letter-spacing: 0;
+  color: var(--text-3);
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  font-weight: 400;
   line-height: 1.5;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-  transition: color 0.14s ease;
+  transition: color 0.14s var(--ease);
 }
 
 a.crumb:hover {
   color: var(--text);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+.crumbCurrent {
+  margin: 0;
+  min-width: 0;
+  color: var(--text);
+  font-size: 22px;
+  font-weight: 500;
+  letter-spacing: -0.01em;
+  line-height: 1.3;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .crumbSep {
-  display: flex;
-  align-items: center;
   flex: none;
   color: var(--text-3);
-  opacity: 0.55;
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  opacity: 0.7;
 }
 
 /* Editing the last segment happens in place, where the name already is. */
@@ -93,16 +112,16 @@ a.crumb:hover {
   font-size: 14px;
   font-weight: 500;
   outline: none;
-  box-shadow: 0 0 0 4px var(--ring);
 }
 
 .pathTitle {
   margin: 0;
   min-width: 0;
-  color: var(--text-2);
-  font-size: 14px;
+  color: var(--text);
+  font-size: 20px;
   font-weight: 500;
-  line-height: 1.5;
+  letter-spacing: -0.01em;
+  line-height: 1.3;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -111,7 +130,7 @@ a.crumb:hover {
 .topActions {
   display: flex;
   align-items: center;
-  gap: 4px;
+  gap: 6px;
   flex: none;
   margin-left: auto;
 }
@@ -120,11 +139,11 @@ a.crumb:hover {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 36px;
-  height: 36px;
-  border-radius: 10px;
+  width: 32px;
+  height: 32px;
+  border-radius: 8px;
   color: var(--text-2);
-  transition: background 0.14s ease, color 0.14s ease;
+  transition: background-color 0.14s var(--ease), color 0.14s var(--ease);
 }
 
 .iconBtn:hover {
@@ -152,9 +171,9 @@ a.crumb:hover {
 
 .searchInput {
   width: 100%;
-  height: 36px;
-  padding: 0 12px 0 31px;
-  border-radius: 10px;
+  height: 32px;
+  padding: 0 12px 0 30px;
+  border-radius: 8px;
   border: 1px solid var(--border);
   background: var(--surface);
   color: var(--text);
@@ -193,25 +212,17 @@ a.crumb:hover {
   align-items: center;
   justify-content: center;
   flex: none;
-  width: 24px;
-  height: 24px;
-  border-radius: 7px;
-  color: var(--text-3);
-  transition: background 0.14s ease, color 0.14s ease;
+  width: 32px;
+  height: 32px;
+  border-radius: 8px;
+  color: var(--text-2);
+  transition: background-color 0.14s var(--ease), color 0.14s var(--ease);
 }
 
 .menuTrigger:hover,
 .menuTrigger[aria-expanded="true"] {
   background: var(--hover);
   color: var(--text);
-}
-
-.menuTrigger svg {
-  transition: transform 0.16s ease;
-}
-
-.menuTrigger[aria-expanded="true"] svg {
-  transform: rotate(180deg);
 }
 
 /* A transparent layer behind the popover: a click anywhere else closes it. */
@@ -293,7 +304,7 @@ a.crumb:hover {
   padding: 24px;
   overflow-y: auto;
   border: 1px solid var(--border);
-  border-radius: 14px;
+  border-radius: 12px;
   background: var(--surface);
   color: var(--text);
   box-shadow: var(--shadow-pop);
@@ -347,7 +358,7 @@ a.crumb:hover {
 }
 
 .confirmDeleteBtn:hover:not(:disabled) {
-  filter: brightness(0.94);
+  background: color-mix(in srgb, var(--danger) 88%, #000);
 }
 
 .confirmDeleteBtn:disabled {
@@ -377,12 +388,12 @@ a.crumb:hover {
 }
 
 .conflictPrimary {
-  background: var(--blue);
+  background: var(--btn-bg);
   color: var(--btn-fg);
 }
 
 .conflictPrimary:hover {
-  filter: brightness(0.94);
+  background: color-mix(in srgb, var(--btn-bg) 88%, var(--btn-fg));
 }
 
 .conflictSecondary {
@@ -419,23 +430,23 @@ a.crumb:hover {
   align-items: center;
   gap: 6px;
   flex: none;
-  height: 36px;
-  padding: 0 15px;
-  border-radius: 10px;
-  background: var(--blue);
+  height: 32px;
+  padding: 0 13px;
+  border-radius: 8px;
+  background: var(--btn-bg);
   color: var(--btn-fg);
-  font-size: 14px;
+  font-size: 13px;
   font-weight: 500;
   white-space: nowrap;
-  transition: filter 0.14s ease;
+  transition: background-color 0.14s var(--ease), opacity 0.14s var(--ease);
 }
 
 .uploadBtn:hover {
-  filter: brightness(0.94);
+  background: color-mix(in srgb, var(--btn-bg) 88%, var(--btn-fg));
 }
 
 .uploadBtn:active {
-  filter: brightness(0.88);
+  transform: scale(0.99);
 }
 
 .uploadBadge {
@@ -444,8 +455,8 @@ a.crumb:hover {
   min-width: 16px;
   height: 16px;
   padding: 0 4px;
-  border-radius: 999px;
-  background: color-mix(in srgb, var(--btn-fg) 20%, transparent);
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--btn-fg) 22%, transparent);
   font-size: 11px;
   font-weight: 500;
   line-height: 1;
@@ -484,9 +495,9 @@ a.crumb:hover {
 .jobBar {
   flex: 1 1 80px;
   min-width: 48px;
-  height: 4px;
-  border-radius: 999px;
-  background: var(--hover);
+  height: 3px;
+  border-radius: 2px;
+  background: var(--border);
   overflow: hidden;
 }
 
@@ -495,7 +506,7 @@ a.crumb:hover {
   height: 100%;
   border-radius: inherit;
   background: var(--blue);
-  transition: width 0.3s ease;
+  transition: width 0.3s var(--ease);
 }
 
 /* ---------- File facts (a file page lists no children) ---------- */
@@ -587,43 +598,63 @@ a.crumb:hover {
 
 /* ---------- List ---------- */
 
+/*
+ * The listing is a sheet, not a stack of cards: one surface, hairlines between the rows, and a
+ * header row that names the three columns so the sizes and times on the right are readable as
+ * figures rather than as stray text.
+ */
 .panel {
   position: relative;
   background: var(--surface);
   border: 1px solid var(--border);
-  border-radius: 14px;
+  border-radius: 12px;
   overflow: hidden;
-  box-shadow: var(--shadow-soft);
+}
+
+.listHead {
+  display: grid;
+  grid-template-columns: 20px minmax(0, 1fr) 88px 96px;
+  align-items: center;
+  gap: 12px;
+  height: 32px;
+  padding: 0 16px;
+  border-bottom: 1px solid var(--border);
+  color: var(--text-3);
+  font-size: 11.5px;
+  font-weight: 400;
+}
+
+.listHead span:nth-child(3),
+.listHead span:nth-child(4) {
+  text-align: right;
 }
 
 .row {
   display: grid;
-  grid-template-columns: 28px minmax(0, 1fr) 84px 104px;
+  grid-template-columns: 20px minmax(0, 1fr) 88px 96px;
   align-items: center;
-  gap: 14px;
-  min-height: 58px;
-  padding: 0 20px;
-  transition: background 0.14s ease;
+  gap: 12px;
+  min-height: 44px;
+  padding: 0 16px;
+  transition: background-color 0.12s var(--ease);
 }
 
 .row + .row {
-  border-top: 1px solid color-mix(in srgb, var(--border) 85%, transparent);
+  border-top: 1px solid var(--border);
 }
 
 .row:hover {
   background: var(--hover);
 }
 
+/* One icon set, one size, one colour: the text role's own muted grey. No coloured tile. */
 .glyph {
   display: flex;
   align-items: center;
   justify-content: center;
-  width: 28px;
-  height: 28px;
-  border-radius: 8px;
-  background: var(--blue-light);
-  color: var(--blue-ink);
-  transition: color 0.14s ease, background 0.14s ease;
+  width: 20px;
+  height: 20px;
+  color: var(--text-3);
 }
 
 .nameCell {
@@ -663,7 +694,8 @@ a.crumb:hover {
 .pathHint {
   flex: 0 1 auto;
   min-width: 0;
-  font-size: 13px;
+  font-family: var(--font-mono);
+  font-size: 11.5px;
   color: var(--text-3);
   white-space: nowrap;
   overflow: hidden;
@@ -673,15 +705,12 @@ a.crumb:hover {
 
 .size,
 .time {
-  font-size: 13px;
+  font-family: var(--font-mono);
+  font-size: 11.5px;
   color: var(--text-3);
   font-variant-numeric: tabular-nums;
   text-align: right;
   white-space: nowrap;
-}
-
-.time {
-  text-align: left;
 }
 
 /* ---------- Empty state / skeleton ---------- */
@@ -690,21 +719,23 @@ a.crumb:hover {
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 8px;
-  padding: 70px 24px 74px;
+  gap: 6px;
+  padding: 56px 24px 60px;
   text-align: center;
 }
 
 .emptyIcon {
   display: grid;
   place-items: center;
-  width: 48px;
-  height: 48px;
-  margin-bottom: 6px;
-  border-radius: 14px;
-  border: 0;
-  background: var(--blue-light);
-  color: var(--blue-ink);
+  width: 24px;
+  height: 24px;
+  margin-bottom: 4px;
+  color: var(--text-3);
+}
+
+.emptyIcon svg {
+  width: 20px;
+  height: 20px;
 }
 
 .emptyTitle {
@@ -714,23 +745,23 @@ a.crumb:hover {
 
 .emptyText {
   max-width: 320px;
-  font-size: 13px;
-  line-height: 1.65;
+  font-size: 12.5px;
+  line-height: 1.6;
   color: var(--text-3);
 }
 
 .skeletonRow {
   display: grid;
-  grid-template-columns: 28px minmax(0, 1fr) 84px 104px;
+  grid-template-columns: 20px minmax(0, 1fr) 88px 96px;
   align-items: center;
-  gap: 14px;
-  height: 58px;
-  padding: 0 20px;
+  gap: 12px;
+  height: 44px;
+  padding: 0 16px;
 }
 
 .skeletonRow + .skeletonRow,
 .uploadRow + .skeletonRow {
-  border-top: 1px solid color-mix(in srgb, var(--border) 85%, transparent);
+  border-top: 1px solid var(--border);
 }
 
 .skBar {
@@ -761,21 +792,21 @@ a.crumb:hover {
   display: flex;
   align-items: center;
   gap: 8px;
-  height: 58px;
-  padding: 0 14px 0 20px;
+  height: 44px;
+  padding: 0 12px 0 16px;
   background: var(--hover);
 }
 
 .newRow + .list > .row:first-child {
-  border-top: 1px solid color-mix(in srgb, var(--border) 85%, transparent);
+  border-top: 1px solid var(--border);
 }
 
 .newInput {
   flex: 1;
   max-width: 320px;
-  height: 36px;
-  padding: 0 12px;
-  border-radius: 10px;
+  height: 32px;
+  padding: 0 10px;
+  border-radius: 8px;
   border: 1px solid var(--border-strong);
   background: var(--surface);
   color: var(--text);
@@ -789,8 +820,7 @@ a.crumb:hover {
 }
 
 .newInput:focus {
-  border-color: var(--blue);
-  box-shadow: 0 0 0 4px var(--ring);
+  border-color: var(--border-strong);
 }
 
 /* ---------- File detail ---------- */
@@ -799,9 +829,8 @@ a.crumb:hover {
   position: relative;
   background: var(--surface);
   border: 1px solid var(--border);
-  border-radius: 14px;
+  border-radius: 12px;
   overflow: hidden;
-  box-shadow: var(--shadow-soft);
 }
 
 /*
@@ -831,14 +860,13 @@ a.crumb:hover {
 
 .viewerNav:hover {
   background: var(--surface);
-  border-color: var(--blue);
+  border-color: var(--border-strong);
   color: var(--text);
 }
 
 .viewerNav:focus-visible {
   outline: none;
-  border-color: var(--blue);
-  box-shadow: 0 0 0 4px var(--ring);
+  border-color: var(--blue-ink);
 }
 
 .viewerNavPrev {
@@ -882,37 +910,35 @@ a.crumb:hover {
 .noPreviewIcon {
   display: grid;
   place-items: center;
-  width: 60px;
-  height: 60px;
-  margin-bottom: 4px;
-  border-radius: 16px;
-  background: var(--blue-light);
-  color: var(--blue-ink);
+  width: 28px;
+  height: 28px;
+  margin-bottom: 2px;
+  color: var(--text-3);
 }
 
 .noPreviewIcon svg {
-  width: 26px;
-  height: 26px;
+  width: 24px;
+  height: 24px;
 }
 
 .primaryLink {
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  height: 36px;
+  height: 34px;
   margin-top: 8px;
-  padding: 0 16px;
-  border-radius: 10px;
-  background: var(--blue);
+  padding: 0 14px;
+  border-radius: 8px;
+  background: var(--btn-bg);
   color: var(--btn-fg);
-  font-size: 14px;
+  font-size: 13px;
   font-weight: 500;
   white-space: nowrap;
-  transition: filter 0.14s ease;
+  transition: background-color 0.14s var(--ease);
 }
 
 .primaryLink:hover {
-  filter: brightness(0.94);
+  background: color-mix(in srgb, var(--btn-bg) 88%, var(--btn-fg));
 }
 
 .downloadError {
@@ -923,11 +949,11 @@ a.crumb:hover {
 }
 
 .detailPanel {
-  margin-top: 14px;
-  padding: 4px 20px;
+  margin-top: 12px;
+  padding: 0 16px;
   background: var(--surface);
   border: 1px solid var(--border);
-  border-radius: 14px;
+  border-radius: 12px;
 }
 
 .detailList {
@@ -939,16 +965,16 @@ a.crumb:hover {
   grid-template-columns: 104px minmax(0, 1fr);
   align-items: baseline;
   gap: 16px;
-  padding: 11px 0;
+  padding: 10px 0;
 }
 
 .detailRow + .detailRow {
-  border-top: 1px solid color-mix(in srgb, var(--border) 85%, transparent);
+  border-top: 1px solid var(--border);
 }
 
 .detailRow dt {
   color: var(--text-3);
-  font-size: 13px;
+  font-size: 12.5px;
 }
 
 .detailRow dd {
@@ -961,7 +987,7 @@ a.crumb:hover {
 
 .detailPath {
   font-family: var(--font-mono);
-  font-size: 13px;
+  font-size: 12px;
 }
 
 /* A secondary fact on the same row, such as the altitude after coordinates. */
@@ -988,8 +1014,8 @@ a.crumb:hover {
   flex-direction: column;
   align-items: center;
   gap: 12px;
-  padding: 56px 72px;
-  border-radius: 18px;
+  padding: 48px 64px;
+  border-radius: 12px;
   border: 1.5px dashed var(--border-strong);
   background: color-mix(in srgb, var(--surface) 88%, transparent);
   color: var(--text-2);
@@ -998,7 +1024,7 @@ a.crumb:hover {
 }
 
 .dropInner svg {
-  color: var(--blue);
+  color: var(--text-2);
 }
 
 /* ---------- Toast ---------- */
@@ -1006,7 +1032,7 @@ a.crumb:hover {
 .toast {
   position: fixed;
   left: 50%;
-  bottom: 30px;
+  bottom: 28px;
   transform: translateX(-50%);
   z-index: 80;
   display: flex;
@@ -1014,12 +1040,12 @@ a.crumb:hover {
   gap: 8px;
   max-width: min(92vw, 420px);
   padding: 10px 14px;
-  border-radius: 12px;
+  border-radius: 8px;
   background: var(--toast-bg);
   color: var(--toast-fg);
   font-size: 13px;
   box-shadow: var(--shadow-pop);
-  animation: rise 0.2s cubic-bezier(0.22, 1, 0.36, 1);
+  animation: rise 0.2s var(--ease);
 }
 
 .toastError {
@@ -1044,19 +1070,19 @@ a.crumb:hover {
 .uploadRow {
   display: flex;
   gap: 0;
-  min-height: 58px;
+  min-height: 44px;
   padding: 0;
 }
 
 .uploadLink {
   display: grid;
-  grid-template-columns: 28px minmax(0, 1fr) 190px 14px;
+  grid-template-columns: 20px minmax(0, 1fr) 180px 14px;
   align-items: center;
-  gap: 14px;
+  gap: 12px;
   flex: 1;
   min-width: 0;
-  min-height: 58px;
-  padding: 12px 12px 12px 20px;
+  min-height: 44px;
+  padding: 8px 10px 8px 16px;
 }
 
 .uploadInfo {
@@ -1110,8 +1136,8 @@ a.crumb:hover {
 }
 
 .statusActive {
-  background: var(--blue-light);
-  color: var(--text);
+  background: color-mix(in srgb, var(--blue) 12%, transparent);
+  color: var(--text-2);
 }
 
 .statusFailed {
@@ -1216,7 +1242,7 @@ a.crumb:hover {
 .uploadPausedTitle {
   color: var(--text-2);
   font-size: 13px;
-  font-weight: 600;
+  font-weight: 500;
 }
 
 .uploadPausedReason {
@@ -1253,7 +1279,7 @@ a.crumb:hover {
   min-width: 0;
   color: var(--text-2);
   font-size: 13px;
-  font-weight: 600;
+  font-weight: 500;
   font-variant-numeric: tabular-nums;
 }
 
@@ -1329,7 +1355,7 @@ a.crumb:hover {
   justify-content: space-between;
   gap: 8px;
   color: var(--text-3);
-  font-size: 11px;
+  font-size: 11.5px;
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
 }
@@ -1354,10 +1380,10 @@ a.crumb:hover {
 
 .progressTrack {
   width: 100%;
-  height: 4px;
+  height: 3px;
   margin-top: 6px;
-  border-radius: 999px;
-  background: color-mix(in srgb, var(--border) 80%, transparent);
+  border-radius: 2px;
+  background: var(--border);
   overflow: hidden;
 }
 
@@ -1365,7 +1391,7 @@ a.crumb:hover {
   height: 100%;
   border-radius: inherit;
   background: var(--blue);
-  transition: width 0.3s ease;
+  transition: width 0.3s var(--ease);
 }
 
 .progressFillFinishing {
@@ -1407,8 +1433,8 @@ a.crumb:hover {
  * FilesPage.tsx with the same duration.
  */
 .enter {
-  animation: fade-in 0.24s cubic-bezier(0.25, 0.1, 0.25, 1);
-  transition: opacity 0.12s ease;
+  animation: fade-in 0.24s var(--ease);
+  transition: opacity 0.12s var(--ease);
 }
 
 .list {
@@ -1478,30 +1504,41 @@ a.crumb:hover {
     padding: 22px 16px 60px;
   }
 
-  /* Narrow screens: the controls wrap under the path. */
+  /* Narrow screens keep one head row: the trail truncates, the tools stay on the right. */
   .topbar {
-    flex-wrap: wrap;
-    gap: 10px;
-    padding: 0 2px 16px;
+    flex-wrap: nowrap;
+    gap: 8px;
+    padding: 0 0 12px;
   }
 
-  .pathArea,
+  .pathArea {
+    flex: 1 1 auto;
+    min-width: 0;
+  }
+
   .topActions {
-    flex: 1 1 100%;
+    flex: none;
+    gap: 4px;
   }
 
   .search {
-    flex: 1 1 auto;
-    width: auto;
+    flex: 0 0 160px;
+    width: 160px;
+  }
+
+  .crumbCurrent {
+    font-size: 18px;
   }
 
   .row,
   .skeletonRow {
-    grid-template-columns: 28px minmax(0, 1fr);
+    grid-template-columns: 20px minmax(0, 1fr);
     gap: 10px;
-    padding: 0 16px;
+    padding: 0 14px;
   }
 
+  /* A narrow screen has no room for three columns; the rows carry name and glyph only. */
+  .listHead,
   .size,
   .time {
     display: none;
@@ -1517,9 +1554,9 @@ a.crumb:hover {
   }
 
   .uploadLink {
-    grid-template-columns: 28px minmax(0, 1fr) 14px;
+    grid-template-columns: 20px minmax(0, 1fr) 14px;
     gap: 10px;
-    padding: 12px 8px 12px 16px;
+    padding: 8px 8px 8px 14px;
   }
 
   .uploadTitle {

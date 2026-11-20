@@ -1,6 +1,9 @@
 /*
  * The settings page is a classic two-column layout: a section list on the left and the
  * selected section on the right. It stays on --page-width so it lines up with the header.
+ *
+ * The pane's title is the page title, so it is the largest thing here; the sidebar's own heading
+ * is a quiet label, because "Settings" names the place you already are.
  */
 .page {
   min-height: 100vh;
@@ -13,29 +16,30 @@
   width: 100%;
   max-width: var(--page-width);
   margin: 0 auto;
-  padding: 30px 24px 72px;
+  padding: 28px 24px 72px;
 }
 
 .layout {
   display: grid;
-  grid-template-columns: 164px minmax(0, 1fr);
-  gap: 34px;
+  grid-template-columns: 200px minmax(0, 1fr);
+  gap: 56px;
   align-items: start;
 }
 
-/* Sticky below the 64px header plus this page's own top padding. */
+/* Sticky below the 56px header plus this page's own top padding. */
 .sidebar {
   position: sticky;
-  top: 88px;
+  top: 84px;
 }
 
 .heading {
   margin: 0 0 10px;
   padding: 0 10px;
-  font-size: 19px;
-  font-weight: 650;
-  letter-spacing: -0.02em;
-  line-height: 1.35;
+  color: var(--text-3);
+  font-size: 12px;
+  font-weight: 400;
+  letter-spacing: 0;
+  line-height: 1.5;
 }
 
 .nav {
@@ -45,16 +49,17 @@
 }
 
 .navItem {
+  position: relative;
   display: flex;
   align-items: center;
   height: 32px;
   padding: 0 10px;
-  border-radius: 8px;
-  font-size: 13px;
-  font-weight: 500;
+  border-radius: 6px;
+  font-size: 13.5px;
+  font-weight: 400;
   color: var(--text-2);
   white-space: nowrap;
-  transition: background 0.14s ease, color 0.14s ease;
+  transition: background-color 0.14s var(--ease), color 0.14s var(--ease);
 }
 
 .navItem:hover {
@@ -62,17 +67,18 @@
   color: var(--text);
 }
 
-/* The open section keeps a filled background at rest, like the old top-bar navigation did. */
+/* The open section is marked by one blue edge, the one place the accent appears on this page. */
 .navItemActive,
 .navItemActive:hover {
-  background: var(--blue-light);
+  background: var(--hover);
   color: var(--text);
-  font-weight: 600;
+  font-weight: 500;
+  box-shadow: inset 2px 0 0 var(--blue);
 }
 
 /*
  * The pane is an inline-size container: the sections inside size themselves against the pane,
- * not the viewport, because the sidebar takes 164px away at every width.
+ * not the viewport, because the sidebar takes 200px away at every width.
  */
 .pane {
   min-width: 0;
@@ -80,14 +86,14 @@
 }
 
 .paneHead {
-  margin: 0 0 18px;
+  margin: 0 0 20px;
 }
 
 .paneTitle {
   margin: 0;
-  font-size: 22px;
-  font-weight: 650;
-  letter-spacing: -0.02em;
+  font-size: 26px;
+  font-weight: 500;
+  letter-spacing: -0.015em;
   line-height: 1.25;
 }
 
@@ -102,7 +108,7 @@
 
 @media (max-width: 760px) {
   .main {
-    padding: 22px 16px 56px;
+    padding: 20px 16px 56px;
   }
 
   .layout {
@@ -114,10 +120,13 @@
     position: static;
   }
 
+  /* On a narrow screen the pane title is hidden, so this label becomes the page title. */
   .heading {
-    margin-bottom: 8px;
+    margin-bottom: 10px;
     padding: 0;
-    font-size: 17px;
+    color: var(--text);
+    font-size: 20px;
+    font-weight: 500;
   }
 
   /* Narrow screens put the sections in a horizontal strip; the pane keeps the whole width. */
@@ -137,16 +146,17 @@
     height: 30px;
     padding: 0 12px;
     border: 1px solid var(--border);
-    border-radius: 999px;
+    border-radius: 8px;
   }
 
   .navItemActive,
   .navItemActive:hover {
-    border-color: var(--blue);
+    border-color: var(--border-strong);
+    box-shadow: inset 0 -2px 0 var(--blue);
   }
 
   .paneHead {
-    margin-bottom: 12px;
+    margin-bottom: 14px;
   }
 
   /*

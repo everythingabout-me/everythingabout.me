@@ -24,6 +24,7 @@ import {
   FileIcon,
   FolderIcon,
   GlyphFor,
+  MoreIcon,
   PencilIcon,
   PlusIcon,
   SearchIcon,
@@ -1501,8 +1502,8 @@ export function FilesPage() {
                   return (
                     <span key={crumb.path || "root"} className={styles.crumbItem}>
                       {index > 0 && (
-                        <span className={styles.crumbSep}>
-                          <ChevronRightIcon size={13} />
+                        <span className={styles.crumbSep} aria-hidden="true">
+                          /
                         </span>
                       )}
                       {!isLast ? (
@@ -1528,7 +1529,7 @@ export function FilesPage() {
                           }}
                         />
                       ) : (
-                        <h1 className={styles.crumb}>{crumbName(crumb)}</h1>
+                        <h1 className={styles.crumbCurrent}>{crumbName(crumb)}</h1>
                       )}
                       {/* The folder you are inside has no row of its own to carry the wait. */}
                       {isLast && deletingPaths.includes(crumb.path) && (
@@ -1551,7 +1552,7 @@ export function FilesPage() {
                       aria-label={t("drive.actions")}
                       title={t("drive.actions")}
                     >
-                      <ChevronDownIcon size={15} />
+                      <MoreIcon size={16} />
                     </button>
                     {menuOpen && (
                       <>
@@ -1893,6 +1894,16 @@ export function FilesPage() {
                   inert={navigating}
                   className={`${styles.list} ${styles.enter} ${navigating ? styles.dim : ""}`}
                 >
+                  {entries.length > 0 && (
+                    // The columns are named once, at the top of the sheet: it turns the figures on
+                    // the right into a size and a time instead of two stray numbers per row.
+                    <div className={styles.listHead} aria-hidden="true">
+                      <span />
+                      <span>{t("drive.colName")}</span>
+                      <span>{t("drive.colSize")}</span>
+                      <span>{t("drive.colModified")}</span>
+                    </div>
+                  )}
                   {shownEntries.map((entry) =>
                     isUploadRowActive(entry) ? (
                       <UploadRow
