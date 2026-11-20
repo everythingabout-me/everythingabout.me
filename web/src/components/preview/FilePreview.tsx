@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { FileViewer } from "@open-file-viewer/react";
 import "@open-file-viewer/core/style.css";
-import { api, isNativeAbsent } from "../../api/client";
+import { acquirePrefetchedPreview, api, isNativeAbsent } from "../../api/client";
 import { locale, t } from "../../i18n";
 import { StorageNotice } from "../StorageNotice";
 import { previewPlugins } from "./plugins";
@@ -38,8 +38,16 @@ function MediaPreview({ path, name, mediaType }: { path: string; name: string; m
   // decides between "moved outside the app" and an ordinary preview failure.
   const [failure, setFailure] = useState<"missing" | "error" | null>(null);
   useEffect(() => {
-    setURL(null);
     setFailure(null);
+    // The page prepared this file's bytes while the previous one was open, so a page turn
+    // renders from memory instead of asking for a grant and downloading the object again.
+    // The cache keeps owning that URL; this render only holds it until it unmounts.
+    const prepared = acquirePrefetchedPreview(path);
+    if (prepared) {
+      setURL(prepared.url);
+      return prepared.release;
+    }
+    setURL(null);
     const controller = new AbortController();
     let created: string | null = null;
     void api.downloadURL(path, safeInline ? "inline" : "attachment", controller.signal).then((next) => {

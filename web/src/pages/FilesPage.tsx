@@ -11,7 +11,7 @@ import {
   type ReactNode,
 } from "react";
 import { Link, useBlocker, useLoaderData, useLocation, useNavigate } from "react-router";
-import { ApiError, api, filePath, isFileOperation, isNativeAbsent, prefetchListing, type AuthUser, type Crumb, type FileMediaMetadata, type FileNeighbors, type FileOperation, type Item } from "../api/client";
+import { ApiError, api, filePath, isFileOperation, isNativeAbsent, prefetchListing, prefetchPreview, type AuthUser, type Crumb, type FileMediaMetadata, type FileNeighbors, type FileOperation, type Item } from "../api/client";
 import { AppHeader } from "../components/AppHeader";
 import { StorageNotice } from "../components/StorageNotice";
 import {
@@ -635,26 +635,56 @@ function MediaMetadataRows({ media }: { media: FileMediaMetadata }) {
 }
 
 /**
- * The two files this page can step to, read once per open file.
+ * How many files on each side of the open one to prepare. One page each way is enough for
+ * both arrows to be instant without dragging a folder's worth of photos into memory; raising
+ * it costs bytes (a photo is megabytes) and one more row of the same index read, and the
+ * endpoint caps it at `FileBrowseNeighborLimit`.
+ */
+const PRELOAD_BEHIND = 1;
+const PRELOAD_AHEAD = 1;
+
+/**
+ * The run of files this page can step through, read once per open file.
  *
- * The pair comes from the index rather than from a listing page: a neighbor is only
+ * The run comes from the index rather than from a listing page: a neighbor is only
  * expressible against the folder's sort key, so walking a listing to find it would cost one
  * page per step (the whole folder for a file late in it). A failed read hides the arrows and
  * nothing else — the file still renders, and its preview already reports bytes that are gone.
  */
 function useNeighbors(file: Item): FileNeighbors | null {
-  const [pair, setPair] = useState<FileNeighbors | null>(null);
+  const [run, setRun] = useState<FileNeighbors | null>(null);
   useEffect(() => {
-    setPair(null);
+    setRun(null);
     const controller = new AbortController();
-    api.neighbors(file.path, controller.signal).then(
-      (answer) => { if (!controller.signal.aborted) setPair(answer); },
-      () => { if (!controller.signal.aborted) setPair({ previous: null, next: null }); },
+    api.neighbors(file.path, { before: PRELOAD_BEHIND, after: PRELOAD_AHEAD }, controller.signal).then(
+      (answer) => { if (!controller.signal.aborted) setRun(answer); },
+      () => { if (!controller.signal.aborted) setRun({ previous: [], next: [] }); },
     );
     return () => controller.abort();
     // The path identifies the page: replaced bytes keep it, so the arrows stay put.
   }, [file.path]);
-  return pair;
+  return run;
+}
+
+/**
+ * Prepare what the arrows will open before they are pressed: the listing read the next page
+ * makes, and, for images, the bytes themselves.
+ *
+ * Both are opportunistic. The listing warm-up follows the same pool rules as a hover, so it
+ * is skipped while anything else is reading rather than delaying the page; the bytes are
+ * skipped for anything the viewer streams or for a file too large to fetch twice. A failure
+ * only means the next page costs what it always did.
+ */
+function usePreload(neighbors: FileNeighbors | null): void {
+  useEffect(() => {
+    if (!neighbors) return;
+    const controller = new AbortController();
+    for (const item of [...neighbors.previous, ...neighbors.next]) {
+      prefetchListing(item.path);
+      void prefetchPreview(item, controller.signal);
+    }
+    return () => controller.abort();
+  }, [neighbors]);
 }
 
 /**
@@ -670,8 +700,8 @@ function ViewerNav({ neighbors, onOpen }: {
   neighbors: FileNeighbors | null;
   onOpen: (path: string) => void;
 }) {
-  const previous = neighbors?.previous ?? null;
-  const next = neighbors?.next ?? null;
+  const previous = neighbors?.previous[0] ?? null;
+  const next = neighbors?.next[0] ?? null;
   useEffect(() => {
     if (!previous && !next) return;
     const onKeyDown = (event: KeyboardEvent) => {
@@ -733,6 +763,7 @@ function FileDetail({ file, onOpenNeighbor, onDelete, onCopyLink, deleteDisabled
   useEffect(() => { setDownloadError(null); setDownloadMissing(false); }, [file.path]);
   const media = useMediaMetadata(file);
   const neighbors = useNeighbors(file);
+  usePreload(neighbors);
   const download = async () => {
     setDownloadError(null);
     setDownloadMissing(false);

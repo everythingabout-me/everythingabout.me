@@ -40,7 +40,7 @@ const (
 type FileReadIndex interface {
 	FileBrowseMetadata(context.Context, string, string, string, ...string) (*nodes.FileBrowseRecord, error)
 	FileBrowsePage(context.Context, string, string, nodes.FileBrowseQuery) ([]nodes.FileBrowseRecord, error)
-	FileBrowseNeighbors(context.Context, string, string, string, ...string) (nodes.FileBrowseNeighbors, error)
+	FileBrowseNeighbors(context.Context, string, string, string, nodes.FileBrowseNeighborLimits, ...string) (nodes.FileBrowseNeighbors, error)
 	FileBrowseUsage(context.Context, string, string, ...string) (int64, int64, error)
 }
 
@@ -50,6 +50,10 @@ type filesReadQuery struct {
 	Path                             fc.Path
 	Limit                            int
 	Cursor, Keyword, Kind, MediaType string
+	// Before/After bound the /neighbors window, nearest first. They are separate from
+	// Limit because a caller asks how far it wants to prepare in each direction, and the
+	// directions are not interchangeable: a photo viewer usually prepares ahead.
+	Before, After int
 }
 
 func parseFilesReadQuery(r *http.Request, scope fc.Path, pathRequired bool) (filesReadQuery, error) {
@@ -76,7 +80,7 @@ func parseFilesReadQuery(r *http.Request, scope fc.Path, pathRequired bool) (fil
 	var unknown []string
 	for name := range q {
 		switch name {
-		case "path", "limit", "cursor", "q", "kind", "mediaType":
+		case "path", "limit", "cursor", "q", "kind", "mediaType", "before", "after":
 		default:
 			unknown = append(unknown, name)
 		}
@@ -95,13 +99,29 @@ func parseFilesReadQuery(r *http.Request, scope fc.Path, pathRequired bool) (fil
 	if err != nil {
 		return filesReadQuery{}, err
 	}
-	result := filesReadQuery{Path: parsed, Limit: filesDefaultLimit, Cursor: q.Get("cursor"), Keyword: q.Get("q"), Kind: q.Get("kind"), MediaType: q.Get("mediaType")}
+	result := filesReadQuery{Path: parsed, Limit: filesDefaultLimit, Cursor: q.Get("cursor"), Keyword: q.Get("q"), Kind: q.Get("kind"), MediaType: q.Get("mediaType"), Before: 1, After: 1}
 	if values, ok := q["limit"]; ok {
 		n, err := strconv.Atoi(values[0])
 		if err != nil || n < 1 || n > filesMaxLimit {
 			return invalid("Limit must be between 1 and 1000.")
 		}
 		result.Limit = n
+	}
+	// A window is bounded by the same ceiling the index read enforces, so a client cannot
+	// ask the server to sort a folder for more rows than it will use.
+	for _, side := range []struct {
+		name   string
+		target *int
+	}{{"before", &result.Before}, {"after", &result.After}} {
+		values, ok := q[side.name]
+		if !ok {
+			continue
+		}
+		n, err := strconv.Atoi(values[0])
+		if err != nil || n < 0 || n > nodes.FileBrowseNeighborLimit {
+			return invalid(fmt.Sprintf("%s must be between 0 and %d.", side.name, nodes.FileBrowseNeighborLimit))
+		}
+		*side.target = n
 	}
 	if !utf8.ValidString(result.Keyword) || !utf8.ValidString(result.MediaType) || len(result.Keyword) > 4096 || len(result.MediaType) > 255 || len(result.Cursor) > 32768 {
 		return invalid("The query exceeds the supported limits or contains invalid text.")
@@ -321,16 +341,18 @@ func (s *Server) handleFilesSearch(w http.ResponseWriter, r *http.Request, f *fi
 	return s.filesBrowsePage(w, r, f, q, "search")
 }
 
-// handleFilesNeighbors answers the two files a viewer can step to from the selected one:
-// the sibling immediately before and after it in the order a listing of that folder shows.
+// handleFilesNeighbors answers the run of sibling files a viewer can step to from the
+// selected one: the entries before it and after it, nearest first, in the order a listing of
+// that folder shows. `before`/`after` say how far each direction looks (default 1).
 //
-// Why this is its own read rather than the two adjacent /list pages: the neighbor is only
+// Why this is its own read rather than the two adjacent /list pages: a neighbor is only
 // expressible against the listing's sort key, and a page is anchored at the folder's first
 // row, so a file late in a large folder would cost the whole folder in pages to find. This
-// read sorts the same folder's members once, as one listing page of it already does, and
-// returns at most one row per direction.
+// read sorts the same folder's members once per direction, as one listing page of it already
+// does, and returns the bounded run — which is also why the window is a parameter instead of
+// the client making one call per step: the sort is already paid for.
 //
-// Folders are refused instead of answered with an empty pair. A folder is not a page in a
+// Folders are refused instead of answered with empty runs. A folder is not a page in a
 // viewer: stepping to one would replace the content with a listing, which is a different
 // action the caller already has (opening the path). Answering "no neighbors" would hide
 // that the question was wrong.
@@ -359,33 +381,33 @@ func (s *Server) handleFilesNeighbors(w http.ResponseWriter, r *http.Request, f 
 	if metadata.Kind != "file" {
 		return fc.NewProblem(409, "not_a_file", "Neighbors are only defined for a file; this path names a folder.")
 	}
-	pair, err := s.filesIndex.FileBrowseNeighbors(r.Context(), f.Principal.User.ID, f.ContentNamespace, metadata.Path.Relative(), filesHiddenRoots(f)...)
+	run, err := s.filesIndex.FileBrowseNeighbors(r.Context(), f.Principal.User.ID, f.ContentNamespace, metadata.Path.Relative(),
+		nodes.FileBrowseNeighborLimits{Before: q.Before, After: q.After}, filesHiddenRoots(f)...)
 	if err != nil {
 		return err
 	}
-	result := filesNeighborsResource{}
+	result := filesNeighborsResource{Previous: make([]fc.Metadata, 0, len(run.Previous)), Next: make([]fc.Metadata, 0, len(run.Next))}
 	for _, side := range []struct {
-		record *nodes.FileBrowseRecord
-		target **fc.Metadata
-	}{{pair.Previous, &result.Previous}, {pair.Next, &result.Next}} {
-		if side.record == nil {
-			continue
+		records []nodes.FileBrowseRecord
+		target  *[]fc.Metadata
+	}{{run.Previous, &result.Previous}, {run.Next, &result.Next}} {
+		for _, record := range side.records {
+			neighbor, err := nodes.IndexedMetadata(f.ContentNamespace, record)
+			if err != nil {
+				return err
+			}
+			// The index restricts the read to the selected entry's parent, so a neighbor
+			// from anywhere else means the index disagrees with itself. Refuse it: rendering
+			// a file from another folder under this file's arrows would step outside what the
+			// page shows.
+			if !filesEqualPath(f, neighbor.ParentPath, metadata.ParentPath) {
+				return fc.NewProblem(500, "internal_error", "The index returned a neighbor outside the selected folder.")
+			}
+			if err := f.RequireRead(neighbor.Path); err != nil {
+				return err
+			}
+			*side.target = append(*side.target, filesRedactParent(f, neighbor))
 		}
-		neighbor, err := nodes.IndexedMetadata(f.ContentNamespace, *side.record)
-		if err != nil {
-			return err
-		}
-		// The index restricts the read to the selected entry's parent, so a neighbor from
-		// anywhere else means the index disagrees with itself. Refuse it: rendering a file
-		// from another folder under this file's arrows would step outside what the page shows.
-		if !filesEqualPath(f, neighbor.ParentPath, metadata.ParentPath) {
-			return fc.NewProblem(500, "internal_error", "The index returned a neighbor outside the selected folder.")
-		}
-		if err := f.RequireRead(neighbor.Path); err != nil {
-			return err
-		}
-		redacted := filesRedactParent(f, neighbor)
-		*side.target = &redacted
 	}
 	return writeFilesJSON(w, 200, result)
 }

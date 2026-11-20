@@ -605,11 +605,11 @@
     "FileNeighbors": {
       "fields": {
         "next": {
-          "kind": "object",
+          "kind": "array",
           "optional": false
         },
         "previous": {
-          "kind": "object",
+          "kind": "array",
           "optional": false
         }
       }

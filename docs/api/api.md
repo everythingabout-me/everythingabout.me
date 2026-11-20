@@ -279,7 +279,7 @@ All suffixes are below `B`:
 | GET | `/capabilities?path=/Photos` or `?id=1f12cfd6-b93b-41ad-ae71-52a4299c3421` | Effective limits/features at an authorized entry |
 | GET | `?path=/Photos/a.jpg` or `?id=f7ca1104-12f0-4bbf-8c77-41d341f7d120` | Indexed metadata by either selector; no native lookup |
 | GET | `/list?path=/Photos&limit=&cursor=` or `id=1f12cfd6-b93b-41ad-ae71-52a4299c3421` in place of path | The selected entry (`node`) plus its indexed immediate children, with SQL keyset pagination; a file answers with `node` and no items |
-| GET | `/neighbors?path=/Photos/a.jpg` or `id=f7ca1104-12f0-4bbf-8c77-41d341f7d120` in place of path | The sibling files immediately before and after the selected one, in listing order; `null` at either end; a folder is `409 not_a_file` |
+| GET | `/neighbors?path=/Photos/a.jpg&before=1&after=1` or `id=f7ca1104-12f0-4bbf-8c77-41d341f7d120` in place of path | The sibling files before and after the selected one, nearest first, up to `before`/`after` each way (default 1, maximum 10); empty arrays at either end; a folder is `409 not_a_file` |
 | GET | `/search?q=&path=/Photos&kind=&mediaType=&limit=&cursor=` or `id=1f12cfd6-b93b-41ad-ae71-52a4299c3421` in place of path | Indexed search below selected folder; authorized-root default |
 | GET, HEAD, PUT | `/content?path=/Photos/a.jpg` or `?id=f7ca1104-12f0-4bbf-8c77-41d341f7d120` | Download/headers/conditional replace; creation uses a destination |
 | POST | (base) | Create folder using `{kind:"folder",destination:Destination,parents?}`; retained full-path shortcut |
@@ -342,15 +342,17 @@ Default page size is 200; maximum 1000. SQL applies owner, subtree, search filte
 returning at most the requested limit plus one row. The API does not scan storage or load the whole indexed
 subtree to paginate. Authorization filters apply before pagination and never leak totals.
 
-`/neighbors` answers the pair a preview steps between, and it exists because that pair is not expressible
-from a page. The neighbor is defined by the listing's own sort key, which a client cannot fabricate into an
+`/neighbors` answers the run a preview steps through, and it exists because that run is not expressible
+from a page. A neighbor is defined by the listing's own sort key, which a client cannot fabricate into an
 opaque cursor, so walking pages until the open file appeared would cost one page per step — the whole folder
 for a file late in it. The read instead sorts that one folder's members, exactly as one `/list` page of it
-already does, and returns at most one row per direction. `previous` and `next` are always present and `null`
-at the ends of the folder, so a client can hide an arrow without treating absence as an error. Only sibling
-*files* are neighbors: a folder is an entry point that opens a listing, not a page a viewer can turn to, so
-a folder selector is refused with `409 not_a_file` rather than answered with an empty pair. Entries a pending
-delete conceals are skipped like every other read.
+already does, and returns the bounded run, nearest first. `before` and `after` say how far each way to look
+(default 1, maximum 10): a preview prepares a few pages ahead of the turn, and because the folder is already
+sorted for the first row, every extra row in the same direction costs no additional read. `previous` and
+`next` are always arrays and are empty at the ends of the folder, so a client can hide an arrow without
+treating absence as an error. Only sibling *files* are neighbors: a folder is an entry point that opens a
+listing, not a page a viewer can turn to, so a folder selector is refused with `409 not_a_file` rather than
+answered with empty runs. Entries a pending delete conceals are skipped like every other read.
 
 Create a folder:
 

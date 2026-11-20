@@ -216,10 +216,11 @@ func TestScanInvalidatesChangedContentGeneration(t *testing.T) {
 	}
 }
 
-// Neighbors are the pair a viewer steps between: sibling files in the listing's own order
-// (NFC name bytes, so "Z.txt" sorts before "b.txt"), never a folder, and never an entry a
-// pending delete conceals. Each of those is a decision the arrows depend on: a folder would
-// replace the viewer with a listing, and a concealed path must not be reachable at all.
+// Neighbors are the run a viewer steps through: sibling files in the listing's own order
+// (NFC name bytes, so "Z.txt" sorts before "b.txt"), never a folder, never an entry a
+// pending delete conceals, and only as far as the caller asked to prepare. Each of those is
+// a decision the arrows depend on: a folder would replace the viewer with a listing, and a
+// concealed path must not be reachable at all.
 func TestFileBrowseNeighborsFollowFolderOrderAndConcealment(t *testing.T) {
 	pool := actionTestDatabase(t)
 	ctx := context.Background()
@@ -242,6 +243,7 @@ func TestFileBrowseNeighborsFollowFolderOrderAndConcealment(t *testing.T) {
 		{"Album", true},
 		{"Album/A.txt", false},
 		{"Album/b.txt", false},
+		{"Album/E.txt", false},
 		{"Album/Z.txt", false},
 		{"Album/sub", true},
 		{"Album/sub/z.txt", false},
@@ -249,39 +251,47 @@ func TestFileBrowseNeighborsFollowFolderOrderAndConcealment(t *testing.T) {
 		indexActionEntry(t, pool, owner, entry.path, entry.folder)
 	}
 	namespace := fileRootNamespace(owner)
-	neighbors := func(path string, hidden ...string) FileBrowseNeighbors {
+	neighbors := func(path string, limit FileBrowseNeighborLimits, hidden ...string) FileBrowseNeighbors {
 		t.Helper()
-		pair, err := service.FileBrowseNeighbors(ctx, owner.OwnerID, namespace, path, hidden...)
+		run, err := service.FileBrowseNeighbors(ctx, owner.OwnerID, namespace, path, limit, hidden...)
 		if err != nil {
 			t.Fatalf("neighbors(%s): %v", path, err)
 		}
-		return pair
+		return run
 	}
-	pathOf := func(record *FileBrowseRecord) string {
-		if record == nil {
-			return ""
+	one := FileBrowseNeighborLimits{Before: 1, After: 1}
+	paths := func(records []FileBrowseRecord) []string {
+		result := make([]string, 0, len(records))
+		for _, record := range records {
+			result = append(result, record.Row.Path)
 		}
-		return record.Row.Path
+		return result
 	}
 
-	middle := neighbors("Album/Z.txt")
-	if pathOf(middle.Previous) != "Album/A.txt" || pathOf(middle.Next) != "Album/b.txt" {
-		t.Fatalf("byte order neighbors of Z.txt: previous=%q next=%q", pathOf(middle.Previous), pathOf(middle.Next))
+	middle := neighbors("Album/Z.txt", one)
+	if paths(middle.Previous)[0] != "Album/E.txt" || paths(middle.Next)[0] != "Album/b.txt" {
+		t.Fatalf("byte order neighbors of Z.txt: previous=%q next=%q", paths(middle.Previous), paths(middle.Next))
 	}
-	if first := neighbors("Album/A.txt"); first.Previous != nil || pathOf(first.Next) != "Album/Z.txt" {
-		t.Fatalf("first file: previous=%+v next=%q", first.Previous, pathOf(first.Next))
+	if first := neighbors("Album/A.txt", one); len(first.Previous) != 0 || paths(first.Next)[0] != "Album/E.txt" {
+		t.Fatalf("first file: previous=%q next=%q", paths(first.Previous), paths(first.Next))
 	}
-	if last := neighbors("Album/b.txt"); pathOf(last.Previous) != "Album/Z.txt" || last.Next != nil {
-		t.Fatalf("last file: previous=%q next=%+v", pathOf(last.Previous), last.Next)
+	if last := neighbors("Album/b.txt", one); paths(last.Previous)[0] != "Album/Z.txt" || len(last.Next) != 0 {
+		t.Fatalf("last file: previous=%q next=%q", paths(last.Previous), paths(last.Next))
+	}
+	// A window is how far to prepare, and the run stops at the end of the folder rather than
+	// wrapping or padding: two back from b.txt is Z then E, and there is nothing ahead.
+	window := neighbors("Album/b.txt", FileBrowseNeighborLimits{Before: 4, After: 3})
+	if got := paths(window.Previous); !reflect.DeepEqual(got, []string{"Album/Z.txt", "Album/E.txt", "Album/A.txt"}) || len(window.Next) != 0 {
+		t.Fatalf("window: previous=%q next=%q", got, paths(window.Next))
 	}
 	// A folder is not a page: the read answers nothing rather than stepping into it.
-	if folder := neighbors("Album/sub"); folder.Previous != nil || folder.Next != nil {
+	if folder := neighbors("Album/sub", FileBrowseNeighborLimits{Before: 2, After: 2}); len(folder.Previous) != 0 || len(folder.Next) != 0 {
 		t.Fatalf("folder answered neighbors: %+v", folder)
 	}
 	// A pending delete hides its path from every read, neighbors included, so the arrows
 	// land on the next visible file instead of opening a path that no longer exists.
-	concealed := neighbors("Album/b.txt", "Album/Z.txt")
-	if pathOf(concealed.Previous) != "Album/A.txt" {
-		t.Fatalf("concealed sibling still offered: previous=%q", pathOf(concealed.Previous))
+	concealed := neighbors("Album/b.txt", FileBrowseNeighborLimits{Before: 2}, "Album/Z.txt")
+	if got := paths(concealed.Previous); !reflect.DeepEqual(got, []string{"Album/E.txt", "Album/A.txt"}) {
+		t.Fatalf("concealed sibling still offered: previous=%q", got)
 	}
 }

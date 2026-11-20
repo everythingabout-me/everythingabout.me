@@ -236,13 +236,14 @@ type filesOperationResource struct {
 	FinishedAt      *time.Time             `json:"finishedAt"`
 }
 
-// filesNeighborsResource is GET B/neighbors: the sibling files a viewer steps between, or
-// null at either end of the folder. Both keys are always present — a null says "there is
-// no neighbor in that direction", which a caller must be able to tell from "the field is
-// missing", since the arrows it drives are hidden on null.
+// filesNeighborsResource is GET B/neighbors: the sibling files a viewer steps between, in
+// the direction each one lies — `previous` nearest-first, `next` nearest-first. Both keys are
+// always arrays, empty at either end of the folder: a client that prepares a window of L and
+// R reads the first entry for its arrows and the rest for the pages it fetches ahead, so an
+// empty list and a missing field must not look alike.
 type filesNeighborsResource struct {
-	Previous *fc.Metadata `json:"previous"`
-	Next     *fc.Metadata `json:"next"`
+	Previous []fc.Metadata `json:"previous"`
+	Next     []fc.Metadata `json:"next"`
 }
 
 // filesDownloadGrantResource is one read grant; a refused item is an fc.Problem

@@ -276,14 +276,14 @@ export interface FileBrowsePage extends FileCollection {
 }
 
 /**
- * GET /neighbors: the sibling files a viewer steps between, in the same order the folder
- * lists them. A null at either end means there is no neighbor in that direction — the
- * folder's first or last file — and both keys are always present, so absence is a null and
- * not a missing field.
+ * GET /neighbors: the sibling files a viewer steps between, nearest first in each direction,
+ * in the same order the folder lists them. Both keys are always arrays and are empty at the
+ * end of the folder: the first entry drives an arrow, and the rest exist so a page can fetch
+ * what the next turns will show before they happen.
  */
 export interface FileNeighbors {
-  previous: FileResource | null;
-  next: FileResource | null;
+  previous: FileResource[];
+  next: FileResource[];
 }
 
 export interface FileQuota {
@@ -1136,6 +1136,117 @@ export function isFileOperation(result: FileResource | FileOperation | void): re
   return Boolean(result && "state" in result && "id" in result);
 }
 
+/**
+ * Preview bytes fetched ahead of the page turn that will show them.
+ *
+ * Opening a file normally costs a read grant and then the object itself, which is the whole
+ * wait a page turn has. Preparing a neighbor while the person is still on the current file
+ * turns that into work already done. The cache holds bytes, not grants: a grant URL is
+ * signed per request, so warming one and then asking for another would miss in the browser
+ * cache, while a blob URL is literally the representation the viewer will render.
+ *
+ * It is bounded twice because a preview cache without a limit is a memory leak with a nicer
+ * name: by bytes (a photo is megabytes) and by entries (a short strip of prepared files). A
+ * blob a mounted viewer is showing is never evicted, so no page loses the image it displays.
+ * Only images are fetched: a video streams by range, and pulling one ahead of the turn would
+ * cost more than the turn saves.
+ */
+const previewPrefetchBytes = 24 * 1000 * 1000;
+const previewPrefetchEntries = 6;
+const previewPrefetchTTL = 2 * 60_000;
+/** One file above this is left to the viewer: doubling its cost is not a page turn's gain. */
+const previewPrefetchFileBytes = 12 * 1000 * 1000;
+
+interface PrefetchedPreview {
+  url: string;
+  bytes: number;
+  expiresAt: number;
+  /** Mounted viewers showing this URL; an entry with holders is not evicted. */
+  holders: number;
+}
+
+const prefetchedPreviews = new Map<string, PrefetchedPreview>();
+const previewPrefetchPending = new Map<string, Promise<void>>();
+
+function prunePrefetchedPreviews(now = Date.now()): void {
+  for (const [path, entry] of prefetchedPreviews) {
+    if (entry.holders > 0 || entry.expiresAt > now) continue;
+    prefetchedPreviews.delete(path);
+    URL.revokeObjectURL(entry.url);
+  }
+}
+
+function evictPrefetchedPreviews(): void {
+  let bytes = 0;
+  for (const entry of prefetchedPreviews.values()) bytes += entry.bytes;
+  for (const [path, entry] of prefetchedPreviews) {
+    if (prefetchedPreviews.size <= previewPrefetchEntries && bytes <= previewPrefetchBytes) return;
+    if (entry.holders > 0) continue;
+    prefetchedPreviews.delete(path);
+    bytes -= entry.bytes;
+    URL.revokeObjectURL(entry.url);
+  }
+}
+
+/** The bytes prepared for this path, and the release a mounted viewer owes back. */
+export function acquirePrefetchedPreview(path: string): { url: string; release: () => void } | null {
+  prunePrefetchedPreviews();
+  const entry = prefetchedPreviews.get(path);
+  if (!entry) return null;
+  entry.holders += 1;
+  let released = false;
+  return {
+    url: entry.url,
+    release: () => {
+      if (released) return;
+      released = true;
+      entry.holders -= 1;
+      evictPrefetchedPreviews();
+    },
+  };
+}
+
+function prefetchablePreview(file: { mediaType: string | null; size: number | null }): boolean {
+  if (!(file.mediaType ?? "").toLowerCase().startsWith("image/")) return false;
+  return file.size === null || file.size <= previewPrefetchFileBytes;
+}
+
+/**
+ * Fetch one neighbor's preview bytes so the page that opens it renders from memory. Safe to
+ * call repeatedly: a path already prepared or in flight is left alone. Failures are silent
+ * by design — this is bandwidth spent early, and a page that cannot warm it still works.
+ */
+export async function prefetchPreview(
+  file: { path: string; mediaType: string | null; size: number | null },
+  signal?: AbortSignal,
+): Promise<void> {
+  if (!prefetchablePreview(file) || prefetchedPreviews.has(file.path) || previewPrefetchPending.has(file.path)) return;
+  const task = fetchPreviewBytes(file.path, signal).finally(() => previewPrefetchPending.delete(file.path));
+  previewPrefetchPending.set(file.path, task);
+  await task;
+}
+
+async function fetchPreviewBytes(path: string, signal?: AbortSignal): Promise<void> {
+  try {
+    const grant = await fetchDownloadGrant(path, "inline", signal);
+    if (signal?.aborted) return;
+    const response = await fetch(grant.url, grant.kind === "bearer"
+      ? { headers: grant.headers ?? {}, credentials: "omit", signal }
+      : { credentials: "omit", signal });
+    if (!response.ok || signal?.aborted) return;
+    const blob = await response.blob();
+    if (signal?.aborted) return;
+    const url = URL.createObjectURL(blob);
+    prefetchedPreviews.delete(path);
+    prefetchedPreviews.set(path, { url, bytes: blob.size, expiresAt: Date.now() + previewPrefetchTTL, holders: 0 });
+    prunePrefetchedPreviews();
+    evictPrefetchedPreviews();
+  } catch {
+    // A warm-up that cannot finish is not an error the page has to answer: the file opens
+    // exactly as it did before, one grant and one download later.
+  }
+}
+
 /** Unified resources; byte access is through read grants or same-origin class C streaming. */
 export const files = {
   metadata(selector: FileSelector, signal?: AbortSignal): Promise<FileResource> {
@@ -1144,9 +1255,13 @@ export const files = {
   list(selector: FileSelector, options: { limit?: number; cursor?: string; signal?: AbortSignal } = {}): Promise<FileBrowsePage> {
     return fileRequest(fileURL("/list", { limit: options.limit, cursor: options.cursor, ...entrySelector(selector) }), { signal: options.signal });
   },
-  /** The two files a viewer steps to from this one, in the folder's listing order. */
-  neighbors(selector: FileSelector, signal?: AbortSignal): Promise<FileNeighbors> {
-    return fileRequest(fileURL("/neighbors", entrySelector(selector)), { signal });
+  /**
+   * The files a viewer steps to from this one, in the folder's listing order. `before` and
+   * `after` say how far each way to look, so one request can warm a whole window instead of
+   * the client making a call per step.
+   */
+  neighbors(selector: FileSelector, window: { before: number; after: number }, signal?: AbortSignal): Promise<FileNeighbors> {
+    return fileRequest(fileURL("/neighbors", { before: window.before, after: window.after, ...entrySelector(selector) }), { signal });
   },
   search(options: FileSearchOptions): Promise<FileCollection> {
     const selected = Object.fromEntries(["id", "path"].filter((key) => hasOwn(options, key)).map((key) => [key, options[key as "id" | "path"]]));
@@ -1410,6 +1525,10 @@ function forgetSession(): void {
   listingPrefetches.clear();
   for (const stream of activeListings.values()) stream.cancel();
   activeListings.clear();
+  // Prepared bytes belong to the account that fetched them: a granted read is never
+  // re-authorised, so the next sign-in must not inherit one.
+  for (const entry of prefetchedPreviews.values()) URL.revokeObjectURL(entry.url);
+  prefetchedPreviews.clear();
 }
 
 /**

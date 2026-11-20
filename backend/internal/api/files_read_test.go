@@ -112,6 +112,7 @@ type filesReadTestIndex struct {
 	queries                     []nodes.FileBrowseQuery
 	metadataPaths               []string
 	neighborPaths               []string
+	neighborLimits              []nodes.FileBrowseNeighborLimits
 	metadataHidden, usageHidden []string
 	neighborHidden              []string
 	usageCalls                  int
@@ -177,12 +178,14 @@ func filesReadIndexKey(row nodes.Row) nodes.FileBrowseKey {
 }
 
 // FileBrowseNeighbors mirrors the production read in the terms this fake keeps: the
-// sibling files of the selected entry's folder in listing order, one candidate per
-// direction, and none for a folder or a concealed entry.
-func (i *filesReadTestIndex) FileBrowseNeighbors(ctx context.Context, owner, namespace, p string, hidden ...string) (nodes.FileBrowseNeighbors, error) {
+// sibling files of the selected entry's folder in listing order, up to the requested
+// distance each way and nearest first, and none for a folder or a concealed entry.
+func (i *filesReadTestIndex) FileBrowseNeighbors(ctx context.Context, owner, namespace, p string,
+	limit nodes.FileBrowseNeighborLimits, hidden ...string) (nodes.FileBrowseNeighbors, error) {
 	i.calls++
 	i.owner, i.namespace = owner, namespace
 	i.neighborPaths = append(i.neighborPaths, p)
+	i.neighborLimits = append(i.neighborLimits, limit)
 	i.neighborHidden = append([]string{}, hidden...)
 	if err := ctx.Err(); err != nil {
 		return nodes.FileBrowseNeighbors{}, err
@@ -190,6 +193,7 @@ func (i *filesReadTestIndex) FileBrowseNeighbors(ctx context.Context, owner, nam
 	if i.err != nil {
 		return nodes.FileBrowseNeighbors{}, i.err
 	}
+	empty := nodes.FileBrowseNeighbors{Previous: []nodes.FileBrowseRecord{}, Next: []nodes.FileBrowseRecord{}}
 	var current *nodes.Row
 	for index := range i.rows {
 		if i.rows[index].Path == p {
@@ -198,7 +202,7 @@ func (i *filesReadTestIndex) FileBrowseNeighbors(ctx context.Context, owner, nam
 		}
 	}
 	if current == nil || current.IsDir || filesReadHidden(p, hidden) {
-		return nodes.FileBrowseNeighbors{}, nil
+		return empty, nil
 	}
 	siblings := make([]nodes.Row, 0)
 	for _, row := range i.rows {
@@ -209,22 +213,20 @@ func (i *filesReadTestIndex) FileBrowseNeighbors(ctx context.Context, owner, nam
 	sort.SliceStable(siblings, func(a, b int) bool {
 		return filesKeyLess(filesReadIndexKey(siblings[a]), filesReadIndexKey(siblings[b]))
 	})
-	var pair nodes.FileBrowseNeighbors
+	run := empty
 	for index, row := range siblings {
 		if row.Path != p {
 			continue
 		}
-		if index > 0 {
-			record := i.record(siblings[index-1], hidden)
-			pair.Previous = &record
+		for distance, count := 1, limit.Before; distance <= count && index-distance >= 0; distance++ {
+			run.Previous = append(run.Previous, i.record(siblings[index-distance], hidden))
 		}
-		if index+1 < len(siblings) {
-			record := i.record(siblings[index+1], hidden)
-			pair.Next = &record
+		for distance, count := 1, limit.After; distance <= count && index+distance < len(siblings); distance++ {
+			run.Next = append(run.Next, i.record(siblings[index+distance], hidden))
 		}
 		break
 	}
-	return pair, nil
+	return run, nil
 }
 
 func (i *filesReadTestIndex) FileBrowsePage(ctx context.Context, owner, namespace string, q nodes.FileBrowseQuery) ([]nodes.FileBrowseRecord, error) {
