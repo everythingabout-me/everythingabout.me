@@ -2,7 +2,6 @@ package connections
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -292,21 +291,6 @@ func TestPostgresBackupFolderAndProbeRoundTrip(t *testing.T) {
 	}
 	if err := st.SetBackupFolder(ctx, rowID, ownerID, "elsewhere"); !errors.Is(err, ErrBackupFolderLocked) {
 		t.Fatalf("a folder moved after a run existed: %v", err)
-	}
-	probe := []byte(`{"ok":true,"latencyMs":12}`)
-	if err := st.SetProbe(ctx, rowID, probe); err != nil {
-		t.Fatalf("record the probe: %v", err)
-	}
-	got, _, err = st.ByName(ctx, ownerID, "nas")
-	if err != nil {
-		t.Fatal(err)
-	}
-	var decoded map[string]any
-	if err := json.Unmarshal(got.LastProbe, &decoded); err != nil {
-		t.Fatalf("stored probe is not JSON: %v (%s)", err, got.LastProbe)
-	}
-	if decoded["ok"] != true || decoded["latencyMs"] != float64(12) {
-		t.Fatalf("stored probe = %s, want ok=true latencyMs=12", got.LastProbe)
 	}
 }
 

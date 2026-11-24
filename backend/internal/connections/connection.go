@@ -46,13 +46,7 @@ type Connection struct {
 	// deployment environment to point at.
 	SecretReference SecretReference
 	Generation      int64
-	Admission       json.RawMessage
 	Enabled         bool
-	// LastProbe caches the last measurement the account asked this connection to
-	// perform (reachability, latency, throughput). It describes nothing the driver
-	// acts on: a stale value must never decide whether a backup may run. Whether this
-	// store may be published to is the product's answer, not this number's.
-	LastProbe json.RawMessage
 }
 
 // Spec is everything about a connection except its credentials and role. It

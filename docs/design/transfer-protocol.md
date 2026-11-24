@@ -197,26 +197,26 @@ conditional PUT — but only on a connection that measured it is enforced. A for
 unusable through the edge upload ingress, which rewrites provider URLs to a same-origin path that
 serves `PUT` only.
 
-A *create* and a *replacement* are different promises, so the probe measures them separately. A
-create's condition is the provider's overwrite switch, which a form upload relies on exclusively and
-the conditional PUT sends alongside `If-None-Match: *`; `conditionalCreate` and `formPost` cover it.
-A replacement's condition is a single `If-Match` in the signed headers and nothing else: no server
-request compares a revision before the client writes, and the grant remains usable for up to an
-hour after its session is superseded. A provider may enforce conditional GET and DELETE while
-ignoring `If-Match` on PUT — COS does exactly that, and a wrong-`If-Match` PUT succeeds. The
-`conditionalPut` probe therefore writes a key, replaces it unconditionally, then asks the old
-revision to publish again; only a refusal (412, bytes unchanged) admits the direct replacement.
-Where it is not measured, the replacement is not refused: it is the ordinary multipart session
-whose parts stay unpublished until the server completes them, so a superseded grant cannot write
-the destination at all. The cost is the staging round trips this section exists to avoid, paid only
-for replacements on connections that cannot enforce the header.
+A *create* and a *replacement* are different promises, and the product row states each separately.
+A create's condition is the provider's overwrite switch, which a form upload relies on exclusively
+and the conditional PUT sends alongside `If-None-Match: *`; `ConditionalCreate` and `FormPost` cover
+it. A replacement's condition is a single `If-Match` in the signed headers and nothing else: no
+server request compares a revision before the client writes, and the grant remains usable for up to
+an hour after its session is superseded. A provider may enforce conditional GET and DELETE while
+ignoring `If-Match` on PUT — COS does exactly that, and a wrong-`If-Match` PUT succeeds — so
+`ConditionalPut` is `false` on the COS row with that reason next to it. Where it is false, the
+replacement is not refused: it is the ordinary multipart session whose parts stay unpublished until
+the server completes them, so a superseded grant cannot write the destination at all. The cost is
+the staging round trips this section exists to avoid, paid only for replacements on products that
+cannot enforce the header.
 
-The capabilities are evidence, not configuration: the connection probe measures a `PUT` carrying
-only the provider's overwrite switch on an occupied key (`formPost`) and a `PUT` carrying a stale
-`If-Match` (`conditionalPut`), and a probe version that predates either measurement invalidates the
-file so it is re-measured on the next start. A connection that cannot prove `formPost` keeps the
-conditional PUT for creates; one that cannot prove `conditionalPut` routes replacements through
-multipart.
+The capabilities are knowledge about the product, not configuration and not a measurement: a
+request that succeeds once says nothing about whether the provider enforces a header on the next
+request, while a missing `If-Match` or a CVE is a fact about the software. `internal/storageproduct`
+carries each promise with its reason; a connection that names a product inherits them, and there is
+no probe to run, no evidence file to carry, and nothing to re-measure when a binary is upgraded. A
+product without `FormPost` keeps the conditional PUT for creates; one without `ConditionalPut`
+routes replacements through multipart.
 
 ## 5. Class B — cloud-drive sessions
 
@@ -424,8 +424,8 @@ origin configuration.
 
 **Class C.** Nothing beyond the application itself.
 
-Provider behaviour in §5, §8 and §9 is the design basis; each row is admitted for a connection only after an
-exact-connection probe confirms it.
+Provider behaviour in §5, §8 and §9 is the design basis; each row is admitted for a connection by the product
+that connection names (`internal/storageproduct`), with the reason recorded next to the promise.
 
 ## 12. Prohibitions
 

@@ -7,7 +7,7 @@
 > [identity](../design/file-identity.md) and [changes/audit](../design/file-changes.md).
 >
 > Reads, namespace mutations, resumable uploads and all media bytes use this contract. Writes stay behind
-> explicit admission: a verified root baseline and exact-connection native probe evidence are required, object
+> explicit admission: a verified root baseline is required, object
 > connections need a durable single-gateway spool, and thumbnails remain an authenticated 501 placeholder.
 > Transfer classes A (`presigned-parts`, COS) and C (`relay`) are implemented, including `/downloads`,
 > `/uploads/{id}/parts/sign`, provider part listing and server-side class A sealing. Class B
@@ -225,7 +225,7 @@ Mutations separately enforce their admitted native conditions before applying fi
 capture the current ETag as native revision evidence and use operation-specific native conditions where
 enforced. COS ignores PUT If-Match, so admitted replacement rechecks ETag under gateway coordination; this
 does not fence arbitrary external writers. A direct class A replacement is offered only on a connection whose
-probe measured that a stale If-Match is refused (412); otherwise the same replacement is a multipart session
+product promises that a stale If-Match is refused (412); otherwise the same replacement is a multipart session
 whose parts stay unpublished until the server completes them. Stable IDs add no native conditional or
 version-pinning guarantee.
 `contentRevision` is the saved, native-evidence-backed content generation and is null when none is recorded or
@@ -913,7 +913,7 @@ grant signs a PUT at the destination itself, carrying the create/replace conditi
 signed headers. `PUT` returning `2xx` means the object exists; the commit then verifies it
 (`HEAD`) and settles identity, quota, change facts and audit.
 
-**A replacement is only signed this way when the connection's probe measured that a PUT with a
+**A replacement is only signed this way when the connection's product promises that a PUT with a
 stale `If-Match` is refused (412).** The header is the grant's only guard — the client's PUT is the
 publication, no server request compares a revision first, and the grant stays usable for up to an
 hour after its session is superseded — so a provider that ignores `If-Match` on PUT would let an
@@ -1256,7 +1256,7 @@ Object roots use current ETags as native revisions: `pinnedRead`, `strongContent
 `sourceModifiedAt` are false, while upload, replacement, folder creation, move, copy and deletion are
 available whenever `write` is true and the requested action is admitted. Native condition enforcement is
 operation-specific; COS PUT ignores If-Match, so replacement uses gateway coordination and an immediate
-ETag recheck, and a one-part *direct* replacement is offered only where the connection's probe measured that
+ETag recheck, and a one-part *direct* replacement is offered only where the connection's product promises that
 a stale If-Match is refused — otherwise the session publishes through multipart. Outside writers are not
 globally fenced; object reads are validated but not version-pinned.
 Scans synchronize observed index metadata; budget counters retain the initial compared baseline plus
@@ -1516,14 +1516,14 @@ a file client cannot select a provider through the file API.
 
 | Method | Route | Purpose |
 |---|---|---|
-| `GET` | `/api/storage` | This account's visible providers (its own plus the deployment default), the authority first, each with its run count, its newest run and last test result, plus the backup feature's chosen provider. `location` is the host or bucket an account added and `""` for the deployment default, whose store is operator infrastructure. The dates that live inside one provider are that provider's own page, not here |
-| `GET` | `/api/storage/connections/{id}` | One provider's page: the row with its run count, newest run and last test result; the backup feature's chosen provider as `{id, name}` (absent when unconfigured, and the name is what lets a page say which provider choosing this one would replace); and that provider's own restore points, newest first (up to 120). A provider this account cannot see answers `404`, the same as one that does not exist |
+| `GET` | `/api/storage` | This account's visible providers (its own plus the deployment default), the authority first, each with its run count and its newest run, plus the backup feature's chosen provider. `location` is the host or bucket an account added and `""` for the deployment default, whose store is operator infrastructure. The dates that live inside one provider are that provider's own page, not here |
+| `GET` | `/api/storage/connections/{id}` | One provider's page: the row with its run count and newest run; the backup feature's chosen provider as `{id, name}` (absent when unconfigured, and the name is what lets a page say which provider choosing this one would replace); and that provider's own restore points, newest first (up to 120). A provider this account cannot see answers `404`, the same as one that does not exist |
 | `POST` | `/api/storage/connections` | Attach the account's own storage provider: `backend` `cos` (`bucket`, `region`) or `s3` (`endpoint`, `bucket`, `region`, optional `prefix` and `pathStyle`), with `name`, `secretId`, `secretKey`. This is setup only: no feature uses it until one says so |
 | `DELETE` | `/api/storage/connections/{id}` | Remove one of the account's own providers |
 | `PATCH` | `/api/storage/connections/{id}` | Set the **backup feature's** `backupFolder` on that provider: a root-relative path where dated snapshots are written (`""` is the provider's root). The deployment default cannot be edited |
-| `POST` | `/api/storage/connections/{id}/test` | Start a measurement and answer `202 {"started":true,"runId":…,"testedAt":…}`; the run finishes off the request and caches its result on the connection (`probe`). The phases are a median metadata round trip (`latencyMs`), a 100 MB upload and read-back (`uploadBytesPerSecond`, `downloadBytesPerSecond`), then a batch of 100 objects of 1 KB written, renamed (provider-side copy + conditional delete) and deleted, each as `{files, elapsedMs, perSecond}` in `smallFiles`, `renames` and `deletes`, then four overlapping 250 KB writes (`concurrency.bytesPerSecond`, `concurrency.perStreamBytesPerSecond`), then the admission probe. A file-operation or concurrency phase that fails reports its own `error` inside that object instead of failing the measurement; a result cached before a phase existed omits it, which means "not measured", not zero. `probe.runId` names the run that produced the cached result and `probeRunning` says a run is in progress, so a page (or a reload) waits for exactly its own answer instead of comparing timestamps. While it runs, `GET /api/storage/connections/{id}` carries `probeProgress` — the same fields for the phases finished so far, plus `phase` (the phase measuring now; empty between phases and during the admission probe) and `done` (the finished phases in completion order; only a phase in `done` has a meaningful number, since a close store can measure 0 ms) — which is what lets a page fill one row as each phase finishes instead of showing nothing until the whole run ends; the record is in-memory and disappears when the answer is cached or the process stops. Every phase does a fixed amount of work, so two results are comparable |
-| `POST` | `/api/storage/connections/{id}/browser-probe` | Sign one browser-side measurement and answer it directly. The body is an application payload, not cached: `{"runId":"bp_…","bytes":100000000,"upload":{"url","method","headers","expiresAt"},"download":{"url","headers","expiresAt"}}`. The browser PUTs exactly `bytes` with the signed headers (a conditional create on one key under the reserved probe prefix), then times a GET of the same object, then calls the delete route. It answers `409` with a sentence when the connection relays (its bytes go through this service, and `/test` already measures that path) or when the product's driver cannot sign. Nothing is stored, because the answer describes a client and a network, not the provider. Every run expires after 30 minutes |
+| `POST` | `/api/storage/connections/{id}/browser-probe` | Start the speed test. The answer is the run itself, not a cached result: `{"runId":"bp_…","bytes":100000000,"direct":true,"upload":{"url","method","headers","credentials","expiresAt"},"download":{"url","headers","credentials","expiresAt"}}`. `direct` is the transport, decided by the connection's product and not by the caller: `true` hands over signed provider URLs (a conditional create on one key under the reserved probe prefix, then a read), and `false` hands over this service's own two legs, `PUT` and `GET` on `/api/storage/connections/{id}/browser-probe/{runId}/object`, which stream the bytes to and from the store exactly where a relayed upload would put them. `credentials` says whether the request carries the session cookie: `omit` for the provider, whose CORS policy rejects a credentialed request, and `include` for this service. The browser PUTs exactly `bytes` and times it, then times a GET of the same object (first byte, then body), then calls the delete route. Only a store this service cannot address as an object store (a local root) answers `409`, with a sentence. Nothing is stored, because the answer describes a client and a network, not the provider. Every run expires after 30 minutes |
 | `DELETE` | `/api/storage/connections/{id}/browser-probe/{runId}` | Delete the run's probe object with this service's own credential and forget the run (`{"removed":true}`); an unknown or expired run is `{"removed":false}`. The browser never holds a delete grant |
+| `PUT` / `GET` | `/api/storage/connections/{id}/browser-probe/{runId}/object` | The two relayed legs, used only for a run that answered `direct:false`: `PUT` takes exactly `bytes` of body and writes them to the store with this service's own credential, `GET` streams that object back. Both are cookie-authenticated and same-origin, both refuse a run this account did not open (`404` names the expired run), and a body that is not exactly `bytes` is `400` rather than a rate for work that never happened. This is the real relay leg, so what the page times is what an upload costs here |
 | `PUT` | `/api/storage/backup-target` | The backup feature's provider: `connectionId`, or `""` for not configured. One provider per feature |
 | `POST` | `/api/storage/backup` | Start `snapshot`, `prune` or `restore` on one backup provider; returns `202` and records progress in `backup_runs` |
 

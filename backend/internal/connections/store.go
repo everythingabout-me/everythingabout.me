@@ -29,10 +29,6 @@ type Store interface {
 	// moved them. It is scoped by row id, not name, so a rename cannot repoint
 	// another row's evidence.
 	SetObjectPaths(ctx context.Context, id, spoolRoot string) error
-	// SetProbe caches the last measurement requested for one connection. It is
-	// scoped by row id because a rename keeps the same store but a reused name
-	// must not inherit someone else's result.
-	SetProbe(ctx context.Context, id string, probe []byte) error
 	// SetBackupFolder changes where snapshots are placed inside one account's own
 	// connection. It refuses a row that already holds backup runs: those dates live
 	// under the old folder, and a silent move would leave listed restore points
@@ -168,18 +164,14 @@ func (p postgresStore) Insert(ctx context.Context, c Connection) error {
 		}
 		reference = encoded
 	}
-	var admission any
-	if len(c.Admission) > 0 {
-		admission = []byte(c.Admission)
-	}
 	// The id is supplied by a caller that had to place on-disk state before the
 	// INSERT, because a connection's evidence and spool are keyed by it; a caller
 	// without one still gets the schema's gen_random_uuid().
 	tag, err := p.db.Pool().Exec(ctx, `
-		insert into storage_connections(id, owner_id, name, backend, role, identity, config, secret, secret_reference, generation, admission, enabled)
-		values(coalesce(nullif($1,'')::uuid, gen_random_uuid()), nullif($2,'')::uuid,$3,$4,$5,$6,$7,$8,$9,$10,$11,true)
+		insert into storage_connections(id, owner_id, name, backend, role, identity, config, secret, secret_reference, generation, enabled)
+		values(coalesce(nullif($1,'')::uuid, gen_random_uuid()), nullif($2,'')::uuid,$3,$4,$5,$6,$7,$8,$9,$10,$11)
 		on conflict (identity) do nothing`,
-		c.ID, c.OwnerID, c.Name, c.Backend, c.Role, c.Identity, config, secret, reference, c.Generation, admission)
+		c.ID, c.OwnerID, c.Name, c.Backend, c.Role, c.Identity, config, secret, reference, c.Generation, c.Enabled)
 	if err != nil {
 		return fmt.Errorf("insert storage connection %q (identity %s): %w", c.Name, c.Identity, err)
 	}
@@ -253,9 +245,8 @@ func scanConnection(row scanner) (Connection, error) {
 	var (
 		c                   Connection
 		config, secret, ref []byte
-		ad, probe           []byte
 	)
-	if err := row.Scan(&c.ID, &c.OwnerID, &c.Name, &c.Backend, &c.Role, &c.Identity, &config, &secret, &ref, &c.Generation, &ad, &c.Enabled, &probe); err != nil {
+	if err := row.Scan(&c.ID, &c.OwnerID, &c.Name, &c.Backend, &c.Role, &c.Identity, &config, &secret, &ref, &c.Generation, &c.Enabled); err != nil {
 		return Connection{}, err
 	}
 	if err := json.Unmarshal(config, &c.Config); err != nil {
@@ -269,8 +260,6 @@ func scanConnection(row scanner) (Connection, error) {
 			return Connection{}, fmt.Errorf("storage connection %q: decode environment reference: %w", c.Name, err)
 		}
 	}
-	c.Admission = ad
-	c.LastProbe = probe
 	return c, nil
 }
 
@@ -283,20 +272,6 @@ var ErrConnectionNotFound = errors.New("storage connection not found on this acc
 // moving its folder would orphan every listed restore point. Removing those dates
 // first (or keeping the folder) is the only way through.
 var ErrBackupFolderLocked = errors.New("this destination already holds backups")
-
-func (p postgresStore) SetProbe(ctx context.Context, id string, probe []byte) error {
-	if len(probe) == 0 {
-		return fmt.Errorf("storage connection %s: an empty probe result cannot be recorded", id)
-	}
-	tag, err := p.db.Pool().Exec(ctx, `update storage_connections set last_probe=$2 where id=$1::uuid`, id, probe)
-	if err != nil {
-		return fmt.Errorf("storage connection %s: record probe result: %w", id, err)
-	}
-	if tag.RowsAffected() == 0 {
-		return fmt.Errorf("%w: %s", ErrConnectionNotFound, id)
-	}
-	return nil
-}
 
 // SetBackupFolder serializes against a backup start by taking the same row lock
 // `recordBackupStart` takes. The lock is what makes "no run exists yet" a fact
@@ -340,4 +315,4 @@ func (p postgresStore) SetBackupFolder(ctx context.Context, id, ownerID, folder 
 	return tx.Commit(ctx)
 }
 
-const connectionColumns = `id::text, coalesce(owner_id::text, ''), name, backend, role, identity, config, secret, secret_reference, generation, admission, enabled, last_probe`
+const connectionColumns = `id::text, coalesce(owner_id::text, ''), name, backend, role, identity, config, secret, secret_reference, generation, enabled`

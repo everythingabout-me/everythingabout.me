@@ -146,13 +146,14 @@ coordinate external writes with active application mutations according to the ad
 lock does not lock rclone, Finder or another cloud client.
 
 **Object writes:** object connections use one mutation strategy whose revision tokens are current-object
-ETags with operation-specific native `If-Match` / `If-None-Match` where enforced. Enforcement is measured per
-connection rather than assumed from S3 compatibility: `conditionalCreate` probes the overwrite switch on an
-occupied key, and `conditionalPut` probes a PUT carrying a stale `If-Match` — COS ignores that header on PUT
-while it enforces conditional GET and DELETE. A replacement through the gateway uses coordination and an
+ETags with operation-specific native `If-Match` / `If-None-Match` where enforced. Enforcement is a property of
+the product, not a measurement of the bucket: `internal/storageproduct` records `ConditionalCreate` and
+`ConditionalPut` for each product with the reason, because a request that once succeeded is not knowledge
+about the software — COS, for instance, ignores `If-Match` on PUT while it enforces conditional GET and
+DELETE, and its row says so. A replacement through the gateway uses coordination and an
 immediate ETag recheck regardless, without fencing arbitrary external writers. A **direct** class A
 replacement — the client's PUT is the publication and its grant lives up to an hour — is offered only where
-`conditionalPut` was measured, because that signed header is its only guard; elsewhere the same session
+the product promises `ConditionalPut`, because that signed header is its only guard; elsewhere the same session
 becomes a multipart upload whose parts stay unpublished until the server completes them, paying the staging
 round trips a small file otherwise avoids. Bucket versioning is neither required nor consulted. Upload,
 replacement, mkdir, move, copy and delete are available; implicit prefix folders are valid parents without
@@ -239,26 +240,21 @@ requires the spool to hold no non-terminal record, not an empty directory: settl
 locks cannot hide a future effect, and requiring their removal made a lost-index rebuild depend on hand-deleting
 the driver's recovery evidence.
 
-**Per-connection on-disk state is keyed by the connection row id (2026-11-13).** A connection owns two
-pieces of host state: its admission evidence and its spool. Evidence describes one endpoint, so a second
-connection inheriting the file would be refused when it loaded proof recorded elsewhere, and a probe
-against an inherited path would overwrite that proof; a shared spool would let one target's temporary
-material be published to another. Their paths are `<admission dir>/admission-<row id>.json` and
-`<spool root>/<row id>`. The leaf is the row id, never the connection name: migration 036 deliberately
-allows two owners to each call a connection "nas", so a name is not unique, and the earlier name-keyed
-leaf gave two accounts one host directory and one evidence file while every row and query was
+**Per-connection on-disk state is keyed by the connection row id (2026-11-13).** A connection owns one
+piece of host state: its spool. A shared spool would let one target's temporary material be published to
+another, so its path is `<spool root>/<row id>`. The leaf is the row id, never the connection name:
+migration 036 deliberately allows two owners to each call a connection "nas", so a name is not unique,
+and the earlier name-keyed leaf gave two accounts one host directory while every row and query was
 owner-scoped. The id is also the leaf that survives a rename of the connection, which a name-keyed leaf
 would move; the name stays where a person reads it (logs, errors, the settings UI). An operator's explicit
-`--admission-file`/`--spool-root` is kept verbatim, and the deployment's own paths are never moved.
+`--spool-root` is kept verbatim, and the deployment's own paths are never moved.
 Existing deployments are adopted at startup, before any owner resolves a connection, and the pass is
 idempotent. A row is a legacy row only when its stored path is exactly the name-keyed derivation. When
 only the legacy path exists it is renamed, so an in-flight upload's staged bytes and the ledger that
 proves a publication may still land move with the directory. When both exist the spool is merged entry by
 entry: entries missing from the new directory move in, byte-identical duplicates are dropped from the old
 one, and one name present in both with different contents stops the start naming both paths, because
-neither copy can be discarded automatically — a non-terminal record proves its effect may still land. The
-single evidence file is not merged: the id-keyed file wins because it is the one the current layout reads,
-and the old file is left in place and logged, since evidence is a measurement the probe rewrites. If two
+neither copy can be discarded automatically — a non-terminal record proves its effect may still land. If two
 rows already shared one name-keyed directory (the failure this fixes), the older row adopts it whole and
 the newer row starts with an empty directory; startup logs the shared path, and nothing is deleted,
 because the ledger it may hold is the evidence of a possible pending effect.

@@ -32,7 +32,7 @@ var ErrPathConflict = errors.New("storage connection path conflict")
 // keep across a restart.
 //
 // A row is adopted only when its stored path is exactly the legacy derivation; an
-// operator's explicit --spool-root/--admission-file and the deployment's own paths are
+// operator's explicit --spool-root and the deployment's own paths are
 // never touched. The rule for each of the two paths, independently:
 //
 //   - neither exists: the row is repointed and the id-keyed spool directory is created

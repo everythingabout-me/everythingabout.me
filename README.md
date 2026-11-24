@@ -473,11 +473,10 @@ Legacy `/api/fs/*` routes and the old root file routes (`/capabilities`, `/list`
 | POST | `/api/auth/logout` | End the current session |
 | GET | `/api/auth/me` | Current user (including `hasPassword`); anonymous requests return `user: null` |
 | GET | `/api/account` | Settings summary (current user, save links, recent activity, count of unclaimed legacy files) |
-| GET | `/api/storage` | Providers this account may use, the one holding the files first, each with its run count, newest run and last test result; the backup feature's chosen provider (owner session only) |
+| GET | `/api/storage` | Providers this account may use, the one holding the files first, each with its run count and newest run; the backup feature's chosen provider (owner session only) |
 | GET | `/api/storage/connections/{id}` | One provider's page: its newest run, the chosen backup provider, and that provider's own restore points |
 | POST, PATCH, DELETE | `/api/storage/connections` · `/api/storage/connections/{id}` | Attach an account-owned provider, set the backup feature's folder on it, or remove it |
-| POST | `/api/storage/connections/{id}/test` | Start a measurement (`202`) of latency, a 100 MB transfer, small-file write/rename/delete rates, concurrency and publishability; the answer is cached on the row, and the running phases are polled from the provider page as `probeProgress` |
-| POST / DELETE | `/api/storage/connections/{id}/browser-probe[/{runId}]` | Sign one measurement the browser runs itself — the same 100 MB PUT and read-back, straight to the provider — and delete its probe object afterwards. Class A connections only; nothing is cached, because the result describes the browser's network |
+| POST, PUT, GET, DELETE | `/api/storage/connections/{id}/browser-probe[/{runId}[/object]]` | The speed test, run by the browser: start a run of 100 MB put and read back, send and receive the bytes, then delete the probe object. The server decides from the product whether those bytes go straight to the provider (signed URLs, no cookie) or through this service (the relay legs, cookie-authenticated), so the page always measures the path a real upload takes. Nothing is cached: the result describes the browser's network |
 | PUT, POST | `/api/storage/backup-target` · `/api/storage/backup` | Choose the one backup destination, or start a snapshot/restore on a destination |
 | POST | `/api/auth/email/current-code` | Send an email-change code to the **current address** (requires a session, used to confirm identity) |
 | POST | `/api/auth/email/code` | Send an email-change code to the **new address** (requires a session) |

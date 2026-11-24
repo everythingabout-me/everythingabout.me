@@ -78,16 +78,6 @@ func (f *fakeStore) SetObjectPaths(_ context.Context, id, spoolRoot string) erro
 	return fmt.Errorf("fake store: no connection row %q", id)
 }
 
-func (f *fakeStore) SetProbe(_ context.Context, id string, probe []byte) error {
-	for i := range f.rows {
-		if f.rows[i].ID == id {
-			f.rows[i].LastProbe = probe
-			return nil
-		}
-	}
-	return fmt.Errorf("fake store: no connection row %q", id)
-}
-
 func (f *fakeStore) SetBackupFolder(_ context.Context, id, ownerID, folder string) error {
 	for i := range f.rows {
 		if f.rows[i].ID != id {

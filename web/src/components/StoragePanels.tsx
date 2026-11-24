@@ -5,12 +5,9 @@ import {
   ApiError,
   type BackupRun,
   type BrowserProbeGrant,
-  type FileOpsTest,
   type StorageConnection,
   type StorageConnectionDetail,
   type StorageProduct,
-  type StorageTestProgress,
-  type StorageTestResult,
 } from "../api/client";
 import { formatBytes, formatSpeed } from "../pages/sizeFormat";
 import { t } from "../i18n";
@@ -52,7 +49,6 @@ export function ProviderCard({ connection, backupTarget }: { connection: Storage
         </span>
       </span>
       <span className={styles.cardFoot}>
-        <HealthChip probe={connection.probe} />
         <span className={styles.cardMeta}>{backupLine(connection.lastRun)}</span>
       </span>
     </Link>
@@ -143,34 +139,6 @@ export function ProviderGlyph({ connection, large }: { connection: StorageConnec
   );
 }
 
-/**
- * Whether the last test still says something: a provider that answered but cannot
- * publish is not "ready", because publication is the promise a backup depends on.
- */
-function HealthChip({ probe }: { probe?: StorageTestResult | null }) {
-  const status = probeStatus(probe);
-  return (
-    <span className={styles.chip} data-tone={status.tone}>
-      <span className={styles.dot} />
-      <span className={styles.chipLabel}>{status.label}</span>
-      {probe?.ok && probe.writable ? <span className={styles.chipValue}>{formatMS(probe.latencyMs)}</span> : null}
-    </span>
-  );
-}
-
-type ProbeTone = "ready" | "failed" | "idle";
-
-/**
- * One place decides how a cached measurement reads, so the card, the panel and the
- * button that produced it cannot disagree about what "writable" means.
- */
-function probeStatus(probe?: StorageTestResult | null): { tone: ProbeTone; label: string } {
-  if (!probe) return { tone: "idle", label: t("drives.cardUntested") };
-  if (!probe.ok) return { tone: "failed", label: t("drives.cardUnreachable") };
-  if (!probe.writable) return { tone: "failed", label: t("drives.cardNotWritable") };
-  return { tone: "ready", label: t("drives.cardReady") };
-}
-
 function backupLine(last?: BackupRun | null): string {
   if (!last) return t("drives.cardNoBackup");
   if (last.state === "running") return t("drives.cardBackingUp");
@@ -179,195 +147,21 @@ function backupLine(last?: BackupRun | null): string {
 }
 
 /**
- * The measurement as a spec sheet: one label, one right-aligned number. The numbers sit in
- * the same position across providers and runs, which is what makes them comparable at a
- * glance; the work behind each row is fixed, so no row needs a footnote to say what it
- * measured. A phase that failed keeps its row and replaces the number with its error, so a
- * provider that is fast at one thing and broken at another says both.
+ * The speed test. There is one, and this is it: it runs in the browser, over the path an
+ * upload takes on this connection, so upload and download are the numbers a person actually
+ * feels when they move a file.
  *
- * A run in flight prints the same sheet from its progress: the phase now measuring shows a
- * spinner where its number will go, and each finished phase fills its own row. Replacing the
- * whole sheet at the end instead is what makes a minute of work look like a page that did
- * not notice the click. The rows are also the only progress marker: a second spinner beside
- * the heading would repeat what the row already says, and the disabled button already names
- * the run.
- */
-export function ProbeSection({
-  probe,
-  progress,
-  testing,
-  error,
-  local,
-  onTest,
-}: {
-  probe?: StorageTestResult | null;
-  progress?: StorageTestProgress | null;
-  testing: boolean;
-  error: string;
-  /** A local root is a host path: it has no credential and no round trip to measure. */
-  local?: boolean;
-  onTest: () => void;
-}) {
-  const status = probeStatus(probe);
-  // The sheet starts before the first poll returns: the run exists from the moment the POST
-  // was answered, and a second of nothing is the same "did anything happen" this display
-  // exists to remove. Every run starts with the latency phase.
-  const live: StorageTestProgress | null = testing ? (progress ?? pendingProbe()) : null;
-  const sheet: StorageTestResult | null = live ?? (probe?.ok ? probe : null);
-  return (
-    <section className={styles.section}>
-      <div className={styles.sectionHead}>
-        <div className={styles.sectionHeadText}>
-          <h2 className={styles.title}>{t("probe.title")}</h2>
-        </div>
-        {local ? null : (
-          <button className={styles.button} disabled={testing} onClick={onTest} aria-busy={testing}>
-            {testing ? t("drives.testing") : t("drives.test")}
-          </button>
-        )}
-      </div>
-
-      {local ? <p className={styles.muted}>{t("probe.local")}</p> : null}
-
-      {local || testing ? null : probe ? (
-        <div className={styles.probeStatus}>
-          <span className={`${styles.chip} ${styles.chipPlate}`} data-tone={status.tone}>
-            <span className={styles.dot} />
-            <span className={styles.chipLabel}>{status.label}</span>
-          </span>
-          <span className={styles.probeWhen}>{t("drives.testedAt", { when: testedAgo(probe.testedAt) })}</span>
-        </div>
-      ) : (
-        <div className={styles.emptyProbe}>
-          <p className={styles.emptyTitle}>{t("probe.untested")}</p>
-        </div>
-      )}
-
-      {!local && !testing && probe?.error ? <p className={styles.error}>{probe.error}</p> : null}
-
-      {sheet ? <Measurements probe={sheet} progress={live ?? undefined} /> : null}
-
-      {!local && error ? <p className={styles.error}>{error}</p> : null}
-    </section>
-  );
-}
-
-// The rows a run prints before the server has reported its first phase.
-function pendingProbe(): StorageTestProgress {
-  return {
-    testedAt: "",
-    phase: "latency",
-    done: [],
-    ok: false,
-    writable: false,
-    latencyMs: 0,
-    uploadBytes: 0,
-    downloadBytes: 0,
-    uploadBytesPerSecond: 0,
-    downloadBytesPerSecond: 0,
-  };
-}
-
-/** One printed row: the label on the left, the number flush right, and only an error below. */
-interface MetricRow {
-  key: string;
-  label: string;
-  value: string;
-  error?: string;
-}
-
-/**
- * One list of rows whether the run is finished or still going. A row prints its number once
- * its phase is in `done`, and the phase in `phase` prints a spinner in the same slot. A row
- * that has not run stays empty rather than showing "—", which would read as a measured zero.
- */
-function Measurements({ probe, progress }: { probe: StorageTestResult; progress?: StorageTestProgress }) {
-  const rows: MetricRow[] = [
-    { key: "latency", label: t("probe.latency"), value: formatMS(probe.latencyMs) },
-    { key: "upload", label: t("probe.upload"), value: formatSpeed(probe.uploadBytesPerSecond) },
-    { key: "download", label: t("probe.download"), value: formatSpeed(probe.downloadBytesPerSecond) },
-    fileOpsRow("smallFiles", t("probe.smallFiles"), probe.smallFiles),
-    fileOpsRow("renames", t("probe.renames"), probe.renames),
-    fileOpsRow("deletes", t("probe.deletes"), probe.deletes),
-    {
-      key: "concurrency",
-      label: t("probe.concurrency"),
-      value: probe.concurrency && !probe.concurrency.error ? formatSpeed(probe.concurrency.bytesPerSecond) : "—",
-      error: probe.concurrency?.error,
-    },
-  ];
-  const finished = progress ? new Set(progress.done) : null;
-  return (
-    <div className={styles.metrics} aria-busy={progress ? true : undefined}>
-      {rows.map((row) => {
-        const running = progress?.phase === row.key;
-        const done = finished === null || finished.has(row.key);
-        return (
-          <div key={row.key} className={styles.metric}>
-            <span className={styles.metricLabel}>{row.label}</span>
-            {running ? (
-              <span className={`${styles.metricValue} ${styles.metricBusy}`}>
-                <span className={styles.spinner} aria-hidden="true" />
-              </span>
-            ) : (
-              <span className={row.error ? `${styles.metricValue} ${styles.metricValueFailed}` : styles.metricValue}>
-                {done ? row.value : ""}
-              </span>
-            )}
-            {done && row.error ? <span className={styles.metricError}>{row.error}</span> : null}
-          </div>
-        );
-      })}
-    </div>
-  );
-}
-
-function fileOpsRow(key: string, label: string, phase?: FileOpsTest | null): MetricRow {
-  if (!phase) return { key, label, value: "—" };
-  if (phase.error) return { key, label, value: "—", error: phase.error };
-  return { key, label, value: t("probe.perSecond", { value: formatCount(phase.perSecond) }) };
-}
-
-/**
- * A per-file-op rate keeps one decimal only below 10: a slow store reports "2.5 files/s"
- * where a fast one reports "33", and a thousandth of a file per second is noise.
- */
-function formatCount(value: number): string {
-  if (!Number.isFinite(value) || value <= 0) return "0";
-  return value >= 10 ? String(Math.round(value)) : value.toFixed(1);
-}
-
-/** Sub-millisecond results exist on a local or a very close store; "0 ms" would read as a failure. */
-function formatMS(ms: number): string {
-  if (!Number.isFinite(ms) || ms < 0) return "—";
-  if (ms < 1) return "< 1 ms";
-  return `${Math.round(ms)} ms`;
-}
-
-function testedAgo(iso: string): string {
-  const then = new Date(iso).getTime();
-  if (!Number.isFinite(then)) return t("drives.testedJustNow");
-  const minutes = Math.max(0, Math.round((Date.now() - then) / 60_000));
-  if (minutes < 1) return t("drives.testedJustNow");
-  if (minutes < 60) return t("drives.testedMinutes", { minutes });
-  const hours = Math.round(minutes / 60);
-  if (hours < 24) return t("drives.testedHours", { hours });
-  return t("drives.testedDays", { days: Math.round(hours / 24) });
-}
-
-/**
- * The measurement from this browser.
+ * The server decides the leg, not the page. A product that a browser can be signed into gets
+ * a conditional PUT and a read on its own URLs; everything else gets this service's own two
+ * endpoints, which relay the bytes through the same provider calls a real upload makes. The
+ * two legs differ in one visible way — a direct leg carries no cookie — and that difference
+ * arrives in the grant rather than being guessed here.
  *
- * The panel above measures the server's path — the one a backup and the index take. An
- * upload from the page takes a different one: the browser writes straight to the store over
- * its own network, so the number a person feels is the one taken from where they sit. Two
- * vantage points are two sheets, not two rows on one sheet, and the copy says which is which.
- *
- * Nothing here is kept. The grant names one disposable object and the object is deleted in
- * the finally, because a client's speed is a fact about a network at a moment, not a
- * property of the provider worth caching.
+ * Nothing here is kept. The run names one disposable object and the object is deleted in the
+ * finally, because a client's speed is a fact about a network at a moment, not a property of
+ * the provider worth caching.
  */
-export function BrowserProbeSection({ connectionId }: { connectionId: string }) {
+export function SpeedTest({ connectionId }: { connectionId: string }) {
   const [running, setRunning] = useState(false);
   const [elapsed, setElapsed] = useState(0);
   const startedAt = useRef(0);
@@ -381,10 +175,11 @@ export function BrowserProbeSection({ connectionId }: { connectionId: string }) 
   const [latencyMS, setLatencyMS] = useState<number | null>(null);
   const [uploadBps, setUploadBps] = useState(0);
   const [downloadBps, setDownloadBps] = useState(0);
-  // A relayed connection is not a failure: its bytes go through this service, so there is no
-  // provider URL to hand a browser and the server-side measurement is the path. The 409's
-  // message is a full sentence written for the person, so it reads as the explanation it is
-  // instead of as a red line under the button.
+  /** Whether the bytes are going to the provider itself, which changes what a CORS failure means. */
+  const [direct, setDirect] = useState(false);
+  // A store this service cannot reach as an object store (a local root) has no speed to
+  // measure. The 409's message is a full sentence written for the person, so it reads as the
+  // explanation it is instead of as a red line under the button.
   const [explanation, setExplanation] = useState("");
   const [error, setError] = useState("");
 
@@ -400,7 +195,7 @@ export function BrowserProbeSection({ connectionId }: { connectionId: string }) 
    * print.
    */
   function refusal(response: Response): string {
-    return t("probe.browserRefused", { status: response.status });
+    return t("probe.refused", { status: response.status });
   }
 
   async function measure(grant: BrowserProbeGrant) {
@@ -412,21 +207,21 @@ export function BrowserProbeSection({ connectionId }: { connectionId: string }) 
     // Every signed header but Content-Length: fetch derives it from the body and refuses a
     // caller-set value. The rest — the content type and the "only if absent" condition — are
     // the grant's terms, so dropping one would change what is being measured.
-    const headers: Record<string, string> = {};
-    for (const [name, value] of Object.entries(grant.upload.headers)) {
+    const uploadHeaders: Record<string, string> = {};
+    for (const [name, value] of Object.entries(grant.upload.headers ?? {})) {
       if (name.toLowerCase() === "content-length") continue;
-      headers[name] = value;
+      uploadHeaders[name] = value;
     }
 
     setPhase("upload");
     const uploadStart = performance.now();
     const uploaded = await fetch(grant.upload.url, {
-      method: grant.upload.method,
-      headers,
+      method: grant.upload.method ?? "PUT",
+      headers: uploadHeaders,
       body,
-      // A cross-origin transfer carries no cookie, and nothing about this run may be answered
-      // from a cache.
-      credentials: "omit",
+      // Set by the grant: a provider URL must not carry this service's cookie, and a relayed
+      // leg is this service and needs it.
+      credentials: grant.upload.credentials,
       cache: "no-store",
     });
     const uploadMS = performance.now() - uploadStart;
@@ -437,8 +232,8 @@ export function BrowserProbeSection({ connectionId }: { connectionId: string }) 
     setPhase("download");
     const downloadStart = performance.now();
     const downloaded = await fetch(grant.download.url, {
-      headers: grant.download.headers,
-      credentials: "omit",
+      headers: grant.download.headers ?? {},
+      credentials: grant.download.credentials,
       cache: "no-store",
     });
     // The response resolves once the first byte and the headers are here: that wait is the
@@ -481,6 +276,7 @@ export function BrowserProbeSection({ connectionId }: { connectionId: string }) 
         throw e;
       }
       setBytes(grant.bytes);
+      setDirect(grant.direct);
       try {
         await measure(grant);
       } finally {
@@ -493,12 +289,12 @@ export function BrowserProbeSection({ connectionId }: { connectionId: string }) 
         }
       }
     } catch (e) {
-      // A cross-origin request that the store never answers never gets a status: the browser
-      // reports a network error, which is what a missing CORS rule looks like from here. The
-      // server-side measurement above distinguishes the two cases — it has already said
-      // whether the store is reachable.
+      // A request that never gets a status is a network failure. On a direct leg the usual
+      // cause is a missing CORS rule on the store, because the provider is being asked to
+      // accept a cross-origin write; on a relayed leg there is no cross-origin request to
+      // fail, so it is the connection itself.
       if (e instanceof TypeError) {
-        setError(`${e.message} ${t("probe.browserNetwork")}`);
+        setError(`${e.message} ${direct ? t("probe.networkDirect") : t("probe.networkRelay")}`);
       } else {
         setError(e instanceof Error ? e.message : String(e));
       }
@@ -511,19 +307,19 @@ export function BrowserProbeSection({ connectionId }: { connectionId: string }) 
   const rows = [
     {
       key: "latency",
-      label: t("probe.browserLatency"),
+      label: t("probe.latency"),
       value: latencyMS === null ? "" : formatMS(latencyMS),
       busy: phase === "download" && latencyMS === null,
     },
     {
       key: "upload",
-      label: t("probe.browserUpload"),
+      label: t("probe.upload"),
       value: uploadBps > 0 ? formatSpeed(uploadBps) : "",
       busy: phase === "upload",
     },
     {
       key: "download",
-      label: t("probe.browserDownload"),
+      label: t("probe.download"),
       value: downloadBps > 0 ? formatSpeed(downloadBps) : "",
       busy: phase === "download",
     },
@@ -533,18 +329,18 @@ export function BrowserProbeSection({ connectionId }: { connectionId: string }) 
     <section className={styles.section}>
       <div className={styles.sectionHead}>
         <div className={styles.sectionHeadText}>
-          <h2 className={styles.title}>{t("probe.browserTitle")}</h2>
-          <p className={styles.lead}>{t("probe.browserLead")}</p>
+          <h2 className={styles.title}>{t("probe.title")}</h2>
+          <p className={styles.lead}>{t("probe.lead")}</p>
         </div>
         <button className={styles.button} disabled={running} aria-busy={running} onClick={() => void run()}>
-          {running ? t("probe.browserRunning", { seconds: elapsed }) : t("probe.browserRun")}
+          {running ? t("probe.running", { seconds: elapsed }) : t("probe.run")}
         </button>
       </div>
 
       {explanation ? <p className={styles.lead}>{explanation}</p> : null}
       {error ? (
         <p className={styles.error}>
-          {t("probe.browserFailed")} {error}
+          {t("probe.failed")} {error}
         </p>
       ) : null}
 
@@ -567,16 +363,21 @@ export function BrowserProbeSection({ connectionId }: { connectionId: string }) 
 
       {running && phase ? (
         <p className={styles.muted}>
-          {phase === "upload"
-            ? t("probe.browserUploading", { size: formatBytes(bytes) })
-            : t("probe.browserDownloading")}
+          {phase === "upload" ? t("probe.uploading", { size: formatBytes(bytes) }) : t("probe.downloading")}
         </p>
       ) : null}
 
-      {sent > 0 ? <p className={styles.hint}>{t("probe.browserSent", { size: formatBytes(sent) })}</p> : null}
-      <p className={styles.muted}>{t("probe.browserNotSaved")}</p>
+      {sent > 0 ? <p className={styles.hint}>{t("probe.sent", { size: formatBytes(sent) })}</p> : null}
+      <p className={styles.muted}>{t("probe.notSaved")}</p>
     </section>
   );
+}
+
+/** Sub-millisecond results exist on a very close store; "0 ms" would read as a failure. */
+function formatMS(ms: number): string {
+  if (!Number.isFinite(ms) || ms < 0) return "—";
+  if (ms < 1) return "< 1 ms";
+  return `${Math.round(ms)} ms`;
 }
 
 /** Bytes per second over one transfer, tolerant of a clock that did not advance. */

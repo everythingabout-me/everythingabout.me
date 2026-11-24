@@ -39,8 +39,6 @@ type Server struct {
 	conns      connections.Store
 	backupMu   sync.Mutex
 	backupJobs map[string]bool
-	probeMu    sync.Mutex
-	probeRuns  map[string]*probeRun
 	// browserProbes are the runs this process signed for a browser to measure itself.
 	browserProbeMu sync.Mutex
 	browserProbes  map[string]browserProbeClaim
@@ -202,9 +200,12 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/storage/connections", s.wrap(s.handleStorageConnectionAdd))
 	mux.HandleFunc("DELETE /api/storage/connections/{id}", s.wrap(s.handleStorageConnectionRemove))
 	mux.HandleFunc("PATCH /api/storage/connections/{id}", s.wrap(s.handleStorageConnectionSettings))
-	mux.HandleFunc("POST /api/storage/connections/{id}/test", s.wrap(s.handleStorageConnectionTest))
 	mux.HandleFunc("POST /api/storage/connections/{id}/browser-probe", s.wrap(s.handleStorageBrowserProbeStart))
 	mux.HandleFunc("DELETE /api/storage/connections/{id}/browser-probe/{runId}", s.wrap(s.handleStorageBrowserProbeDelete))
+	// The relayed legs of a speed test: a product that cannot be written to directly sends
+	// its bytes through this service, so these two are the browser's path to that store.
+	mux.HandleFunc("PUT /api/storage/connections/{id}/browser-probe/{runId}/object", s.wrap(s.handleStorageBrowserProbePut))
+	mux.HandleFunc("GET /api/storage/connections/{id}/browser-probe/{runId}/object", s.wrap(s.handleStorageBrowserProbeGet))
 	mux.HandleFunc("PUT /api/storage/backup-target", s.wrap(s.handleStorageBackupTarget))
 	mux.HandleFunc("POST /api/storage/backup", s.wrap(s.handleBackupStart))
 

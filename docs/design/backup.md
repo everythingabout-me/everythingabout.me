@@ -2,8 +2,8 @@
 
 > Status: connections (§7–§8) and the snapshot/prune/restore commands (§1–§6) are implemented
 > (`sql/035`–`sql/037`, `internal/connections`, `internal/snapshot`, `eam backup`). The account surface
-> exists too: providers are added and measured once (`sql/055`, `POST /api/storage/connections/{id}/test`),
-> and the **backup feature** separately chooses a provider and a folder (`PUT /api/storage/backup-target`,
+> exists too: providers are added and their product names the write guarantees they have (`sql/035`,
+> `internal/storageproduct`), and the **backup feature** separately chooses a provider and a folder (`PUT /api/storage/backup-target`,
 > `PATCH /api/storage/connections/{id}`). Editing the retention policy from the UI is still missing.
 > This replaces the earlier framing in which application metadata was part of the backup. Per `AGENTS.md` (*Bytes are the source of truth*), a backup is a
 > storage-layer artifact: the user's content survives because the storage layer holds copies of the tree.
@@ -153,7 +153,6 @@ create table if not exists storage_connections (
   config     jsonb not null,                    -- endpoint, region, bucket, prefixes, path style, case rules
   secret     jsonb not null,                    -- this connection's credential fields
   generation bigint not null default 1,
-  admission  jsonb,                             -- retired: per-connection probe evidence, unreferenced
   enabled    boolean not null default true,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
@@ -205,18 +204,17 @@ Rules, each answering a specific failure:
   `authority`.** Attaching your own store is the point of the feature, so naming an endpoint is the
   account's call: a host allowlist would make the deployment's owner a gatekeeper for their own drive and
   answer the wrong question (which hosts exist, not whether this one can hold a tree). What bounds it is
-  that the row is a *backup destination* — never an authority — and that the probe must prove publication
-  before it is used. That reasoning rests on accounts being people the deployment trusts; if signup
+  that the row is a *backup destination* — never an authority — and that its product must promise
+  publication before any feature may write there. That reasoning rests on accounts being people the deployment trusts; if signup
   is open to strangers, the control belongs at registration (`ALLOW_REGISTRATION`), because an open
   signup is a far larger grant than any single endpoint. The operator CLI is not bound by any of this: it
   already has host access.
-- **A destination is measured when it is used, not when it is recorded.** Both paths derive that
-  connection's own evidence and spool (the row id is the leaf; see
-  [storage](storage.md#5-write-and-recovery-model)), because inheriting the deployment's would
-  make the new bucket refuse evidence recorded for another one — and measuring it would overwrite the
-  authority's proof. The measurement itself happens before the first snapshot: a drive may be recorded
-  while it is unreachable (a NAS that is off, a tunnel is down), and a person adding one should not
-  have to wait for it to come back before saying where it is.
+- **A destination is reached when it is used, not when it is recorded.** Each connection derives its own
+  spool (the row id is the leaf; see [storage](storage.md#5-write-and-recovery-model)), because inheriting
+  the deployment's would let one target's temporary material be published to another. Nothing is probed
+  when a row is written: a drive may be recorded while it is unreachable (a NAS that is off, a tunnel is
+  down), and a person adding one should not have to wait for it to come back before saying where it is.
+  The first real write is what says whether it is reachable, and it fails naming the connection.
 
 **A row is a provider; a feature's use of it is separate state.** An account-added row carries
 `role='backup'` because backup is the only feature that exists today; the role means "this row may never
@@ -262,13 +260,15 @@ backup folder is reached through the backup feature's configuration.
   limit (5 GiB on COS and S3), and an entry above it is refused by name before the attempt.
 - One snapshot per owner per day is the default. RPO is therefore one day, which matches the stated need:
   this is backup, not sync, and the copy does not have to be reachable immediately.
-- **The account tests a provider once, independently of any feature.** `POST /api/storage/connections/{id}/test`
-  measures one metadata round trip, uploads and reads back 100 MB, then writes, renames and deletes 100 small
-  objects and overlaps four writes, caching every phase on the row. `writable` is the product's answer, not a
-  second measurement: a store that moves bytes but does not promise conditional create and atomic publication
-  is reported as reachable and not ready. It is provider-level because the write protocol does not depend on
-  which feature uses it. It is bounded
-  by those bytes and requests, never by a clock, so a slow link finishes instead of being cut off.
+- **The speed test measures the provider, independently of any feature.** `POST /api/storage/connections/{id}/browser-probe`
+  hands the page one run: 100 MB written to the store and read back, timed by the browser along the path an
+  upload takes on that product (straight to the provider on a product that can be signed into, through this
+  service on a relay). It is provider-level because that path does not depend on which feature uses the
+  connection, and it is run in the browser because a number taken on the server would describe the host's
+  link instead of the person's. Nothing about publishability is measured: the product row answers that, and a
+  store that cannot promise conditional create and atomic publication is refused when it is used, not scored
+  here. A run is bounded by those bytes and requests, never by a clock, so a slow link finishes instead of
+  being cut off.
 - **A provider is setup; a feature chooses it.** Adding a provider must not configure a feature. The backup
   feature stays unconfigured until the account names a provider (`backup_policies.enabled`), even when only
   one provider exists. The alternative — "the only attached provider is the obvious default" — was tried and

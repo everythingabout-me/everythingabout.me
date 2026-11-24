@@ -1639,95 +1639,34 @@ export interface StorageConnection {
   runs: number;
   /** The newest of those runs; absent when no backup ever ran here. */
   lastRun?: BackupRun | null;
-  /** Last measurement, if this account ever ran one. */
-  probe?: StorageTestResult | null;
-  /** A measurement is running for this provider in the server process. */
-  probeRunning?: boolean;
-  /**
-   * The run in flight, revealed phase by phase. A test takes a minute or more, and a sheet
-   * that only changes at the end is indistinguishable from one that is stuck; this is what
-   * lets each row fill in as its own phase finishes.
-   */
-  probeProgress?: StorageTestProgress | null;
-}
-
-export interface StorageTestResult {
-  testedAt: string;
-  /** Identifies the run that produced this result; absent on a result cached before runs had ids. */
-  runId?: string;
-  ok: boolean;
-  writable: boolean;
-  error?: string;
-  /** Median metadata round trip, in milliseconds. */
-  latencyMs: number;
-  uploadBytes: number;
-  downloadBytes: number;
-  uploadBytesPerSecond: number;
-  downloadBytesPerSecond: number;
-  /** The small-file batch, written one file at a time; absent on an older cached result. */
-  smallFiles?: FileOpsTest | null;
-  /** The same batch renamed (provider-side copy + delete), then deleted. */
-  renames?: FileOpsTest | null;
-  deletes?: FileOpsTest | null;
-  /** Overlapping writes: the aggregate, and the average part each stream contributed. */
-  concurrency?: ConcurrencyTest | null;
 }
 
 /**
- * A measurement still running: the cached result's shape plus the phase it is on. The page
- * reveals a row when its phase appears in `done` and spins the one named by `phase`, which
- * is why the two are separate facts — a file-operation phase that failed still finished and
- * still owns the error its row prints.
- */
-export interface StorageTestProgress extends StorageTestResult {
-  /** The phase now measuring; "" between phases and during the publishability check. */
-  phase: string;
-  /** Phases that already finished, in completion order. */
-  done: string[];
-}
-
-/** One file-operation phase: how many files, and how fast, because a small file costs a round trip. */
-export interface FileOpsTest {
-  files: number;
-  bytesPerFile?: number;
-  elapsedMs: number;
-  perSecond: number;
-  error?: string;
-}
-
-/** Overlapping writes: the aggregate, and the average part each stream contributed. */
-export interface ConcurrencyTest {
-  streams: number;
-  bytesPerStream: number;
-  bytesPerSecond: number;
-  perStreamBytesPerSecond: number;
-  error?: string;
-}
-
-/** A measurement runs off the request; the page waits for the result with this run id. */
-export interface StorageTestStart {
-  started: boolean;
-  runId: string;
-  testedAt: string;
-}
-
-/**
- * One browser measurement, signed by the server: a conditional PUT of exactly `bytes` on a
- * disposable object, and a read of it back. The page performs both transfers itself, so the
- * numbers describe the browser's network — the path an upload actually takes — rather than
- * the server's.
+ * One speed test, taken by this browser: a PUT of exactly `bytes` and a read of it back,
+ * along the path an upload of that size takes on this connection. Nothing about it is
+ * cached — it describes a network at a moment, not a property of the store.
+ *
+ * `direct` says which leg that is. A direct run sends the bytes to the provider with the
+ * signed headers below and no cookie; a relayed run sends them to this service, which
+ * writes them to the store, so it needs the session cookie instead.
  */
 export interface BrowserProbeGrant {
   runId: string;
   bytes: number;
-  upload: {
-    url: string;
-    method: string;
-    /** Signed headers. `Content-Length` is in here but fetch sets it from the body. */
-    headers: Record<string, string>;
-    expiresAt: string;
-  };
-  download: { url: string; headers: Record<string, string>; expiresAt: string };
+  direct: boolean;
+  upload: BrowserProbeLeg;
+  download: BrowserProbeLeg;
+}
+
+/** One half of a run: where the bytes go, how, and whether that URL is this service's own. */
+export interface BrowserProbeLeg {
+  url: string;
+  method?: string;
+  /** Signed headers on a direct leg. `Content-Length` is in there but fetch sets it. */
+  headers?: Record<string, string>;
+  /** "omit" for the provider (its CORS policy rejects a credentialed request), "include" for this service. */
+  credentials: "omit" | "include";
+  expiresAt: string;
 }
 
 export interface BackupRun {
@@ -1798,14 +1737,10 @@ export const api = {
     await request(`/api/storage/connections/${encodeURIComponent(id)}`, { method: "DELETE" });
   },
 
-  testStorageConnection(id: string): Promise<StorageTestStart> {
-    return post<StorageTestStart>(`/api/storage/connections/${encodeURIComponent(id)}/test`);
-  },
-
   /**
-   * Opens one measurement from this browser. A 409 here is an explanation, not a failure:
-   * the connection relays through this service (or its driver cannot sign), so there is no
-   * provider URL to hand a browser and the server-side measurement is the path.
+   * Opens one speed test. The server decides the leg from the connection's product, so the
+   * same call answers with a provider URL on a product that can be written to directly and
+   * with this service's own relay URL everywhere else.
    */
   startBrowserProbe(id: string): Promise<BrowserProbeGrant> {
     return post<BrowserProbeGrant>(`/api/storage/connections/${encodeURIComponent(id)}/browser-probe`);
