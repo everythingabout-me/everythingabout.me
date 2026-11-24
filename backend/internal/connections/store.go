@@ -78,9 +78,18 @@ func (p postgresStore) ByName(ctx context.Context, ownerID, name string) (Connec
 }
 
 // Visible is what an account may see: its own rows plus the deployment default.
+//
+// The authority row comes first because it is not one option among several: it is where
+// the account's files already live, and every other row is a place they might put a copy.
+// Ordering by owner then name alone put it wherever its name happened to sort — the
+// deployment default is a shared row (owner_id null, so NULLS LAST) and sank below the
+// first account-added provider, which presented the one card that is not a choice as the
+// last of a list of equals. The account's own rows still precede other shared rows, and
+// the name breaks ties inside each group.
 func (p postgresStore) Visible(ctx context.Context, ownerID string) ([]Connection, error) {
 	rows, err := p.db.Pool().Query(ctx, `select `+connectionColumns+` from storage_connections
-		where owner_id=nullif($1,'')::uuid or owner_id is null order by owner_id nulls last, name`, ownerID)
+		where owner_id=nullif($1,'')::uuid or owner_id is null
+		order by (role='authority') desc, owner_id nulls last, name`, ownerID)
 	if err != nil {
 		return nil, fmt.Errorf("read visible storage connections for owner %s: %w", ownerID, err)
 	}

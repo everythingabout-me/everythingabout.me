@@ -314,3 +314,28 @@ func TestStorageConnectionPageIsPerProvider(t *testing.T) {
 		t.Fatalf("another account's provider page answered %d, want 404", recorder.Code)
 	}
 }
+
+// The deployment's own store is the operator's infrastructure, so the page must not be
+// able to print its bucket or region: the bucket name carries the provider account id,
+// and a value sent to the browser is a value the account can read. An account-added row
+// is the opposite case — that location is the thing the person typed and must recognise.
+func TestConnectionLocationHidesTheDeploymentStore(t *testing.T) {
+	shared := connections.Connection{
+		Backend: "cos",
+		Role:    connections.RoleAuthority,
+		Config:  connections.Spec{COS: connections.COSSpec{Bucket: "everything-about-me-1252157770", Region: "ap-beijing"}},
+	}
+	if got := connectionLocation(shared); got != "" {
+		t.Fatalf("deployment location = %q, want it redacted", got)
+	}
+
+	owned := connections.Connection{
+		OwnerID: "6f1a6f54-5f2d-4f7c-9c76-8bd0f0f5d3a2",
+		Backend: "cos",
+		Role:    connections.RoleBackup,
+		Config:  connections.Spec{COS: connections.COSSpec{Bucket: "my-backups-1250000000", Region: "ap-hongkong"}},
+	}
+	if got, want := connectionLocation(owned), "my-backups-1250000000 · ap-hongkong"; got != want {
+		t.Fatalf("account location = %q, want %q", got, want)
+	}
+}

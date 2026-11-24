@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { Link, useLoaderData, useNavigate, useRevalidator } from "react-router";
 import { api, type StorageConnectionDetail } from "../../api/client";
-import { BackupSection, ProbeSection, ProviderGlyph, providerRoleLabel } from "../../components/StoragePanels";
+import { BackupSection, ProbeSection, ProviderGlyph, providerRoleLabel, storageKindLabel } from "../../components/StoragePanels";
 import { StorageSync } from "../../components/StorageSync";
 import { t } from "../../i18n";
 import panel from "../../components/StoragePanels.module.css";
@@ -94,16 +94,21 @@ export function StorageProviderSettings() {
       </div>
 
       <header className={panel.identity}>
-        <ProviderGlyph backend={connection.backend} large />
+        <ProviderGlyph connection={connection} large />
         <div className={panel.identityText}>
           <h3 className={panel.providerName}>
             {connection.name}
             <span className={panel.badge}>{roleLabel}</span>
           </h3>
           <p className={panel.providerMeta}>
-            <span>{backendLabel(connection.backend)}</span>
-            <span className={panel.metaSep}>·</span>
-            <code className={panel.locationCode}>{connection.location}</code>
+            <span>{storageKindLabel(connection)}</span>
+            {/* The deployment's own store has no location the account may read. */}
+            {connection.location ? (
+              <>
+                <span className={panel.metaSep}>·</span>
+                <code className={panel.locationCode}>{connection.location}</code>
+              </>
+            ) : null}
           </p>
           {authority ? <p className={panel.identityNote}>{t("provider.authorityNote")}</p> : null}
         </div>
@@ -141,10 +146,4 @@ export function StorageProviderSettings() {
       ) : null}
     </div>
   );
-}
-
-function backendLabel(backend: string): string {
-  if (backend === "cos") return t("drives.backendCos");
-  if (backend === "s3") return t("drives.backendS3");
-  return t("drives.backendLocal");
 }

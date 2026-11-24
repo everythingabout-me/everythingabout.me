@@ -10,7 +10,7 @@ import {
 } from "../api/client";
 import { formatBytes, formatSpeed } from "../pages/sizeFormat";
 import { t } from "../i18n";
-import { BucketIcon, FolderIcon, ServerIcon } from "./icons";
+import { CloudIcon, BucketIcon, FolderIcon, ServerIcon } from "./icons";
 import styles from "./StoragePanels.module.css";
 
 /**
@@ -33,13 +33,17 @@ export function ProviderCard({ connection, backupTarget }: { connection: Storage
   return (
     <Link className={styles.card} to={`/settings/storage/${connection.id}`}>
       <span className={styles.cardTop}>
-        <ProviderGlyph backend={connection.backend} />
+        <ProviderGlyph connection={connection} />
         <span className={styles.cardIdentity}>
           <span className={styles.cardName}>
             <span className={styles.cardNameText}>{connection.name}</span>
             {badge ? <span className={styles.badge}>{badge}</span> : null}
           </span>
-          <span className={styles.cardLocation}>{connection.location}</span>
+          {connection.location ? (
+            <span className={styles.cardLocation}>{connection.location}</span>
+          ) : (
+            <span className={styles.cardKind}>{storageKindLabel(connection)}</span>
+          )}
         </span>
       </span>
       <span className={styles.cardFoot}>
@@ -48,6 +52,23 @@ export function ProviderCard({ connection, backupTarget }: { connection: Storage
       </span>
     </Link>
   );
+}
+
+/**
+ * What kind of store a row is, in the account's words. An account-added provider can
+ * also be named by its location, which is the host or bucket the person typed. The
+ * deployment's own store has no location to show — that is the operator's
+ * infrastructure — so this is the only thing left that says what the card is.
+ */
+export function storageKindLabel(connection: StorageConnection): string {
+  if (!connection.mine) return t("drives.backendManaged");
+  return backendLabel(connection.backend);
+}
+
+export function backendLabel(backend: string): string {
+  if (backend === "cos") return t("drives.backendCos");
+  if (backend === "s3") return t("drives.backendS3");
+  return t("drives.backendLocal");
 }
 
 /**
@@ -61,9 +82,21 @@ export function providerRoleLabel(connection: StorageConnection, backupTarget: s
   return connection.lastRun ? t("drives.roleOff") : t("drives.roleUnused");
 }
 
-/** The same glyph on the card and on the page it opens, so the two read as one thing. */
-export function ProviderGlyph({ backend, large }: { backend: string; large?: boolean }) {
-  const Icon = backend === "cos" ? BucketIcon : backend === "local" ? FolderIcon : ServerIcon;
+/**
+ * The same glyph on the card and on the page it opens, so the two read as one thing.
+ * Which glyph is which store is a fact about who runs it, not only about the protocol:
+ * the deployment's own store is a cloud, a bucket the account attached stays a bucket,
+ * a self-hosted endpoint is a server, and a host path is a folder. Those are four
+ * silhouettes, so the kind is legible without reading the line under the name.
+ */
+export function ProviderGlyph({ connection, large }: { connection: StorageConnection; large?: boolean }) {
+  const Icon = !connection.mine
+    ? CloudIcon
+    : connection.backend === "cos"
+      ? BucketIcon
+      : connection.backend === "local"
+        ? FolderIcon
+        : ServerIcon;
   return (
     <span className={large ? `${styles.glyph} ${styles.glyphLarge}` : styles.glyph}>
       <Icon size={large ? 20 : 17} />

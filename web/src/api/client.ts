@@ -1620,6 +1620,11 @@ export interface StorageConnection {
   name: string;
   role: "authority" | "backup";
   backend: string;
+  /**
+   * Where the store is, in the words the page may print: a host or a bucket. Empty for
+   * the deployment's own row, whose bucket and region are operator infrastructure that
+   * the server does not hand to a browser at all.
+   */
   location: string;
   enabled: boolean;
   mine: boolean;

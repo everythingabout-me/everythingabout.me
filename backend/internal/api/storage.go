@@ -1020,7 +1020,17 @@ func (s *Server) recordBackupRun(ctx context.Context, ownerID, connectionID, dat
 	}
 }
 
+// connectionLocation is what the page may say about where a store is. A shared row's
+// store belongs to the deployment, not to the account: its bucket name carries the
+// operator's provider account id and its region names infrastructure the account can
+// neither choose nor check, so it answers "". The account acts on that row all the same
+// (it holds the files), and the role says what it is. Redacted here rather than in the
+// page because a value that reaches the browser is a value the user can read; operator
+// tooling still prints it (`eam storage-connection list`).
 func connectionLocation(c connections.Connection) string {
+	if c.OwnerID == "" {
+		return ""
+	}
 	switch c.Backend {
 	case "cos":
 		return c.Config.COS.Bucket + " · " + c.Config.COS.Region

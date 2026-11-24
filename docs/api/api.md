@@ -1518,7 +1518,7 @@ a file client cannot select a provider through the file API.
 
 | Method | Route | Purpose |
 |---|---|---|
-| `GET` | `/api/storage` | This account's visible providers (its own plus the deployment default), each with its run count, its newest run and last test result, plus the backup feature's chosen provider. The dates that live inside one provider are that provider's own page, not here |
+| `GET` | `/api/storage` | This account's visible providers (its own plus the deployment default), the authority first, each with its run count, its newest run and last test result, plus the backup feature's chosen provider. `location` is the host or bucket an account added and `""` for the deployment default, whose store is operator infrastructure. The dates that live inside one provider are that provider's own page, not here |
 | `GET` | `/api/storage/connections/{id}` | One provider's page: the row with its run count, newest run and last test result; the backup feature's chosen provider as `{id, name}` (absent when unconfigured, and the name is what lets a page say which provider choosing this one would replace); and that provider's own restore points, newest first (up to 120). A provider this account cannot see answers `404`, the same as one that does not exist |
 | `POST` | `/api/storage/connections` | Attach the account's own storage provider: `backend` `cos` (`bucket`, `region`) or `s3` (`endpoint`, `bucket`, `region`, optional `prefix` and `pathStyle`), with `name`, `secretId`, `secretKey`. This is setup only: no feature uses it until one says so |
 | `DELETE` | `/api/storage/connections/{id}` | Remove one of the account's own providers |

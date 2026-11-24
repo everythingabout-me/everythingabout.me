@@ -212,6 +212,20 @@ export function ServerIcon(props: IconProps) {
   );
 }
 
+/**
+ * A cloud: the store the service runs for this account. It is a different silhouette
+ * from a bucket and a server, not another cylinder: the three storage kinds sit side by
+ * side in one list, and at 20px an outline is read as a shape long before it is read as
+ * a detail.
+ */
+export function CloudIcon(props: IconProps) {
+  return (
+    <svg {...base(props)}>
+      <path d="M11.67 12.67H6a4.67 4.67 0 1 1 4.47-6h1.2a3 3 0 1 1 0 6Z" />
+    </svg>
+  );
+}
+
 /** A key: a temporary token. */
 export function KeyIcon(props: IconProps) {
   return (

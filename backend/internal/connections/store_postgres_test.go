@@ -311,3 +311,45 @@ func TestPostgresBackupFolderAndProbeRoundTrip(t *testing.T) {
 		t.Fatalf("stored probe = %s, want ok=true latencyMs=12", got.LastProbe)
 	}
 }
+
+// The authority row is where the account's files live, so it leads the list whatever its
+// name sorts like. Ordering by owner then name alone put the deployment default last
+// (a shared row is owner_id null and sorted after every row the account added), which
+// read as "the one provider that is not a choice" being the newest option.
+func TestPostgresVisiblePutsTheAuthorityFirst(t *testing.T) {
+	db := connectionTestDB(t)
+	ctx := context.Background()
+	var ownerID string
+	if err := db.Pool().QueryRow(ctx, `insert into users(email, password_hash) values('ordering-owner@example.test','test-only') returning id::text`).Scan(&ownerID); err != nil {
+		t.Fatal(err)
+	}
+	st := NewPostgresStore(db)
+
+	// Names chosen so name order alone would put the account's row first and the
+	// deployment default (shared, so NULLS LAST under the old ordering) last.
+	shared := legacyRow(t, testCOSConfig("id-shared", "key", "managed-125", "ap-beijing"), "")
+	shared.Name = "zzz-default"
+	if err := st.Insert(ctx, shared); err != nil {
+		t.Fatalf("insert the deployment row: %v", err)
+	}
+	owned := legacyRow(t, testCOSConfig("id-owned", "key", "backups-125", "ap-hongkong"), "")
+	owned.OwnerID, owned.Name, owned.Role = ownerID, "aaa-nas", RoleBackup
+	owned.Identity = mustIdentity(t, owned)
+	if err := st.Insert(ctx, owned); err != nil {
+		t.Fatalf("insert the account row: %v", err)
+	}
+
+	rows, err := st.Visible(ctx, ownerID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 2 {
+		t.Fatalf("visible rows = %d, want 2", len(rows))
+	}
+	if rows[0].Role != RoleAuthority || rows[0].Name != "zzz-default" {
+		t.Fatalf("first row = %q (%s), want the authority row", rows[0].Name, rows[0].Role)
+	}
+	if rows[1].Name != "aaa-nas" {
+		t.Fatalf("second row = %q, want the account's own row", rows[1].Name)
+	}
+}

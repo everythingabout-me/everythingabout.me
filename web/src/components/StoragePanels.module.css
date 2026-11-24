@@ -288,6 +288,17 @@
   line-height: 1.5;
 }
 
+/*
+ * The kind of store in words, for a card that has no location to print: the deployment's
+ * own row. Prose rather than an identifier, so it does not take the mono face, and it
+ * keeps the card's second line from being empty — a blank line reads as a failed load.
+ */
+.cardKind {
+  color: var(--text-3);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
 .badge {
   flex: none;
   color: var(--text-3);
