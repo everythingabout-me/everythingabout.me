@@ -67,8 +67,8 @@ mutated by a drain of rows created by an older release is reported separately as
   only callers are tests that build their own mux (`files_delete_test.go:171-173`,
   `upload_index_test.go:230,461`). `browser_delete_test.go` separately asserts the retired paths answer
   `410`.
-- **Wiring decides the configuration.** `api.New` creates `uploadIndex` and `browserUploads` only for
-  `STORAGE_BACKEND=cos` with `FILE_COORDINATED_WRITES=false` (`server.go:107-111`); it wires
+- **Wiring decides the configuration.** `api.New` creates `uploadIndex` and `browserUploads` only for the
+  legacy write path (`server.go:107-111`); it wires
   `filesJournal` whenever a database is configured (`server.go:100-104`). Every native `/api/files` mutation returns
   `501 not_implemented` unless coordinated writes are on (`files_mutations.go:144-147`).
 - **The schema was inspected, not assumed.** Migrations were applied with `eam migrate` to a disposable
@@ -90,7 +90,7 @@ grep -rn --include=*.go 'handleAPIUpload\|handleUploadSign\|handleMkdir\|handleD
 | Table | Created by (reachable?) | Read by | Read on | Replaced by the newest design |
 |---|---|---|---|---|
 | `upload_sessions` | `api_upload.go:164,216` — **no reachable route** | `storage_baseline.go:147`; `browser_upload.go:145` (retired handler) | **operator CLI only** | `file_uploads` + `file_operations` |
-| `upload_index_watches` | `uploadindex/journal.go:23` via `files.go:299` — **no reachable route** | `uploadindex/service.go:153-192` worker; `browser_upload.go:147` (retired) | **background worker**, COS + `FILE_COORDINATED_WRITES=false` | server commit + reconcile |
+| `upload_index_watches` | `uploadindex/journal.go:23` via `files.go:299` — **no reachable route** | `uploadindex/service.go:153-192` worker; `browser_upload.go:147` (retired) | **background worker**, legacy write path | server commit + reconcile |
 | `browser_uploads` | `browserupload/journal.go:29` via `files.go:177` — **no reachable route** | `journal.go:96` worker; `journal.go:38,123` | **background worker**, same configuration | `file_uploads` + `uploadspool`/native parts |
 | `file_uploads` | `fileops/postgres_uploads.go:205` | `files_uploads.go`, `files_reclaim.go:40`, `postgres_workers.go`, `postgres.go:199,318,506`, `nodes/file_identity.go:68`, `cmd/eam/storage_resolve_upload.go:87` | request path + worker + operator CLI | current |
 | `file_upload_parts` | `postgres_uploads.go:486` | `postgres_uploads.go:470,520`, `postgres_upload_lifecycle.go:122` | request path | current |
@@ -105,18 +105,17 @@ described in §4. The rest of this document proves each verdict and turns them i
 
 Created by `handleFilesCreateUpload` (`files_uploads.go:303`) through `Postgres.CreateUpload`
 (`postgres_uploads.go:205`), read back by every session status, part, commit, abort, worker and reclaim
-path. Configuration: `FILE_COORDINATED_WRITES=true` on any backend (Local, COS or S3); without it no
-upload session can be created at all. This is the table the review calls "the newest".
+path. Configuration: coordinated writes on any backend (Local, COS or S3), which every backend here runs;
+without them no upload session can be created at all. This is the table the review calls "the newest".
 
 ### `file_upload_parts` — LIVE
 
 Written only by class C (relay) receipts: `handleFilesUploadPart` (`files_uploads.go:783`) streams each
 part through `uploadspool.Receive` or `ReceivePart` and seals a receipt with
 `AcceptUploadPart` (`postgres_uploads.go:486`); commit proves coverage from those receipts
-(`postgres_upload_lifecycle.go:122`). Configuration: coordinated writes **and** a relay connection —
-`FILE_TRANSFER_CLASS=relay`, which is the default and the only class Local serves. On a class A
-(presigned-parts) connection the bytes never reach the application and no row is written; the provider's
-own part listing is the progress record.
+(`postgres_upload_lifecycle.go:122`). Configuration: a relay connection, which is the only class a local
+root serves. On a class A (presigned-parts) connection the bytes never reach the application and no row is
+written; the provider's own part listing is the progress record.
 
 ### `file_upload_native_metadata` — LIVE
 
@@ -124,9 +123,8 @@ The class A counterpart: the native multipart handle and immutable part identiti
 through `storage.UploadMetadata` (`postgres_upload_native.go:102-127`) by
 `BeginPlannedUpload`/`SignUploadParts`/`ListUploadParts`
 (`objectmutation/uploads_signed.go:46,167,231`), which the server calls from
-`files_presigned_uploads.go:55-140`. Configuration: coordinated writes **and**
-`FILE_TRANSFER_CLASS=presigned-parts`, which configuration validation restricts to COS
-(`config/storage.go:142-149`).
+`files_presigned_uploads.go:55-140`. Configuration: a class A connection, which every object product
+serves (`internal/storageproduct`).
 
 ### `browser_uploads` — PRODUCER-DEAD, CONSUMER-LIVE
 
@@ -141,8 +139,9 @@ one, and for `publishing`/`unknown` inspects the destination. It never calls `Pu
 only from the retired `Receive` — and an applied-but-unproven attempt is retained as `unknown` forever
 (`cos/browser_upload.go:118-131`: "a lost final response does not prove that all native I/O is
 terminal"). So the drain cannot empty this table either.
-`FILE_COORDINATED_WRITES` defaults to false (`config/storage.go:74-80`), and the README makes the legacy
-drain a prerequisite for turning it on, so this is a supported configuration, not an accident.
+The legacy write path was a supported configuration of that era rather than an accident: the README made
+the legacy drain a prerequisite for it. Object stores now always publish through coordinated writes, so
+that path no longer exists.
 
 ### `upload_index_watches` — PRODUCER-DEAD, CONSUMER-LIVE
 
@@ -236,7 +235,7 @@ populated deployment ever faced the same three tables again.
    key for a single-part session) and abort the ones that do. Keep each row until its provider answer is
    recorded. The block clears when `eam storage-baseline --owner-id UUID --writers-quiesced` no longer
    reports `legacy_sessions_present` and `reservationBaselineReady` is true.
-2. **`upload_index_watches`.** Run the observation worker (COS, `FILE_COORDINATED_WRITES=false`) until
+2. **`upload_index_watches`.** Run the observation worker (on the legacy write path) until
    the remaining rows have been observed, then settle each remaining file watch by hand only with
    evidence that the path is indexed or absent. There is no automatic retirement for file watches
    (`journal.go:76-96`), so this step is operator work by design, not a bug to wait out.
