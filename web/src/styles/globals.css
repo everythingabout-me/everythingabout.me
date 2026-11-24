@@ -1,5 +1,11 @@
 :root {
-  /* Paper / surface. One warm neutral ramp (paper, ink) — no other hue ever reaches a surface. */
+  /*
+   * Paper / surface. One warm neutral ramp (paper, ink) — no other hue reaches a surface, with
+   * one exception the storage list owns: the 24px plate behind a storage-kind glyph. Four kinds
+   * of store have to be told apart before any word is read, and at that size the answer is the
+   * mark's colour, not four more hairline silhouettes. The hues stay inside the plate: a card
+   * never takes one as its background.
+   */
   --bg: #faf8f4;
   --bg-top: #fcfaf6;
   --surface: #fffdfb;
@@ -14,13 +20,29 @@
 
   /*
    * Blue is the mark's colour, kept for selection, rings, progress and live status. It is never
-   * text and never a surface: at 2.5:1 on paper even a 16px icon fails, so a stroke uses
-   * --blue-ink (4.3:1) and a fill that carries no glyph uses --blue.
+   * text and never a surface larger than a 24px glyph plate: at 2.5:1 on paper even a 16px icon
+   * fails, so a stroke uses --blue-ink (4.3:1) and a fill that carries no glyph uses --blue. The
+   * one plate it tints is the managed store's, which is what "this service runs that store" means.
    */
   --blue: #13a7f5;
   --blue-ink: #0b7bc4;
   --blue-light: #eaf6fe;
   --ring: rgba(19, 167, 245, 0.18);
+
+  /*
+   * Storage kinds. One hue per kind, an ink for the glyph and a soft tint for its plate; the four
+   * hues are far apart (blue / teal / amber / violet) so the mark still reads on a page that has
+   * decided not to use colour for anything else. Each ink is ≥ 4:1 on its own tint, because a
+   * 15px stroke is the whole message.
+   */
+  --store-managed: #0a6cae;
+  --store-managed-soft: #d8ecfb;
+  --store-cos: #0a635a;
+  --store-cos-soft: #d5efe9;
+  --store-s3: #7d5109;
+  --store-s3-soft: #fbe8c8;
+  --store-local: #5b3d8c;
+  --store-local-soft: #e6ddf6;
 
   /* Danger: a muted brick red, only for irreversible actions. */
   --danger: #b4483f;
@@ -83,6 +105,17 @@
     --blue-ink: #8fd4ff;
     --blue-light: #122633;
     --ring: rgba(76, 184, 245, 0.2);
+
+    /* The same four kinds on a dark surface: the ink lightens, the plate darkens, and the pair
+       still carries the hue the light theme uses. */
+    --store-managed: #8fd4ff;
+    --store-managed-soft: #17303f;
+    --store-cos: #6fd6c4;
+    --store-cos-soft: #14312c;
+    --store-s3: #e6b975;
+    --store-s3-soft: #332816;
+    --store-local: #c3a7ec;
+    --store-local-soft: #2c2439;
 
     --danger: #e8847c;
     --danger-soft: #2a1715;

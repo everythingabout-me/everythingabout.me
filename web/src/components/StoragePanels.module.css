@@ -234,20 +234,49 @@
   gap: 11px;
 }
 
-/* One glyph per card, in the muted text role: a provider is content, not a coloured tile. */
+/*
+ * The store's kind, worn as a plate. This used to be one muted glyph for every row, on the
+ * argument that a provider is content and not a coloured tile; the four kinds changed the
+ * argument. Telling a managed store from an attached bucket, an S3 endpoint and a host path is
+ * what the card's left edge is for, and colour does that in one glance where four hairline
+ * outlines at 20px did not. The tile stays a 24px plate around the glyph — never a card
+ * background, never more hue than a mark — which is the one exception paper/ink allows.
+ */
 .glyph {
+  --kind: var(--store-managed);
+  --kind-soft: var(--store-managed-soft);
   display: grid;
   place-items: center;
   flex: none;
-  width: 20px;
-  height: 20px;
-  margin-top: 1px;
-  color: var(--text-3);
+  width: 24px;
+  height: 24px;
+  margin-top: -2px;
+  border-radius: 7px;
+  background: var(--kind-soft);
+  color: var(--kind);
 }
 
+.glyph[data-kind="cos"] {
+  --kind: var(--store-cos);
+  --kind-soft: var(--store-cos-soft);
+}
+
+.glyph[data-kind="s3"] {
+  --kind: var(--store-s3);
+  --kind-soft: var(--store-s3-soft);
+}
+
+.glyph[data-kind="local"] {
+  --kind: var(--store-local);
+  --kind-soft: var(--store-local-soft);
+}
+
+/* The provider page's header repeats the card's mark, one step larger so it holds the name. */
 .glyphLarge {
-  width: 22px;
-  height: 22px;
+  width: 30px;
+  height: 30px;
+  margin-top: 0;
+  border-radius: 9px;
 }
 
 .cardIdentity {

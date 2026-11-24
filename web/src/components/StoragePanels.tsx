@@ -61,14 +61,16 @@ export function ProviderCard({ connection, backupTarget }: { connection: Storage
  * infrastructure — so this is the only thing left that says what the card is.
  */
 export function storageKindLabel(connection: StorageConnection): string {
-  if (!connection.mine) return t("drives.backendManaged");
-  return backendLabel(connection.backend);
-}
-
-export function backendLabel(backend: string): string {
-  if (backend === "cos") return t("drives.backendCos");
-  if (backend === "s3") return t("drives.backendS3");
-  return t("drives.backendLocal");
+  switch (storageKind(connection)) {
+    case "managed":
+      return t("drives.backendManaged");
+    case "cos":
+      return t("drives.backendCos");
+    case "s3":
+      return t("drives.backendS3");
+    case "local":
+      return t("drives.backendLocal");
+  }
 }
 
 /**
@@ -83,23 +85,32 @@ export function providerRoleLabel(connection: StorageConnection, backupTarget: s
 }
 
 /**
- * The same glyph on the card and on the page it opens, so the two read as one thing.
- * Which glyph is which store is a fact about who runs it, not only about the protocol:
- * the deployment's own store is a cloud, a bucket the account attached stays a bucket,
- * a self-hosted endpoint is a server, and a host path is a folder. Those are four
- * silhouettes, so the kind is legible without reading the line under the name.
+ * The store's kind, which is the one thing the card's mark carries. It is decided once, here:
+ * the glyph, the plate's colour and the label all read it, so a card cannot show a cloud in
+ * amber and call itself S3.
+ */
+export type StorageKind = "managed" | "cos" | "s3" | "local";
+
+export function storageKind(connection: StorageConnection): StorageKind {
+  if (!connection.mine) return "managed";
+  if (connection.backend === "cos") return "cos";
+  if (connection.backend === "local") return "local";
+  return "s3";
+}
+
+/**
+ * The same mark on the card and on the page it opens, so the two read as one thing. Which
+ * glyph is which store is a fact about who runs it, not only about the protocol: the
+ * deployment's own store is a cloud, a bucket the account attached stays a bucket, a
+ * self-hosted endpoint is a server, and a host path is a folder. The plate behind it takes the
+ * kind's hue, so the kind is legible before the line under the name is read.
  */
 export function ProviderGlyph({ connection, large }: { connection: StorageConnection; large?: boolean }) {
-  const Icon = !connection.mine
-    ? CloudIcon
-    : connection.backend === "cos"
-      ? BucketIcon
-      : connection.backend === "local"
-        ? FolderIcon
-        : ServerIcon;
+  const kind = storageKind(connection);
+  const Icon = kind === "managed" ? CloudIcon : kind === "cos" ? BucketIcon : kind === "local" ? FolderIcon : ServerIcon;
   return (
-    <span className={large ? `${styles.glyph} ${styles.glyphLarge}` : styles.glyph}>
-      <Icon size={large ? 20 : 17} />
+    <span className={large ? `${styles.glyph} ${styles.glyphLarge}` : styles.glyph} data-kind={kind}>
+      <Icon size={large ? 18 : 15} />
     </span>
   );
 }
