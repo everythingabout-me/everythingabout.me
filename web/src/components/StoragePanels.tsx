@@ -11,7 +11,8 @@ import {
 } from "../api/client";
 import { formatBytes, formatSpeed } from "../pages/sizeFormat";
 import { t } from "../i18n";
-import { CloudIcon, BucketIcon, FolderIcon, ServerIcon } from "./icons";
+import { BucketIcon, FolderIcon } from "./icons";
+import { BrandMark } from "./BrandMark";
 import styles from "./StoragePanels.module.css";
 
 /**
@@ -100,18 +101,28 @@ export function storageKind(connection: StorageConnection): StorageKind {
 }
 
 /**
- * The same mark on the card and on the page it opens, so the two read as one thing. Which
- * glyph is which store is a fact about who runs it, not only about the protocol: the
- * deployment's own store is a cloud, a bucket the account attached stays a bucket, a
- * self-hosted endpoint is a server, and a host path is a folder. The plate behind it takes the
- * kind's hue, so the kind is legible before the line under the name is read.
+ * The same mark on the card and on the page it opens, so the two read as one thing.
+ *
+ * Three of the four are products rather than shapes, and are drawn as the products: the
+ * store this service runs is the service itself, so it wears the circle mark instead of a
+ * generic cloud; an S3-compatible endpoint wears "S3" rather than a server rack that says
+ * nothing about which protocol answers on it; an attached bucket and a host path stay a
+ * bucket and a folder, the two marks a person already reads that way. The plate takes the
+ * kind's hue so the kinds separate before the line under the name is read.
  */
 export function ProviderGlyph({ connection, large }: { connection: StorageConnection; large?: boolean }) {
   const kind = storageKind(connection);
-  const Icon = kind === "managed" ? CloudIcon : kind === "cos" ? BucketIcon : kind === "local" ? FolderIcon : ServerIcon;
   return (
     <span className={large ? `${styles.glyph} ${styles.glyphLarge}` : styles.glyph} data-kind={kind}>
-      <Icon size={large ? 18 : 15} />
+      {kind === "managed" ? (
+        <BrandMark size={large ? 28 : 22} />
+      ) : kind === "s3" ? (
+        <span className={styles.glyphWord}>S3</span>
+      ) : kind === "cos" ? (
+        <BucketIcon size={large ? 18 : 15} />
+      ) : (
+        <FolderIcon size={large ? 18 : 15} />
+      )}
     </span>
   );
 }

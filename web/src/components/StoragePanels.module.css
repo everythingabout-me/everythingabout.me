@@ -271,6 +271,28 @@
   --kind-soft: var(--store-local-soft);
 }
 
+/*
+ * The managed store wears the service's own mark, which is already a finished disc of colour:
+ * a tinted plate behind it would be a second badge for the same thing, so this kind keeps the
+ * box and drops the fill.
+ */
+.glyph[data-kind="managed"] {
+  background: transparent;
+}
+
+/* S3 is a product name, not a shape: set it in the mono face so it reads as a mark, not prose. */
+.glyphWord {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: -0.03em;
+  line-height: 1;
+}
+
+.glyphLarge .glyphWord {
+  font-size: 12px;
+}
+
 /* The provider page's header repeats the card's mark, one step larger so it holds the name. */
 .glyphLarge {
   width: 30px;
