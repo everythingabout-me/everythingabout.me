@@ -182,7 +182,7 @@ func TestPlannedUploadRenewalKeepsBoundLengths(t *testing.T) {
 
 func TestPlannedUploadRequiresProviderEvidence(t *testing.T) {
 	d, _, _ := signedFixture(t)
-	d.options.Admission.MultipartUploads = false
+	d.options.Capabilities.MultipartUploads = false
 	if d.SignedUploadSupported() {
 		t.Fatal("missing native multipart evidence enabled class A")
 	}
@@ -283,7 +283,7 @@ func TestDirectReplacementRequiresMeasuredConditionalPut(t *testing.T) {
 	if _, err := driver.BeginPlannedUpload(ctx, replacement, metadata, time.Now().Add(10*time.Minute)); err != nil {
 		t.Fatalf("class A cannot express the replacement as a multipart session: %v", err)
 	}
-	driver.options.Admission.ConditionalPut = true
+	driver.options.Capabilities.ConditionalPut = true
 	if !driver.SupportsDirectPut(replacement.Conditions) {
 		t.Fatal("measured conditional PUT did not admit direct replacement")
 	}

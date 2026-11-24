@@ -713,25 +713,10 @@ func TestFilesUploadsPostgresObjectPublicationLimitAndUnknown(t *testing.T) {
 		f.provider.serve(t, w, r)
 	}))
 	t.Cleanup(proxy.Close)
-	evidence, err := os.ReadFile(f.cfg.Storage.ObjectAdmissionFile)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var admission map[string]any
-	if err = json.Unmarshal(evidence, &admission); err != nil {
-		t.Fatal(err)
-	}
-	admission["endpoint"] = proxy.URL
-	if evidence, err = json.Marshal(admission); err != nil {
-		t.Fatal(err)
-	}
-	evidencePath := filepath.Join(t.TempDir(), "admission.json")
-	if err = os.WriteFile(evidencePath, evidence, 0600); err != nil {
-		t.Fatal(err)
-	}
+	// The product's capabilities do not depend on the endpoint, so pointing the same
+	// connection at a proxy needs nothing but the endpoint.
 	cfg := *f.cfg
 	cfg.Storage.S3.Endpoint = proxy.URL
-	cfg.Storage.ObjectAdmissionFile = evidencePath
 	proxied, err := storagebackend.New(&cfg)
 	if err != nil {
 		t.Fatal(err)

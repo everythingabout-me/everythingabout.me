@@ -143,7 +143,7 @@ func TestStorageAdmitPostgresCLI(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	env := []string{"EAM_SERVER_TEST_PROCESS=1", "EAM_ENV_FILE=" + filepath.Join(root, "absent.env"), "EAM_SQL_DIR=" + sqlDir, "DATABASE_URL=" + isolated, "APP_ENV=development", "STORAGE_BACKEND=local", "FILE_COORDINATED_WRITES=true", "LOCAL_CONTENT_ROOT=" + content, "LOCAL_SYSTEM_ROOT=" + system, "USER_QUOTA_BYTES=5"}
+	env := []string{"EAM_SERVER_TEST_PROCESS=1", "EAM_ENV_FILE=" + filepath.Join(root, "absent.env"), "EAM_SQL_DIR=" + sqlDir, "DATABASE_URL=" + isolated, "APP_ENV=development", "STORAGE_BACKEND=local", "LOCAL_CONTENT_ROOT=" + content, "LOCAL_SYSTEM_ROOT=" + system, "USER_QUOTA_BYTES=5"}
 	run := func(args ...string) (string, error) {
 		cmd := exec.CommandContext(ctx, os.Args[0], append([]string{"-test.run=^TestLocalStorageServerCommand$", "--"}, args...)...)
 		cmd.Env = env

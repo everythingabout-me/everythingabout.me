@@ -20,8 +20,8 @@ func validateAdmissionQuiescence(quiesced bool) error {
 // correctness. It binds the operator's explicit physical declaration to evidence;
 // current native HEAD/list observations are checked separately without mutation.
 func validateAdmissionAccounting(cfg *config.Config, proof json.RawMessage, physicalProvided bool, physical int64) (bool, error) {
-	if cfg == nil || !cfg.Storage.CoordinatedWrites {
-		return false, fmt.Errorf("storage-admit requires FILE_COORDINATED_WRITES=true")
+	if cfg == nil {
+		return false, fmt.Errorf("storage-admit needs a storage configuration")
 	}
 	switch cfg.BackendName() {
 	case "local":

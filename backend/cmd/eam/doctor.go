@@ -156,9 +156,9 @@ func checkNativeStorage(ctx context.Context, cfg *config.Config, checks *doctor,
 }
 
 // checkStorageRoots surfaces at `eam doctor` time what the server refuses to start
-// with: admission evidence that belongs to another connection, and owner roots that
-// no longer match the tree the current configuration selects. It never adopts or
-// records anything; doctor is read-only.
+// with: a configuration whose product cannot publish, and owner roots that no longer
+// match the tree the current configuration selects. It never adopts or records
+// anything; doctor is read-only.
 func checkStorageRoots(ctx context.Context, cfg *config.Config, db *store.DB, checks *doctor) {
 	backend, err := storagebackend.NewForServing(cfg)
 	if err != nil {
@@ -169,7 +169,7 @@ func checkStorageRoots(ctx context.Context, cfg *config.Config, db *store.DB, ch
 	if problem := backend.ObjectWritesProblem(); problem != nil {
 		checks.warn("object writes disabled: " + problem.Error())
 	} else {
-		checks.ok("configuration and admission evidence", "")
+		checks.ok("storage product and configuration", "")
 	}
 	if db == nil {
 		checks.warn("owner roots not compared: database unavailable")

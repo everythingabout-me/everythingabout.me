@@ -98,67 +98,22 @@ func adoptObjectPaths(ctx context.Context, store Store, deployment config.Storag
 		// written by hand, and there is nothing to key on.
 		return nil
 	}
-	admission, spool := c.Config.ObjectAdmissionFile, c.Config.ObjectSpoolRoot
-	changed := false
-
-	if legacy, ok := derivedAdmission(deployment, c.Name); ok && admission == legacy {
-		if want, ok := derivedAdmission(deployment, c.ID); ok && want != legacy {
-			if err := adoptEvidence(c.Name, c.ID, legacy, want); err != nil {
-				return err
-			}
-			admission, changed = want, true
-		}
-	}
+	spool := c.Config.ObjectSpoolRoot
 	if legacy, ok := derivedSpool(deployment, c.Name); ok && spool == legacy {
-		if want, ok := derivedSpool(deployment, c.ID); ok && want != legacy {
-			if err := adoptSpool(c.Name, c.ID, legacy, want); err != nil {
-				return err
-			}
-			spool, changed = want, true
+		want, ok := derivedSpool(deployment, c.ID)
+		if !ok || want == legacy {
+			return nil
 		}
-	}
-	if !changed {
-		return nil
-	}
-	slog.Info("repointed a storage connection to its id-keyed on-disk paths",
-		"connection", c.Name, "connection_id", c.ID, "admission", admission, "spool", spool)
-	return store.SetObjectPaths(ctx, c.ID, admission, spool)
-}
-
-// adoptEvidence moves the legacy evidence file. Its name changes with the layout, so
-// the two paths rarely collide; when they do the id-keyed file wins and the old one is
-// only reported, because a probe rewrites the file and removing another connection's
-// evidence would be worse than leaving a dead file behind.
-func adoptEvidence(name, id, from, to string) error {
-	info, err := os.Lstat(from)
-	switch {
-	case errors.Is(err, fs.ErrNotExist):
-		return nil
-	case err != nil:
-		return fmt.Errorf("inspect legacy admission evidence %s: %w", from, err)
-	case !info.Mode().IsRegular():
-		return fmt.Errorf("legacy admission evidence %s is not a regular file, so it is not what this service wrote; move it away from the evidence path and probe the connection again", from)
-	}
-	current, err := os.Lstat(to)
-	switch {
-	case errors.Is(err, fs.ErrNotExist):
-		if err := os.Rename(from, to); err != nil {
-			return fmt.Errorf("move admission evidence %s to %s: %w", from, to, err)
+		if err := adoptSpool(c.Name, c.ID, legacy, want); err != nil {
+			return err
 		}
-		slog.Info("moved a storage connection's admission evidence to its id-keyed path",
-			"connection", name, "connection_id", id, "from", from, "to", to)
-		return nil
-	case err != nil:
-		return fmt.Errorf("inspect admission evidence %s: %w", to, err)
-	case current.Mode().IsRegular() && sameContents(from, to):
-		if err := os.Remove(from); err != nil {
-			return fmt.Errorf("remove the superseded evidence copy %s: %w", from, err)
-		}
+		spool = want
+	} else {
 		return nil
 	}
-	slog.Warn("both a legacy and an id-keyed admission evidence file exist; keeping the id-keyed one and leaving the old file in place",
-		"connection", name, "connection_id", id, "legacy", from, "current", to)
-	return nil
+	slog.Info("repointed a storage connection to its id-keyed spool",
+		"connection", c.Name, "connection_id", c.ID, "spool", spool)
+	return store.SetObjectPaths(ctx, c.ID, spool)
 }
 
 // adoptSpool moves or merges one connection's staged material and ledger.

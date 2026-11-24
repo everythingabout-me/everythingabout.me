@@ -13,18 +13,24 @@
 
 | Class | Kind | Byte path | Typical backends |
 |---|---|---|---|
-| **A** | `presigned-parts` | Client ↔ object store, through presigned requests | COS, S3, R2, B2 and other S3-compatible stores |
+| **A** | `presigned-parts` | Client ↔ object store, through presigned requests | every object product: AWS S3, Tencent COS, MinIO, RustFS |
 | **B** | `resumable-session` | Client ↔ cloud drive, through a provider upload session or download link | OneDrive, Google Drive, Dropbox, Box |
 | **C** | `relay` | Client ↔ application ↔ backend | Local filesystem; any backend the client cannot reach directly |
 
-A driver declares which classes it can serve. Each storage connection **selects exactly one** of them when it
-is configured, and every session and read grant records it. COS/S3 drivers can serve A or C; cloud-drive
-drivers serve B or C; Local serves only C. Whether a client can reach a provider is a property of the
-deployment, so the choice belongs to the connection, not to the driver.
+A connection names a **product** (`aws-s3`, `cos`, `minio`, `rustfs`, `local`), and the product fixes its
+class: every object product serves A, and only a local root serves C, because a filesystem on this host has
+no provider a client could reach. Every session and read grant records the class it was opened with.
+
+This replaced a per-connection configuration because a protocol family is not a capability. "S3-compatible"
+covered stores that refuse `If-None-Match`, stores that ignore `If-Match` on PUT, and one product whose
+presigned POST accepts policy conditions without enforcing them — and the guard on a direct replacement is
+exactly one of those headers. The product table in `internal/storageproduct` carries each answer with its
+reason; the alternative, measuring it per endpoint, produced an evidence file that had to be carried between
+machines and left a newly added provider unable to publish until an operator ran a command.
 
 **No fallback.** A transfer never switches class. An unavailable direct route fails with a typed error; it is
-not retried through the application. Changing a connection's class is an explicit administrative
-reconfiguration, allowed only while the connection has no open sessions, and it never happens per transfer.
+not retried through the application, because a silent downgrade would turn one person's unreachable endpoint
+into this service's bandwidth bill, and the session's recorded class would be a lie.
 
 ## 2. Invariants
 
@@ -394,12 +400,9 @@ Sign a header only when its value is deterministic and the client sends it exact
 
 **Class A.** The bucket carries a CORS rule: the exact application origins, `PUT`, `GET` and `HEAD`, the
 client-set headers above, exposed `ETag` and `Content-Range`, and an explicit `MaxAgeSeconds`. `eam doctor`
-checks it. Uploads may additionally go through a same-origin edge relay: the browser `PUT`s to
-`/api/files/transfer/<object-key>?<signed query>` and the edge forwards it to the provider unchanged except
-for removing the prefix and setting the provider `Host`. The edge must preserve method, body and every signed
-query byte, strip cookies and application credentials, pass `OPTIONS` through, disable caching and never
-redirect. The application refuses that path (`503 edgeone_route_required`), so a missing edge rule fails the
-upload instead of consuming application bandwidth.
+checks it. Part and read URLs are the provider's own: there is no edge rewrite and no application hop, so a
+bucket with the wrong CORS rule fails at the browser with an opaque network error — the cost of never
+inventing a relay nobody configured.
 
 **Class B.** Register the provider application once: Box requires the application origins in its CORS
 allowlist; Google Drive sessions are initiated with the browser's `Origin`; OneDrive and Dropbox need no

@@ -4,7 +4,6 @@ import (
 	"context"
 	"strings"
 	"testing"
-	"time"
 
 	"everythingabout.me/backend/internal/storage"
 )
@@ -60,7 +59,7 @@ func TestPathObservationRequestCost(t *testing.T) {
 				backend.current[key] = object
 			}
 			cfg := storage.Config{OwnerID: "owner", ConnectionID: "fixture", Generation: 1, ContentRoot: "drive/owner/", SystemRoot: "system/owner/"}
-			options := Options{SpoolRoot: t.TempDir(), MaxPublishBytes: 1024, Admission: Admission{Version: AdmissionVersion, ConnectionID: cfg.ConnectionID, Endpoint: "https://fixture.invalid", Bucket: "bucket", Region: "region", CheckedAt: time.Now().UTC(), ProbeReference: "isolated-positive-negative-test", AtomicPublish: true, ConditionalCreate: true, SingleGateway: true}}
+			options := Options{SpoolRoot: t.TempDir(), MaxPublishBytes: 1024, Capabilities: Capabilities{AtomicPublish: true, ConditionalCreate: true, SingleWriter: true}}
 			tree := &countingPrefixTree{fakeTree: &fakeTree{backend: backend, root: cfg.ContentRoot}}
 			driver, err := New(tree, cfg, backend, options)
 			if err != nil {

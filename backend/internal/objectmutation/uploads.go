@@ -48,7 +48,7 @@ type nativeStage struct {
 }
 
 func (d *Driver) UploadMaxFileBytes() int64 {
-	if !d.options.Admission.MultipartUploads {
+	if !d.options.Capabilities.MultipartUploads {
 		return 0
 	}
 	if _, ok := d.backend.(MultipartBackend); !ok {

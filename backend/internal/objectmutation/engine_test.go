@@ -248,7 +248,7 @@ func fixture(t *testing.T) (*Driver, *fakeBackend, storage.Config, Options) {
 	t.Helper()
 	b := newFake()
 	cfg := storage.Config{OwnerID: "owner", ConnectionID: "fixture", Generation: 1, ContentRoot: "drive/owner/", SystemRoot: "system/owner/"}
-	options := Options{SpoolRoot: t.TempDir(), MaxPublishBytes: 1024, Admission: Admission{Version: AdmissionVersion, ConnectionID: cfg.ConnectionID, Endpoint: "https://fixture.invalid", Bucket: "bucket", Region: "region", CheckedAt: time.Now().UTC(), ProbeReference: "isolated-positive-negative-test", AtomicPublish: true, ConditionalCreate: true, SingleGateway: true}}
+	options := Options{SpoolRoot: t.TempDir(), MaxPublishBytes: 1024, Capabilities: Capabilities{AtomicPublish: true, ConditionalCreate: true, SingleWriter: true}}
 	d, err := New(&fakeTree{backend: b, root: cfg.ContentRoot}, cfg, b, options)
 	if err != nil {
 		t.Fatal(err)
@@ -527,19 +527,16 @@ func TestObjectCopyFoldersAndCapturedCurrentDelete(t *testing.T) {
 		t.Fatalf("copy recovery=%+v %v", inspection, err)
 	}
 }
-func TestObjectAdmissionAndSpoolSymlinkFailClosed(t *testing.T) {
+func TestObjectCapabilitiesAndSpoolSymlinkFailClosed(t *testing.T) {
 	d, b, cfg, opts := fixture(t)
 	_ = d
-	opts.Admission.SingleGateway = false
-	if _, err := New(&fakeTree{backend: b, root: cfg.ContentRoot}, cfg, b, opts); err == nil {
-		t.Fatal("unadmitted native writer enabled")
-	}
-	opts.Admission.SingleGateway = true
-	opts.Admission.ConditionalCreate = false
+	// A product that does not promise conditional create cannot publish: the whole
+	// protocol rests on a write that is refused on an occupied key.
+	opts.Capabilities.ConditionalCreate = false
 	if _, err := New(&fakeTree{backend: b, root: cfg.ContentRoot}, cfg, b, opts); err == nil {
 		t.Fatal("unverified conditional create admitted")
 	}
-	opts.Admission.ConditionalCreate = true
+	opts.Capabilities.ConditionalCreate = true
 	in := createIntent("symlink", "target", "secret")
 	attempt := "00000000000000000000000000000001"
 	r := &ledger{Kind: "write", ID: in.ID, Intent: in, Attempt: attempt, Phase: "ready", Digest: &storage.Digest{Algorithm: "sha-256", Value: make([]byte, 32)}}

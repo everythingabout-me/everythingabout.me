@@ -30,7 +30,7 @@ func objectBaselineBackend(t *testing.T, head func(string) (objectmutation.Objec
 	return &Backend{
 		cfg:           config.Config{Storage: config.Storage{Backend: "cos", ConnectionID: "baseline", Generation: 1, CoordinatedWrites: true}, COS: config.COS{Bucket: "fixture-123456", Region: "test"}},
 		objectBackend: baselineObjectBackend{head: head},
-		objectOptions: objectmutation.Options{Admission: objectmutation.Admission{}, SpoolRoot: t.TempDir()},
+		objectOptions: objectmutation.Options{Capabilities: objectmutation.Capabilities{}, SpoolRoot: t.TempDir()},
 	}
 }
 

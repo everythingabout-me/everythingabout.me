@@ -8,6 +8,7 @@ import (
 
 	"everythingabout.me/backend/internal/filecontract"
 	"everythingabout.me/backend/internal/storage"
+	"everythingabout.me/backend/internal/storageproduct"
 )
 
 // Storage configures one connection. A shared connection derives a deterministic root
@@ -25,13 +26,17 @@ type Storage struct {
 	// RootAtBucket says an owner-scoped connection's tree is the bucket itself rather
 	// than a prefix inside it. Only an owner-scoped row may ask for it: a shared row
 	// would put every account's tree in the same place.
-	RootAtBucket        bool
-	CoordinatedWrites   bool
-	MaxSinglePutBytes   int64
-	ObjectAdmissionFile string
-	ObjectSpoolRoot     string
+	RootAtBucket      bool
+	CoordinatedWrites bool
+	MaxSinglePutBytes int64
+	ObjectSpoolRoot   string
+	// Product is the store's product name (aws-s3, cos, minio, rustfs, local). It selects
+	// the driver implementation and the capabilities that go with it; a connection that
+	// names only a protocol family has no answer to "will this store replace my bytes".
+	Product string
 	// TransferClass is the one class this connection serves: presigned-parts,
-	// resumable-session or relay. It is fixed for the connection, not per transfer.
+	// resumable-session or relay. It is derived from Product, never configured: a class is
+	// a consequence of how the product answers requests, not a preference.
 	TransferClass string
 	Local         Local
 	S3            S3
@@ -60,7 +65,7 @@ func loadStorage(getenv func(string) string) (Storage, error) {
 		}
 		return fallback
 	}
-	s := Storage{Backend: value("STORAGE_BACKEND", "cos"), ConnectionID: value("STORAGE_CONNECTION_ID", "default"), Generation: 1,
+	s := Storage{Backend: value("STORAGE_BACKEND", "cos"), ConnectionID: value("STORAGE_CONNECTION_ID", "default"), Product: getenv("STORAGE_PRODUCT"), Generation: 1,
 		Local: Local{ContentRoot: getenv("LOCAL_CONTENT_ROOT"), SystemRoot: getenv("LOCAL_SYSTEM_ROOT")},
 		S3:    S3{Endpoint: getenv("S3_ENDPOINT"), Region: getenv("S3_REGION"), Bucket: getenv("S3_BUCKET"), AccessKeyID: getenv("S3_ACCESS_KEY_ID"), SecretAccessKey: getenv("S3_SECRET_ACCESS_KEY"), SessionToken: getenv("S3_SESSION_TOKEN"), ContentPrefix: value("S3_CONTENT_PREFIX", "drive/"), SystemPrefix: value("S3_SYSTEM_PREFIX", "__eam_system__/")}}
 	s.MaxSinglePutBytes = 32 << 20
@@ -71,32 +76,7 @@ func loadStorage(getenv func(string) string) (Storage, error) {
 		}
 		s.MaxSinglePutBytes = n
 	}
-	if raw := getenv("FILE_COORDINATED_WRITES"); raw != "" {
-		v, err := strconv.ParseBool(raw)
-		if err != nil {
-			return s, fmt.Errorf("FILE_COORDINATED_WRITES must be a boolean")
-		}
-		s.CoordinatedWrites = v
-	}
-	s.ObjectAdmissionFile = getenv("FILE_OBJECT_ADMISSION_FILE")
 	s.ObjectSpoolRoot = getenv("FILE_OBJECT_SPOOL_ROOT")
-	s.TransferClass = getenv("FILE_TRANSFER_CLASS")
-	if s.TransferClass == "" {
-		// A connection that does not name a class keeps the previous byte path:
-		// Local and admitted object connections relay through the application.
-		s.TransferClass = storage.TransferRelay
-		if s.Backend != "local" && getenv("FILE_UPLOAD_INGRESS") == "edgeone" {
-			s.TransferClass = storage.TransferPresignedParts
-		}
-	}
-	switch s.TransferClass {
-	case storage.TransferPresignedParts, storage.TransferResumableSession, storage.TransferRelay:
-	default:
-		return s, fmt.Errorf("FILE_TRANSFER_CLASS must be presigned-parts, resumable-session or relay")
-	}
-	if s.CoordinatedWrites && s.Backend != "local" && (!filepath.IsAbs(s.ObjectAdmissionFile) || !filepath.IsAbs(s.ObjectSpoolRoot)) {
-		return s, fmt.Errorf("object writes require explicit absolute FILE_OBJECT_ADMISSION_FILE and FILE_OBJECT_SPOOL_ROOT")
-	}
 	if raw := getenv("STORAGE_GENERATION"); raw != "" {
 		var err error
 		s.Generation, err = strconv.ParseInt(raw, 10, 64)
@@ -104,6 +84,34 @@ func loadStorage(getenv func(string) string) (Storage, error) {
 			return s, fmt.Errorf("STORAGE_GENERATION must be a positive integer")
 		}
 	}
+	switch s.Backend {
+	case "cos", "local", "s3":
+	default:
+		return s, fmt.Errorf("STORAGE_BACKEND must be cos, local or s3")
+	}
+	// An object store has exactly one publication path: the coordinated protocol, where
+	// the client's parts stay unpublished until this service completes them. A local root
+	// is a filesystem this service writes directly. There is no third mode worth a switch.
+	s.CoordinatedWrites = s.Backend != "local"
+	// The product resolves before the path-style override: a product carries that
+	// addressing default, and an explicit S3_PATH_STYLE still wins over it.
+	if s.Product == "" {
+		if id, ok := storageproduct.ProductForBackend(s.Backend); ok {
+			s.Product = id
+		}
+	}
+	if s.Product == "" {
+		return s, fmt.Errorf("STORAGE_PRODUCT is required for STORAGE_BACKEND=%s: %v speak that protocol and differ in what they promise about writes", s.Backend, storageproduct.ForBackend(s.Backend))
+	}
+	profile, err := storageproduct.Lookup(s.Product)
+	if err != nil {
+		return s, err
+	}
+	if profile.Backend != s.Backend {
+		return s, fmt.Errorf("STORAGE_PRODUCT %q is served by the %q driver, but STORAGE_BACKEND is %q", s.Product, profile.Backend, s.Backend)
+	}
+	s.S3.PathStyle = profile.PathStyle
+	s.TransferClass = profile.TransferClass
 	for key, dest := range map[string]*bool{"LOCAL_CASE_SENSITIVE": &s.Local.CaseSensitive, "S3_PATH_STYLE": &s.S3.PathStyle} {
 		if raw := getenv(key); raw != "" {
 			v, err := strconv.ParseBool(raw)
@@ -113,45 +121,62 @@ func loadStorage(getenv func(string) string) (Storage, error) {
 			*dest = v
 		}
 	}
-	switch s.Backend {
-	case "cos", "local", "s3":
-	default:
-		return s, fmt.Errorf("STORAGE_BACKEND must be cos, local or s3")
-	}
 	if strings.TrimSpace(s.ConnectionID) == "" {
 		return s, fmt.Errorf("STORAGE_CONNECTION_ID cannot be blank")
 	}
 	return s, nil
 }
 
-// validateTransferClass rejects a class the selected backend cannot serve with
-// the credentials actually configured. A driver's Descriptor must still advertise
-// the class; this is the deployment-level half of the same rule.
+// TransferClass is derived from the product, so this only rejects an impossible
+// combination: a class A connection needs a provider to hand presigned URLs to, and a
+// publisher able to complete an upload.
 func (c *Config) validateTransferClass() error {
 	class := c.Storage.TransferClass
 	if class == "" {
-		class = storage.TransferRelay
-		c.Storage.TransferClass = class
+		// A configuration assembled directly by maintenance and test callers carries no
+		// resolved class; ask the product rather than assuming a byte path.
+		profile, err := c.StorageProfile()
+		if err != nil {
+			return err
+		}
+		class = profile.TransferClass
 	}
 	switch class {
 	case storage.TransferRelay:
-		if c.EdgeOneUploadIngress() {
-			return fmt.Errorf("class C relay cannot use the EdgeOne class A transfer route")
-		}
 		return nil
 	case storage.TransferPresignedParts:
-		if c.BackendName() != "cos" {
-			return fmt.Errorf("class A presigned-parts currently requires the COS backend")
+		if c.BackendName() == "local" {
+			return fmt.Errorf("storage product %q is a local root: it has no provider for a client to reach, so it cannot serve class A", c.Storage.Product)
 		}
 		if !c.Storage.CoordinatedWrites {
-			return fmt.Errorf("class A presigned-parts requires FILE_COORDINATED_WRITES=true")
+			return fmt.Errorf("class A presigned-parts requires coordinated writes on storage product %q, because the server completes every multi-part upload", c.Storage.Product)
 		}
 		return nil
 	case storage.TransferResumableSession:
-		return fmt.Errorf("no storage driver advertises resumable-session yet")
+		return fmt.Errorf("no storage product serves resumable-session: it needs a cloud-drive driver, and none exists")
 	default:
-		return fmt.Errorf("FILE_TRANSFER_CLASS must be presigned-parts, resumable-session or relay")
+		return fmt.Errorf("storage product %q has an unknown transfer class %q", c.Storage.Product, c.Storage.TransferClass)
 	}
+}
+
+// StorageProfile is the capability table for this connection's product.
+func (c *Config) StorageProfile() (storageproduct.Profile, error) {
+	id := c.Storage.Product
+	if id == "" {
+		resolved, ok := storageproduct.ProductForBackend(c.BackendName())
+		if !ok {
+			return storageproduct.Profile{}, fmt.Errorf("storage connection %q names no product: set STORAGE_PRODUCT to one of %v", c.Storage.ConnectionID, storageproduct.ForBackend(c.BackendName()))
+		}
+		id = resolved
+	}
+	profile, err := storageproduct.Lookup(id)
+	if err != nil {
+		return storageproduct.Profile{}, err
+	}
+	if profile.Backend != c.BackendName() {
+		return storageproduct.Profile{}, fmt.Errorf("storage connection %q is product %q, which the %q driver serves, but its backend is %q", c.Storage.ConnectionID, profile.ID, profile.Backend, c.BackendName())
+	}
+	return profile, nil
 }
 
 func (c *Config) BackendName() string {
@@ -175,9 +200,6 @@ func (c *Config) ValidateStorage() error {
 // class A requires coordinated writes, which is exactly what those read-only drivers turn
 // off. The full check still runs on the configuration as loaded, before any of this.
 func (c *Config) ValidateReadOnlyStorage() error {
-	if c.Storage.CoordinatedWrites && c.BackendName() != "local" && (!filepath.IsAbs(c.Storage.ObjectAdmissionFile) || !filepath.IsAbs(c.Storage.ObjectSpoolRoot)) {
-		return fmt.Errorf("object writes require explicit absolute FILE_OBJECT_ADMISSION_FILE and FILE_OBJECT_SPOOL_ROOT")
-	}
 	switch c.BackendName() {
 	case "cos":
 		return c.ValidateCOS()
@@ -203,9 +225,6 @@ func (c *Config) ValidateReadOnlyStorage() error {
 // ValidateServer refuses an accidental identity reset: migrating deployments must
 // explicitly set APP_SECRET to the old save-link derivation seed before switching.
 func (c *Config) ValidateServer() error {
-	if err := c.ValidateUploadIngress(); err != nil {
-		return err
-	}
 	for _, origin := range c.FileCookieOrigins {
 		if _, err := filecontract.NewCookieMutationPolicy(origin); err != nil {
 			return fmt.Errorf("FILE_COOKIE_ORIGINS requires explicit HTTP(S) origins without paths")

@@ -9,39 +9,31 @@ import (
 )
 
 func deploymentStorage() config.Storage {
-	return config.Storage{
-		ObjectAdmissionFile: "/srv/eam/state/admission.json",
-		ObjectSpoolRoot:     "/srv/eam/object-spool",
-	}
+	return config.Storage{ObjectSpoolRoot: "/srv/eam/object-spool"}
 }
 
 func testConnection(id, name, backend string) Connection {
 	return Connection{ID: id, Name: name, Backend: backend}
 }
 
-// A second object connection must not inherit the deployment's evidence or spool:
-// inheriting the file makes the driver refuse its own evidence, and a probe run
-// against it would overwrite the connection that file describes.
-func TestObjectConnectionPathsDerivePerConnectionPaths(t *testing.T) {
+// A second object connection must not inherit the deployment's spool: a shared one would
+// let one target's temporary bytes be published to another.
+func TestObjectConnectionPathsDeriveAPerConnectionSpool(t *testing.T) {
 	c := testConnection("0f0e9d5a-3f2b-4b1a-9f8e-2d7c6a5b4c3d", "nas", "s3")
-	admission, spool, err := ObjectPaths(deploymentStorage(), c, "", "")
+	spool, err := ObjectPaths(deploymentStorage(), c, "")
 	if err != nil {
 		t.Fatalf("derive paths: %v", err)
-	}
-	if want := filepath.Join("/srv/eam/state", "admission-"+c.ID+".json"); admission != want {
-		t.Errorf("admission evidence = %q, want %q", admission, want)
 	}
 	if want := filepath.Join("/srv/eam/object-spool", c.ID); spool != want {
 		t.Errorf("spool root = %q, want %q", spool, want)
 	}
-	deployment := deploymentStorage()
-	if admission == deployment.ObjectAdmissionFile || spool == deployment.ObjectSpoolRoot {
-		t.Errorf("derived paths overlap the deployment's: %q %q", admission, spool)
+	if spool == deploymentStorage().ObjectSpoolRoot {
+		t.Errorf("the derived spool overlaps the deployment's: %q", spool)
 	}
-	// The name is a human label now; it must not appear in either path, or two owners
-	// that call a connection "nas" share one directory again.
-	if strings.Contains(spool, "nas") || strings.Contains(admission, "nas") {
-		t.Errorf("a derived path still carries the connection name: %q %q", admission, spool)
+	// The name is a human label now; it must not appear in the path, or two owners that
+	// call a connection "nas" share one directory again.
+	if strings.Contains(spool, "nas") {
+		t.Errorf("a derived path still carries the connection name: %q", spool)
 	}
 }
 
@@ -54,61 +46,46 @@ func TestSameNameDifferentOwnersGetDisjointDirectories(t *testing.T) {
 	second := testConnection("22222222-2222-4222-8222-222222222222", "nas", "cos")
 	second.OwnerID = "owner-two"
 
-	firstAdmission, firstSpool, err := ObjectPaths(deployment, first, "", "")
+	firstSpool, err := ObjectPaths(deployment, first, "")
 	if err != nil {
-		t.Fatalf("derive the first owner's paths: %v", err)
+		t.Fatalf("derive the first owner's path: %v", err)
 	}
-	secondAdmission, secondSpool, err := ObjectPaths(deployment, second, "", "")
+	secondSpool, err := ObjectPaths(deployment, second, "")
 	if err != nil {
-		t.Fatalf("derive the second owner's paths: %v", err)
+		t.Fatalf("derive the second owner's path: %v", err)
 	}
-	if firstAdmission == secondAdmission || firstSpool == secondSpool {
-		t.Fatalf("two owners sharing a connection name share on-disk paths: %q/%q and %q/%q",
-			firstAdmission, firstSpool, secondAdmission, secondSpool)
+	if firstSpool == secondSpool {
+		t.Fatalf("two owners sharing a connection name share a spool: %q", firstSpool)
 	}
 	if filepath.Dir(firstSpool) != filepath.Dir(secondSpool) {
 		t.Fatalf("derived spools are not siblings under the deployment root: %q %q", firstSpool, secondSpool)
 	}
-	if filepath.Dir(firstAdmission) != filepath.Dir(secondAdmission) {
-		t.Fatalf("derived evidence files are not siblings beside the deployment evidence: %q %q", firstAdmission, secondAdmission)
-	}
 }
 
-func TestObjectConnectionPathsKeepExplicitPaths(t *testing.T) {
+func TestObjectConnectionPathsKeepAnExplicitSpool(t *testing.T) {
 	c := testConnection("0f0e9d5a-3f2b-4b1a-9f8e-2d7c6a5b4c3d", "nas", "s3")
-	admission, spool, err := ObjectPaths(deploymentStorage(), c, "/srv/eam/state/nas.json", "/var/spool/nas")
+	spool, err := ObjectPaths(deploymentStorage(), c, "/var/spool/nas")
 	if err != nil {
 		t.Fatalf("derive paths: %v", err)
 	}
-	if admission != "/srv/eam/state/nas.json" || spool != "/var/spool/nas" {
-		t.Errorf("explicit paths were not kept: %q %q", admission, spool)
+	if spool != "/var/spool/nas" {
+		t.Errorf("an explicit spool was not kept: %q", spool)
 	}
 }
 
-func TestObjectConnectionPathsRejectSharedDeploymentPaths(t *testing.T) {
+func TestObjectConnectionPathsRejectTheDeploymentSpool(t *testing.T) {
 	deployment := deploymentStorage()
-	for _, test := range []struct {
-		name      string
-		admission string
-		spool     string
-	}{
-		{"admission", deployment.ObjectAdmissionFile, ""},
-		{"spool", "", deployment.ObjectSpoolRoot},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			c := testConnection("0f0e9d5a-3f2b-4b1a-9f8e-2d7c6a5b4c3d", "nas", "s3")
-			if _, _, err := ObjectPaths(deployment, c, test.admission, test.spool); err == nil {
-				t.Fatal("sharing the deployment's path was accepted")
-			}
-		})
+	c := testConnection("0f0e9d5a-3f2b-4b1a-9f8e-2d7c6a5b4c3d", "nas", "s3")
+	if _, err := ObjectPaths(deployment, c, deployment.ObjectSpoolRoot); err == nil {
+		t.Fatal("sharing the deployment's spool was accepted")
 	}
 }
 
-// Without a deployment path to derive from, guessing would place evidence somewhere
+// Without a deployment root to derive from, guessing would place staged bytes somewhere
 // the driver does not read, so the operator has to name it.
 func TestObjectConnectionPathsRequireSomethingToDeriveFrom(t *testing.T) {
 	c := testConnection("0f0e9d5a-3f2b-4b1a-9f8e-2d7c6a5b4c3d", "nas", "s3")
-	if _, _, err := ObjectPaths(config.Storage{}, c, "", ""); err == nil {
+	if _, err := ObjectPaths(config.Storage{}, c, ""); err == nil {
 		t.Fatal("deriving from an empty deployment configuration was accepted")
 	}
 }
@@ -117,22 +94,22 @@ func TestObjectConnectionPathsRequireSomethingToDeriveFrom(t *testing.T) {
 func TestObjectConnectionPathsRequireAUsableID(t *testing.T) {
 	for _, id := range []string{"", "..", "a/b", `a\b`, "a\x00b"} {
 		c := testConnection(id, "nas", "s3")
-		if _, _, err := ObjectPaths(deploymentStorage(), c, "", ""); err == nil {
+		if _, err := ObjectPaths(deploymentStorage(), c, ""); err == nil {
 			t.Errorf("row id %q was accepted as a path component", id)
 		}
 	}
 }
 
-// A local connection stages inside its own system root, so it owns no object
-// evidence or spool and the derivation must not invent one.
+// A local connection stages inside its own system root, so it owns no object spool and
+// the derivation must not invent one.
 func TestObjectConnectionPathsLeaveLocalConnectionsAlone(t *testing.T) {
 	c := testConnection("0f0e9d5a-3f2b-4b1a-9f8e-2d7c6a5b4c3d", "local-nas", "local")
-	admission, spool, err := ObjectPaths(deploymentStorage(), c, "", "")
+	spool, err := ObjectPaths(deploymentStorage(), c, "")
 	if err != nil {
 		t.Fatalf("derive paths: %v", err)
 	}
-	if admission != "" || spool != "" {
-		t.Errorf("local connection got object paths: %q %q", admission, spool)
+	if spool != "" {
+		t.Errorf("a local connection got an object spool: %q", spool)
 	}
 }
 

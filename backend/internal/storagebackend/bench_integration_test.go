@@ -180,7 +180,7 @@ func openBenchDriver(t *testing.T, name string) storage.Driver {
 			t.Fatalf("load .env: %v", err)
 		}
 		if loaded.BackendName() != "cos" || !loaded.Storage.CoordinatedWrites {
-			t.Fatalf("cos bench needs STORAGE_BACKEND=cos and FILE_COORDINATED_WRITES=true in .env")
+			t.Fatalf("cos bench needs STORAGE_PRODUCT=cos (STORAGE_BACKEND=cos) in .env")
 		}
 		cfg = loaded
 		// Private spool so the bench never shares ledgers with a running server.

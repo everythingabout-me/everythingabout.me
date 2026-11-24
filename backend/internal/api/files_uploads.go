@@ -744,7 +744,10 @@ func (s *Server) filesDirectPutTransport(ctx context.Context, native fileops.Nat
 	if err != nil {
 		return nil, filesMutationProblem(err)
 	}
-	formPost := intent.Conditions.Absent && (s.cfg == nil || !s.cfg.EdgeOneUploadIngress())
+	// A form upload can only express "this key must be absent", which is exactly the
+	// condition it carries; the product's FormPost capability decides whether its signed
+	// policy conditions are enforced at all.
+	formPost := intent.Conditions.Absent
 	if post, ok := native.(storage.DirectPostWriter); ok && formPost && post.SupportsDirectPost() {
 		grant, err := post.BeginDirectPost(ctx, intent, nil, s.filesPartGrantExpiry(u))
 		if err != nil {

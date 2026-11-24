@@ -62,10 +62,10 @@ func TestLocalAdmissionPhysicalMeasurementCannotBeOverridden(t *testing.T) {
 	if physical, err := admissionPhysicalBytes(false, 7, -1); err != nil || physical != 7 {
 		t.Fatalf("Local measured bytes changed %d %v", physical, err)
 	}
-	cfg.Storage.CoordinatedWrites = false
-	if _, err := validateAdmissionAccounting(cfg, proof, false, -1); err == nil {
-		t.Fatal("writer admission assertion was bypassed")
-	}
+	// There is no writer flag to bypass any more: a local root never stages through the
+	// object protocol, and an object backend always does, so this function only decides how
+	// physical bytes are accounted. Whether the connection may publish at all is the
+	// product's answer, checked when the driver is opened.
 }
 func TestObjectAdmissionPhysicalCountIncludesCurrentAndRetainedBytes(t *testing.T) {
 	for _, tc := range []struct {

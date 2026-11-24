@@ -25,10 +25,10 @@ type Store interface {
 	// environment reference. It is scoped to shared rows: an account-added row
 	// keeps its inline secret because its key has no deployment environment.
 	SetSecretReference(ctx context.Context, id string, ref SecretReference) error
-	// SetObjectPaths rewrites the two per-connection on-disk paths after adoption
+	// SetObjectPaths rewrites the per-connection spool path after adoption
 	// moved them. It is scoped by row id, not name, so a rename cannot repoint
 	// another row's evidence.
-	SetObjectPaths(ctx context.Context, id, admissionFile, spoolRoot string) error
+	SetObjectPaths(ctx context.Context, id, spoolRoot string) error
 	// SetProbe caches the last measurement requested for one connection. It is
 	// scoped by row id because a rename keeps the same store but a reused name
 	// must not inherit someone else's result.
@@ -225,19 +225,19 @@ func (p postgresStore) SetSecretReference(ctx context.Context, id string, ref Se
 	return nil
 }
 
-// SetObjectPaths records the id-keyed paths adoption moved a row's directories to.
-// The two paths live in the row's config, so the driver, the probe command and the
-// CLI all read one answer; leaving the row on a legacy path after moving the
-// directory would make the next start adopt a directory that is no longer there.
-func (p postgresStore) SetObjectPaths(ctx context.Context, id, admissionFile, spoolRoot string) error {
+// SetObjectPaths records the id-keyed spool adoption moved a row's directory to. The path
+// lives in the row's config, so the driver and the CLI read one answer; leaving the row on
+// a legacy path after moving the directory would make the next start adopt a directory
+// that is no longer there.
+func (p postgresStore) SetObjectPaths(ctx context.Context, id, spoolRoot string) error {
 	if id == "" {
 		return fmt.Errorf("storage connection path adoption: no row id to update")
 	}
 	tag, err := p.db.Pool().Exec(ctx, `
 		update storage_connections
-		set config = jsonb_set(jsonb_set(config, '{objectAdmissionFile}', to_jsonb($2::text)), '{objectSpoolRoot}', to_jsonb($3::text)),
+		set config = jsonb_set(config, '{objectSpoolRoot}', to_jsonb($2::text)),
 		    updated_at=now()
-		where id=$1::uuid`, id, admissionFile, spoolRoot)
+		where id=$1::uuid`, id, spoolRoot)
 	if err != nil {
 		return fmt.Errorf("storage connection %s: write adopted object paths: %w", id, err)
 	}

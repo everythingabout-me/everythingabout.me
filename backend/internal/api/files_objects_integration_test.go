@@ -25,7 +25,6 @@ import (
 	"everythingabout.me/backend/internal/config"
 	"everythingabout.me/backend/internal/fileops"
 	"everythingabout.me/backend/internal/nodes"
-	"everythingabout.me/backend/internal/objectmutation"
 	"everythingabout.me/backend/internal/storage"
 	"everythingabout.me/backend/internal/storagebackend"
 	"everythingabout.me/backend/internal/store"
@@ -407,13 +406,7 @@ func newObjectsAPIFixture(t *testing.T) *objectsAPIFixture {
 	provider := newObjectAPIProvider()
 	native := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { provider.serve(t, w, r) }))
 	t.Cleanup(native.Close)
-	proof := objectmutation.Admission{Version: objectmutation.AdmissionVersion, ConnectionID: "default", Endpoint: native.URL, Bucket: "bucket", Region: "test-region", CheckedAt: time.Now().UTC(), ProbeReference: "isolated stateful S3 SDK fixture, not live cloud evidence", AtomicPublish: true, ConditionalCreate: true, SingleGateway: true, MultipartUploads: true}
-	proofPath := filepath.Join(t.TempDir(), "admission.json")
-	encoded, _ := json.Marshal(proof)
-	if err = os.WriteFile(proofPath, encoded, 0600); err != nil {
-		t.Fatal(err)
-	}
-	cfg := &config.Config{AppSecret: "object-api-independent-secret", SessionTTLDays: 1, FileCookieOrigins: []string{"https://files.example"}, Storage: config.Storage{Backend: "s3", ConnectionID: "default", Generation: 1, CoordinatedWrites: true, MaxSinglePutBytes: 32 << 20, ObjectAdmissionFile: proofPath, ObjectSpoolRoot: t.TempDir(), S3: config.S3{Endpoint: native.URL, Region: "test-region", Bucket: "bucket", AccessKeyID: "object-api-id", SecretAccessKey: "object-api-secret", SessionToken: "object-api-session", PathStyle: true, ContentPrefix: "drive/", SystemPrefix: "system/"}}}
+	cfg := &config.Config{AppSecret: "object-api-independent-secret", SessionTTLDays: 1, FileCookieOrigins: []string{"https://files.example"}, Storage: config.Storage{Backend: "s3", Product: "minio", ConnectionID: "default", Generation: 1, CoordinatedWrites: true, MaxSinglePutBytes: 32 << 20, ObjectSpoolRoot: t.TempDir(), S3: config.S3{Endpoint: native.URL, Region: "test-region", Bucket: "bucket", AccessKeyID: "object-api-id", SecretAccessKey: "object-api-secret", SessionToken: "object-api-session", PathStyle: true, ContentPrefix: "drive/", SystemPrefix: "system/"}}}
 	backend, err := storagebackend.New(cfg)
 	if err != nil {
 		t.Fatal(err)

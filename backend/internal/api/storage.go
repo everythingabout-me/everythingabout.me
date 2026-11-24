@@ -18,6 +18,7 @@ import (
 	"everythingabout.me/backend/internal/snapshot"
 	"everythingabout.me/backend/internal/storage"
 	"everythingabout.me/backend/internal/storagebackend"
+	"everythingabout.me/backend/internal/storageproduct"
 	"github.com/jackc/pgx/v5"
 )
 
@@ -38,9 +39,13 @@ const defaultBackupKeep = 14
 const backupRunHistoryLimit = 120
 
 type storageConnectionView struct {
-	ID       string `json:"id"`
-	Name     string `json:"name"`
-	Role     string `json:"role"`
+	ID   string `json:"id"`
+	Name string `json:"name"`
+	Role string `json:"role"`
+	// Product is the store's name (aws-s3, cos, minio, rustfs, local). It is what the page
+	// shows, because it is what decides the guarantees: "S3-compatible" was the label that
+	// made a person ask questions the row could not answer.
+	Product  string `json:"product"`
 	Backend  string `json:"backend"`
 	Location string `json:"location"`
 	Enabled  bool   `json:"enabled"`
@@ -69,10 +74,23 @@ type storageConnectionView struct {
 
 func connectionView(c connections.Connection, runCount int, last *backupRunView) storageConnectionView {
 	return storageConnectionView{
-		ID: c.ID, Name: c.Name, Role: c.Role, Backend: c.Backend,
+		ID: c.ID, Name: c.Name, Role: c.Role, Product: connectionProduct(c), Backend: c.Backend,
 		Location: connectionLocation(c), Enabled: c.Enabled, Mine: c.OwnerID != "",
 		BackupFolder: c.Config.BackupFolder, Runs: runCount, LastRun: last, Probe: c.LastProbe,
 	}
+}
+
+// connectionProduct names the product a row uses. Rows written before the product split
+// carry only a backend, and COS and Local have exactly one product each; an S3 row from
+// that era is reported as the family it named rather than silently guessed as one product.
+func connectionProduct(c connections.Connection) string {
+	if c.Config.Product != "" {
+		return c.Config.Product
+	}
+	if id, ok := storageproduct.ProductForBackend(c.Backend); ok {
+		return id
+	}
+	return c.Backend
 }
 
 // backupTargetView names a provider rather than just identifying it: a provider's own
@@ -370,12 +388,17 @@ func (s *Server) backupTarget(ctx context.Context, ownerID string) (string, erro
 }
 
 type connectionInput struct {
-	Name      string `json:"name"`
-	Backend   string `json:"backend"`
-	Bucket    string `json:"bucket"`
-	Region    string `json:"region"`
-	Endpoint  string `json:"endpoint"`
-	PathStyle bool   `json:"pathStyle"`
+	Name string `json:"name"`
+	// Product names the store (aws-s3, cos, minio, rustfs). It replaces the old
+	// "backend" of cos|s3 because a protocol family does not answer the questions a
+	// connection has: how bytes travel, and whether the store replaces an object it was
+	// told not to touch.
+	Product  string `json:"product"`
+	Bucket   string `json:"bucket"`
+	Region   string `json:"region"`
+	Endpoint string `json:"endpoint"`
+	// PathStyle is nil when the account left the product's default alone.
+	PathStyle *bool `json:"pathStyle"`
 	// Prefix is the tree's prefix inside an S3 bucket: nil keeps the deployment default,
 	// an explicit empty string means the bucket itself.
 	Prefix    *string `json:"prefix"`
@@ -384,9 +407,9 @@ type connectionInput struct {
 }
 
 // handleStorageConnectionAdd lets an account attach its own drive as a backup
-// destination: a COS bucket, or an S3-compatible endpoint whose host the operator has
-// listed. A local root stays operator-only — it is a host path, not a drive an account
-// can name.
+// destination, naming the store's product: a COS bucket or an endpoint running AWS S3,
+// MinIO or RustFS. A local root stays operator-only — it is a host path, not a drive an
+// account can name.
 func (s *Server) handleStorageConnectionAdd(w http.ResponseWriter, r *http.Request) error {
 	if s.db == nil || s.conns == nil {
 		return httpx.ServiceUnavailable("Storage settings are unavailable on this instance.")
@@ -403,58 +426,57 @@ func (s *Server) handleStorageConnectionAdd(w http.ResponseWriter, r *http.Reque
 		return httpx.BadRequest("The request body is not valid JSON.")
 	}
 	// A destination is only useful if this process can publish into it, and publication
-	// needs the coordinated object protocol.
+	// needs the coordinated object protocol — which a local-root deployment does not run.
 	if !s.cfg.Storage.CoordinatedWrites {
-		return httpx.BadRequest("Object writes are disabled on this deployment, so a backup destination could not publish into it.")
+		return httpx.BadRequest("This deployment runs on a local root, so there is no object store for a backup destination to publish into.")
 	}
-	backend := strings.ToLower(strings.TrimSpace(in.Backend))
-	if backend == "" {
-		backend = "cos"
+	product, err := storageproduct.Lookup(strings.ToLower(strings.TrimSpace(in.Product)))
+	if err != nil {
+		return httpx.BadRequest(err.Error())
 	}
-	// The row id is generated before the INSERT because this connection's evidence and
-	// spool are keyed by it; the name is what the account reads, not what separates two
-	// accounts' directories.
+	if product.Backend == "local" {
+		return httpx.BadRequest("A local root is a host path, not a drive an account can attach; only an operator can configure it.")
+	}
+	// The row id is generated before the INSERT because this connection's spool is keyed
+	// by it; the name is what the account reads, not what separates two accounts'
+	// directories.
 	id, err := connections.NewID()
 	if err != nil {
 		return err
 	}
 	c := connections.Connection{
-		ID: id, OwnerID: user.ID, Name: in.Name, Backend: backend, Role: connections.RoleBackup,
+		ID: id, OwnerID: user.ID, Name: in.Name, Backend: product.Backend, Role: connections.RoleBackup,
 		Generation: 1, Enabled: true,
-		Config: connections.Spec{CoordinatedWrites: true},
+		Config: connections.Spec{Product: product.ID},
 	}
-	switch backend {
+	switch product.Backend {
 	case "cos":
 		c.Config.COS = connections.COSSpec{Bucket: in.Bucket, Region: in.Region}
-		c.Config.TransferClass = s.cfg.Storage.TransferClass
 		c.Secret = connections.Secret{COS: connections.COSCredential{SecretID: in.SecretID, SecretKey: in.SecretKey}}
 	case "s3":
 		prefix, rootAtBucket, err := connections.S3ContentPrefix(in.Prefix)
 		if err != nil {
 			return httpx.BadRequest(err.Error())
 		}
+		pathStyle := product.PathStyle
+		if in.PathStyle != nil {
+			pathStyle = *in.PathStyle
+		}
 		c.Config.S3 = connections.S3Spec{Endpoint: in.Endpoint, Region: in.Region, Bucket: in.Bucket,
-			PathStyle: in.PathStyle, ContentPrefix: prefix, SystemPrefix: "__eam_system__/"}
+			PathStyle: pathStyle, ContentPrefix: prefix, SystemPrefix: "__eam_system__/"}
 		c.Config.RootAtBucket = rootAtBucket
-		// An S3-compatible server speaks the relay class only; a presigned part URL would
-		// have to be signed for its host, which this connection's credentials may not be
-		// allowed to do.
-		c.Config.TransferClass = storage.TransferRelay
 		c.Secret = connections.Secret{S3: connections.S3Credential{AccessKeyID: in.SecretID, SecretAccessKey: in.SecretKey}}
-	default:
-		return httpx.BadRequest("A drive is either a COS bucket or an S3-compatible endpoint.")
 	}
 	if err := connections.ValidateName(c.Name); err != nil {
 		return httpx.BadRequest(err.Error())
 	}
-	// Each connection owns its evidence and its spool. Inheriting the deployment's would
-	// make this bucket refuse evidence recorded for another one, and measuring this bucket
-	// would overwrite the authority's proof at that path.
-	admissionFile, spoolRoot, err := connections.ObjectPaths(s.cfg.Storage, c, "", "")
+	// Each connection owns its spool: inheriting the deployment's would let one target's
+	// temporary bytes be published to another.
+	spoolRoot, err := connections.ObjectPaths(s.cfg.Storage, c, "")
 	if err != nil {
 		return httpx.BadRequest(err.Error())
 	}
-	c.Config.ObjectAdmissionFile, c.Config.ObjectSpoolRoot = admissionFile, spoolRoot
+	c.Config.ObjectSpoolRoot = spoolRoot
 	if err := os.MkdirAll(spoolRoot, 0o700); err != nil {
 		return fmt.Errorf("create spool root for storage connection %q: %w", c.Name, err)
 	}
@@ -570,12 +592,16 @@ func (s *Server) runStorageTest(target connections.Connection, result storageTes
 		}
 		result.OK = true
 		applyMeasurement(&result, measurement)
-		// Publishability is a different question from reachability, so a store that
-		// answered but cannot be admitted is "reachable, not ready" rather than a
-		// failed connection test.
-		if _, probeErr := storagebackend.ProbeConnection(ctx, &effective); probeErr != nil {
-			result.Error = probeErr.Error()
-		} else {
+		// Publishability is a different question from reachability, and it is answered by
+		// the product rather than measured again: a store that moves bytes but does not
+		// promise conditional create and atomic publication is "reachable, not ready".
+		profile, profileErr := effective.StorageProfile()
+		switch {
+		case profileErr != nil:
+			result.Error = profileErr.Error()
+		case profile.Capabilities.Validate() != nil:
+			result.Error = fmt.Sprintf("the store answered, but as product %q it cannot be published to: %v", profile.ID, profile.Capabilities.Validate())
+		default:
 			result.Writable = true
 		}
 	}
@@ -1021,21 +1047,6 @@ func (s *Server) runBackupJob(key, ownerID string, target connections.Connection
 	if !ok {
 		fail(fmt.Errorf("this deployment cannot open a named storage connection"))
 		return
-	}
-	if action == "snapshot" {
-		// Measure the destination at the moment it is used, not when it is recorded. A
-		// drive can be added while it is unreachable — a NAS that is off, a tunnel that is
-		// down — and must work as soon as it is back, without re-adding it. Publication is
-		// the only thing that needs this proof; a restore or a prune reads and deletes.
-		effective, err := target.ApplyEnvironment(*s.cfg)
-		if err != nil {
-			fail(err)
-			return
-		}
-		if err := storagebackend.EnsureAdmission(ctx, &effective); err != nil {
-			fail(err)
-			return
-		}
 	}
 	dst, err := named.OpenConnection(ctx, ownerID, target.Name)
 	if err != nil {

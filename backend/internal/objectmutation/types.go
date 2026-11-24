@@ -6,61 +6,22 @@ package objectmutation
 import (
 	"context"
 	"everythingabout.me/backend/internal/storage"
+	"everythingabout.me/backend/internal/storageproduct"
 	"io"
 	"time"
 )
 
-// Admission is deployment evidence, not an assertion of S3 compatibility. The
-// file must describe positive/negative isolated probes for this exact connection.
-// Capability assertions apply only to the selected publication strategy.
-type Admission struct {
-	// Version names the probe that produced this evidence. A probe that learns a new
-	// property invalidates earlier evidence instead of silently leaving that property off:
-	// the file is re-measured on the next start rather than aging into a half-answer.
-	Version           int       `json:"version"`
-	ConnectionID      string    `json:"connectionId"`
-	Endpoint          string    `json:"endpoint"`
-	Bucket            string    `json:"bucket"`
-	Region            string    `json:"region"`
-	CheckedAt         time.Time `json:"checkedAt"`
-	ProbeReference    string    `json:"probeReference"`
-	AtomicPublish     bool      `json:"atomicPublish"`
-	ConditionalCreate bool      `json:"conditionalCreate"`
-	SingleGateway     bool      `json:"singleGateway"`
-	// MultipartUploads additionally attests native part persistence and conditional
-	// create on Complete for this exact provider endpoint. Existing PUT evidence
-	// alone never enables numbered native uploads.
-	MultipartUploads bool `json:"multipartUploads,omitempty"`
-	// FormPost attests that a form upload with no conditional header is still refused on
-	// an occupied key: the provider's overwrite switch alone, which is the whole guarantee
-	// a form post has.
-	FormPost bool `json:"formPost,omitempty"`
-	// ConditionalPut attests that a plain PUT carrying a stale If-Match is refused (412)
-	// instead of replacing the object. COS enforces conditional GET and DELETE but ignores
-	// If-Match on PUT, and a provider may change that per endpoint, so the only evidence
-	// this service accepts is a refusal it measured on this exact connection.
-	//
-	// False is not an admission failure: the connection still publishes through multipart,
-	// where the client's parts stay unpublished until the server completes them. What it
-	// forbids is a direct class A replacement, because that grant's *only* guard is the
-	// If-Match the client sends — the client's PUT is the publication, so an unenforced
-	// header leaves a superseded session able to overwrite a newer file with old bytes for
-	// as long as its grant lives (up to an hour).
-	ConditionalPut bool `json:"conditionalPut,omitempty"`
-	// SignedMultipartParts attests COS Content-MD5 rejection and no-SSE part ETag=MD5.
-	SignedMultipartParts bool `json:"signedMultipartParts,omitempty"`
-	// ListingETag additionally attests, for this exact endpoint, that a delimiter
-	// listing reports each object's ETag byte-identically to the HEAD the mutation
-	// driver would otherwise issue to learn it. Without that evidence the two
-	// channels could disagree and every captured entry would look changed; with it a
-	// listing answers each child at no extra request, which is the difference between
-	// one request per folder and one per entry for every capture, move, copy, delete
-	// and reconcile pass. Probed on 18 objects of a real COS bucket, 16 of them
-	// multipart and 2 zero-byte markers: no mismatch.
-	ListingETag bool `json:"listingETag,omitempty"`
-}
+// Capabilities are what the selected product promises about writes. They are one
+// definition, in storageproduct: a property of the product rather than a measurement of
+// one bucket, which is why this package neither probes nor stores them.
+//
+// A capability that is false does not fail the connection — it removes one publication
+// strategy. What it must never do is leave a strategy enabled that the product does not
+// honour, because the failure that produces is a silent overwrite rather than an error.
+type Capabilities = storageproduct.Capabilities
+
 type Options struct {
-	Admission       Admission
+	Capabilities    Capabilities
 	SpoolRoot       string
 	MaxPublishBytes int64
 }

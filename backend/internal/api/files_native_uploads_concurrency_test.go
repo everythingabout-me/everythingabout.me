@@ -6,13 +6,8 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
-	"os"
-	"path/filepath"
 	"testing"
 	"time"
-
-	"everythingabout.me/backend/internal/objectmutation"
-	"everythingabout.me/backend/internal/storagebackend"
 )
 
 func TestFilesNativeUploadsPostgresPartsActuallyRunConcurrently(t *testing.T) {
@@ -59,45 +54,4 @@ func TestFilesNativeUploadsPostgresPartsActuallyRunConcurrently(t *testing.T) {
 	close(release)
 	uploadsHTTPJSON(t, <-done, 201)
 	uploadsHTTPJSON(t, <-done, 201)
-}
-
-func TestFilesNativeUploadsPostgresRequireMultipartAdmission(t *testing.T) {
-	f := newObjectsAPIFixture(t)
-	encoded, err := os.ReadFile(f.cfg.Storage.ObjectAdmissionFile)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var proof objectmutation.Admission
-	if err = json.Unmarshal(encoded, &proof); err != nil {
-		t.Fatal(err)
-	}
-	proof.MultipartUploads = false
-	encoded, _ = json.Marshal(proof)
-	path := filepath.Join(t.TempDir(), "without-multipart.json")
-	if err = os.WriteFile(path, encoded, 0600); err != nil {
-		t.Fatal(err)
-	}
-	cfg := *f.cfg
-	cfg.Storage = f.cfg.Storage
-	cfg.Storage.ObjectAdmissionFile = path
-	backend, err := storagebackend.New(&cfg)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer backend.Close()
-	server := New(&cfg, f.db, backend.Legacy(), nil)
-	server.SetStorageFactory(backend)
-	f.server = server
-	caps := uploadsHTTPJSON(t, f.request(t, "GET", "/capabilities", "/", nil, nil), 200)
-	if caps["uploads"] != false || caps["maxUploadParallelism"] != nil {
-		t.Fatalf("unproven native upload advertised: %v", caps)
-	}
-	body, _ := json.Marshal(map[string]any{"path": "/unproven", "size": 4})
-	uploadsHTTPProblem(t, f.request(t, "POST", "/uploads", "", body, http.Header{"Idempotency-Key": {"unproven"}, "Content-Type": {"application/json"}}), 422, "unsupported_option")
-	var sessions int
-	if err = f.db.Pool().QueryRow(f.ctx, `select count(*) from file_uploads`).Scan(&sessions); err != nil || sessions != 0 {
-		t.Fatalf("unproven upload allocated: %d %v", sessions, err)
-	}
-	// The independent ordinary content PUT retains its existing admitted policy.
-	uploadsHTTPJSON(t, f.request(t, "PUT", "/content", "/small", []byte("data"), http.Header{"If-None-Match": {"*"}}), 201)
 }

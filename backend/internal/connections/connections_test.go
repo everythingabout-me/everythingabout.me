@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"everythingabout.me/backend/internal/config"
@@ -65,12 +66,11 @@ func (f *fakeStore) Insert(_ context.Context, c Connection) error {
 	return nil
 }
 
-func (f *fakeStore) SetObjectPaths(_ context.Context, id, admissionFile, spoolRoot string) error {
+func (f *fakeStore) SetObjectPaths(_ context.Context, id, spoolRoot string) error {
 	for i := range f.rows {
 		if f.rows[i].ID != id {
 			continue
 		}
-		f.rows[i].Config.ObjectAdmissionFile = admissionFile
 		f.rows[i].Config.ObjectSpoolRoot = spoolRoot
 		f.writes++
 		return nil
@@ -124,13 +124,12 @@ func localConfig(t *testing.T) config.Config {
 		}
 	}
 	return config.Config{Storage: config.Storage{
-		Backend:             "local",
-		ConnectionID:        "default",
-		Generation:          1,
-		MaxSinglePutBytes:   1024,
-		ObjectAdmissionFile: filepath.Join(dir, "admission.json"),
-		ObjectSpoolRoot:     filepath.Join(dir, "spool"),
-		Local:               config.Local{ContentRoot: content, SystemRoot: system, CaseSensitive: true},
+		Backend:           "local",
+		ConnectionID:      "default",
+		Generation:        1,
+		MaxSinglePutBytes: 1024,
+		ObjectSpoolRoot:   filepath.Join(dir, "spool"),
+		Local:             config.Local{ContentRoot: content, SystemRoot: system, CaseSensitive: true},
 	}}
 }
 
@@ -422,5 +421,36 @@ func TestBindingForMatchesTheServingBinding(t *testing.T) {
 	}
 	if _, err := resolver.BindingFor(context.Background(), "owner-a", "missing"); err == nil {
 		t.Fatal("a missing connection was derived as a binding")
+	}
+}
+
+// A row's byte path comes from its product, and the row has to reach the same answer the
+// deployment's own connection does. An S3 row written before the product split has no
+// product to ask, so it refuses by name instead of falling back to a relay nobody chose.
+func TestApplyResolvesTheClassFromTheProduct(t *testing.T) {
+	base := config.Config{}
+	row := Connection{
+		ID: "0f0e9d5a-3f2b-4b1a-9f8e-2d7c6a5b4c3d", Name: "nas", Backend: "s3", Role: RoleBackup,
+		Enabled: true, Generation: 1,
+		Config: Spec{Product: "rustfs", S3: S3Spec{Endpoint: "https://nas.invalid", Region: "us-east-1", Bucket: "b", ContentPrefix: "drive/", SystemPrefix: "__eam_system__/"}},
+		Secret: Secret{S3: S3Credential{AccessKeyID: "id", SecretAccessKey: "key"}},
+	}
+	applied, err := row.Apply(base)
+	if err != nil {
+		t.Fatalf("apply: %v", err)
+	}
+	if applied.Storage.TransferClass != storage.TransferPresignedParts {
+		t.Fatalf("class = %q, want the product's direct class", applied.Storage.TransferClass)
+	}
+	if !applied.Storage.CoordinatedWrites {
+		t.Fatal("an object product was not set up to stage its publications")
+	}
+
+	legacy := row
+	legacy.Config.Product = ""
+	if _, err := legacy.Apply(base); err == nil {
+		t.Fatal("an S3 row with no product was resolved to something")
+	} else if !strings.Contains(err.Error(), "nas") {
+		t.Fatalf("the refusal does not name the connection: %v", err)
 	}
 }

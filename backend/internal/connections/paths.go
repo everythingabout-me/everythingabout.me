@@ -53,17 +53,9 @@ func validateKey(c Connection) error {
 	return nil
 }
 
-// derivedAdmission and derivedSpool are the id-keyed derivation of a connection's two
-// pieces of on-disk state. Derived is separate from ObjectPaths so adoption can ask
-// "where would the id put this?" and "where did the name put it?" without restating
-// the layout.
-func derivedAdmission(deployment config.Storage, key string) (string, bool) {
-	if !filepath.IsAbs(deployment.ObjectAdmissionFile) {
-		return "", false
-	}
-	return filepath.Join(filepath.Dir(deployment.ObjectAdmissionFile), "admission-"+key+".json"), true
-}
-
+// derivedSpool is the id-keyed derivation of a connection's on-disk state. Derived is
+// separate from ObjectPaths so adoption can ask "where would the id put this?" and
+// "where did the name put it?" without restating the layout.
 func derivedSpool(deployment config.Storage, key string) (string, bool) {
 	if !filepath.IsAbs(deployment.ObjectSpoolRoot) {
 		return "", false
@@ -71,54 +63,37 @@ func derivedSpool(deployment config.Storage, key string) (string, bool) {
 	return filepath.Join(deployment.ObjectSpoolRoot, key), true
 }
 
-// ObjectPaths derives where one object connection keeps the two things a connection
-// must own: its admission evidence and its spool.
+// ObjectPaths derives where one object connection stages its bytes.
 //
-// Both are per connection. Evidence describes one endpoint, so a second connection
-// that inherited the first file would be refused when it loaded that evidence, and a
-// probe run against the inherited path would overwrite the other connection's proof;
-// a shared spool would let one target's temporary material be published to another.
+// The spool is per connection: a shared spool would let one target's temporary material
+// be published to another.
 //
 // The leaf is the row id, never the name. 036 lets two owners each call a connection
 // "nas", so the name is not unique and cannot separate two owners' state: with a
-// name-keyed leaf both owners staged into one directory, both wrote one evidence file,
-// and the two accounts shared a namespace on the host even though every row and query
-// is owner-scoped. The id is the row's durable identity, so the directory survives a
-// rename, while the name stays where a person reads it: logs, errors and the UI.
-func ObjectPaths(deployment config.Storage, c Connection, admissionFlag, spoolFlag string) (string, string, error) {
+// name-keyed leaf both owners staged into one directory and the two accounts shared a
+// namespace on the host even though every row and query is owner-scoped. The id is the
+// row's durable identity, so the directory survives a rename, while the name stays where
+// a person reads it: logs, errors and the UI.
+func ObjectPaths(deployment config.Storage, c Connection, spoolFlag string) (string, error) {
 	if err := validateKey(c); err != nil {
-		return "", "", err
+		return "", err
 	}
 	if c.Backend == "local" {
-		// A local connection stages inside its own system root; it has no object
-		// admission evidence and no spool.
-		return admissionFlag, spoolFlag, nil
+		// A local connection stages inside its own system root; it has no object spool.
+		return spoolFlag, nil
 	}
-	admission, spool := admissionFlag, spoolFlag
-	if admission == "" {
-		derived, ok := derivedAdmission(deployment, c.ID)
-		if !ok {
-			return "", "", fmt.Errorf("connection %q needs its own admission evidence path: this deployment has no object admission file to derive one from, so pass one explicitly", c.Name)
-		}
-		admission = derived
-	}
+	spool := spoolFlag
 	if spool == "" {
 		derived, ok := derivedSpool(deployment, c.ID)
 		if !ok {
-			return "", "", fmt.Errorf("connection %q needs its own spool root: this deployment has no object spool root to derive one from, so pass one explicitly", c.Name)
+			return "", fmt.Errorf("connection %q needs its own spool root: this deployment has no object spool root to derive one from, so pass one explicitly", c.Name)
 		}
 		spool = derived
 	}
-	for _, owned := range []struct{ what, path, deployment string }{
-		{"admission evidence", admission, deployment.ObjectAdmissionFile},
-		{"spool", spool, deployment.ObjectSpoolRoot},
-	} {
-		if owned.deployment != "" && filepath.Clean(owned.path) == filepath.Clean(owned.deployment) {
-			return "", "", fmt.Errorf("connection %q would share the deployment's %s %s; each connection owns its own, because evidence describes one endpoint and a shared spool would let one target's temporary bytes be published to another",
-				c.Name, owned.what, owned.path)
-		}
+	if deployment.ObjectSpoolRoot != "" && filepath.Clean(spool) == filepath.Clean(deployment.ObjectSpoolRoot) {
+		return "", fmt.Errorf("connection %q would share the deployment's spool %s; each connection owns its own, because a shared spool would let one target's temporary bytes be published to another", c.Name, spool)
 	}
-	return admission, spool, nil
+	return spool, nil
 }
 
 // S3ContentPrefix reads the prefix an account chose for its own S3-compatible drive.

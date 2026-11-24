@@ -134,7 +134,7 @@ func newBackend(cfg *config.Config, tolerateUnprovenWrites bool) (*Backend, erro
 		return nil, err
 	}
 	if b.objectBackend != nil {
-		admission, problem := b.loadAdmission()
+		capabilities, problem := b.objectCapabilities()
 		switch {
 		case problem != nil && !tolerateUnprovenWrites:
 			return nil, problem
@@ -150,9 +150,9 @@ func newBackend(cfg *config.Config, tolerateUnprovenWrites bool) (*Backend, erro
 				max = 32 << 20
 			}
 			if max > 5<<30 {
-				return nil, fmt.Errorf("object single-PUT publication exceeds the admitted 5 GiB limit")
+				return nil, fmt.Errorf("object single-PUT publication exceeds the 5 GiB provider part limit")
 			}
-			b.objectOptions = objectmutation.Options{Admission: admission, SpoolRoot: b.cfg.Storage.ObjectSpoolRoot, MaxPublishBytes: max}
+			b.objectOptions = objectmutation.Options{Capabilities: capabilities, SpoolRoot: b.cfg.Storage.ObjectSpoolRoot, MaxPublishBytes: max}
 		}
 	}
 	if b.factory == nil {
@@ -164,27 +164,27 @@ func newBackend(cfg *config.Config, tolerateUnprovenWrites bool) (*Backend, erro
 	return b, nil
 }
 
-// loadAdmission resolves the measured evidence for this exact connection. Evidence
-// is a measurement of one endpoint, so a bucket, region or endpoint change makes it
-// inapplicable rather than merely old.
-func (b *Backend) loadAdmission() (objectmutation.Admission, error) {
-	admission, err := objectmutation.LoadAdmission(b.cfg.Storage.ObjectAdmissionFile)
+// objectCapabilities resolves what this connection's product promises about writes.
+//
+// It is a lookup, not a measurement: the product name is already in the configuration,
+// and storageproduct carries the promise with its reason. A deployment that names no
+// product for a multi-product backend is refused here, by name, rather than guessed at —
+// the S3 wire protocol is served by products that differ exactly in these promises.
+func (b *Backend) objectCapabilities() (objectmutation.Capabilities, error) {
+	profile, err := b.cfg.StorageProfile()
 	if err != nil {
-		return admission, fmt.Errorf("storage connection %q has no usable object admission evidence at %s, so it may read but not publish; measure it with `eam storage-connection probe --name %s`: %w",
-			b.cfg.Storage.ConnectionID, b.cfg.Storage.ObjectAdmissionFile, b.cfg.Storage.ConnectionID, err)
+		return objectmutation.Capabilities{}, err
 	}
-	endpoint, bucket, region := connectionIdentity(&b.cfg)
-	if !admission.Matches(b.cfg.Storage.ConnectionID, endpoint, bucket, region) {
-		return admission, fmt.Errorf("object admission evidence %s was recorded for connection %q at %s bucket %q region %q, but this connection is %q at %s bucket %q region %q; re-measure it with `eam storage-connection probe --name %s`: %w",
-			b.cfg.Storage.ObjectAdmissionFile,
-			admission.ConnectionID, admission.Endpoint, admission.Bucket, admission.Region,
-			b.cfg.Storage.ConnectionID, endpoint, bucket, region,
-			b.cfg.Storage.ConnectionID, storage.NewError("invalid_config", "", nil))
+	if profile.Backend == "local" {
+		return objectmutation.Capabilities{}, fmt.Errorf("storage connection %q is a local root, which publishes through the filesystem driver: %w", b.cfg.Storage.ConnectionID, storage.NewError("invalid_config", "", nil))
 	}
-	if b.cfg.Storage.TransferClass == storage.TransferPresignedParts && !admission.MultipartUploads {
-		return admission, fmt.Errorf("class A presigned-parts requires admitted multipartUploads evidence for this exact connection")
+	if err := profile.Capabilities.Validate(); err != nil {
+		return objectmutation.Capabilities{}, fmt.Errorf("storage product %q cannot publish to connection %q: it does not promise conditional create and atomic publication: %w", profile.ID, b.cfg.Storage.ConnectionID, err)
 	}
-	return admission, nil
+	if b.cfg.Storage.TransferClass == storage.TransferPresignedParts && !profile.MultipartUploads {
+		return objectmutation.Capabilities{}, fmt.Errorf("storage product %q cannot serve class A on connection %q: it does not promise multipart uploads: %w", profile.ID, b.cfg.Storage.ConnectionID, storage.NewError("invalid_config", "", nil))
+	}
+	return profile.Capabilities, nil
 }
 
 func validateObjectPrefixes(content, system string, rootAtBucket bool) error {
@@ -340,7 +340,6 @@ func (b *Backend) Open(ctx context.Context, ownerID string) (storage.Driver, err
 	}
 	if b.objectBackend != nil {
 		options := b.objectOptions
-		options.Admission.ConnectionID = cfg.ConnectionID
 		mutation, e := objectmutation.New(driver, cfg, b.objectBackend, options)
 		if e != nil {
 			driver.Close()

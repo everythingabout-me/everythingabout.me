@@ -232,7 +232,7 @@ func (s *Server) Handler() http.Handler {
 
 	mux.HandleFunc("GET /me", s.api(s.handleAPIMe))
 	mux.HandleFunc("PATCH /me", s.api(s.handleAPIPatchMe))
-	files := s.fileIngressHandler(s.filesHandler())
+	files := s.filesHandler()
 	mux.Handle("/api/files", files)
 	mux.Handle("/api/files/", files)
 

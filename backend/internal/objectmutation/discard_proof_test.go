@@ -31,7 +31,7 @@ func (b *inspectingBackend) InspectMultipart(context.Context, string, string) (M
 func inspectingFixture(t *testing.T) (*Driver, *inspectingBackend, *memoryUploadMetadata, storage.WriteIntent) {
 	t.Helper()
 	_, base, binding, options := fixture(t)
-	options.Admission.MultipartUploads = true
+	options.Capabilities.MultipartUploads = true
 	native := &nativeTestBackend{fakeBackend: base}
 	backend := &inspectingBackend{nativeTestBackend: native}
 	driver, err := New(&fakeTree{backend: base, root: binding.ContentRoot}, binding, backend, options)
@@ -237,7 +237,7 @@ func TestDiscardProofRefusesLiveAllocationAndUnprovableProviders(t *testing.T) {
 
 	// Without the provider capability the command must fail closed instead of guessing.
 	_, base, binding, options := fixture(t)
-	options.Admission.MultipartUploads = true
+	options.Capabilities.MultipartUploads = true
 	plain := &nativeTestBackend{fakeBackend: base}
 	unprovable, err := New(&fakeTree{backend: base, root: binding.ContentRoot}, binding, plain, options)
 	if err != nil {

@@ -6,6 +6,7 @@ import {
   type FileOpsTest,
   type StorageConnection,
   type StorageConnectionDetail,
+  type StorageProduct,
   type StorageTestProgress,
   type StorageTestResult,
 } from "../api/client";
@@ -63,16 +64,29 @@ export function ProviderCard({ connection, backupTarget }: { connection: Storage
  * infrastructure — so this is the only thing left that says what the card is.
  */
 export function storageKindLabel(connection: StorageConnection): string {
-  switch (storageKind(connection)) {
-    case "managed":
-      return t("drives.backendManaged");
+  // The product is the thing a person chose and the thing the guarantees come from, so it
+  // is the label; "S3-compatible" described a protocol family that answers none of the
+  // questions a connection raises.
+  switch (connection.product) {
+    case "aws-s3":
+      return t("drives.productAwsS3");
     case "cos":
-      return t("drives.backendCos");
-    case "s3":
-      return t("drives.backendS3");
+      return t("drives.productCos");
+    case "minio":
+      return t("drives.productMinio");
+    case "rustfs":
+      return t("drives.productRustfs");
     case "local":
       return t("drives.backendLocal");
+    case "managed":
+      return t("drives.backendManaged");
+    case "s3":
+      // A row written before the product split names only the protocol family. It has no
+      // product to print and cannot publish until an operator names one, so the label says
+      // what the row actually says instead of inventing a product.
+      return t("drives.backendS3");
   }
+  return connection.product;
 }
 
 /**
@@ -341,14 +355,21 @@ function testedAgo(iso: string): string {
 
 export function AddProvider({ onAdded, onCancel }: { onAdded: () => void; onCancel: () => void }) {
   const [error, setError] = useState("");
-  const [backend, setBackend] = useState<"cos" | "s3">("cos");
+  const [product, setProduct] = useState<StorageProduct>("cos");
   const [pathStyle, setPathStyle] = useState(true);
   const [form, setForm] = useState({ name: "", bucket: "", region: "", endpoint: "", prefix: "backups/", secretId: "", secretKey: "" });
   const field = (key: keyof typeof form) => ({
     value: form[key],
     onChange: (event: React.ChangeEvent<HTMLInputElement>) => setForm({ ...form, [key]: event.target.value }),
   });
-  const s3 = backend === "s3";
+  // COS signs virtual-hosted URLs; the two self-hosted products are normally addressed by
+  // path. Picking the product is what selects the driver and the write guarantees, so it
+  // is the first field and the one that decides what the rest of the form asks for.
+  const s3 = product !== "cos";
+  const chooseProduct = (next: StorageProduct) => {
+    setProduct(next);
+    setPathStyle(next !== "aws-s3");
+  };
 
   return (
     <form
@@ -359,7 +380,7 @@ export function AddProvider({ onAdded, onCancel }: { onAdded: () => void; onCanc
         try {
           await api.addStorageConnection({
             name: form.name,
-            backend,
+            product,
             bucket: form.bucket,
             region: form.region,
             endpoint: s3 ? form.endpoint : undefined,
@@ -374,14 +395,17 @@ export function AddProvider({ onAdded, onCancel }: { onAdded: () => void; onCanc
         }
       }}
     >
-      <p className={styles.hint}>{s3 ? t("drives.addHintS3") : t("drives.addHint")}</p>
       <label className={styles.field}>
-        {t("drives.fieldBackend")}
-        <select value={backend} onChange={(event) => setBackend(event.target.value as "cos" | "s3")}>
-          <option value="cos">{t("drives.backendCos")}</option>
-          <option value="s3">{t("drives.backendS3")}</option>
+        {t("drives.fieldProduct")}
+        <select value={product} onChange={(event) => chooseProduct(event.target.value as StorageProduct)}>
+          <option value="cos">{t("drives.productCos")}</option>
+          <option value="aws-s3">{t("drives.productAwsS3")}</option>
+          <option value="minio">{t("drives.productMinio")}</option>
+          <option value="rustfs">{t("drives.productRustfs")}</option>
         </select>
+        <span className={styles.muted}>{t("drives.productHint")}</span>
       </label>
+      <p className={styles.hint}>{s3 ? t("drives.addHintS3") : t("drives.addHint")}</p>
       <label className={styles.field}>
         {t("drives.fieldName")}
         <input required {...field("name")} />

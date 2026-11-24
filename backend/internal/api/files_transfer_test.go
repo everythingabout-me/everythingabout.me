@@ -219,7 +219,7 @@ func TestUploadTransportForClassAAndC(t *testing.T) {
 	intent, _ := json.Marshal(storage.WriteIntent{Target: "a", Size: 4})
 	u := fileops.Upload{ID: "u_1", PartSize: filesUploadPartSize, ExpiresAt: time.Now().Add(24 * time.Hour), Operation: fileops.Operation{Intent: intent}}
 	writer := &plannedTestWriter{plan: storage.PlannedUpload{PartSize: filesUploadPartSize, ExpiresAt: time.Now().Add(time.Hour), Parts: []storage.SignedPartGrant{{Number: 1, Size: 4, Method: "PUT", URL: "https://bucket.example/drive/owner/a?partNumber=1&uploadId=n", Headers: map[string]string{"Content-Type": "application/octet-stream"}, ExpiresAt: time.Now().Add(time.Hour)}}}}
-	s := &Server{cfg: &config.Config{Storage: config.Storage{TransferClass: storage.TransferPresignedParts}, FileUploadIngress: "edgeone"}}
+	s := &Server{cfg: &config.Config{Storage: config.Storage{TransferClass: storage.TransferPresignedParts}}}
 	transport, err := s.filesUploadTransport(context.Background(), writer, u)
 	if err != nil {
 		t.Fatal(err)
@@ -229,8 +229,9 @@ func TestUploadTransportForClassAAndC(t *testing.T) {
 		t.Fatalf("unexpected transport %+v", payload)
 	}
 	part := payload["parts"].([]*filesPartGrant)[0]
-	if !strings.HasPrefix(part.URL, filesTransferPrefix) {
-		t.Fatalf("edge relay did not rewrite provider URL: %v", part)
+	// The client is handed the provider's own URL: no edge relay, no application hop.
+	if part.URL != "https://bucket.example/drive/owner/a?partNumber=1&uploadId=n" {
+		t.Fatalf("the grant did not carry the provider URL: %v", part)
 	}
 
 	s.cfg.Storage.TransferClass = storage.TransferRelay

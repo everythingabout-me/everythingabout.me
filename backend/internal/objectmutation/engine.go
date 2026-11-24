@@ -52,15 +52,11 @@ var _ storage.NativeCopier = (*Driver)(nil)
 var _ storage.PrefixProbe = (*Driver)(nil)
 
 func New(tree storage.Driver, binding storage.Config, backend Backend, options Options) (*Driver, error) {
-	a := options.Admission
-	if err := ValidateAdmission(a); err != nil {
-		return nil, err
+	if err := options.Capabilities.Validate(); err != nil {
+		return nil, fail("unsupported", "")
 	}
 	if tree == nil || backend == nil || storage.ValidateBinding(binding) != nil {
 		return nil, fail("unsupported", "")
-	}
-	if a.ConnectionID != binding.ConnectionID {
-		return nil, fail("invalid_config", "")
 	}
 	for _, p := range []string{binding.ContentRoot, binding.SystemRoot} {
 		if p == "" && binding.RootAtBucket {
@@ -317,21 +313,6 @@ func (d *Driver) observe(ctx context.Context, e storage.Entry) (storage.Entry, e
 	return d.objectEntry(e.Path, e.Kind, obj)
 }
 
-// listedRevision is the revision a listing already proved, in the same spelling
-// observe would produce from its own HEAD, so the two are interchangeable.
-func (d *Driver) listedRevision(e storage.Entry) []byte {
-	if len(e.Revision) > 0 {
-		return e.Revision
-	}
-	// A listing's ETag is only as good as the endpoint's promise that it equals the
-	// one a HEAD returns; that promise is probed evidence, never an assumption about
-	// a provider. Without it the entry is observed like any other.
-	if !d.options.Admission.ListingETag || len(e.NativeETag) == 0 {
-		return nil
-	}
-	return nativeRevision(string(e.NativeETag))
-}
-
 // Purge is the cheap deletion a settled purge uses: one conditional request, no ledger and
 // no re-observation. See storage.Purger for why those two are the only things it may skip.
 func (d *Driver) Purge(ctx context.Context, p storage.Path, kind storage.Kind, revision []byte) error {
@@ -380,17 +361,10 @@ func (d *Driver) List(ctx context.Context, p storage.Path, req storage.PageReque
 		if e.Kind != storage.File && e.Kind != storage.Folder {
 			return storage.Page{}, fail("invalid_backend_response", e.Path)
 		}
-		// A listing that already reported each entry's ETag has answered the one
-		// question this driver's revision asks. Observing it again is a HEAD per
-		// child that re-reads bytes we hold: one folder of a thousand files cost a
-		// thousand and one requests and answered nothing new. Entries the listing
-		// could not name (a common prefix is not an object) still observe.
-		if revision := d.listedRevision(e); len(revision) > 0 {
-			e.NativeETag = nil
-			e.Revision = revision
-			out.Entries = append(out.Entries, e)
-			continue
-		}
+		// Every entry is observed, even one whose listing already carried an ETag: a
+		// listing's ETag is only interchangeable with a HEAD's if the *product* promises
+		// it, and no product here documents that. One request per entry is the price of
+		// not mistaking a listing's spelling for the revision a conditional write binds.
 		observed, err := d.observe(ctx, e)
 		if err != nil {
 			return storage.Page{}, err

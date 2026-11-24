@@ -103,15 +103,17 @@ class only the server commit publishes. Geometry is advertised per session; the 
 parts with eight concurrent requests, and class B follows provider rules. Receipts label provider-listed
 lengths, provider digests and server-computed SHA-256 distinctly.
 
-Writes stay behind explicit admission. Configure `FILE_COORDINATED_WRITES=true` only for coordinated writers,
-validate and import the native index, then run `eam storage-admit --owner-id UUID --writers-quiesced
---evidence /secure/proof.json` for every owner that already holds content, with `--physical-bytes` and
-inventory evidence for object connections. The only automatic baseline is the zero one for a brand-new owner
+Writes stay behind an owner baseline. Validate and import the native index, then run
+`eam storage-admit --owner-id UUID --writers-quiesced --evidence /secure/proof.json` for every owner that
+already holds content, with `--physical-bytes` and inventory evidence for object connections. What a store
+promises about writes is not part of this: it comes from the store's **product** (`aws-s3`, `cos`, `minio`,
+`rustfs`, `local`), whose capabilities live in `backend/internal/storageproduct` with their reasons. The only automatic baseline is the zero one for a brand-new owner
 whose index, accounting and native root are all provably empty and whose spool holds no non-terminal intent
 record; a settled record from a previous lifetime is evidence that no effect can still land and does not
 disqualify it. Every other missing or mismatched baseline, and every writer revocation, stays operator-only.
-Object connections use current-object ETag revisions with native conditions; COS ignores `If-Match`, so
-replacement rechecks the ETag under a coordinated PUT, and no bucket versioning is required. `STORAGE_BACKEND=local` or `s3` starts without COS configuration.
+Object connections use current-object ETag revisions with native conditions; COS ignores `If-Match`, so a
+replacement there goes through a multipart session whose parts stay unpublished until this service completes
+them, and no bucket versioning is required. `STORAGE_BACKEND=local` or `s3` starts without COS configuration.
 
 Server startup requires a stable `APP_SECRET` and an explicit `APP_ENV` (`development` or `production`, no default); production also requires explicit SES credentials. Configure
 `FILE_COOKIE_ORIGINS` for cookie mutations and credentialed CORS; GET `/api/files/me` bootstraps its
@@ -136,12 +138,10 @@ make build          # build web/dist, then compile bin/eam
 
 A class-A connection needs a bucket CORS rule for the application origins (see
 [transfer protocol §11](docs/design/transfer-protocol.md#11-deployment)). Class A signs part and read URLs with
-the configured `COS_SECRET_ID` / `COS_SECRET_KEY`; that secret stays server-side. Uploads may
-optionally go through a same-origin edge relay that forwards PUT `/api/files/transfer/…` to the provider
-unchanged; the application refuses that path, so a missing rule fails instead of consuming application
-bandwidth. `FILE_TRANSFER_CLASS` selects `presigned-parts` or `relay`; class B is rejected until a cloud-drive
-driver advertises it. All control requests stay on `eam server`, and no edge function or
-extra upload machine is required.
+the connection's provider credential, which stays server-side, and the URL is the provider's own: bytes go
+from the client to the store, not through this service. Every object product is class A; only a local root
+relays. Class B is rejected until a cloud-drive driver advertises it. All control requests stay on
+`eam server`, and no edge function or extra upload machine is required.
 
 In development the frontend runs on Vite (5173, proxying `/api` to 8080) and the backend runs on Go (8080):
 
@@ -303,13 +303,14 @@ directory with coscli first, then run `reconcile --owner you@example.com`.
 
 **Migrating from the Next.js version touches no data**: the schema, COS keys, password hashes, and session tokens are all unchanged, so just start the new `eam` binary and users do not have to sign in again.
 
-### COS connection admission
+### Storage products and their promises
 
-Clients use the application origin for every control request; bytes leave it only in classes A and B. STS
-issuance is not part of the file protocol, and provider credentials stay server-side. Object admission requires
-proven native ETag and absence conditions (no bucket versioning) plus coordinated-writer evidence. A class-A
-connection additionally requires the bucket CORS rule; a class-C connection needs neither. Class A signs URLs
-with the existing COS credential, never exposing it to the browser. Unsupported image conversions use authorized raw content or placeholders.
+Clients use the application origin for every control request; bytes leave it only in classes A and B. Provider
+credentials stay server-side. A connection names its **product** — `aws-s3`, `tencent cos`, `minio`, `rustfs`
+or a local root — and the product decides the byte path and the write guarantees: conditional create, conditional
+PUT, atomic publication, multipart upload and form post. See
+[storage-driver](docs/design/storage-driver.md) and `backend/internal/storageproduct`. A class-A connection
+additionally requires the bucket's CORS rule. Unsupported image conversions use authorized raw content or placeholders.
 
 ## Loading terabytes of data the first time
 
@@ -496,13 +497,11 @@ password sign-in: 30 per 15 minutes per IP, 10 per 15 minutes per email).
 |---|---|
 | `DATABASE_URL` | Postgres connection string |
 | `APP_SECRET` | Stable application secret independent of storage credentials |
-| `STORAGE_BACKEND` | `local`, `cos` or `s3`; configure one bound root per connection |
+| `STORAGE_PRODUCT` | `aws-s3`, `cos`, `minio`, `rustfs` or `local`; it selects the driver, the transfer class and the write guarantees |
+| `STORAGE_BACKEND` | The driver behind the product (`local`, `cos` or `s3`); normally derived from `STORAGE_PRODUCT` |
 | `FILE_COOKIE_ORIGINS` | Explicit allowed cookie mutation origins including port |
-| `FILE_COORDINATED_WRITES` | Default false; enable only after native evidence and root budget admission |
-| `FILE_TRANSFER_CLASS` | `presigned-parts` (class A) or `relay` (class C); class B is reserved until a cloud-drive driver exists |
-| `FILE_UPLOAD_INGRESS` | `embedded` for direct provider class A URLs, or `edgeone` for the optional same-origin class A edge relay |
-| `FILE_MAX_SINGLE_PUT_BYTES` | Simple PUT/object publication policy for interactive class C requests; default 32 MiB, admitted object maximum 5 GiB. A snapshot or restore derives its staging bound from the entries it copies instead |
-| `FILE_OBJECT_ADMISSION_FILE` / `FILE_OBJECT_SPOOL_ROOT` | Exact-connection capability evidence and durable shared object spool |
+| `FILE_MAX_SINGLE_PUT_BYTES` | Simple PUT/object publication policy for interactive requests; default 32 MiB, object maximum 5 GiB. A snapshot or restore derives its staging bound from the entries it copies instead |
+| `FILE_OBJECT_SPOOL_ROOT` | Durable per-connection spool where an object product stages parts before publishing |
 | `COS_SECRET_ID` / `COS_SECRET_KEY` | Server-side COS control and class A URL signing; never give them to the frontend |
 | `COS_BUCKET` / `COS_REGION` | The bucket must include the APPID |
 | `APP_ENV` | Required: `development` or `production`, no default; decides Secure cookies and the behavior when SES is not configured. `make dev` supplies `development` |

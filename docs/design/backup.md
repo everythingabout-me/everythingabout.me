@@ -25,8 +25,8 @@ taken, stored under that owner's backup connection:
 ```
 
 `<folder>` is the destination's backup folder, empty by default (the store's own root). It is a setting of
-the backup, not of the location: it is excluded from `ComputeIdentity`, so changing it cannot move the tree
-or invalidate admission evidence. It is locked once a run exists for that connection, because run rows name
+the backup, not of the location: it is excluded from `ComputeIdentity`, so changing it cannot move the tree.
+It is locked once a run exists for that connection, because run rows name
 a date and not a folder — allowing the folder to move would leave every listed restore point under a
 directory nothing writes to. Storing the folder per run would lift that restriction; it is deferred because
 the current surface has no need to relocate history, and a per-run folder makes pruning a multi-root
@@ -153,7 +153,7 @@ create table if not exists storage_connections (
   config     jsonb not null,                    -- endpoint, region, bucket, prefixes, path style, case rules
   secret     jsonb not null,                    -- this connection's credential fields
   generation bigint not null default 1,
-  admission  jsonb,                             -- measured evidence plus the identity it measured
+  admission  jsonb,                             -- retired: per-connection probe evidence, unreferenced
   enabled    boolean not null default true,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
@@ -169,15 +169,12 @@ Rules, each answering a specific failure:
   row). The change-stream namespace embeds connection, generation and both roots; startup compares the
   persisted binding with the configured root and refuses to serve until the operator runs
   `eam storage-rebind`, so an in-place edit cannot let an old cursor continue on a different tree.
-- **Evidence is per row and carries its identity.** A second object connection that inherits the first
-  row's "atomic publish" would reintroduce the exact failure that once cost hours: evidence for one bucket
-  applied to another. A mismatch means *unproven*, and unproven disables writes on that connection while
-  reads continue.
-- **Only the environment connection is measured automatically, so every added row needs one explicit probe.**
-  `eam storage-connection probe --name X` measures that row and writes the evidence its driver reads; until
-  it has run, `add` produces a connection that reads but cannot publish, and `backup snapshot` refuses it as
-  a target. Startup cannot do this for rows: it would make every restart depend on a provider the process
-  may never otherwise touch, and a backup target that is down at boot is not a startup failure.
+- **The write guarantees come from the product, not from a measurement of the bucket.** A row names its store
+  (`aws-s3`, `cos`, `minio`, `rustfs`), and `internal/storageproduct` carries what that store promises about
+  writes with the reason. The per-row probe evidence this replaced had the same failure it was built to
+  prevent: it described one endpoint, so a second connection that inherited it would have published under a
+  promise nobody checked — and until someone ran a command on the host, an added row could read but not
+  publish.
 - **The row carries its own credentials.** Adding a connection is one `INSERT`; a reference into a host file
   would split the definition across two places and need shell access, which is the thing this table exists to
   remove. The accepted cost is that the database holds usable credentials, so a dump is secret material.
@@ -235,21 +232,18 @@ backup folder is reached through the backup feature's configuration.
 - `Resolver` reads the owner's binding, finds the connection row, and asks that connection's `Backend` for
   a driver. `storagebackend` stays database-free, so maintenance commands and dozens of tests keep
   constructing it from environment only.
-- Each connection owns its spool root, admission evidence and transfer class. A shared spool across
-  connections would let one target's temporary material be published to another; a shared evidence file
-  would let one connection's probe overwrite another's proof. `add` therefore derives
-  `<admission dir>/admission-<row id>.json` and `<spool dir>/<row id>` for object connections, and refuses
-  a connection that names the deployment's own paths. The id, not the name, is the leaf because two
-  owners may each name a connection "nas"; a name-keyed leaf gave them one host directory.
+- Each connection owns its spool root. A shared spool across
+  connections would let one target's temporary material be published to another. `add` therefore derives
+  `<spool dir>/<row id>` for object connections, and refuses a connection that names the deployment's own
+  path. The id, not the name, is the leaf because two owners may each name a connection "nas"; a name-keyed
+  leaf gave them one host directory.
 
 ## 9. Scheduling and operation
 
-- Adding a target is three commands: `eam storage-connection add ... --role backup`, then
-  `eam storage-connection probe --name X` (which proves conditional create, atomic publication and part
-  persistence on that exact endpoint), then the first `eam backup snapshot`. The account API does the
-  first measurement itself, before the first snapshot, because a person adding a bucket cannot be asked to
-  run an operator command afterwards. A provider that fails the probe is read-only to this service by
-  measurement, not by policy.
+- Adding a target is one command: `eam storage-connection add --product rustfs ... --role backup`, then the
+  first `eam backup snapshot`. The row is publishable from the moment it exists, because what the store
+  promises comes from its product; the account API's test button measures throughput and reachability, not
+  admissibility.
 - The job is a CLI command (`eam backup run|verify|prune`), scheduled by the deployment's timer, the same
   pattern as the existing database dump. There is no scheduler in the process today, and a long job does
   not belong inside the server's request lifecycle.
@@ -269,11 +263,11 @@ backup folder is reached through the backup feature's configuration.
 - One snapshot per owner per day is the default. RPO is therefore one day, which matches the stated need:
   this is backup, not sync, and the copy does not have to be reachable immediately.
 - **The account tests a provider once, independently of any feature.** `POST /api/storage/connections/{id}/test`
-  measures one metadata round trip, uploads and reads back 8 MiB, then runs the admission probe and caches
-  the answer on the row. This is not cosmetic: a NAS can be reachable and still refuse conditional create,
-  and without the test the first failure would be a snapshot that already copied part of the tree. It is
-  provider-level because the write protocol does not depend on which feature uses it; `writable` says
-  whether the service can publish there, not whether any particular feature is configured. It is bounded
+  measures one metadata round trip, uploads and reads back 100 MB, then writes, renames and deletes 100 small
+  objects and overlaps four writes, caching every phase on the row. `writable` is the product's answer, not a
+  second measurement: a store that moves bytes but does not promise conditional create and atomic publication
+  is reported as reachable and not ready. It is provider-level because the write protocol does not depend on
+  which feature uses it. It is bounded
   by those bytes and requests, never by a clock, so a slow link finishes instead of being cut off.
 - **A provider is setup; a feature chooses it.** Adding a provider must not configure a feature. The backup
   feature stays unconfigured until the account names a provider (`backup_policies.enabled`), even when only

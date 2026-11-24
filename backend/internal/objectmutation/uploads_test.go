@@ -118,7 +118,7 @@ func (b *nativeTestBackend) AbortMultipart(context.Context, string, string) erro
 }
 func nativeFixture(t *testing.T) (*Driver, *nativeTestBackend, storage.Config, Options) {
 	_, base, binding, options := fixture(t)
-	options.Admission.MultipartUploads = true
+	options.Capabilities.MultipartUploads = true
 	backend := &nativeTestBackend{fakeBackend: base}
 	driver, err := New(&fakeTree{backend: base, root: binding.ContentRoot}, binding, backend, options)
 	if err != nil {

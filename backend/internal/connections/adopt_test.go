@@ -23,8 +23,7 @@ func adoptionDeployment(t *testing.T) config.Storage {
 		}
 	}
 	return config.Storage{
-		ObjectAdmissionFile: filepath.Join(state, "admission.json"),
-		ObjectSpoolRoot:     spool,
+		ObjectSpoolRoot: spool,
 	}
 }
 
@@ -34,8 +33,7 @@ func nameKeyedRow(deployment config.Storage, id, name string) Connection {
 	return Connection{
 		ID: id, Name: name, Backend: "cos", Role: RoleBackup, Enabled: true, Generation: 1,
 		Config: Spec{
-			ObjectAdmissionFile: filepath.Join(filepath.Dir(deployment.ObjectAdmissionFile), "admission-"+name+".json"),
-			ObjectSpoolRoot:     filepath.Join(deployment.ObjectSpoolRoot, name),
+			ObjectSpoolRoot: filepath.Join(deployment.ObjectSpoolRoot, name),
 		},
 	}
 }
@@ -65,27 +63,20 @@ func TestLegacyNameKeyedDirectoryIsAdopted(t *testing.T) {
 	// them.
 	staged := filepath.Join(row.Config.ObjectSpoolRoot, "object-mutations-v1-deadbeef", "aa-bb.data")
 	writeFile(t, staged, "staged bytes")
-	writeFile(t, row.Config.ObjectAdmissionFile, `{"connectionId":"nas:digest"}`)
 	store := newFakeStore(row)
 
 	if err := AdoptObjectPaths(context.Background(), store, deployment); err != nil {
 		t.Fatalf("adopt the legacy layout: %v", err)
 	}
 
-	wantSpool, wantAdmission := filepath.Join(deployment.ObjectSpoolRoot, id), filepath.Join(filepath.Dir(deployment.ObjectAdmissionFile), "admission-"+id+".json")
+	wantSpool := filepath.Join(deployment.ObjectSpoolRoot, id)
 	if got := store.rows[0].Config.ObjectSpoolRoot; got != wantSpool {
 		t.Fatalf("row spool = %q, want %q", got, wantSpool)
-	}
-	if got := store.rows[0].Config.ObjectAdmissionFile; got != wantAdmission {
-		t.Fatalf("row evidence = %q, want %q", got, wantAdmission)
 	}
 	if data, err := os.ReadFile(filepath.Join(wantSpool, "object-mutations-v1-deadbeef", "aa-bb.data")); err != nil || string(data) != "staged bytes" {
 		t.Fatalf("adopted staged bytes = %q, %v", data, err)
 	}
-	if data, err := os.ReadFile(wantAdmission); err != nil || string(data) != `{"connectionId":"nas:digest"}` {
-		t.Fatalf("adopted evidence = %q, %v", data, err)
-	}
-	if exists(row.Config.ObjectSpoolRoot) || exists(row.Config.ObjectAdmissionFile) {
+	if exists(row.Config.ObjectSpoolRoot) {
 		t.Fatal("the legacy paths still exist after adoption")
 	}
 
@@ -169,32 +160,6 @@ func TestBothLayoutsMergeAndRefuseToChooseBetweenDifferentContents(t *testing.T)
 	})
 }
 
-// The evidence file is a measurement the probe rewrites, not user state: when both
-// copies exist the id-keyed file is the one the layout reads, and the old one is left
-// alone rather than deleted under a possibly still-running probe.
-func TestAdoptionKeepsTheIDKeyedEvidenceWhenBothExist(t *testing.T) {
-	deployment := adoptionDeployment(t)
-	const id = "0f0e9d5a-3f2b-4b1a-9f8e-2d7c6a5b4c3d"
-	row := nameKeyedRow(deployment, id, "nas")
-	want := filepath.Join(filepath.Dir(deployment.ObjectAdmissionFile), "admission-"+id+".json")
-	writeFile(t, row.Config.ObjectAdmissionFile, "legacy measurement")
-	writeFile(t, want, "current measurement")
-	store := newFakeStore(row)
-
-	if err := AdoptObjectPaths(context.Background(), store, deployment); err != nil {
-		t.Fatalf("adopt: %v", err)
-	}
-	if data, err := os.ReadFile(want); err != nil || string(data) != "current measurement" {
-		t.Fatalf("id-keyed evidence = %q, %v", data, err)
-	}
-	if data, err := os.ReadFile(row.Config.ObjectAdmissionFile); err != nil || string(data) != "legacy measurement" {
-		t.Fatalf("legacy evidence was removed or rewritten: %q, %v", data, err)
-	}
-	if got := store.rows[0].Config.ObjectAdmissionFile; got != want {
-		t.Fatalf("row evidence = %q, want %q", got, want)
-	}
-}
-
 // 036's whole point is that two owners may name a connection the same thing. The older
 // row adopts the one shared directory; the newer row must get its own, never the same
 // one, and the shared path is not silently duplicated.
@@ -241,7 +206,6 @@ func TestAdoptionLeavesExplicitOperatorPathsAlone(t *testing.T) {
 	row := nameKeyedRow(deployment, id, "nas")
 	explicit := filepath.Join(t.TempDir(), "explicit-spool")
 	row.Config.ObjectSpoolRoot = explicit
-	row.Config.ObjectAdmissionFile = filepath.Join(t.TempDir(), "explicit.json")
 	writeFile(t, filepath.Join(explicit, "namespace", "staged.data"), "explicit bytes")
 	store := newFakeStore(row)
 

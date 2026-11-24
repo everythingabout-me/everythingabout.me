@@ -15,7 +15,6 @@ import (
 	"testing"
 	"time"
 
-	"everythingabout.me/backend/internal/objectmutation"
 	"everythingabout.me/backend/internal/paths"
 	"everythingabout.me/backend/internal/testpg"
 	"github.com/jackc/pgx/v5"
@@ -83,12 +82,6 @@ func TestStorageAdmitObjectsPostgresCLI(t *testing.T) {
 		}
 	}))
 	defer provider.Close()
-	admission := objectmutation.Admission{Version: objectmutation.AdmissionVersion, ConnectionID: "objects", Endpoint: provider.URL, Bucket: "fixture-bucket", Region: "test-region", CheckedAt: time.Now().UTC(), ProbeReference: "isolated-http-fixture", AtomicPublish: true, ConditionalCreate: true, SingleGateway: true}
-	admissionFile := filepath.Join(root, "admission.json")
-	data, _ := json.Marshal(admission)
-	if err = os.WriteFile(admissionFile, data, 0600); err != nil {
-		t.Fatal(err)
-	}
 	proof := filepath.Join(root, "proof.json")
 	proofDocument := `{"writers":"drained","retainedVersionInventory":"verified-fixture-history-owner-root"}`
 	if err = os.WriteFile(proof, []byte(proofDocument), 0600); err != nil {
@@ -98,7 +91,7 @@ func TestStorageAdmitObjectsPostgresCLI(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	env := []string{"EAM_SERVER_TEST_PROCESS=1", "EAM_ENV_FILE=" + filepath.Join(root, "missing.env"), "EAM_SQL_DIR=" + sqlDir, "DATABASE_URL=" + isolated, "APP_ENV=development", "STORAGE_BACKEND=s3", "STORAGE_CONNECTION_ID=objects", "FILE_COORDINATED_WRITES=true", "FILE_OBJECT_ADMISSION_FILE=" + admissionFile, "FILE_OBJECT_SPOOL_ROOT=" + spool, "S3_ENDPOINT=" + provider.URL, "S3_REGION=test-region", "S3_BUCKET=fixture-bucket", "S3_ACCESS_KEY_ID=fixture-id", "S3_SECRET_ACCESS_KEY=fixture-secret", "S3_PATH_STYLE=true", "USER_QUOTA_BYTES=5"}
+	env := []string{"EAM_SERVER_TEST_PROCESS=1", "EAM_ENV_FILE=" + filepath.Join(root, "missing.env"), "EAM_SQL_DIR=" + sqlDir, "DATABASE_URL=" + isolated, "APP_ENV=development", "STORAGE_BACKEND=s3", "STORAGE_CONNECTION_ID=objects", "STORAGE_PRODUCT=minio", "FILE_OBJECT_SPOOL_ROOT=" + spool, "S3_ENDPOINT=" + provider.URL, "S3_REGION=test-region", "S3_BUCKET=fixture-bucket", "S3_ACCESS_KEY_ID=fixture-id", "S3_SECRET_ACCESS_KEY=fixture-secret", "S3_PATH_STYLE=true", "USER_QUOTA_BYTES=5"}
 	run := func(args ...string) (string, error) {
 		cmd := exec.CommandContext(ctx, os.Args[0], append([]string{"-test.run=^TestLocalStorageServerCommand$", "--"}, args...)...)
 		cmd.Env = env

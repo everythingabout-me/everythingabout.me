@@ -2,17 +2,13 @@ package api
 
 import (
 	"net/url"
-	"strings"
 	"time"
 
 	fc "everythingabout.me/backend/internal/filecontract"
 	"everythingabout.me/backend/internal/storage"
 )
 
-const (
-	filesReadGrantWindow = time.Hour
-	filesTransferPrefix  = "/api/files/transfer/"
-)
+const filesReadGrantWindow = time.Hour
 
 func (s *Server) filesTransferClass() string {
 	if s.cfg == nil || s.cfg.Storage.TransferClass == "" {
@@ -47,26 +43,11 @@ func filesUnderlyingDriver(driver storage.Driver) storage.Driver {
 	}
 }
 
-// filesPartGrantPayload writes one class A grant. The provider URL is exposed
-// only through this single-session grant; the optional edge relay rewrites it
-// to the reserved same-origin prefix without decoding the native key.
+// filesPartGrantPayload writes one class A grant. The provider URL is exposed only
+// through this single-session grant, and it is the provider's own URL: bytes go from the
+// client to the store, never through this service.
 func (s *Server) filesPartGrantPayload(grant storage.SignedPartGrant) (*filesPartGrant, error) {
 	value := grant.URL
-	if len(grant.Form) > 0 && s.cfg != nil && s.cfg.EdgeOneUploadIngress() {
-		// The edge ingress rewrites a provider URL to a same-origin path that serves PUT
-		// only; a form upload carries every signed value in its body and cannot be rewritten.
-		return nil, fc.NewProblem(503, "temporarily_unavailable", "A form upload cannot use the edge upload ingress.")
-	}
-	if s.cfg != nil && s.cfg.EdgeOneUploadIngress() {
-		private, err := url.Parse(grant.URL)
-		if err != nil || private.Scheme != "https" && private.Scheme != "http" || private.Host == "" || private.User != nil || private.Fragment != "" || !strings.HasPrefix(private.EscapedPath(), "/") {
-			return nil, fc.NewProblem(503, "temporarily_unavailable", "The provider part grant is invalid.")
-		}
-		value = filesTransferPrefix + strings.TrimPrefix(private.EscapedPath(), "/")
-		if private.RawQuery != "" {
-			value += "?" + private.RawQuery
-		}
-	}
 	headers := grant.Headers
 	if headers == nil {
 		headers = map[string]string{}

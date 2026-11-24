@@ -1,13 +1,13 @@
 # Storage driver contract
 
 > Native-tree contract. Read-only Local/COS/S3 trees, mutation/publication interfaces, class A presigned
-> uploads/read grants and class C relay writes exist. Limited recorded COS ETag observations do not establish
-> every operation or deployment capability, so default writes stay disabled without admission. Class B has
-> interfaces and configuration but no cloud-drive driver yet. Preserving the readable tree is
+> uploads/read grants and class C relay writes exist. A connection names a **product** (`aws-s3`, `cos`,
+> `minio`, `rustfs`, `local`), and `internal/storageproduct` holds what that product promises about writes,
+> with the reason next to each answer. Class B has interfaces and configuration but no cloud-drive driver yet. Preserving the readable tree is
 > mandatory. Stable IDs are implemented with canonical parent/name links and direct selectors; disposable
 > integration/browser tests and targeted race checks passed.
 > See [identity](file-identity.md) and [first-phase changes/audit](file-changes.md).
-> A driver declares the [transfer classes](transfer-protocol.md) it can serve and each connection selects one;
+> A product declares the [transfer class](transfer-protocol.md) it serves and each connection names a product;
 > the transfer protocol owns byte paths, geometry, provider rules and deployment requirements.
 >
 > [Architecture](storage.md) requires original names, complete native folder structure and directly usable
@@ -37,10 +37,10 @@ lag external changes. See the [indexed browsing decision](storage.md#3-storage-f
 
 The interfaces below are intended Go declarations. Root bindings can be cheap views over shared pooled
 clients; do not allocate a separate HTTP pool permanently for every user. Configuration generation identifies
-the actual backend/root; credential rotation alone need not change that identity. Capability evidence describes
-exactly one connection, so a bucket, region or endpoint change invalidates it: the server re-probes the newly
-configured connection and records the result rather than carrying the old measurement across. Use typed options per adapter
-at construction, validate them there, and never construct provider clients in an HTTP handler.
+the actual backend/root; credential rotation alone need not change that identity. Capabilities are not part of it: a bucket, region or
+endpoint change does not change what the product promises, which is why there is nothing to re-measure when a
+connection moves. Use typed options per adapter at construction, validate them there, and never construct
+provider clients in an HTTP handler.
 
 ## 2. File and folder interfaces
 
@@ -421,19 +421,12 @@ from HEAD. This is not a claim that ETags are useless — the same fixture also 
 object, which guards a different rule: an ETag is not an *identity*. Identity is the key (`NativeRef`) plus
 what the driver proves about the content; a revision is only what a conditional effect compares.
 
-Trusting a listing's ETag is therefore a per-connection decision, taken on evidence for that endpoint,
-exactly like the other admission capabilities — not a default that a provider is assumed to satisfy. That
-decision is `listingETag` in the admission evidence, and it changes nothing about the rule above: the tree
-still takes its own revision only from HEAD/GET. What it admits is narrower — the *coordinator* may build
-its revision from the ETag a listing already reported instead of heading each listed child, which it does
-only after a probe compared the two channels byte for byte on that bucket (multipart and zero-byte markers
-included, since those are the ones a provider is most likely to spell differently).
-
-The cost that justifies asking for the evidence: an unproven connection pays one HEAD per listed entry, so
-a capture, its consistency re-read and a per-entry check of a 103-entry folder cost roughly 430 requests,
-and a folder of a thousand files costs a thousand per pass. Which is also why the flag is opt-in rather than
-assumed: on an endpoint where the two spellings disagree, the same shortcut turns every captured entry into
-`target_changed` — a wrong answer, not a slow one.
+A listing's ETag is never interchangeable with a HEAD's here: no product documents that the two spellings
+agree, and on an endpoint where they disagree the shortcut turns every captured entry into `target_changed` —
+a wrong answer, not a slow one. So every listed entry is observed, at one HEAD per entry: a capture, its
+consistency re-read and a per-entry check of a 103-entry folder cost roughly 430 requests. The earlier
+`listingETag` evidence existed to buy that back per endpoint, and was measured false for the one bucket this
+deployment runs on.
 
 A driver may also implement `storage.Purger`, which is the one deletion that is not a conditional effect: the
 caller has already settled the removal in the index, so it skips the receipt and the re-observation `Remove`
@@ -441,8 +434,8 @@ performs and issues one conditional delete. It exists for purges only; a mutatio
 goes through `Remove`.
 
 The object mutation driver derives `Revision` from the current object's ETag and sends every conditional
-effect with native `If-Match` / `If-None-Match` where the provider enforces them. Enforcement is a per-connection
-measurement, never an assumption: a PUT carrying a stale `If-Match` must be refused (412) before a **direct**
+effect with native `If-Match` / `If-None-Match` where the provider enforces them. Enforcement is a product
+fact, never an assumption: a PUT carrying a stale `If-Match` must be refused (412) before a **direct**
 class A replacement may sign that PUT at the destination, because the client's own write is the publication and
 the grant outlives the session. COS ignores `If-Match` on PUT, so such a connection routes replacement through
 multipart, where the parts stay unpublished until the server completes them and the commit re-checks the ETag

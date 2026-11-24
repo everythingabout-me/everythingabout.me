@@ -24,7 +24,6 @@ type Config struct {
 	// AppSecret is a stable deployment secret, independent of database/storage credentials.
 	AppSecret         string
 	FileCookieOrigins []string
-	FileUploadIngress string
 	Storage           Storage
 	SessionTTLDays    int
 	CookieSecure      bool
@@ -140,16 +139,15 @@ func Load() (*Config, error) {
 	}
 
 	c := &Config{
-		Addr:              addr(),
-		AppEnv:            appEnvValue,
-		WebDir:            webDir(),
-		DatabaseURL:       os.Getenv("DATABASE_URL"),
-		AppSecret:         os.Getenv("APP_SECRET"),
-		FileUploadIngress: envOr("FILE_UPLOAD_INGRESS", "embedded"),
-		Storage:           storageConfig,
-		SessionTTLDays:    positiveInt("SESSION_TTL_DAYS", 30),
-		RegistrationOpen:  os.Getenv("ALLOW_REGISTRATION") != "false",
-		QuotaBytes:        int64(positiveInt("USER_QUOTA_BYTES", 0)),
+		Addr:             addr(),
+		AppEnv:           appEnvValue,
+		WebDir:           webDir(),
+		DatabaseURL:      os.Getenv("DATABASE_URL"),
+		AppSecret:        os.Getenv("APP_SECRET"),
+		Storage:          storageConfig,
+		SessionTTLDays:   positiveInt("SESSION_TTL_DAYS", 30),
+		RegistrationOpen: os.Getenv("ALLOW_REGISTRATION") != "false",
+		QuotaBytes:       int64(positiveInt("USER_QUOTA_BYTES", 0)),
 		COS: COS{
 			SecretID:  os.Getenv("COS_SECRET_ID"),
 			SecretKey: os.Getenv("COS_SECRET_KEY"),
@@ -194,9 +192,6 @@ func Load() (*Config, error) {
 		c.CookieSecure = c.IsProduction()
 	}
 
-	if err := c.ValidateUploadIngress(); err != nil {
-		return nil, err
-	}
 	if c.DatabaseURL == "" {
 		return nil, fmt.Errorf("missing required environment variable DATABASE_URL")
 	}

@@ -7,7 +7,6 @@ import (
 	"sort"
 	"strings"
 	"testing"
-	"time"
 
 	"everythingabout.me/backend/internal/snapshot"
 	"everythingabout.me/backend/internal/storage"
@@ -173,7 +172,7 @@ func TestObjectImplicitFolderNeedsAnExplicitRequest(t *testing.T) {
 func TestSnapshotStagesAnEntryLargerThanTheDefaultSinglePutPolicy(t *testing.T) {
 	b := newFake()
 	cfg := storage.Config{OwnerID: "owner", ConnectionID: "fixture", Generation: 1, ContentRoot: "drive/owner/", SystemRoot: "system/owner/"}
-	options := Options{SpoolRoot: t.TempDir(), Admission: Admission{Version: AdmissionVersion, ConnectionID: cfg.ConnectionID, Endpoint: "https://fixture.invalid", Bucket: "bucket", Region: "region", CheckedAt: time.Now().UTC(), ProbeReference: "isolated-positive-negative-test", AtomicPublish: true, ConditionalCreate: true, SingleGateway: true}}
+	options := Options{SpoolRoot: t.TempDir(), Capabilities: Capabilities{AtomicPublish: true, ConditionalCreate: true, SingleWriter: true}}
 	d, err := New(&fakeTree{backend: b, root: cfg.ContentRoot}, cfg, b, options)
 	if err != nil {
 		t.Fatal(err)

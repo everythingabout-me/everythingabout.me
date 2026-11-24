@@ -661,7 +661,7 @@ func (d *Driver) copyProvider(ctx context.Context, in storage.MoveRequest, sourc
 	if in.Size < 0 {
 		return storage.MutationResult{}, fail("invalid_request", in.Source)
 	}
-	if _, ok := d.backend.(PartCopyBackend); in.Size > singleCopyLimit && (!ok || !d.options.Admission.MultipartUploads) {
+	if _, ok := d.backend.(PartCopyBackend); in.Size > singleCopyLimit && (!ok || !d.options.Capabilities.MultipartUploads) {
 		// Deterministic refusal: no native request is issued, so the intent is never
 		// published and the coordinator may report it without a recovery cycle.
 		return storage.MutationResult{}, &storage.NoFinalEffect{Cause: fail("too_large", in.Source)}
@@ -792,7 +792,7 @@ func (d *Driver) nativeCopy(ctx context.Context, r *ledger, sourceETag string, c
 	// Part copies finish with one conditional completion, which only an admitted
 	// multipart connection has proven.
 	parts, ok := d.backend.(PartCopyBackend)
-	if !ok || !d.options.Admission.MultipartUploads {
+	if !ok || !d.options.Capabilities.MultipartUploads {
 		return Object{}, fail("too_large", r.Intent.Target)
 	}
 	return d.copyParts(ctx, r, request, parts)

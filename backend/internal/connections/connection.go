@@ -50,8 +50,8 @@ type Connection struct {
 	Enabled         bool
 	// LastProbe caches the last measurement the account asked this connection to
 	// perform (reachability, latency, throughput). It describes nothing the driver
-	// acts on: a stale value must never decide whether a backup may run, which is
-	// why the run measures again through EnsureAdmission instead of reading this.
+	// acts on: a stale value must never decide whether a backup may run. Whether this
+	// store may be published to is the product's answer, not this number's.
 	LastProbe json.RawMessage
 }
 
@@ -62,12 +62,13 @@ type Spec struct {
 	// RootAtBucket roots an owner-scoped connection's tree at the bucket itself instead
 	// of under a prefix. It is a flag rather than an empty prefix because the empty
 	// string already means "not configured".
-	RootAtBucket        bool   `json:"rootAtBucket,omitempty"`
-	CoordinatedWrites   bool   `json:"coordinatedWrites,omitempty"`
-	MaxSinglePutBytes   int64  `json:"maxSinglePutBytes,omitempty"`
-	ObjectAdmissionFile string `json:"objectAdmissionFile,omitempty"`
-	ObjectSpoolRoot     string `json:"objectSpoolRoot,omitempty"`
-	TransferClass       string `json:"transferClass,omitempty"`
+	RootAtBucket      bool   `json:"rootAtBucket,omitempty"`
+	MaxSinglePutBytes int64  `json:"maxSinglePutBytes,omitempty"`
+	ObjectSpoolRoot   string `json:"objectSpoolRoot,omitempty"`
+	// Product names the store (aws-s3, cos, minio, rustfs, local). It is what decides how
+	// bytes travel and which write strategies the store supports, so a row that named only
+	// a protocol family would be a row nobody can answer questions about.
+	Product string `json:"product,omitempty"`
 	// BackupFolder is where snapshots live inside this connection's own tree, as a
 	// root-relative native path ("" means the tree root). It is a setting of the
 	// backup, not of the location: the connection's identity stays the bucket,
@@ -366,16 +367,15 @@ func (c Connection) Apply(base config.Config) (config.Config, error) {
 	}
 	out := base
 	out.Storage = config.Storage{
-		Backend:             c.Backend,
-		ConnectionID:        c.Name,
-		Generation:          c.Generation,
-		OwnerScoped:         c.OwnerID != "",
-		RootAtBucket:        c.Config.RootAtBucket,
-		CoordinatedWrites:   c.Config.CoordinatedWrites,
-		MaxSinglePutBytes:   c.Config.MaxSinglePutBytes,
-		ObjectAdmissionFile: c.Config.ObjectAdmissionFile,
-		ObjectSpoolRoot:     c.Config.ObjectSpoolRoot,
-		TransferClass:       c.Config.TransferClass,
+		Backend:           c.Backend,
+		ConnectionID:      c.Name,
+		Generation:        c.Generation,
+		OwnerScoped:       c.OwnerID != "",
+		RootAtBucket:      c.Config.RootAtBucket,
+		CoordinatedWrites: c.Backend != "local",
+		MaxSinglePutBytes: c.Config.MaxSinglePutBytes,
+		ObjectSpoolRoot:   c.Config.ObjectSpoolRoot,
+		Product:           c.Config.Product,
 		Local: config.Local{
 			ContentRoot:   c.Config.Local.ContentRoot,
 			SystemRoot:    c.Config.Local.SystemRoot,
@@ -393,6 +393,14 @@ func (c Connection) Apply(base config.Config) (config.Config, error) {
 			SystemPrefix:    c.Config.S3.SystemPrefix,
 		},
 	}
+	// The class is a consequence of the product, not a column: resolving it here means a
+	// per-owner connection answers the same way the deployment's own connection does.
+	profile, err := out.StorageProfile()
+	if err != nil {
+		return base, err
+	}
+	out.Storage.Product = profile.ID
+	out.Storage.TransferClass = profile.TransferClass
 	out.COS = config.COS{
 		SecretID:  c.Secret.COS.SecretID,
 		SecretKey: c.Secret.COS.SecretKey,
@@ -415,13 +423,11 @@ func FromConfig(cfg config.Config) (Connection, error) {
 		Generation: cfg.Storage.Generation,
 		Enabled:    true,
 		Config: Spec{
-			CoordinatedWrites:   cfg.Storage.CoordinatedWrites,
-			MaxSinglePutBytes:   cfg.Storage.MaxSinglePutBytes,
-			ObjectAdmissionFile: cfg.Storage.ObjectAdmissionFile,
-			ObjectSpoolRoot:     cfg.Storage.ObjectSpoolRoot,
-			TransferClass:       cfg.Storage.TransferClass,
-			RootAtBucket:        cfg.Storage.RootAtBucket,
-			COS:                 COSSpec{Bucket: cfg.COS.Bucket, Region: cfg.COS.Region},
+			MaxSinglePutBytes: cfg.Storage.MaxSinglePutBytes,
+			ObjectSpoolRoot:   cfg.Storage.ObjectSpoolRoot,
+			Product:           cfg.Storage.Product,
+			RootAtBucket:      cfg.Storage.RootAtBucket,
+			COS:               COSSpec{Bucket: cfg.COS.Bucket, Region: cfg.COS.Region},
 			S3: S3Spec{
 				Endpoint:      cfg.Storage.S3.Endpoint,
 				Region:        cfg.Storage.S3.Region,

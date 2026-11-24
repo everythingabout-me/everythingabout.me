@@ -1610,10 +1610,20 @@ export function openListing(selector: FileSelector): ListingStream {
   return stream;
 }
 
+/** The stores an account may attach. A local root is operator-only, so it is absent. */
+export type StorageProduct = "aws-s3" | "cos" | "minio" | "rustfs";
+
 export interface StorageConnection {
   id: string;
   name: string;
   role: "authority" | "backup";
+  /**
+   * The store's product: aws-s3, cos, minio, rustfs or local. This is the setting that
+   * decides how bytes travel and what the store promises about writes, so the page names
+   * it instead of the protocol family it happens to speak.
+   */
+  product: string;
+  /** The driver implementation behind the product: cos, s3 or local. */
   backend: string;
   /**
    * Where the store is, in the words the page may print: a host or a bucket. Empty for
@@ -1751,7 +1761,8 @@ export const api = {
 
   addStorageConnection(input: {
     name: string;
-    backend?: "cos" | "s3";
+    /** The store's product; the server derives the driver and the guarantees from it. */
+    product: StorageProduct;
     bucket: string;
     region: string;
     endpoint?: string;

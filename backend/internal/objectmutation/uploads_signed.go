@@ -20,7 +20,7 @@ var (
 
 func (d *Driver) SignedUploadSupported() bool {
 	backend, ok := d.backend.(SignedPartBackend)
-	return ok && backend.SignedPartsSupported() && d.options.Admission.MultipartUploads && d.UploadMaxFileBytes() > 0
+	return ok && backend.SignedPartsSupported() && d.options.Capabilities.MultipartUploads && d.UploadMaxFileBytes() > 0
 }
 
 func (d *Driver) ReadGrantSupported() bool {
@@ -102,7 +102,7 @@ func (d *Driver) SupportsDirectPut(cond storage.Conditions) bool {
 	if len(cond.ExpectedRevision) == 0 {
 		return false
 	}
-	return d.options.Admission.ConditionalPut
+	return d.options.Capabilities.ConditionalPut
 }
 
 // BeginDirectPut signs one conditional PUT at the destination itself. Nothing is staged

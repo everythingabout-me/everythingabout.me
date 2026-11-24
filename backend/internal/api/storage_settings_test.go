@@ -99,12 +99,12 @@ func TestStorageTargetAndFolderAreAccountSettings(t *testing.T) {
 
 	authority := insertStorageRow(t, server, ctx, connections.Connection{
 		Name: "default", Backend: "cos", Role: connections.RoleAuthority,
-		Config: connections.Spec{COS: connections.COSSpec{Bucket: "authority-bucket-125", Region: "ap-hongkong"}},
+		Config: connections.Spec{Product: "cos", COS: connections.COSSpec{Bucket: "authority-bucket-125", Region: "ap-hongkong"}},
 		Secret: connections.Secret{COS: connections.COSCredential{SecretID: "id", SecretKey: "key"}},
 	})
 	backup := insertStorageRow(t, server, ctx, connections.Connection{
 		Name: "nas", Backend: "s3", Role: connections.RoleBackup, OwnerID: owner,
-		Config: connections.Spec{CoordinatedWrites: true, S3: connections.S3Spec{
+		Config: connections.Spec{Product: "rustfs", S3: connections.S3Spec{
 			Endpoint: "https://nas.example.test", Region: "us-east-1", Bucket: "backups",
 			PathStyle: true, ContentPrefix: "drive/", SystemPrefix: "__eam_system__/",
 		}},
@@ -237,7 +237,7 @@ func TestStorageConnectionPageIsPerProvider(t *testing.T) {
 
 	first := insertStorageRow(t, server, ctx, connections.Connection{
 		Name: "nas-one", Backend: "s3", Role: connections.RoleBackup, OwnerID: owner,
-		Config: connections.Spec{CoordinatedWrites: true, S3: connections.S3Spec{
+		Config: connections.Spec{Product: "rustfs", S3: connections.S3Spec{
 			Endpoint: "https://nas-one.example.test", Region: "us-east-1", Bucket: "backups",
 			PathStyle: true, ContentPrefix: "drive/", SystemPrefix: "__eam_system__/",
 		}},
@@ -245,7 +245,7 @@ func TestStorageConnectionPageIsPerProvider(t *testing.T) {
 	})
 	second := insertStorageRow(t, server, ctx, connections.Connection{
 		Name: "nas-two", Backend: "s3", Role: connections.RoleBackup, OwnerID: owner,
-		Config: connections.Spec{CoordinatedWrites: true, S3: connections.S3Spec{
+		Config: connections.Spec{Product: "rustfs", S3: connections.S3Spec{
 			Endpoint: "https://nas-two.example.test", Region: "us-east-1", Bucket: "backups",
 			PathStyle: true, ContentPrefix: "drive/", SystemPrefix: "__eam_system__/",
 		}},

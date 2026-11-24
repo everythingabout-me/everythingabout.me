@@ -29,17 +29,17 @@
 
 Every metadata and control request uses the configured origin: hosted `https://everythingabout.me`,
 self-hosted the operator's domain or LAN endpoint. Signing secrets, broad temporary credentials and storage
-SDKs never reach clients. Each storage connection selects one transfer class, and every upload session and
-read grant advertises it: class A (`presigned-parts`) sends bytes between the client and an object store
+SDKs never reach clients. Each storage connection selects one store — a product, in
+[storage-driver](../design/storage-driver.md) — and the product's transfer class is what every upload session
+and read grant advertises: class A (`presigned-parts`) sends bytes between the client and an object store
 through presigned requests, class B (`resumable-session`) between the client and a cloud drive through a
-provider session or download link, and class C (`relay`) through this origin. Classes A and B never carry file
-bytes through the application, and a transfer never falls back to another class. The class payload is opaque
-outside the client's transfer executor. [Transfer protocol](../design/transfer-protocol.md) defines the classes,
-their geometry, provider rules, recovery and deployment requirements.
+provider session or download link, and class C (`relay`) through this origin. Every object product is class A;
+only a local root, which has no provider to reach, relays. Classes A and B never carry file bytes through the
+application, and a transfer never falls back to another class. The class payload is opaque outside the client's
+transfer executor. [Transfer protocol](../design/transfer-protocol.md) defines the classes, their geometry,
+provider rules, recovery and deployment requirements.
 
-Class A uploads may optionally use a same-origin edge relay under `B/transfer/`; the application refuses that
-path before reading a body (`503 edgeone_route_required`), so a missing edge rule fails instead of consuming
-application bandwidth. Uploads are uncached and no byte path may redirect.
+Uploads are uncached and no byte path may redirect.
 
 **One base, `/api/files`, serves Web, iOS, Android, CLIs and third-party clients.** There is no separate
 browser route or separate ID-only resource family. ID and path select the same resources. All returned
@@ -294,7 +294,6 @@ All suffixes are below `B`:
 | PUT | `/uploads/{uploadId}/parts/{number}` | Class C immutable numbered part |
 | GET | `/uploads/{uploadId}/parts?limit=&cursor=` | Class A: the provider's own part listing |
 | GET | `/uploads/{uploadId}/parts?limit=&cursor=` | Class C: durable receipts, ACK-order pages with a fixed watermark |
-| PUT | `/transfer/{encoded-object-key}?…` | Class A optional same-origin edge route; refused by the application |
 | POST | `/uploads/{uploadId}/commit` | Server verifies provider state and publishes at the bound target |
 | DELETE | `/uploads/{uploadId}` | Abort and discard provider state |
 | GET | `/operations/{operationId}` | Durable workflow state/result |
@@ -660,7 +659,7 @@ returns `409 session_required` before reading the body; every write, however sma
 ## 7. Upload sessions and transfer classes
 
 Clients use one session lifecycle — create, status, commit — and each session advertises exactly one
-transfer class. The class is fixed by the storage connection; a client never chooses an origin or a
+transfer class. The class is fixed by the connection's product; a client never chooses an origin or a
 provider. [Transfer protocol](../design/transfer-protocol.md) defines the three classes, their geometry
 and their recovery rules; this section defines their API representation.
 
@@ -1283,7 +1282,7 @@ silently serve the first page again.
 | 428 | precondition_required |
 | 429 | rate_limited (Retry-After) |
 | 500 | internal_error (the request was rejected by this service's own inconsistent intent or configuration) |
-| 502 / 503 / 504 | storage_failure / temporarily_unavailable, storage_outcome_unknown, edgeone_route_required, snapshot_too_large, snapshot_incomplete, audit_unavailable, change_root_reset_required / storage_timeout |
+| 502 / 503 / 504 | storage_failure / temporarily_unavailable, storage_outcome_unknown, snapshot_too_large, snapshot_incomplete, audit_unavailable, change_root_reset_required / storage_timeout |
 | 507 | quota_exceeded, staging_full |
 
 Retry transient requests with backoff/jitter and Retry-After. A `Retry-After` `429` comes from a per-principal

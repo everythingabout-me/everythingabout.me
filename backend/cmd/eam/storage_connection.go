@@ -10,7 +10,7 @@ import (
 
 	"everythingabout.me/backend/internal/config"
 	"everythingabout.me/backend/internal/connections"
-	"everythingabout.me/backend/internal/storagebackend"
+	"everythingabout.me/backend/internal/storageproduct"
 	"everythingabout.me/backend/internal/store"
 )
 
@@ -18,10 +18,9 @@ import (
 // an INSERT, so it is a command rather than a deployment edit.
 //
 //	eam storage-connection list [--owner email-or-UUID]
-//	eam storage-connection add --name backup-nas --backend local --role backup \
+//	eam storage-connection add --name backup-nas --product local --role backup \
 //	   --local-content-root /srv/backup/content --local-system-root /srv/backup/system
-//	eam storage-connection add --owner you@example.com --name my-cos --backend cos --role backup ...
-//	eam storage-connection probe --name nas
+//	eam storage-connection add --owner you@example.com --name my-cos --product cos --role backup ...
 //	eam storage-connection rotate --name default --from-environment
 //
 // Without --owner a connection is the deployment default that every account may
@@ -32,28 +31,52 @@ func runStorageConnection(args []string) error {
 	if len(args) == 0 {
 		return fmt.Errorf(`usage:
   eam storage-connection list [--owner email-or-UUID]
-  eam storage-connection add [--owner email-or-UUID] --name NAME --backend cos|s3|local --role authority|backup [flags]
-  eam storage-connection probe [--owner email-or-UUID] --name NAME
+  eam storage-connection add [--owner email-or-UUID] --name NAME --product aws-s3|cos|minio|rustfs|local --role authority|backup [flags]
   eam storage-connection rotate --name NAME --from-environment
 
 cos flags:   --cos-bucket --cos-region --cos-secret-id --cos-secret-key
 s3 flags:    --s3-endpoint --s3-region --s3-bucket --s3-access-key-id --s3-secret-access-key [--s3-path-style] [--s3-content-prefix] [--s3-system-prefix]
 local flags: --local-content-root --local-system-root [--local-case-sensitive]
 root:        [--root-at-bucket]  (with --owner: the tree is the bucket itself, not a prefix in it)
-common:      [--transfer-class] [--coordinated-writes=false] [--admission-file] [--spool-root] [--generation N]`)
+common:      [--spool-root] [--generation N]`)
 	}
 	switch args[0] {
 	case "list":
 		return runStorageConnectionList(args[1:])
 	case "add":
 		return runStorageConnectionAdd(args[1:])
-	case "probe":
-		return runStorageConnectionProbe(args[1:])
 	case "rotate":
 		return runStorageConnectionRotate(args[1:])
 	default:
 		return fmt.Errorf("unknown storage-connection subcommand %q", args[0])
 	}
+}
+
+// connectionProduct names the store a row uses. A row written before the product split has
+// no product; COS and Local then have exactly one, and an S3 row says "s3" so the operator
+// can see which row still needs one.
+func connectionProduct(c connections.Connection) string {
+	if c.Config.Product != "" {
+		return c.Config.Product
+	}
+	if id, ok := storageproduct.ProductForBackend(c.Backend); ok {
+		return id
+	}
+	return c.Backend
+}
+
+// capabilitiesLabel prints what the product promises about writes. It replaces the old
+// per-connection evidence line: the answer now comes from the product, so it is printed
+// with the row instead of being recorded beside it.
+func capabilitiesLabel(c storageproduct.Capabilities) string {
+	yes := func(b bool) string {
+		if b {
+			return "yes"
+		}
+		return "no"
+	}
+	return fmt.Sprintf("conditional create %s, conditional put %s, atomic publish %s, multipart %s, form post %s",
+		yes(c.ConditionalCreate), yes(c.ConditionalPut), yes(c.AtomicPublish), yes(c.MultipartUploads), yes(c.FormPost))
 }
 
 func runStorageConnectionList(args []string) error {
@@ -94,9 +117,9 @@ func runStorageConnectionList(args []string) error {
 		return nil
 	}
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(w, "NAME\tROLE\tBACKEND\tSCOPE\tGENERATION\tENABLED\tSECRET\tLOCATION\tIDENTITY")
+	fmt.Fprintln(w, "NAME\tROLE\tPRODUCT\tSCOPE\tGENERATION\tENABLED\tSECRET\tLOCATION\tIDENTITY")
 	for _, c := range rows {
-		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%d\t%t\t%s\t%s\t%s\n", c.Name, c.Role, c.Backend, connectionScope(c), c.Generation, c.Enabled, connectionSecretSource(c), connectionLocation(c), c.Identity[:12])
+		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%d\t%t\t%s\t%s\t%s\n", c.Name, c.Role, connectionProduct(c), connectionScope(c), c.Generation, c.Enabled, connectionSecretSource(c), connectionLocation(c), c.Identity[:12])
 	}
 	return w.Flush()
 }
@@ -171,13 +194,10 @@ func runStorageConnectionAdd(args []string) error {
 	fs := flag.NewFlagSet("storage-connection add", flag.ContinueOnError)
 	owner := fs.String("owner", "", "email or UUID: give the connection to one account instead of making it the deployment default")
 	name := fs.String("name", "", "connection name; owner bindings are written as name:digest")
-	backend := fs.String("backend", "", "cos, s3 or local")
+	product := fs.String("product", "", "store product: aws-s3, cos, minio, rustfs or local")
 	role := fs.String("role", connections.RoleAuthority, "authority or backup")
 	generation := fs.Int64("generation", 1, "generation; bump it when the location changes")
-	transferClass := fs.String("transfer-class", "", "presigned-parts, resumable-session or relay")
 	rootAtBucket := fs.Bool("root-at-bucket", false, "put this account's tree at the bucket root instead of under a prefix (needs --owner)")
-	coordinated := fs.Bool("coordinated-writes", true, "require the coordinated object write protocol")
-	admissionFile := fs.String("admission-file", "", "object admission evidence path (object backends)")
 	spoolRoot := fs.String("spool-root", "", "object spool root (object backends)")
 	cosBucket := fs.String("cos-bucket", "", "")
 	cosRegion := fs.String("cos-region", "", "")
@@ -198,9 +218,14 @@ func runStorageConnectionAdd(args []string) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	if *name == "" || *backend == "" {
-		return fmt.Errorf("--name and --backend are required: a connection is identified by its name and where it lives")
+	if *name == "" || *product == "" {
+		return fmt.Errorf("--name and --product are required: a connection is identified by its name and which store it lives in")
 	}
+	profile, err := storageproduct.Lookup(strings.ToLower(strings.TrimSpace(*product)))
+	if err != nil {
+		return err
+	}
+	backend := profile.Backend
 	if *rootAtBucket && *owner == "" {
 		return fmt.Errorf("--root-at-bucket puts one account's tree at the bucket root, so it needs --owner: a shared connection would put every account's tree in the same place")
 	}
@@ -237,12 +262,11 @@ func runStorageConnectionAdd(args []string) error {
 		return err
 	}
 	c := connections.Connection{
-		ID: id, OwnerID: ownerID, Name: *name, Backend: *backend, Role: *role, Generation: *generation, Enabled: true,
+		ID: id, OwnerID: ownerID, Name: *name, Backend: backend, Role: *role, Generation: *generation, Enabled: true,
 		Config: connections.Spec{
-			RootAtBucket:      *rootAtBucket,
-			CoordinatedWrites: *coordinated,
-			TransferClass:     *transferClass,
-			COS:               connections.COSSpec{Bucket: *cosBucket, Region: *cosRegion},
+			RootAtBucket: *rootAtBucket,
+			Product:      profile.ID,
+			COS:          connections.COSSpec{Bucket: *cosBucket, Region: *cosRegion},
 			S3: connections.S3Spec{
 				Endpoint: *s3Endpoint, Region: *s3Region, Bucket: *s3Bucket,
 				PathStyle: *s3PathStyle, ContentPrefix: *s3ContentPrefix, SystemPrefix: *s3SystemPrefix,
@@ -254,11 +278,19 @@ func runStorageConnectionAdd(args []string) error {
 			S3:  connections.S3Credential{AccessKeyID: *s3AccessKey, SecretAccessKey: *s3SecretKey, SessionToken: *s3SessionToken},
 		},
 	}
-	if c.Config.TransferClass == "" {
-		c.Config.TransferClass = cfg.Storage.TransferClass
+	if profile.Backend == "s3" {
+		set := false
+		fs.Visit(func(f *flag.Flag) {
+			if f.Name == "s3-path-style" {
+				set = true
+			}
+		})
+		if !set {
+			c.Config.S3.PathStyle = profile.PathStyle
+		}
 	}
-	if *backend != "local" {
-		c.Config.ObjectAdmissionFile, c.Config.ObjectSpoolRoot, err = connections.ObjectPaths(cfg.Storage, c, *admissionFile, *spoolRoot)
+	if profile.Backend != "local" {
+		c.Config.ObjectSpoolRoot, err = connections.ObjectPaths(cfg.Storage, c, *spoolRoot)
 		if err != nil {
 			return err
 		}
@@ -298,68 +330,9 @@ func runStorageConnectionAdd(args []string) error {
 		}
 	}
 	if c.Backend != "local" {
-		fmt.Printf("  admission evidence: %s\n  spool root: %s\n", c.Config.ObjectAdmissionFile, c.Config.ObjectSpoolRoot)
-		fmt.Printf("  object writes stay unproven until: eam storage-connection probe --name %s\n", c.Name)
+		fmt.Printf("  product: %s (class %s, %s)\n  spool root: %s\n", c.Config.Product, profile.TransferClass, capabilitiesLabel(profile.Capabilities), c.Config.ObjectSpoolRoot)
 	}
 	fmt.Println("new connections are picked up on first use; changing which connection an owner is bound to is a rebinding and needs a restart")
-	return nil
-}
-
-// runStorageConnectionProbe measures one connection and records the evidence its
-// driver needs before it may publish.
-func runStorageConnectionProbe(args []string) error {
-	fs := flag.NewFlagSet("storage-connection probe", flag.ContinueOnError)
-	owner := fs.String("owner", "", "scope to one account (email or UUID); omit for a deployment default row")
-	name := fs.String("name", "", "connection name to measure")
-	if err := fs.Parse(args); err != nil {
-		return err
-	}
-	if *name == "" {
-		return fmt.Errorf("--name is required: a probe measures one named connection")
-	}
-	ctx := context.Background()
-	cfg, err := config.Load()
-	if err != nil {
-		return err
-	}
-	db, err := store.Open(ctx, cfg.DatabaseURL)
-	if err != nil {
-		return err
-	}
-	defer db.Close()
-	var ownerID string
-	if *owner != "" {
-		ownerID, err = resolveOwnerID(ctx, db, *owner)
-		if err != nil {
-			return err
-		}
-	}
-	c, ok, err := connections.NewPostgresStore(db).ByName(ctx, ownerID, *name)
-	if err != nil {
-		return err
-	}
-	if !ok {
-		scope := "the deployment default"
-		if *owner != "" {
-			scope = "owner " + *owner
-		}
-		return fmt.Errorf("storage connection %q does not exist for %s; add it first with `eam storage-connection add --name %s ...`", *name, scope, *name)
-	}
-	effective, err := c.ApplyEnvironment(*cfg)
-	if err != nil {
-		return err
-	}
-	admission, err := storagebackend.ProbeConnection(ctx, &effective)
-	if err != nil {
-		return err
-	}
-	fmt.Printf("probed storage connection %q: %s bucket %q region %q\n", c.Name, admission.Endpoint, admission.Bucket, admission.Region)
-	fmt.Printf("  evidence: %s\n  transcript: %s\n", effective.Storage.ObjectAdmissionFile, admission.ProbeReference)
-	fmt.Printf("  conditional create: %t  conditional put: %t  atomic publish: %t  multipart: %t  form post: %t\n",
-		admission.ConditionalCreate, admission.ConditionalPut, admission.AtomicPublish, admission.MultipartUploads, admission.FormPost)
-	if !admission.ConditionalPut {
-		fmt.Println("  replacement: multipart (a direct replacement PUT would carry an If-Match this connection was not measured to enforce)")
-	}
 	return nil
 }
 

@@ -27,7 +27,6 @@ func TestFilesNativeUploadsPostgresIndependentReceiverAndCommit(t *testing.T) {
 	receiverConfig := *f.cfg
 	receiverConfig.Storage = f.cfg.Storage
 	receiverConfig.Storage.ObjectSpoolRoot = t.TempDir()
-	receiverConfig.FileUploadIngress = "embedded"
 	backend, err := storagebackend.New(&receiverConfig)
 	if err != nil {
 		t.Fatal(err)

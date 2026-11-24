@@ -126,9 +126,9 @@ type ConcurrentPhase struct {
 // the same native path a backup uses, so a passing result is evidence about the path that
 // matters rather than about a separate API.
 //
-// It deliberately does not consult admission evidence: measuring must work on a
-// connection whose publishability is exactly what is still unproven. The caller
-// runs ProbeConnection afterwards to establish that.
+// It measures reachability and throughput only. Whether the store may be published to is
+// the product's promise (storageproduct), so a fast store whose product cannot publish is
+// reported as "reachable, not ready" rather than as a failed transfer.
 //
 // progress, when not nil, is called at every phase boundary with the measurement as it
 // stands, so a page can fill its rows one at a time while the run is still working.

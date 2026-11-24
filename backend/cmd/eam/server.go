@@ -105,12 +105,6 @@ func runServer(args []string) error {
 		return err
 	}
 
-	// Refresh measured write capability for this exact connection. Evidence cannot
-	// be carried across a bucket or region change, and re-running the probe here
-	// keeps configuration in charge instead of making an operator redo it by hand.
-	if err := storagebackend.EnsureAdmission(ctx, cfg); err != nil {
-		slog.Warn("object admission probe failed; coordinated object writes stay disabled", "error", err)
-	}
 	backend, err := storagebackend.NewForServing(cfg)
 	if err != nil {
 		return fmt.Errorf("failed to initialize storage backend: %w", err)

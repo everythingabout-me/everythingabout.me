@@ -55,7 +55,7 @@ func (b *Backend) VerifyEmptyOwner(ctx context.Context, ownerID string, content 
 	case "cos", "s3":
 		// A backend that admits concurrent native writers cannot promise that the
 		// empty prefix stays empty until the admission row commits.
-		if b.objectBackend == nil || !b.objectOptions.Admission.SingleGateway {
+		if b.objectBackend == nil || !b.objectOptions.Capabilities.SingleWriter {
 			return storage.NewError("baseline_required", "", nil)
 		}
 		return objectmutation.CheckSpoolSettled(binding, b.objectOptions)

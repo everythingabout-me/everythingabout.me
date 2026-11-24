@@ -2,16 +2,12 @@ package storagebackend
 
 import (
 	"context"
-	"encoding/json"
 	"io"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
-	"time"
 
 	"everythingabout.me/backend/internal/config"
-	"everythingabout.me/backend/internal/objectmutation"
 	"everythingabout.me/backend/internal/storage"
 )
 
@@ -132,94 +128,12 @@ func TestRootBindingIdentityExcludesCredentials(t *testing.T) {
 	}
 }
 
-// Admission is measured evidence, so it describes exactly one connection. The
-// failure an operator sees after moving a bucket must name both sides; a bare
-// "invalid_config" cost an afternoon of debugging once.
-func TestNewReportsAdmissionEvidenceFromAnotherConnection(t *testing.T) {
-	dir := t.TempDir()
-	evidence := filepath.Join(dir, "admission.json")
-	admission := objectmutation.Admission{
-		Version:           objectmutation.AdmissionVersion,
-		ConnectionID:      "default",
-		Endpoint:          "https://old-bucket-1250000000.cos.ap-hongkong.myqcloud.com",
-		Bucket:            "old-bucket-1250000000",
-		Region:            "ap-hongkong",
-		CheckedAt:         time.Now().UTC(),
-		ProbeReference:    "live-probe",
-		AtomicPublish:     true,
-		ConditionalCreate: true,
-		SingleGateway:     true,
-	}
-	write := func(a objectmutation.Admission) {
-		data, err := json.Marshal(a)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(evidence, data, 0600); err != nil {
-			t.Fatal(err)
-		}
-	}
-	cfg := &config.Config{
-		Storage: config.Storage{
-			Backend:             "cos",
-			ConnectionID:        "default",
-			Generation:          1,
-			CoordinatedWrites:   true,
-			ObjectAdmissionFile: evidence,
-			ObjectSpoolRoot:     dir,
-			TransferClass:       storage.TransferRelay,
-		},
-		COS: config.COS{SecretID: "id", SecretKey: "key", Bucket: "new-bucket-1250000000", Region: "ap-beijing"},
-	}
-
-	write(admission)
-	_, err := New(cfg)
-	if err == nil {
-		t.Fatal("evidence from another bucket was accepted")
-	}
-	if !storage.IsCode(err, "invalid_config") {
-		t.Fatalf("mismatch lost its error code: %v", err)
-	}
-	for _, fragment := range []string{"old-bucket-1250000000", "ap-hongkong", "new-bucket-1250000000", "ap-beijing", evidence} {
-		if !strings.Contains(err.Error(), fragment) {
-			t.Fatalf("mismatch message omits %q:\n%v", fragment, err)
-		}
-	}
-
-	// The long-running server keeps serving reads with object writes disabled
-	// instead of refusing to start: the configured tree is what it must serve.
-	serving, err := NewForServing(cfg)
-	if err != nil {
-		t.Fatalf("serving mode rejected stale evidence: %v", err)
-	}
-	if serving.ObjectWritesProblem() == nil {
-		if err := serving.Close(); err != nil {
-			t.Fatal(err)
-		}
-		t.Fatal("disabled object writes were not reported")
-	}
-	if err := serving.Close(); err != nil {
-		t.Fatal(err)
-	}
-
-	admission.Endpoint = "https://new-bucket-1250000000.cos.ap-beijing.myqcloud.com"
-	admission.Bucket, admission.Region = "new-bucket-1250000000", "ap-beijing"
-	write(admission)
-	backend, err := New(cfg)
-	if err != nil {
-		t.Fatalf("matching evidence rejected: %v", err)
-	}
-	if err := backend.Close(); err != nil {
-		t.Fatal(err)
-	}
-}
-
 // An owner-scoped connection holds exactly one account's tree, so its root is the
 // configured prefix; a shared connection holds one tree per account and must keep the
 // account segment that separates them.
 func TestBindingOmitsTheAccountForAnOwnerScopedConnection(t *testing.T) {
 	s3 := config.Storage{
-		Backend: "s3", ConnectionID: "nas", Generation: 1,
+		Backend: "s3", Product: "minio", ConnectionID: "nas", Generation: 1,
 		S3: config.S3{Endpoint: "https://nas.invalid", Region: "us-east-1", Bucket: "b",
 			AccessKeyID: "id", SecretAccessKey: "key", ContentPrefix: "eam/", SystemPrefix: "__eam_system__/"},
 	}

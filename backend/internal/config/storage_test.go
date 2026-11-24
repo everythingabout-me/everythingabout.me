@@ -8,7 +8,7 @@ import (
 func isolatedConfigEnv(t *testing.T) {
 	t.Helper()
 	t.Setenv("EAM_ENV_FILE", filepath.Join(t.TempDir(), "missing.env"))
-	for _, key := range []string{"FILE_UPLOAD_INGRESS", "FILE_TRANSFER_CLASS", "FILE_OBJECT_ADMISSION_FILE", "FILE_OBJECT_SPOOL_ROOT", "FILE_COORDINATED_WRITES", "FILE_MAX_SINGLE_PUT_BYTES", "FILE_COOKIE_ORIGINS", "APP_SECRET", "STORAGE_BACKEND", "STORAGE_CONNECTION_ID", "STORAGE_GENERATION", "LOCAL_CONTENT_ROOT", "LOCAL_SYSTEM_ROOT", "LOCAL_CASE_SENSITIVE", "S3_ENDPOINT", "S3_REGION", "S3_BUCKET", "S3_ACCESS_KEY_ID", "S3_SECRET_ACCESS_KEY", "S3_SESSION_TOKEN", "S3_PATH_STYLE", "S3_CONTENT_PREFIX", "S3_SYSTEM_PREFIX", "COS_BUCKET", "COS_REGION", "COS_SECRET_ID", "COS_SECRET_KEY", "SES_SECRET_ID", "SES_SECRET_KEY", "SES_FROM_EMAIL_ADDRESS", "SES_TEMPLATE_ID"} {
+	for _, key := range []string{"FILE_OBJECT_SPOOL_ROOT", "FILE_MAX_SINGLE_PUT_BYTES", "FILE_COOKIE_ORIGINS", "APP_SECRET", "STORAGE_BACKEND", "STORAGE_CONNECTION_ID", "STORAGE_GENERATION", "LOCAL_CONTENT_ROOT", "LOCAL_SYSTEM_ROOT", "LOCAL_CASE_SENSITIVE", "S3_ENDPOINT", "S3_REGION", "S3_BUCKET", "S3_ACCESS_KEY_ID", "S3_SECRET_ACCESS_KEY", "S3_SESSION_TOKEN", "S3_PATH_STYLE", "S3_CONTENT_PREFIX", "S3_SYSTEM_PREFIX", "COS_BUCKET", "COS_REGION", "COS_SECRET_ID", "COS_SECRET_KEY", "SES_SECRET_ID", "SES_SECRET_KEY", "SES_FROM_EMAIL_ADDRESS", "SES_TEMPLATE_ID"} {
 		t.Setenv(key, "")
 	}
 	t.Setenv("DATABASE_URL", "postgres://unused/test")
@@ -67,6 +67,7 @@ func TestAppSecretAndMailAreIndependent(t *testing.T) {
 	t.Setenv("SES_SECRET_KEY", "mail-secret")
 	t.Setenv("COS_BUCKET", "bucket-123456")
 	t.Setenv("COS_REGION", "ap-guangzhou")
+	t.Setenv("FILE_OBJECT_SPOOL_ROOT", t.TempDir())
 	cfg, err = Load()
 	if err != nil {
 		t.Fatal(err)
@@ -90,6 +91,11 @@ func TestStrictBackendConfiguration(t *testing.T) {
 	}
 	isolatedConfigEnv(t)
 	t.Setenv("STORAGE_BACKEND", "s3")
+	if _, err := Load(); err == nil {
+		t.Fatal("an S3 connection with no product was accepted")
+	}
+	t.Setenv("STORAGE_PRODUCT", "minio")
+	t.Setenv("FILE_OBJECT_SPOOL_ROOT", t.TempDir())
 	t.Setenv("S3_ENDPOINT", "http://127.0.0.1:9000")
 	t.Setenv("S3_REGION", "test-region")
 	t.Setenv("S3_BUCKET", "bucket")
@@ -108,7 +114,10 @@ func TestStrictBackendConfiguration(t *testing.T) {
 	}
 }
 
-func TestTransferClassSelectionAndCredentials(t *testing.T) {
+// The class is a consequence of the product, not a setting: local has no provider to
+// reach, every object product does, and a product served by a different driver is a
+// configuration mistake rather than a choice.
+func TestProductSelectsTheTransferClass(t *testing.T) {
 	isolatedConfigEnv(t)
 	t.Setenv("STORAGE_BACKEND", "local")
 	t.Setenv("APP_SECRET", "stable-deployment-secret")
@@ -119,32 +128,16 @@ func TestTransferClassSelectionAndCredentials(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := cfg.ValidateStorage(); err != nil || cfg.Storage.TransferClass != "relay" {
-		t.Fatalf("local default class: %s %v", cfg.Storage.TransferClass, err)
+		t.Fatalf("local class: %s %v", cfg.Storage.TransferClass, err)
 	}
-	t.Setenv("FILE_TRANSFER_CLASS", "presigned-parts")
-	cfg, err = Load()
-	if err == nil {
-		err = cfg.ValidateStorage()
-	}
-	if err == nil {
-		t.Fatal("class A accepted on the local backend")
-	}
-	t.Setenv("FILE_TRANSFER_CLASS", "resumable-session")
-	cfg, err = Load()
-	if err == nil {
-		err = cfg.ValidateStorage()
-	}
-	if err == nil {
-		t.Fatal("class B accepted without a driver")
+	t.Setenv("STORAGE_PRODUCT", "cos")
+	if _, err := Load(); err == nil {
+		t.Fatal("a COS product on the local backend was accepted")
 	}
 }
-
 func TestClassAUsesCOSCredentials(t *testing.T) {
 	isolatedConfigEnv(t)
 	t.Setenv("STORAGE_BACKEND", "cos")
-	t.Setenv("FILE_TRANSFER_CLASS", "presigned-parts")
-	t.Setenv("FILE_COORDINATED_WRITES", "true")
-	t.Setenv("FILE_OBJECT_ADMISSION_FILE", "/synthetic/admission.json")
 	t.Setenv("FILE_OBJECT_SPOOL_ROOT", "/synthetic/spool")
 	t.Setenv("COS_BUCKET", "bucket-123456")
 	t.Setenv("COS_REGION", "ap-guangzhou")
@@ -159,15 +152,5 @@ func TestClassAUsesCOSCredentials(t *testing.T) {
 	}
 	if cfg.Storage.TransferClass != "presigned-parts" {
 		t.Fatalf("unexpected class %q", cfg.Storage.TransferClass)
-	}
-}
-
-func TestClassCRejectsEdgeRelay(t *testing.T) {
-	isolatedConfigEnv(t)
-	t.Setenv("STORAGE_BACKEND", "cos")
-	t.Setenv("FILE_TRANSFER_CLASS", "relay")
-	t.Setenv("FILE_UPLOAD_INGRESS", "edgeone")
-	if _, err := Load(); err == nil {
-		t.Fatal("class C accepted the class A edge relay")
 	}
 }

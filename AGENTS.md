@@ -480,19 +480,23 @@ Variants: `Committed locally main@abc1234, not pushed` / `Not committed (tests f
 - Never expose signing secrets, broad STS credentials, provider download redirects or arbitrary upload origins.
   Each connection selects one transfer class (A presigned parts, B cloud-drive sessions, C relay); a transfer
   never falls back to another class. A and C are implemented; B is configuration-reserved until a cloud-drive
-  driver exists. Class A signs part and read URLs with the configured `COS_SECRET_*` credential, which
-  remains server-side; `FILE_TRANSFER_CLASS` selects `presigned-parts` or `relay`. Grants are scoped to one upload
+  driver exists. Class A signs part and read URLs with the configured provider credential, which
+  remains server-side. A connection names a **product** (`aws-s3`, `cos`, `minio`, `rustfs`, `local`) in
+  `internal/storageproduct`; the product fixes the class (every object product is class A, a local root
+  relays) and the write guarantees (`ConditionalCreate`, `ConditionalPut`, `AtomicPublish`, `Multipart`,
+  `FormPost`), each with its reason next to it. There is no "S3-compatible" choice and no per-connection
+  capability probe: the product answers those questions, and a probe could not — it measured requests, while
+  a product's CVE or missing `If-Match` support is knowledge about the product. Grants are scoped to one upload
   session or one file, time-limited,
   renewable and recorded before they are issued. Class A part URLs bind exact length and no digest.
   **A staged transfer is never published by its client**: multipart parts stay unpublished until the server
   completes them, class C bytes stay in the spool until the server publishes, and class B is a client contract.
-  The exception is a **direct** class A session (one file that fits in a single part, on a connection admitted
-  for conditional writes): its grant writes the destination itself — a conditional PUT, or a form upload whose
+  The exception is a **direct** class A session (one file that fits in a single part, on a product that promises
+  conditional writes): its grant writes the destination itself — a conditional PUT, or a form upload whose
   signed policy carries the same condition (`x-cos-forbid-overwrite`, exact key and length) because a browser
   sends `multipart/form-data` without a CORS preflight — so the client's write is the publication and the
-  commit only verifies the object and settles the index. A replacement keeps the conditional PUT only on a
-  connection whose probe measured that a stale `If-Match` is refused (412), because that signed header is the
-  grant's only guard and the grant outlives its superseded session; elsewhere the replacement is a multipart
+  commit only verifies the object and settles the index. A replacement keeps the conditional PUT only where the
+  product promises it (`Capabilities.ConditionalPut`), because that signed header is the grant's only guard and the grant outlives its superseded session; elsewhere the replacement is a multipart
   session whose parts stay unpublished until the server completes them (a form upload can never express
   "only this revision"). That swap costs one window in
   which the native tree holds a file the index has not recorded (reconcile adopts it, and a purge must not
