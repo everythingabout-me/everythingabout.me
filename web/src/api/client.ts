@@ -1638,6 +1638,12 @@ export interface StorageConnection {
   probe?: StorageTestResult | null;
   /** A measurement is running for this provider in the server process. */
   probeRunning?: boolean;
+  /**
+   * The run in flight, revealed phase by phase. A test takes a minute or more, and a sheet
+   * that only changes at the end is indistinguishable from one that is stuck; this is what
+   * lets each row fill in as its own phase finishes.
+   */
+  probeProgress?: StorageTestProgress | null;
 }
 
 export interface StorageTestResult {
@@ -1660,6 +1666,19 @@ export interface StorageTestResult {
   deletes?: FileOpsTest | null;
   /** Overlapping writes: the aggregate, and the average part each stream contributed. */
   concurrency?: ConcurrencyTest | null;
+}
+
+/**
+ * A measurement still running: the cached result's shape plus the phase it is on. The page
+ * reveals a row when its phase appears in `done` and spins the one named by `phase`, which
+ * is why the two are separate facts — a file-operation phase that failed still finished and
+ * still owns the error its row prints.
+ */
+export interface StorageTestProgress extends StorageTestResult {
+  /** The phase now measuring; "" between phases and during the publishability check. */
+  phase: string;
+  /** Phases that already finished, in completion order. */
+  done: string[];
 }
 
 /** One file-operation phase: how many files, and how fast, because a small file costs a round trip. */

@@ -48,6 +48,35 @@ const (
 	measureConcurrentBytes   = 250_000
 )
 
+// Phase names one step of a measurement, in the order Measure runs them. The page lists
+// the steps in this order and reveals each row when its phase finishes, so the order and
+// the names are a contract with that page, not an implementation detail here.
+type Phase string
+
+const (
+	PhaseLatency     Phase = "latency"
+	PhaseUpload      Phase = "upload"
+	PhaseDownload    Phase = "download"
+	PhaseSmallFiles  Phase = "smallFiles"
+	PhaseRenames     Phase = "renames"
+	PhaseDeletes     Phase = "deletes"
+	PhaseConcurrency Phase = "concurrency"
+)
+
+// Progress is one boundary of a measurement: a phase is starting, or has finished with the
+// measurement as it stands. A measurement takes minutes on a slow link, so a caller that
+// shows nothing until the end makes the person watch an empty page; reporting the
+// boundaries is what lets it fill one row at a time. The observer runs on the measuring
+// goroutine, and a caller that does not care passes nil.
+type Progress struct {
+	Phase Phase
+	// Done is false at the moment the phase starts and true once its numbers are in
+	// Measurement. The start is reported separately because a phase can spend a long time
+	// on the network before it has anything to say.
+	Done        bool
+	Measurement Measurement
+}
+
 // Measurement is what one reachability/latency/throughput test observed. Rates are
 // bytes per second over the phase that moved the bytes, except the file-operation
 // phases, which are files per second because that is what bounds a backup of many small
@@ -100,7 +129,10 @@ type ConcurrentPhase struct {
 // It deliberately does not consult admission evidence: measuring must work on a
 // connection whose publishability is exactly what is still unproven. The caller
 // runs ProbeConnection afterwards to establish that.
-func Measure(ctx context.Context, cfg *config.Config) (Measurement, error) {
+//
+// progress, when not nil, is called at every phase boundary with the measurement as it
+// stands, so a page can fill its rows one at a time while the run is still working.
+func Measure(ctx context.Context, cfg *config.Config, progress func(Progress)) (Measurement, error) {
 	var m Measurement
 	if cfg == nil {
 		return m, fmt.Errorf("storage configuration is required to measure a connection")
@@ -119,7 +151,15 @@ func Measure(ctx context.Context, cfg *config.Config) (Measurement, error) {
 		defer closer.Close()
 	}
 	endpoint, bucket, _ := connectionIdentity(cfg)
-	return measureBackend(ctx, cfg.Storage.ConnectionID, endpoint, bucket, backend)
+	return measureBackend(ctx, cfg.Storage.ConnectionID, endpoint, bucket, backend, progress)
+}
+
+// report hands one phase boundary to the caller's observer, if it asked for one.
+func report(progress func(Progress), phase Phase, done bool, m Measurement) {
+	if progress == nil {
+		return
+	}
+	progress(Progress{Phase: phase, Done: done, Measurement: m})
 }
 
 // measureBackend is the half of Measure that touches a provider, split out so a test
@@ -128,7 +168,7 @@ func Measure(ctx context.Context, cfg *config.Config) (Measurement, error) {
 // The reachability and large-transfer phases are fatal: without them there is nothing to
 // report. The file-operation and concurrency phases are not — a provider that answers and
 // moves 100 MB but refuses repeated creates is a finding to display, not a failed test.
-func measureBackend(ctx context.Context, name, endpoint, bucket string, backend objectmutation.Backend) (Measurement, error) {
+func measureBackend(ctx context.Context, name, endpoint, bucket string, backend objectmutation.Backend, progress func(Progress)) (Measurement, error) {
 	var m Measurement
 	suffix, err := randomProbeSuffix()
 	if err != nil {
@@ -144,6 +184,7 @@ func measureBackend(ctx context.Context, name, endpoint, bucket string, backend 
 	// A metadata request for a key that does not exist costs one round trip and proves
 	// the endpoint answers. It is the latency number, not an error. Three of them, so a
 	// single slow request cannot be reported as the distance to the provider.
+	report(progress, PhaseLatency, false, m)
 	samples := make([]time.Duration, 0, measureLatencySamples)
 	for i := 0; i < measureLatencySamples; i++ {
 		key := fmt.Sprintf("%s/latency-%d", prefix, i)
@@ -154,7 +195,12 @@ func measureBackend(ctx context.Context, name, endpoint, bucket string, backend 
 		samples = append(samples, time.Since(start))
 	}
 	m.Latency = medianDuration(samples)
+	report(progress, PhaseLatency, true, m)
 
+	// The row is reported as running before the payload is prepared: filling 100 MB of
+	// random bytes is part of what the upload costs, and a row that stayed blank until the
+	// provider saw the first byte would make that preparation look like nothing happening.
+	report(progress, PhaseUpload, false, m)
 	payload := make([]byte, measureBytes)
 	if _, err := rand.Read(payload); err != nil {
 		return m, fmt.Errorf("storage connection %q: prepare the test payload: %w", name, err)
@@ -167,7 +213,9 @@ func measureBackend(ctx context.Context, name, endpoint, bucket string, backend 
 	}
 	m.Uploaded = int64(len(payload))
 	m.UploadRate = rate(m.Uploaded, time.Since(start))
+	report(progress, PhaseUpload, true, m)
 
+	report(progress, PhaseDownload, false, m)
 	start = time.Now()
 	body, err := backend.Open(ctx, key, object.ETag)
 	if err != nil {
@@ -183,27 +231,42 @@ func measureBackend(ctx context.Context, name, endpoint, bucket string, backend 
 	}
 	m.Downloaded = read
 	m.DownloadRate = rate(read, time.Since(start))
+	report(progress, PhaseDownload, true, m)
 
 	smallPrefix, renamedPrefix := prefix+"/small", prefix+"/renamed"
-	m.SmallFiles, m.Renames = measureSmallFileBatch(ctx, name, objects, smallPrefix, renamedPrefix, payload[:measureSmallFileBytes])
+	report(progress, PhaseSmallFiles, false, m)
+	written, smallFiles := writeSmallFileBatch(ctx, name, objects, smallPrefix, payload[:measureSmallFileBytes])
+	m.SmallFiles = smallFiles
+	report(progress, PhaseSmallFiles, true, m)
+
+	report(progress, PhaseRenames, false, m)
+	m.Renames = measureRenames(ctx, name, objects, written, renamedPrefix)
+	report(progress, PhaseRenames, true, m)
+
 	// The delete phase removes the batch the two phases above left on the store: a renamed
 	// object where the rename completed, the original where it did not. Nothing is deleted
 	// twice and nothing is measured that the small-file phase did not write.
+	report(progress, PhaseDeletes, false, m)
 	m.Deletes = measureDeletes(ctx, name, objects, smallPrefix, renamedPrefix)
+	report(progress, PhaseDeletes, true, m)
+
+	report(progress, PhaseConcurrency, false, m)
 	m.Concurrency = measureConcurrency(ctx, name, objects, prefix+"/concurrent", payload[:measureConcurrentBytes])
+	report(progress, PhaseConcurrency, true, m)
 	return m, nil
 }
 
-// measureSmallFileBatch writes the small-object batch and then renames it, one object at
-// a time. Both phases are sequential because the number they report is per-file latency: a
+// writeSmallFileBatch writes the small-object batch one object at a time and returns the
+// objects it wrote, so the rename and delete phases measure that batch rather than a
+// synthetic one. It is sequential because the number it reports is per-file latency: a
 // concurrent batch would answer the concurrency phase's question instead and hide the
 // per-round-trip cost this row exists to report.
-func measureSmallFileBatch(ctx context.Context, name string, objects *probeObjects, writePrefix, renamePrefix string, payload []byte) (FileOpsPhase, FileOpsPhase) {
+func writeSmallFileBatch(ctx context.Context, name string, objects *probeObjects, prefix string, payload []byte) ([]objectmutation.Object, FileOpsPhase) {
 	start := time.Now()
 	written := make([]objectmutation.Object, 0, measureSmallFileCount)
 	var writeErr error
 	for i := 0; i < measureSmallFileCount; i++ {
-		key := fmt.Sprintf("%s-%03d", writePrefix, i)
+		key := fmt.Sprintf("%s-%03d", prefix, i)
 		object, err := objects.put(ctx, key, payload)
 		if err != nil {
 			writeErr = fmt.Errorf("storage connection %q: write small object %s: %w", name, key, err)
@@ -211,11 +274,11 @@ func measureSmallFileBatch(ctx context.Context, name string, objects *probeObjec
 		}
 		written = append(written, object)
 	}
-	write := newFileOpsPhase(len(written), int64(len(payload)), time.Since(start))
+	phase := newFileOpsPhase(len(written), int64(len(payload)), time.Since(start))
 	if writeErr != nil {
-		write.Error = writeErr.Error()
+		phase.Error = writeErr.Error()
 	}
-	return write, measureRenames(ctx, name, objects, written, renamePrefix)
+	return written, phase
 }
 
 // measureRenames moves each written object to a fresh key: a provider-side copy bound to

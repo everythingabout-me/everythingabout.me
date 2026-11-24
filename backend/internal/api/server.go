@@ -40,7 +40,7 @@ type Server struct {
 	backupMu     sync.Mutex
 	backupJobs   map[string]bool
 	probeMu      sync.Mutex
-	probeJobs    map[string]bool
+	probeRuns    map[string]*probeRun
 	filesAuth    FilesAuthenticator
 	filesIndex   FileReadIndex
 	mediaCache   mediameta.Cache

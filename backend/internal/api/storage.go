@@ -61,6 +61,10 @@ type storageConnectionView struct {
 	// ProbeRunning reports a measurement this process is running right now, so a page
 	// reloaded mid-test waits instead of showing the stale result as the answer.
 	ProbeRunning bool `json:"probeRunning,omitempty"`
+	// ProbeProgress is that run revealed phase by phase, so the page fills each row when
+	// its phase finishes instead of leaving the sheet empty until the whole test ends.
+	// It is set only on the provider's own page: the list shows a card, not a sheet.
+	ProbeProgress *probeProgressView `json:"probeProgress,omitempty"`
 }
 
 func connectionView(c connections.Connection, runCount int, last *backupRunView) storageConnectionView {
@@ -126,6 +130,24 @@ type concurrencyTestView struct {
 	BytesPerSecond          int64  `json:"bytesPerSecond"`
 	PerStreamBytesPerSecond int64  `json:"perStreamBytesPerSecond"`
 	Error                   string `json:"error,omitempty"`
+}
+
+// probeProgressView is a measurement still running: the cached result's shape, the phase it
+// is on, and the phases that already finished. The page prints a row from Done and a spinner
+// on Phase, and it needs both as separate facts: "finished" is not the same as "current is
+// not this one", because a file-operation phase that failed still finished and still owns
+// the error its row prints.
+//
+// Only a phase listed in Done has a number. A phase that has not finished yet still carries
+// zero fields, and zero is not an answer here — a close store can measure a whole millisecond
+// of latency, so the absence of a value is expressed by Done, never by the value itself.
+type probeProgressView struct {
+	storageTestView
+	// Phase is the phase measuring right now; "" between phases and while the
+	// publishability check runs after them, when there is nothing left to spin.
+	Phase string `json:"phase"`
+	// Done lists finished phases in completion order.
+	Done []string `json:"done"`
 }
 
 type backupRunView struct {
@@ -306,6 +328,7 @@ func (s *Server) handleStorageConnectionGet(w http.ResponseWriter, r *http.Reque
 	}
 	view := connectionView(target, counts[target.ID], last)
 	view.ProbeRunning = s.probeRunning(target.ID)
+	view.ProbeProgress = s.probeProgress(target.ID)
 	return s.ok(w, map[string]any{
 		"connection":   view,
 		"backupTarget": chosen,
@@ -476,6 +499,9 @@ func (s *Server) visibleConnection(r *http.Request, userID, id string) (connecti
 // request should hold, and a request cancelled by navigation must not leave a
 // half-measured provider. The answer is cached on the row, which is what the page polls;
 // there is no task resource because the result belongs to the provider, not to the run.
+// While it runs, the same poll reads `probeProgress` — the phases that already finished and
+// the one now running — because a minute of an unchanged sheet is indistinguishable from a
+// hung test.
 //
 // The measurement runs the phases `storagebackend.Measure` defines — metadata latency, a
 // large upload and read-back, a small-file batch written, renamed and deleted, overlapping
@@ -501,15 +527,16 @@ func (s *Server) handleStorageConnectionTest(w http.ResponseWriter, r *http.Requ
 	if !ok {
 		return httpx.NotFound("No such storage connection on this account.")
 	}
-	if !s.claimProbe(target.ID) {
-		return httpx.Conflict("A test is already running for this provider.")
-	}
 	runID, err := newProbeRunID()
 	if err != nil {
-		s.releaseProbe(target.ID)
 		return err
 	}
 	result := storageTestView{TestedAt: time.Now().UTC().Format(time.RFC3339), RunID: runID}
+	// The run is claimed before it starts, so the id that was just handed out belongs to
+	// exactly one measurement and a second click is a conflict rather than a second probe.
+	if !s.claimProbe(target.ID, runID, result.TestedAt) {
+		return httpx.Conflict("A test is already running for this provider.")
+	}
 	go s.runStorageTest(target, result)
 	// The start time travels back because it is also the finished result's TestedAt: the
 	// page can name the moment it asked, not the moment it happened to read.
@@ -521,6 +548,11 @@ func (s *Server) handleStorageConnectionTest(w http.ResponseWriter, r *http.Requ
 
 // runStorageTest is the measurement itself. It is started by handleStorageConnectionTest
 // and owns the probe claim until the answer is cached.
+//
+// The phases are reported to the claim as they finish, so a page polling this provider sees
+// each row fill in while the rest is still measuring. That record is dropped when the answer
+// is cached: the row's probe is the answer, and the in-process record only exists to make the
+// wait readable.
 func (s *Server) runStorageTest(target connections.Connection, result storageTestView) {
 	defer s.releaseProbe(target.ID)
 	ctx := context.Background()
@@ -529,25 +561,15 @@ func (s *Server) runStorageTest(target connections.Connection, result storageTes
 	case err != nil:
 		result.Error = err.Error()
 	default:
-		measurement, measureErr := storagebackend.Measure(ctx, &effective)
+		measurement, measureErr := storagebackend.Measure(ctx, &effective, func(progress storagebackend.Progress) {
+			s.recordProbePhase(target.ID, progress)
+		})
 		if measureErr != nil {
 			result.Error = measureErr.Error()
 			break
 		}
 		result.OK = true
-		result.LatencyMS = measurement.Latency.Milliseconds()
-		result.UploadBytes, result.DownloadBytes = measurement.Uploaded, measurement.Downloaded
-		result.UploadBytesPerSecond, result.DownloadBytesPerSecond = measurement.UploadRate, measurement.DownloadRate
-		result.SmallFiles = fileOpsView(measurement.SmallFiles)
-		result.Renames = fileOpsView(measurement.Renames)
-		result.Deletes = fileOpsView(measurement.Deletes)
-		result.Concurrency = &concurrencyTestView{
-			Streams:                 measurement.Concurrency.Streams,
-			BytesPerStream:          measurement.Concurrency.BytesPerStream,
-			BytesPerSecond:          measurement.Concurrency.Rate,
-			PerStreamBytesPerSecond: measurement.Concurrency.Share,
-			Error:                   measurement.Concurrency.Error,
-		}
+		applyMeasurement(&result, measurement)
 		// Publishability is a different question from reachability, so a store that
 		// answered but cannot be admitted is "reachable, not ready" rather than a
 		// failed connection test.
@@ -569,6 +591,25 @@ func (s *Server) runStorageTest(target connections.Connection, result storageTes
 	}
 }
 
+// applyMeasurement copies one measurement's numbers into the view the page reads. The
+// running record and the cached answer both go through it, so a row cannot show one number
+// while in flight and a different one once it is written.
+func applyMeasurement(view *storageTestView, m storagebackend.Measurement) {
+	view.LatencyMS = m.Latency.Milliseconds()
+	view.UploadBytes, view.DownloadBytes = m.Uploaded, m.Downloaded
+	view.UploadBytesPerSecond, view.DownloadBytesPerSecond = m.UploadRate, m.DownloadRate
+	view.SmallFiles = fileOpsView(m.SmallFiles)
+	view.Renames = fileOpsView(m.Renames)
+	view.Deletes = fileOpsView(m.Deletes)
+	view.Concurrency = &concurrencyTestView{
+		Streams:                 m.Concurrency.Streams,
+		BytesPerStream:          m.Concurrency.BytesPerStream,
+		BytesPerSecond:          m.Concurrency.Rate,
+		PerStreamBytesPerSecond: m.Concurrency.Share,
+		Error:                   m.Concurrency.Error,
+	}
+}
+
 func fileOpsView(phase storagebackend.FileOpsPhase) *fileOpsTestView {
 	return &fileOpsTestView{
 		Files:        phase.Files,
@@ -579,32 +620,82 @@ func fileOpsView(phase storagebackend.FileOpsPhase) *fileOpsTestView {
 	}
 }
 
+// probeRun is one measurement this process is running: the run's identity, the numbers its
+// finished phases produced, the phase it is on, and the phases already done.
+//
+// It is in memory for the same reason the claim is: the transfers it describes die with the
+// process, and the answer that outlives them is written to the row when the run finishes.
+// Persisting it would put a second, disagreeing copy of a disposable measurement in the
+// database.
+type probeRun struct {
+	view  storageTestView
+	phase string
+	done  []string
+}
+
 // claimProbe marks a measurement as running for one provider. It lives in this process,
 // like the backup runner: a deployment runs one instance, and a probe that outlived its
 // process is meaningless because its transfers are gone.
-func (s *Server) claimProbe(id string) bool {
+func (s *Server) claimProbe(id, runID, testedAt string) bool {
 	s.probeMu.Lock()
 	defer s.probeMu.Unlock()
-	if s.probeJobs == nil {
-		s.probeJobs = map[string]bool{}
+	if s.probeRuns == nil {
+		s.probeRuns = map[string]*probeRun{}
 	}
-	if s.probeJobs[id] {
+	if _, running := s.probeRuns[id]; running {
 		return false
 	}
-	s.probeJobs[id] = true
+	s.probeRuns[id] = &probeRun{view: storageTestView{RunID: runID, TestedAt: testedAt}}
 	return true
+}
+
+// recordProbePhase moves one provider's running record forward. A finished phase contributes
+// its numbers; a starting phase contributes only which row the page should be spinning, so a
+// row never prints a number before the phase that produced it has completed.
+func (s *Server) recordProbePhase(id string, progress storagebackend.Progress) {
+	s.probeMu.Lock()
+	defer s.probeMu.Unlock()
+	run, running := s.probeRuns[id]
+	if !running {
+		return
+	}
+	if !progress.Done {
+		run.phase = string(progress.Phase)
+		return
+	}
+	run.phase = ""
+	applyMeasurement(&run.view, progress.Measurement)
+	run.done = append(run.done, string(progress.Phase))
+}
+
+// probeProgress is the measurement this process is running for one provider, or nil. The
+// copy is taken under the lock; the phase views it points at are replaced, never mutated, so
+// the page can marshal it after the lock is released.
+func (s *Server) probeProgress(id string) *probeProgressView {
+	s.probeMu.Lock()
+	defer s.probeMu.Unlock()
+	run, running := s.probeRuns[id]
+	if !running {
+		return nil
+	}
+	return &probeProgressView{
+		storageTestView: run.view,
+		Phase:           run.phase,
+		Done:            append([]string{}, run.done...),
+	}
 }
 
 func (s *Server) releaseProbe(id string) {
 	s.probeMu.Lock()
-	delete(s.probeJobs, id)
+	delete(s.probeRuns, id)
 	s.probeMu.Unlock()
 }
 
 func (s *Server) probeRunning(id string) bool {
 	s.probeMu.Lock()
 	defer s.probeMu.Unlock()
-	return s.probeJobs[id]
+	_, running := s.probeRuns[id]
+	return running
 }
 
 // newProbeRunID names one measurement so a page can wait for exactly the answer it asked

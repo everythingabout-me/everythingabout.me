@@ -583,6 +583,36 @@
   color: var(--danger);
 }
 
+/*
+ * The slot a number will occupy while its phase is measuring. It holds the value's height,
+ * so a row does not shift when the spinner is replaced by the number it was standing in for.
+ */
+.metricBusy {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  min-height: 1.35em;
+}
+
+/* A phase boundary is seconds to minutes away, so the mark has to read as "working", not as
+   a number that happens to be missing. */
+.spinner {
+  display: inline-block;
+  flex: none;
+  width: 12px;
+  height: 12px;
+  border: 1.5px solid var(--border-strong);
+  border-top-color: var(--blue);
+  border-radius: 50%;
+  animation: probe-spin 720ms linear infinite;
+}
+
+@keyframes probe-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
 /* The one thing that may sit under a row: the phase's own failure, not a footnote. */
 .metricError {
   grid-column: 1 / -1;
@@ -652,5 +682,12 @@
 
   .cardMeta {
     text-align: left;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  /* The ring still marks the row that is measuring; it just does not rotate. */
+  .spinner {
+    animation: none;
   }
 }

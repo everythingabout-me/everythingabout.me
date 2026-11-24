@@ -66,7 +66,7 @@ func (b *probeFixtureBackend) CopyObject(_ context.Context, in objectmutation.Co
 func TestMeasureReportsEveryPhaseAndCleansUp(t *testing.T) {
 	fixture := newProbeFixtureBackend(false)
 	recorder := &recordingBackend{Backend: fixture}
-	measurement, err := measureBackend(context.Background(), "nas", "https://nas.invalid", "backups", recorder)
+	measurement, err := measureBackend(context.Background(), "nas", "https://nas.invalid", "backups", recorder, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -129,9 +129,47 @@ func TestMeasureReportsEveryPhaseAndCleansUp(t *testing.T) {
 	}
 }
 
+// The page fills one row per phase, so the boundaries must arrive in the order the rows
+// are printed, each phase once as started and once as finished, and the finished event
+// must already carry that phase's numbers. An event stream that lagged or repeated would
+// make a row spin under a value it already has.
+func TestMeasureReportsPhaseBoundariesInOrder(t *testing.T) {
+	fixture := newProbeFixtureBackend(false)
+	var events []Progress
+	measurement, err := measureBackend(context.Background(), "nas", "https://nas.invalid", "backups", fixture, func(p Progress) {
+		events = append(events, p)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []Phase{PhaseLatency, PhaseUpload, PhaseDownload, PhaseSmallFiles, PhaseRenames, PhaseDeletes, PhaseConcurrency}
+	if len(events) != 2*len(want) {
+		t.Fatalf("got %d phase events, want %d (a start and a finish for each of %d phases)", len(events), 2*len(want), len(want))
+	}
+	for i, phase := range want {
+		if start := events[2*i]; start.Phase != phase || start.Done {
+			t.Fatalf("event %d = {%s done=%v}, want %s starting", 2*i, start.Phase, start.Done, phase)
+		}
+		if done := events[2*i+1]; done.Phase != phase || !done.Done {
+			t.Fatalf("event %d = {%s done=%v}, want %s finished", 2*i+1, done.Phase, done.Done, phase)
+		}
+	}
+	// The finished event is what the page prints, so at that moment the measurement must
+	// already hold what the phase measured rather than the zero value it started with.
+	if latencyDone := events[1].Measurement; latencyDone.Uploaded != 0 || latencyDone.Latency <= 0 {
+		t.Fatalf("latency finished event carries upload=%d latency=%s, want no upload yet and a measured latency", latencyDone.Uploaded, latencyDone.Latency)
+	}
+	if uploadDone := events[3].Measurement; uploadDone.Uploaded != measureBytes {
+		t.Fatalf("upload finished event carries %d bytes, want %d", uploadDone.Uploaded, measureBytes)
+	}
+	if last := events[len(events)-1].Measurement; last != measurement {
+		t.Fatalf("last event = %+v, want the returned measurement %+v", last, measurement)
+	}
+}
+
 func TestMeasureReportsAnUnreachableProvider(t *testing.T) {
 	fixture := newProbeFixtureBackend(false)
-	_, err := measureBackend(context.Background(), "nas", "https://nas.invalid", "backups", &unreachableBackend{Backend: fixture})
+	_, err := measureBackend(context.Background(), "nas", "https://nas.invalid", "backups", &unreachableBackend{Backend: fixture}, nil)
 	if err == nil {
 		t.Fatal("a provider that cannot be reached must fail the measurement")
 	}

@@ -6,6 +6,7 @@ import {
   type FileOpsTest,
   type StorageConnection,
   type StorageConnectionDetail,
+  type StorageTestProgress,
   type StorageTestResult,
 } from "../api/client";
 import { formatBytes, formatSpeed } from "../pages/sizeFormat";
@@ -156,15 +157,24 @@ function backupLine(last?: BackupRun | null): string {
  * glance; the work behind each row is fixed, so no row needs a footnote to say what it
  * measured. A phase that failed keeps its row and replaces the number with its error, so a
  * provider that is fast at one thing and broken at another says both.
+ *
+ * A run in flight prints the same sheet from its progress: the phase now measuring shows a
+ * spinner where its number will go, and each finished phase fills its own row. Replacing the
+ * whole sheet at the end instead is what makes a minute of work look like a page that did
+ * not notice the click. The rows are also the only progress marker: a second spinner beside
+ * the heading would repeat what the row already says, and the disabled button already names
+ * the run.
  */
 export function ProbeSection({
   probe,
+  progress,
   testing,
   error,
   local,
   onTest,
 }: {
   probe?: StorageTestResult | null;
+  progress?: StorageTestProgress | null;
   testing: boolean;
   error: string;
   /** A local root is a host path: it has no credential and no round trip to measure. */
@@ -172,6 +182,11 @@ export function ProbeSection({
   onTest: () => void;
 }) {
   const status = probeStatus(probe);
+  // The sheet starts before the first poll returns: the run exists from the moment the POST
+  // was answered, and a second of nothing is the same "did anything happen" this display
+  // exists to remove. Every run starts with the latency phase.
+  const live: StorageTestProgress | null = testing ? (progress ?? pendingProbe()) : null;
+  const sheet: StorageTestResult | null = live ?? (probe?.ok ? probe : null);
   return (
     <section className={styles.section}>
       <div className={styles.sectionHead}>
@@ -187,31 +202,43 @@ export function ProbeSection({
 
       {local ? <p className={styles.muted}>{t("probe.local")}</p> : null}
 
-      {local ? null : testing && !probe ? <p className={styles.muted}>{t("drives.testing")}</p> : null}
-
-      {local || probe || testing ? null : (
+      {local || testing ? null : probe ? (
+        <div className={styles.probeStatus}>
+          <span className={`${styles.chip} ${styles.chipPlate}`} data-tone={status.tone}>
+            <span className={styles.dot} />
+            <span className={styles.chipLabel}>{status.label}</span>
+          </span>
+          <span className={styles.probeWhen}>{t("drives.testedAt", { when: testedAgo(probe.testedAt) })}</span>
+        </div>
+      ) : (
         <div className={styles.emptyProbe}>
           <p className={styles.emptyTitle}>{t("probe.untested")}</p>
         </div>
       )}
 
-      {local ? null : probe ? (
-        <>
-          <div className={styles.probeStatus}>
-            <span className={`${styles.chip} ${styles.chipPlate}`} data-tone={status.tone}>
-              <span className={styles.dot} />
-              <span className={styles.chipLabel}>{status.label}</span>
-            </span>
-            <span className={styles.probeWhen}>{t("drives.testedAt", { when: testedAgo(probe.testedAt) })}</span>
-          </div>
-          {probe.error ? <p className={styles.error}>{probe.error}</p> : null}
-          {probe.ok ? <Measurements probe={probe} /> : null}
-        </>
-      ) : null}
+      {!local && !testing && probe?.error ? <p className={styles.error}>{probe.error}</p> : null}
+
+      {sheet ? <Measurements probe={sheet} progress={live ?? undefined} /> : null}
 
       {!local && error ? <p className={styles.error}>{error}</p> : null}
     </section>
   );
+}
+
+// The rows a run prints before the server has reported its first phase.
+function pendingProbe(): StorageTestProgress {
+  return {
+    testedAt: "",
+    phase: "latency",
+    done: [],
+    ok: false,
+    writable: false,
+    latencyMs: 0,
+    uploadBytes: 0,
+    downloadBytes: 0,
+    uploadBytesPerSecond: 0,
+    downloadBytesPerSecond: 0,
+  };
 }
 
 /** One printed row: the label on the left, the number flush right, and only an error below. */
@@ -222,7 +249,12 @@ interface MetricRow {
   error?: string;
 }
 
-function Measurements({ probe }: { probe: StorageTestResult }) {
+/**
+ * One list of rows whether the run is finished or still going. A row prints its number once
+ * its phase is in `done`, and the phase in `phase` prints a spinner in the same slot. A row
+ * that has not run stays empty rather than showing "—", which would read as a measured zero.
+ */
+function Measurements({ probe, progress }: { probe: StorageTestResult; progress?: StorageTestProgress }) {
   const rows: MetricRow[] = [
     { key: "latency", label: t("probe.latency"), value: formatMS(probe.latencyMs) },
     { key: "upload", label: t("probe.upload"), value: formatSpeed(probe.uploadBytesPerSecond) },
@@ -237,17 +269,28 @@ function Measurements({ probe }: { probe: StorageTestResult }) {
       error: probe.concurrency?.error,
     },
   ];
+  const finished = progress ? new Set(progress.done) : null;
   return (
-    <div className={styles.metrics}>
-      {rows.map((row) => (
-        <div key={row.key} className={styles.metric}>
-          <span className={styles.metricLabel}>{row.label}</span>
-          <span className={row.error ? `${styles.metricValue} ${styles.metricValueFailed}` : styles.metricValue}>
-            {row.value}
-          </span>
-          {row.error ? <span className={styles.metricError}>{row.error}</span> : null}
-        </div>
-      ))}
+    <div className={styles.metrics} aria-busy={progress ? true : undefined}>
+      {rows.map((row) => {
+        const running = progress?.phase === row.key;
+        const done = finished === null || finished.has(row.key);
+        return (
+          <div key={row.key} className={styles.metric}>
+            <span className={styles.metricLabel}>{row.label}</span>
+            {running ? (
+              <span className={`${styles.metricValue} ${styles.metricBusy}`}>
+                <span className={styles.spinner} aria-hidden="true" />
+              </span>
+            ) : (
+              <span className={row.error ? `${styles.metricValue} ${styles.metricValueFailed}` : styles.metricValue}>
+                {done ? row.value : ""}
+              </span>
+            )}
+            {done && row.error ? <span className={styles.metricError}>{row.error}</span> : null}
+          </div>
+        );
+      })}
     </div>
   );
 }

@@ -20,7 +20,9 @@ export function StorageProviderSettings() {
   const connection = data.connection;
   const authority = connection.role === "authority";
   // The measurement runs off the request, so the page waits for the run it started and
-  // then revalidates until that run's answer is cached on the connection.
+  // then revalidates until that run's answer is cached on the connection. The poll also
+  // carries the run's progress, which is why it is fast enough to watch: a row appears
+  // about as soon as its phase finishes, not when the whole test does.
   const [runId, setRunId] = useState<string | null>(null);
   const startedAt = useRef(0);
   const polls = useRef(0);
@@ -57,7 +59,7 @@ export function StorageProviderSettings() {
     const poll = setInterval(() => {
       polls.current += 1;
       revalidator.revalidate();
-    }, 2000);
+    }, 1000);
     return () => clearInterval(poll);
   }, [testing, runId, connection.probe?.runId, connection.probeRunning, revalidator]);
 
@@ -116,6 +118,7 @@ export function StorageProviderSettings() {
 
       <ProbeSection
         probe={connection.probe}
+        progress={connection.probeProgress}
         testing={testing}
         error={testError}
         local={connection.backend === "local"}
