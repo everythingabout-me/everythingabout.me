@@ -58,6 +58,22 @@ func TestKnownProductFacts(t *testing.T) {
 	}
 }
 
+// Class A needs a driver that can sign both a conditional PUT and a read. Only COS can in
+// this build, so the S3-family rows must say relay; a row that claims A without a signer
+// fails at the first upload, after the session has already opened.
+func TestOnlyTheSigningDriverServesClassA(t *testing.T) {
+	for _, id := range IDs() {
+		profile, err := Lookup(id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		wantClassA := profile.Backend == "cos"
+		if wantClassA != (profile.TransferClass == storage.TransferPresignedParts) {
+			t.Errorf("%s (driver %s) has class %q; a product is class A only when its driver can sign", id, profile.Backend, profile.TransferClass)
+		}
+	}
+}
+
 func TestLookupNamesTheAlternatives(t *testing.T) {
 	_, err := Lookup("s3")
 	if err == nil {

@@ -35,19 +35,22 @@ type OwnerStorageFactory interface {
 }
 
 type Server struct {
-	trees        OwnerStorageFactory
-	conns        connections.Store
-	backupMu     sync.Mutex
-	backupJobs   map[string]bool
-	probeMu      sync.Mutex
-	probeRuns    map[string]*probeRun
-	filesAuth    FilesAuthenticator
-	filesIndex   FileReadIndex
-	mediaCache   mediameta.Cache
-	filesJournal *fileops.Postgres
-	uploadSpools fileUploadSpoolFactory
-	fileWorkerMu sync.Mutex
-	fileWorkers  *fileWorkers
+	trees      OwnerStorageFactory
+	conns      connections.Store
+	backupMu   sync.Mutex
+	backupJobs map[string]bool
+	probeMu    sync.Mutex
+	probeRuns  map[string]*probeRun
+	// browserProbes are the runs this process signed for a browser to measure itself.
+	browserProbeMu sync.Mutex
+	browserProbes  map[string]browserProbeClaim
+	filesAuth      FilesAuthenticator
+	filesIndex     FileReadIndex
+	mediaCache     mediameta.Cache
+	filesJournal   *fileops.Postgres
+	uploadSpools   fileUploadSpoolFactory
+	fileWorkerMu   sync.Mutex
+	fileWorkers    *fileWorkers
 	// background tracks the goroutines the Start* methods launch, so WaitBackground
 	// can prove they have stopped before the caller closes the pool they use.
 	background sync.WaitGroup
@@ -200,6 +203,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("DELETE /api/storage/connections/{id}", s.wrap(s.handleStorageConnectionRemove))
 	mux.HandleFunc("PATCH /api/storage/connections/{id}", s.wrap(s.handleStorageConnectionSettings))
 	mux.HandleFunc("POST /api/storage/connections/{id}/test", s.wrap(s.handleStorageConnectionTest))
+	mux.HandleFunc("POST /api/storage/connections/{id}/browser-probe", s.wrap(s.handleStorageBrowserProbeStart))
+	mux.HandleFunc("DELETE /api/storage/connections/{id}/browser-probe/{runId}", s.wrap(s.handleStorageBrowserProbeDelete))
 	mux.HandleFunc("PUT /api/storage/backup-target", s.wrap(s.handleStorageBackupTarget))
 	mux.HandleFunc("POST /api/storage/backup", s.wrap(s.handleBackupStart))
 

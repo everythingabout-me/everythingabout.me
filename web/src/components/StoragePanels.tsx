@@ -1,8 +1,10 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Link, useRevalidator } from "react-router";
 import {
   api,
+  ApiError,
   type BackupRun,
+  type BrowserProbeGrant,
   type FileOpsTest,
   type StorageConnection,
   type StorageConnectionDetail,
@@ -351,6 +353,235 @@ function testedAgo(iso: string): string {
   const hours = Math.round(minutes / 60);
   if (hours < 24) return t("drives.testedHours", { hours });
   return t("drives.testedDays", { days: Math.round(hours / 24) });
+}
+
+/**
+ * The measurement from this browser.
+ *
+ * The panel above measures the server's path — the one a backup and the index take. An
+ * upload from the page takes a different one: the browser writes straight to the store over
+ * its own network, so the number a person feels is the one taken from where they sit. Two
+ * vantage points are two sheets, not two rows on one sheet, and the copy says which is which.
+ *
+ * Nothing here is kept. The grant names one disposable object and the object is deleted in
+ * the finally, because a client's speed is a fact about a network at a moment, not a
+ * property of the provider worth caching.
+ */
+export function BrowserProbeSection({ connectionId }: { connectionId: string }) {
+  const [running, setRunning] = useState(false);
+  const [elapsed, setElapsed] = useState(0);
+  const startedAt = useRef(0);
+  // A phase rather than a percentage: each half is one request, so the honest progress is
+  // which half is running and how long it has been. A 100 MB upload on a home uplink takes
+  // long enough that a bare spinner would not say what is happening.
+  const [phase, setPhase] = useState<"upload" | "download" | null>(null);
+  const [bytes, setBytes] = useState(0);
+  /** What the store actually accepted, which is what "sent" may claim. */
+  const [sent, setSent] = useState(0);
+  const [latencyMS, setLatencyMS] = useState<number | null>(null);
+  const [uploadBps, setUploadBps] = useState(0);
+  const [downloadBps, setDownloadBps] = useState(0);
+  // A relayed connection is not a failure: its bytes go through this service, so there is no
+  // provider URL to hand a browser and the server-side measurement is the path. The 409's
+  // message is a full sentence written for the person, so it reads as the explanation it is
+  // instead of as a red line under the button.
+  const [explanation, setExplanation] = useState("");
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    if (!running) return;
+    const timer = setInterval(() => setElapsed(Math.round((Date.now() - startedAt.current) / 1000)), 500);
+    return () => clearInterval(timer);
+  }, [running]);
+
+  /**
+   * The store answered without the object. The status is the whole message: the body is the
+   * provider's XML about its own internals, which is neither actionable here nor ours to
+   * print.
+   */
+  function refusal(response: Response): string {
+    return t("probe.browserRefused", { status: response.status });
+  }
+
+  async function measure(grant: BrowserProbeGrant) {
+    // One allocation for the whole body. Writing it in chunks would measure this loop, and
+    // allocating per chunk would measure the garbage collector; a 100 MB buffer that throws
+    // says so in the error line, which is the only useful thing left to report.
+    const body = new Uint8Array(grant.bytes);
+
+    // Every signed header but Content-Length: fetch derives it from the body and refuses a
+    // caller-set value. The rest — the content type and the "only if absent" condition — are
+    // the grant's terms, so dropping one would change what is being measured.
+    const headers: Record<string, string> = {};
+    for (const [name, value] of Object.entries(grant.upload.headers)) {
+      if (name.toLowerCase() === "content-length") continue;
+      headers[name] = value;
+    }
+
+    setPhase("upload");
+    const uploadStart = performance.now();
+    const uploaded = await fetch(grant.upload.url, {
+      method: grant.upload.method,
+      headers,
+      body,
+      // A cross-origin transfer carries no cookie, and nothing about this run may be answered
+      // from a cache.
+      credentials: "omit",
+      cache: "no-store",
+    });
+    const uploadMS = performance.now() - uploadStart;
+    if (!uploaded.ok) throw new Error(refusal(uploaded));
+    setSent(grant.bytes);
+    setUploadBps(rate(grant.bytes, uploadMS));
+
+    setPhase("download");
+    const downloadStart = performance.now();
+    const downloaded = await fetch(grant.download.url, {
+      headers: grant.download.headers,
+      credentials: "omit",
+      cache: "no-store",
+    });
+    // The response resolves once the first byte and the headers are here: that wait is the
+    // round trip a person feels before a file starts moving.
+    const firstByteMS = performance.now() - downloadStart;
+    if (!downloaded.ok) throw new Error(refusal(downloaded));
+    setLatencyMS(firstByteMS);
+    const reader = downloaded.body!.getReader();
+    const bodyStart = performance.now();
+    let received = 0;
+    for (;;) {
+      const chunk = await reader.read();
+      if (chunk.done) break;
+      received += chunk.value.byteLength;
+    }
+    setDownloadBps(rate(received, performance.now() - bodyStart));
+  }
+
+  async function run() {
+    startedAt.current = Date.now();
+    setElapsed(0);
+    setRunning(true);
+    setExplanation("");
+    setError("");
+    setPhase(null);
+    setBytes(0);
+    setSent(0);
+    setLatencyMS(null);
+    setUploadBps(0);
+    setDownloadBps(0);
+    try {
+      let grant: BrowserProbeGrant;
+      try {
+        grant = await api.startBrowserProbe(connectionId);
+      } catch (e) {
+        if (e instanceof ApiError && e.status === 409) {
+          setExplanation(e.message);
+          return;
+        }
+        throw e;
+      }
+      setBytes(grant.bytes);
+      try {
+        await measure(grant);
+      } finally {
+        // The object is disposable and the run is over either way. Cleanup failing says
+        // nothing about the numbers already taken, so it must not replace them.
+        try {
+          await api.deleteBrowserProbe(connectionId, grant.runId);
+        } catch {
+          /* a leaked probe object is a few minutes of one key, not a failed measurement */
+        }
+      }
+    } catch (e) {
+      // A cross-origin request that the store never answers never gets a status: the browser
+      // reports a network error, which is what a missing CORS rule looks like from here. The
+      // server-side measurement above distinguishes the two cases — it has already said
+      // whether the store is reachable.
+      if (e instanceof TypeError) {
+        setError(`${e.message} ${t("probe.browserNetwork")}`);
+      } else {
+        setError(e instanceof Error ? e.message : String(e));
+      }
+    } finally {
+      setPhase(null);
+      setRunning(false);
+    }
+  }
+
+  const rows = [
+    {
+      key: "latency",
+      label: t("probe.browserLatency"),
+      value: latencyMS === null ? "" : formatMS(latencyMS),
+      busy: phase === "download" && latencyMS === null,
+    },
+    {
+      key: "upload",
+      label: t("probe.browserUpload"),
+      value: uploadBps > 0 ? formatSpeed(uploadBps) : "",
+      busy: phase === "upload",
+    },
+    {
+      key: "download",
+      label: t("probe.browserDownload"),
+      value: downloadBps > 0 ? formatSpeed(downloadBps) : "",
+      busy: phase === "download",
+    },
+  ];
+
+  return (
+    <section className={styles.section}>
+      <div className={styles.sectionHead}>
+        <div className={styles.sectionHeadText}>
+          <h2 className={styles.title}>{t("probe.browserTitle")}</h2>
+          <p className={styles.lead}>{t("probe.browserLead")}</p>
+        </div>
+        <button className={styles.button} disabled={running} aria-busy={running} onClick={() => void run()}>
+          {running ? t("probe.browserRunning", { seconds: elapsed }) : t("probe.browserRun")}
+        </button>
+      </div>
+
+      {explanation ? <p className={styles.lead}>{explanation}</p> : null}
+      {error ? (
+        <p className={styles.error}>
+          {t("probe.browserFailed")} {error}
+        </p>
+      ) : null}
+
+      {bytes > 0 ? (
+        <div className={styles.metrics} aria-busy={running ? true : undefined}>
+          {rows.map((row) => (
+            <div key={row.key} className={styles.metric}>
+              <span className={styles.metricLabel}>{row.label}</span>
+              {row.busy ? (
+                <span className={`${styles.metricValue} ${styles.metricBusy}`}>
+                  <span className={styles.spinner} aria-hidden="true" />
+                </span>
+              ) : (
+                <span className={styles.metricValue}>{row.value}</span>
+              )}
+            </div>
+          ))}
+        </div>
+      ) : null}
+
+      {running && phase ? (
+        <p className={styles.muted}>
+          {phase === "upload"
+            ? t("probe.browserUploading", { size: formatBytes(bytes) })
+            : t("probe.browserDownloading")}
+        </p>
+      ) : null}
+
+      {sent > 0 ? <p className={styles.hint}>{t("probe.browserSent", { size: formatBytes(sent) })}</p> : null}
+      <p className={styles.muted}>{t("probe.browserNotSaved")}</p>
+    </section>
+  );
+}
+
+/** Bytes per second over one transfer, tolerant of a clock that did not advance. */
+function rate(bytes: number, milliseconds: number): number {
+  return milliseconds > 0 ? bytes / (milliseconds / 1000) : 0;
 }
 
 export function AddProvider({ onAdded, onCancel }: { onAdded: () => void; onCancel: () => void }) {

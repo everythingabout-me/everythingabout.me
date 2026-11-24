@@ -430,10 +430,10 @@ func TestBindingForMatchesTheServingBinding(t *testing.T) {
 func TestApplyResolvesTheClassFromTheProduct(t *testing.T) {
 	base := config.Config{}
 	row := Connection{
-		ID: "0f0e9d5a-3f2b-4b1a-9f8e-2d7c6a5b4c3d", Name: "nas", Backend: "s3", Role: RoleBackup,
+		ID: "0f0e9d5a-3f2b-4b1a-9f8e-2d7c6a5b4c3d", Name: "authority", Backend: "cos", Role: RoleAuthority,
 		Enabled: true, Generation: 1,
-		Config: Spec{Product: "rustfs", S3: S3Spec{Endpoint: "https://nas.invalid", Region: "us-east-1", Bucket: "b", ContentPrefix: "drive/", SystemPrefix: "__eam_system__/"}},
-		Secret: Secret{S3: S3Credential{AccessKeyID: "id", SecretAccessKey: "key"}},
+		Config: Spec{Product: "cos", COS: COSSpec{Bucket: "bucket-125", Region: "ap-beijing"}},
+		Secret: Secret{COS: COSCredential{SecretID: "id", SecretKey: "key"}},
 	}
 	applied, err := row.Apply(base)
 	if err != nil {
@@ -442,11 +442,27 @@ func TestApplyResolvesTheClassFromTheProduct(t *testing.T) {
 	if applied.Storage.TransferClass != storage.TransferPresignedParts {
 		t.Fatalf("class = %q, want the product's direct class", applied.Storage.TransferClass)
 	}
+
+	// The S3-family driver has no signer, so its products relay; the row has to say the same
+	// thing the product does rather than claim a direct path nothing can sign.
+	relayed := Connection{
+		ID: "11111111-1111-4111-8111-111111111111", Name: "nas", Backend: "s3", Role: RoleBackup,
+		Enabled: true, Generation: 1,
+		Config: Spec{Product: "rustfs", S3: S3Spec{Endpoint: "https://nas.invalid", Region: "us-east-1", Bucket: "b", ContentPrefix: "drive/", SystemPrefix: "__eam_system__/"}},
+		Secret: Secret{S3: S3Credential{AccessKeyID: "id", SecretAccessKey: "key"}},
+	}
+	appliedRelay, err := relayed.Apply(base)
+	if err != nil {
+		t.Fatalf("apply rustfs: %v", err)
+	}
+	if appliedRelay.Storage.TransferClass != storage.TransferRelay {
+		t.Fatalf("rustfs class = %q, want relay until the S3 driver can sign", appliedRelay.Storage.TransferClass)
+	}
 	if !applied.Storage.CoordinatedWrites {
 		t.Fatal("an object product was not set up to stage its publications")
 	}
 
-	legacy := row
+	legacy := relayed
 	legacy.Config.Product = ""
 	if _, err := legacy.Apply(base); err == nil {
 		t.Fatal("an S3 row with no product was resolved to something")

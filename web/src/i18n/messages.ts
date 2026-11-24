@@ -127,6 +127,23 @@ const en = {
   "probe.perSecond": "{value}/s",
   "probe.stalled": "The test did not report back. Run it again.",
 
+  "probe.browserTitle": "Measured from this browser",
+  "probe.browserLead":
+    "The test above runs on the server, along the path a backup takes; this one runs in this browser, along the path an upload actually takes — one large object written to the store and read back over your network.",
+  "probe.browserRun": "Measure from this browser",
+  "probe.browserRunning": "Measuring… {seconds}s",
+  "probe.browserLatency": "Latency",
+  "probe.browserUpload": "Upload",
+  "probe.browserDownload": "Download",
+  "probe.browserSent": "Sent {size} in one upload.",
+  "probe.browserNotSaved": "This number is not saved: it describes this browser's network, not the provider.",
+  "probe.browserUploading": "Uploading {size} to the store…",
+  "probe.browserDownloading": "Reading it back…",
+  "probe.browserFailed": "The measurement failed.",
+  "probe.browserRefused": "The store answered {status}.",
+  "probe.browserNetwork":
+    "The request never reached the store. If the server measurement above succeeded, the bucket's CORS rule is the first thing to check: it must allow this origin with PUT and GET.",
+
   "common.save": "Save",
   "common.remove": "Remove",
 
@@ -698,6 +715,23 @@ const zh: Record<MessageKey, string> = {
   "probe.concurrency": "并发",
   "probe.perSecond": "{value} 个/秒",
   "probe.stalled": "测速没有返回结果，再跑一次。",
+
+  "probe.browserTitle": "从这台浏览器测量",
+  "probe.browserLead":
+    "上面的测试跑在服务器上，走的是备份那条路；这一项跑在这台浏览器上，走的是上传真正经过的那条路——把一个较大的对象写进存储再读回来，量的是你这边的网络。",
+  "probe.browserRun": "在这台浏览器上测一次",
+  "probe.browserRunning": "测量中… {seconds} 秒",
+  "probe.browserLatency": "延迟",
+  "probe.browserUpload": "上传",
+  "probe.browserDownload": "下载",
+  "probe.browserSent": "这次上传了 {size}。",
+  "probe.browserNotSaved": "这个数字不会被保存：它说明的是这台浏览器的网络，不是存储服务本身。",
+  "probe.browserUploading": "正在往存储里写 {size}…",
+  "probe.browserDownloading": "正在读回来…",
+  "probe.browserFailed": "测量没有完成。",
+  "probe.browserRefused": "存储返回了 {status}。",
+  "probe.browserNetwork":
+    "请求根本没有到存储。如果上面的服务器测速是成功的，先检查桶的 CORS 规则：要放行这个 origin 的 PUT 和 GET。",
 
   "common.save": "保存",
   "common.remove": "删除",

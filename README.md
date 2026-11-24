@@ -477,6 +477,7 @@ Legacy `/api/fs/*` routes and the old root file routes (`/capabilities`, `/list`
 | GET | `/api/storage/connections/{id}` | One provider's page: its newest run, the chosen backup provider, and that provider's own restore points |
 | POST, PATCH, DELETE | `/api/storage/connections` · `/api/storage/connections/{id}` | Attach an account-owned provider, set the backup feature's folder on it, or remove it |
 | POST | `/api/storage/connections/{id}/test` | Start a measurement (`202`) of latency, a 100 MB transfer, small-file write/rename/delete rates, concurrency and publishability; the answer is cached on the row, and the running phases are polled from the provider page as `probeProgress` |
+| POST / DELETE | `/api/storage/connections/{id}/browser-probe[/{runId}]` | Sign one measurement the browser runs itself — the same 100 MB PUT and read-back, straight to the provider — and delete its probe object afterwards. Class A connections only; nothing is cached, because the result describes the browser's network |
 | PUT, POST | `/api/storage/backup-target` · `/api/storage/backup` | Choose the one backup destination, or start a snapshot/restore on a destination |
 | POST | `/api/auth/email/current-code` | Send an email-change code to the **current address** (requires a session, used to confirm identity) |
 | POST | `/api/auth/email/code` | Send an email-change code to the **new address** (requires a session) |

@@ -13,13 +13,14 @@
 
 | Class | Kind | Byte path | Typical backends |
 |---|---|---|---|
-| **A** | `presigned-parts` | Client ↔ object store, through presigned requests | every object product: AWS S3, Tencent COS, MinIO, RustFS |
+| **A** | `presigned-parts` | Client ↔ object store, through presigned requests | a product whose driver can sign: Tencent COS today |
 | **B** | `resumable-session` | Client ↔ cloud drive, through a provider upload session or download link | OneDrive, Google Drive, Dropbox, Box |
 | **C** | `relay` | Client ↔ application ↔ backend | Local filesystem; any backend the client cannot reach directly |
 
 A connection names a **product** (`aws-s3`, `cos`, `minio`, `rustfs`, `local`), and the product fixes its
-class: every object product serves A, and only a local root serves C, because a filesystem on this host has
-no provider a client could reach. Every session and read grant records the class it was opened with.
+class. A product is class A only when its driver can sign the URLs a client needs — in this build that is
+COS alone; the S3-family products relay until `internal/s3storage` grows a presigner, and a local root has no
+provider a client could reach at all. Every session and read grant records the class it was opened with.
 
 This replaced a per-connection configuration because a protocol family is not a capability. "S3-compatible"
 covered stores that refuse `If-None-Match`, stores that ignore `If-Match` on PUT, and one product whose
@@ -399,10 +400,23 @@ Sign a header only when its value is deterministic and the client sends it exact
 ## 11. Deployment
 
 **Class A.** The bucket carries a CORS rule: the exact application origins, `PUT`, `GET` and `HEAD`, the
-client-set headers above, exposed `ETag` and `Content-Range`, and an explicit `MaxAgeSeconds`. `eam doctor`
-checks it. Part and read URLs are the provider's own: there is no edge rewrite and no application hop, so a
-bucket with the wrong CORS rule fails at the browser with an opaque network error — the cost of never
-inventing a relay nobody configured.
+client-set headers above, exposed `ETag` and `Content-Range`, and an explicit `MaxAgeSeconds`. Part and read
+URLs are the provider's own: there is no edge rewrite and no application hop, so a bucket with the wrong CORS
+rule fails at the browser with an opaque network error — the cost of never inventing a relay nobody
+configured. Nothing in this service checks the rule, so the check is a preflight from the deployed origin:
+
+```bash
+curl -sI -X OPTIONS "https://<bucket>.cos.<region>.myqcloud.com/" \
+  -H 'Origin: https://everythingabout.me' \
+  -H 'Access-Control-Request-Method: PUT' \
+  -H 'Access-Control-Request-Headers: content-type,if-none-match,x-cos-forbid-overwrite'
+```
+
+`200` with `Access-Control-Allow-Origin: https://everythingabout.me` means a browser upload will pass; a
+`403` with no such header means every upload from that origin fails before a byte moves. The three requested
+headers are the ones a conditional create binds, so a rule that allows only `content-type` is not enough.
+The storage page's browser measurement is the same check without curl: it is a real signed PUT from the
+browser to the store.
 
 **Class B.** Register the provider application once: Box requires the application origins in its CORS
 allowlist; Google Drive sessions are initiated with the browser's `Origin`; OneDrive and Dropbox need no

@@ -1,7 +1,14 @@
 import { useEffect, useRef, useState } from "react";
 import { Link, useLoaderData, useNavigate, useRevalidator } from "react-router";
 import { api, type StorageConnectionDetail } from "../../api/client";
-import { BackupSection, ProbeSection, ProviderGlyph, providerRoleLabel, storageKindLabel } from "../../components/StoragePanels";
+import {
+  BackupSection,
+  BrowserProbeSection,
+  ProbeSection,
+  ProviderGlyph,
+  providerRoleLabel,
+  storageKindLabel,
+} from "../../components/StoragePanels";
 import { StorageSync } from "../../components/StorageSync";
 import { t } from "../../i18n";
 import panel from "../../components/StoragePanels.module.css";
@@ -124,6 +131,8 @@ export function StorageProviderSettings() {
         local={connection.backend === "local"}
         onTest={() => void test()}
       />
+
+      <BrowserProbeSection connectionId={connection.id} />
 
       {authority ? (
         <section className={panel.section}>

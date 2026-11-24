@@ -482,8 +482,8 @@ Variants: `Committed locally main@abc1234, not pushed` / `Not committed (tests f
   never falls back to another class. A and C are implemented; B is configuration-reserved until a cloud-drive
   driver exists. Class A signs part and read URLs with the configured provider credential, which
   remains server-side. A connection names a **product** (`aws-s3`, `cos`, `minio`, `rustfs`, `local`) in
-  `internal/storageproduct`; the product fixes the class (every object product is class A, a local root
-  relays) and the write guarantees (`ConditionalCreate`, `ConditionalPut`, `AtomicPublish`, `Multipart`,
+  `internal/storageproduct`; the product fixes the class (class A only where the driver can sign — COS
+  today — and relay everywhere else) and the write guarantees (`ConditionalCreate`, `ConditionalPut`, `AtomicPublish`, `Multipart`,
   `FormPost`), each with its reason next to it. There is no "S3-compatible" choice and no per-connection
   capability probe: the product answers those questions, and a probe could not — it measured requests, while
   a product's CVE or missing `If-Match` support is knowledge about the product. Grants are scoped to one upload

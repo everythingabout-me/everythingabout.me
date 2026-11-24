@@ -34,10 +34,11 @@ type Profile struct {
 	// PathStyle is this product's S3 addressing default. A connection may still override
 	// it, because a reverse proxy can move a virtual-host endpoint to a path.
 	PathStyle bool
-	// TransferClass chooses how bytes travel to this product. Every object product is
-	// class A: the client and the provider talk directly and this service only signs, so a
-	// relay through the application is never the default path. Local has no provider to
-	// reach, so it is the one product that relays.
+	// TransferClass chooses how bytes travel to this product. Class A means the client and
+	// the provider talk directly and this service only signs; class C relays through this
+	// service. A product is class A only when the driver can sign a URL for it — COS can
+	// today, and the S3-family driver cannot yet — so the class records what this build can
+	// actually do, never an aspiration.
 	TransferClass string
 	Capabilities
 }
@@ -89,11 +90,24 @@ func (c Capabilities) Validate() error {
 // The products this service supports. The list is deliberately short: every row is a
 // promise this service has to keep, and a promise nobody uses is a place for the table to
 // drift.
+//
+// Only the COS driver can sign class A URLs in this build, so COS is the only product that
+// serves bytes directly; the S3-family rows say relay and their comment says what would
+// change that. Do not mark a product presigned-parts without checking that its driver
+// implements objectmutation.DirectPutBackend and ReadSignerBackend — a connection that
+// advertises class A without them fails at the first upload, after the session opened.
 var (
 	// AWS S3 documents both conditional headers on PutObject, multipart upload with
 	// conditions on Complete, and presigned POST policies whose conditions it enforces.
+	//
+	// It relays rather than signing, and that is a fact about this driver rather than about
+	// AWS: the S3 wire protocol can serve class A, but the driver has no presigner — an
+	// S3 presigned URL cannot carry the conditional header a publication needs, and a URL
+	// this service cannot sign is not a URL it may hand a browser. Bytes relay through the
+	// application until that signer exists, which is one line here and one interface in
+	// internal/s3storage.
 	awsS3 = Profile{
-		ID: "aws-s3", Backend: "s3", TransferClass: storage.TransferPresignedParts,
+		ID: "aws-s3", Backend: "s3", TransferClass: storage.TransferRelay,
 		Capabilities: Caps(true, true, true, true, true),
 	}
 
@@ -107,13 +121,15 @@ var (
 	}
 
 	// MinIO supports conditional writes with both If-Match and If-None-Match on PutObject —
-	// more than AWS itself — and enforces presigned POST policies.
+	// more than AWS itself — and enforces presigned POST policies. It runs the S3 driver,
+	// which has no signer yet, so it relays.
 	minio = Profile{
-		ID: "minio", Backend: "s3", PathStyle: true, TransferClass: storage.TransferPresignedParts,
+		ID: "minio", Backend: "s3", PathStyle: true, TransferClass: storage.TransferRelay,
 		Capabilities: Caps(true, true, true, true, true),
 	}
 
-	// RustFS implements conditional writes (its s3-tests cover both If-Match and
+	// RustFS serves the same driver as AWS S3 above, so it relays for the same reason.
+	// It implements conditional writes (its s3-tests cover both If-Match and
 	// If-None-Match on PutObject; a write with If-None-Match accepts only "*", which is
 	// exactly what a conditional create sends) and standard multipart.
 	//
@@ -128,7 +144,7 @@ var (
 	// service never issues one here. No probe could have found that: the failure is a
 	// condition that is accepted and not enforced, which looks like success.
 	rustfs = Profile{
-		ID: "rustfs", Backend: "s3", PathStyle: true, TransferClass: storage.TransferPresignedParts,
+		ID: "rustfs", Backend: "s3", PathStyle: true, TransferClass: storage.TransferRelay,
 		Capabilities: Caps(true, true, true, true, false),
 	}
 

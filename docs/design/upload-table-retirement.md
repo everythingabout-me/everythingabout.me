@@ -123,8 +123,8 @@ The class A counterpart: the native multipart handle and immutable part identiti
 through `storage.UploadMetadata` (`postgres_upload_native.go:102-127`) by
 `BeginPlannedUpload`/`SignUploadParts`/`ListUploadParts`
 (`objectmutation/uploads_signed.go:46,167,231`), which the server calls from
-`files_presigned_uploads.go:55-140`. Configuration: a class A connection, which every object product
-serves (`internal/storageproduct`).
+`files_presigned_uploads.go:55-140`. Configuration: a class A connection, which needs a driver that can
+sign (`internal/storageproduct`; COS today).
 
 ### `browser_uploads` — PRODUCER-DEAD, CONSUMER-LIVE
 

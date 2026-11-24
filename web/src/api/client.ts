@@ -1711,6 +1711,25 @@ export interface StorageTestStart {
   testedAt: string;
 }
 
+/**
+ * One browser measurement, signed by the server: a conditional PUT of exactly `bytes` on a
+ * disposable object, and a read of it back. The page performs both transfers itself, so the
+ * numbers describe the browser's network — the path an upload actually takes — rather than
+ * the server's.
+ */
+export interface BrowserProbeGrant {
+  runId: string;
+  bytes: number;
+  upload: {
+    url: string;
+    method: string;
+    /** Signed headers. `Content-Length` is in here but fetch sets it from the body. */
+    headers: Record<string, string>;
+    expiresAt: string;
+  };
+  download: { url: string; headers: Record<string, string>; expiresAt: string };
+}
+
 export interface BackupRun {
   connectionId: string;
   connectionName: string;
@@ -1781,6 +1800,23 @@ export const api = {
 
   testStorageConnection(id: string): Promise<StorageTestStart> {
     return post<StorageTestStart>(`/api/storage/connections/${encodeURIComponent(id)}/test`);
+  },
+
+  /**
+   * Opens one measurement from this browser. A 409 here is an explanation, not a failure:
+   * the connection relays through this service (or its driver cannot sign), so there is no
+   * provider URL to hand a browser and the server-side measurement is the path.
+   */
+  startBrowserProbe(id: string): Promise<BrowserProbeGrant> {
+    return post<BrowserProbeGrant>(`/api/storage/connections/${encodeURIComponent(id)}/browser-probe`);
+  },
+
+  /** The probe object is disposable, but only this call removes it from the store. */
+  async deleteBrowserProbe(id: string, runId: string): Promise<{ removed: boolean }> {
+    return request<{ removed: boolean }>(
+      `/api/storage/connections/${encodeURIComponent(id)}/browser-probe/${encodeURIComponent(runId)}`,
+      { method: "DELETE" },
+    );
   },
 
   /** The backup feature's placement on one provider; not a property of the provider. */

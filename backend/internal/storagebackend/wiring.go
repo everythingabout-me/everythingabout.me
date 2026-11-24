@@ -27,6 +27,12 @@ func connectionIdentity(cfg *config.Config) (endpoint, bucket, region string) {
 	return fmt.Sprintf("https://%s.cos.%s.myqcloud.com", bucket, region), bucket, region
 }
 
+// OpenObjectBackend is objectMutationBackend for callers outside this package: the settings
+// surface signs a browser probe against the same provider path the measurement uses.
+func OpenObjectBackend(cfg *config.Config) (objectmutation.Backend, io.Closer, error) {
+	return objectMutationBackend(cfg)
+}
+
 // objectMutationBackend builds the write backend of one object connection. It is used by
 // the speed test, which has to measure the native path a backup uses rather than a
 // separate API — so it deliberately bypasses nothing: the product's capabilities already
