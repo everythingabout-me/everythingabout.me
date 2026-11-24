@@ -3,6 +3,7 @@ import { Link, useRevalidator } from "react-router";
 import {
   api,
   ApiError,
+  files,
   type BackupRun,
   type BrowserProbeGrant,
   type StorageConnection,
@@ -147,15 +148,22 @@ function backupLine(last?: BackupRun | null): string {
 }
 
 /**
- * The speed test. There is one, and this is it: it runs in the browser, over the path an
- * upload takes on this connection, so upload and download are the numbers a person actually
- * feels when they move a file.
+ * The speed test. There is one, and this is it: it runs in the browser, and it measures the
+ * three things a person waits for here rather than one link in isolation.
  *
- * The server decides the leg, not the page. A product that a browser can be signed into gets
- * a conditional PUT and a read on its own URLs; everything else gets this service's own two
+ * The bytes of an upload and a download are the only transfers a product may serve directly,
+ * and even those have a leg on each side. Everything else this page does — a listing, a
+ * search, a rename, a delete — is one round trip to this service, which answers it from the
+ * index or asks the store from the server. So a run starts with exactly one such request (a
+ * listing of the root) and times it: that is the hop every click pays, and a test that skipped
+ * it would report a fast store for a slow app. Then it moves 100 MB up and back down, along
+ * the leg the product gives those bytes.
+ *
+ * The server decides that leg, not the page. A product a browser can be signed into gets a
+ * conditional PUT and a read on its own URLs; everything else gets this service's own two
  * endpoints, which relay the bytes through the same provider calls a real upload makes. The
- * two legs differ in one visible way — a direct leg carries no cookie — and that difference
- * arrives in the grant rather than being guessed here.
+ * difference arrives in the grant (`direct` and `credentials`) rather than being guessed here,
+ * and the panel says which leg the run took once it knows.
  *
  * Nothing here is kept. The run names one disposable object and the object is deleted in the
  * finally, because a client's speed is a fact about a network at a moment, not a property of
@@ -168,15 +176,20 @@ export function SpeedTest({ connectionId }: { connectionId: string }) {
   // A phase rather than a percentage: each half is one request, so the honest progress is
   // which half is running and how long it has been. A 100 MB upload on a home uplink takes
   // long enough that a bare spinner would not say what is happening.
-  const [phase, setPhase] = useState<"upload" | "download" | null>(null);
+  const [phase, setPhase] = useState<"server" | "upload" | "download" | null>(null);
   const [bytes, setBytes] = useState(0);
   /** What the store actually accepted, which is what "sent" may claim. */
   const [sent, setSent] = useState(0);
+  /** The hop every click takes: this browser to this service and back. */
+  const [serverMS, setServerMS] = useState<number | null>(null);
+  /** The store's own first byte, once the bytes have moved. */
   const [latencyMS, setLatencyMS] = useState<number | null>(null);
   const [uploadBps, setUploadBps] = useState(0);
   const [downloadBps, setDownloadBps] = useState(0);
   /** Whether the bytes are going to the provider itself, which changes what a CORS failure means. */
   const [direct, setDirect] = useState(false);
+  /** What leg the last run took, so the panel can name it instead of implying one. */
+  const [legKnown, setLegKnown] = useState(false);
   // A store this service cannot reach as an object store (a local root) has no speed to
   // measure. The 409's message is a full sentence written for the person, so it reads as the
   // explanation it is instead of as a red line under the button.
@@ -261,10 +274,19 @@ export function SpeedTest({ connectionId }: { connectionId: string }) {
     setPhase(null);
     setBytes(0);
     setSent(0);
+    setServerMS(null);
     setLatencyMS(null);
     setUploadBps(0);
     setDownloadBps(0);
+    setLegKnown(false);
     try {
+      // One listing, timed. This is the request every click on this site makes, and it is
+      // answered by this service and its index — not by the store.
+      setPhase("server");
+      const serverStart = performance.now();
+      await files.list({ path: "/" });
+      setServerMS(performance.now() - serverStart);
+
       let grant: BrowserProbeGrant;
       try {
         grant = await api.startBrowserProbe(connectionId);
@@ -277,6 +299,7 @@ export function SpeedTest({ connectionId }: { connectionId: string }) {
       }
       setBytes(grant.bytes);
       setDirect(grant.direct);
+      setLegKnown(true);
       try {
         await measure(grant);
       } finally {
@@ -305,6 +328,12 @@ export function SpeedTest({ connectionId }: { connectionId: string }) {
   }
 
   const rows = [
+    {
+      key: "server",
+      label: t("probe.server"),
+      value: serverMS === null ? "" : formatMS(serverMS),
+      busy: phase === "server",
+    },
     {
       key: "latency",
       label: t("probe.latency"),
@@ -338,13 +367,18 @@ export function SpeedTest({ connectionId }: { connectionId: string }) {
       </div>
 
       {explanation ? <p className={styles.lead}>{explanation}</p> : null}
+      {/* Which leg the bytes took. Without it the panel would leave a reader to assume
+          everything went one way, and on this product the two halves differ. */}
+      {legKnown && !explanation ? (
+        <p className={styles.muted}>{direct ? t("probe.legDirect") : t("probe.legRelay")}</p>
+      ) : null}
       {error ? (
         <p className={styles.error}>
           {t("probe.failed")} {error}
         </p>
       ) : null}
 
-      {bytes > 0 ? (
+      {serverMS !== null || bytes > 0 ? (
         <div className={styles.metrics} aria-busy={running ? true : undefined}>
           {rows.map((row) => (
             <div key={row.key} className={styles.metric}>
@@ -363,7 +397,11 @@ export function SpeedTest({ connectionId }: { connectionId: string }) {
 
       {running && phase ? (
         <p className={styles.muted}>
-          {phase === "upload" ? t("probe.uploading", { size: formatBytes(bytes) }) : t("probe.downloading")}
+          {phase === "server"
+            ? t("probe.serverWaiting")
+            : phase === "upload"
+              ? t("probe.uploading", { size: formatBytes(bytes) })
+              : t("probe.downloading")}
         </p>
       ) : null}
 

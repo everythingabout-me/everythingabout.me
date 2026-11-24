@@ -261,11 +261,13 @@ backup folder is reached through the backup feature's configuration.
 - One snapshot per owner per day is the default. RPO is therefore one day, which matches the stated need:
   this is backup, not sync, and the copy does not have to be reachable immediately.
 - **The speed test measures the provider, independently of any feature.** `POST /api/storage/connections/{id}/browser-probe`
-  hands the page one run: 100 MB written to the store and read back, timed by the browser along the path an
-  upload takes on that product (straight to the provider on a product that can be signed into, through this
-  service on a relay). It is provider-level because that path does not depend on which feature uses the
-  connection, and it is run in the browser because a number taken on the server would describe the host's
-  link instead of the person's. Nothing about publishability is measured: the product row answers that, and a
+  hands the page one run: one directory listing, then 100 MB written to the store and read back, all timed by
+  the browser. The listing is there because only the bytes have a direct leg: every other operation — a
+  listing, a search, a rename, a delete — is one round trip to this service, so a test that timed only the
+  store would report a fast provider for a slow app. The bytes travel the path an upload takes on that product
+  (straight to the provider on a product that can be signed into, through this service on a relay), and the
+  panel names which leg the run took. It is run in the browser because a number taken on the server would
+  describe the host's link instead of the person's. Nothing about publishability is measured: the product row answers that, and a
   store that cannot promise conditional create and atomic publication is refused when it is used, not scored
   here. A run is bounded by those bytes and requests, never by a clock, so a slow link finishes instead of
   being cut off.

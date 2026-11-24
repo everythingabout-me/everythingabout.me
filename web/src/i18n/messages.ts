@@ -103,7 +103,11 @@ const en = {
 
   "probe.title": "Speed",
   "probe.lead":
-    "Measured from this browser, over the path a file takes here: one 100 MB object written to the store and read back. That is the same leg order an upload uses on this product.",
+    "Run from this browser: one directory listing — the hop every click on this site takes — then a 100 MB upload and the same object read back.",
+  "probe.legDirect": "Uploads and downloads go straight from this browser to the store; listings, search, renames and deletes are answered by this service.",
+  "probe.legRelay": "This store has no direct browser path, so uploads and downloads are relayed through this service as well.",
+  "probe.server": "Server response",
+  "probe.serverWaiting": "Timing a directory listing…",
   "probe.local": "This provider is a folder on this host, so bytes are written here and stop: there is no store link to measure.",
   "probe.latency": "Latency",
   "probe.upload": "Upload",
@@ -668,7 +672,11 @@ const zh: Record<MessageKey, string> = {
 
   "probe.title": "速度",
   "probe.lead":
-    "从这台浏览器测，走的是文件在这里真正经过的那条路：把一个 100 MB 的对象写进存储，再读回来。上传用的也是同样的顺序。",
+    "从这台浏览器跑：先一次目录列表——这个站点上每次点击都要走的那一跳——再传一个 100 MB 的文件，然后读回来。",
+  "probe.legDirect": "上传和下载从这台浏览器直接到存储；列表、搜索、改名、删除都由本服务回答。",
+  "probe.legRelay": "这个存储没有浏览器直传，上传和下载也经本服务转发。",
+  "probe.server": "服务响应",
+  "probe.serverWaiting": "正在计一次目录列表的时间…",
   "probe.local": "这个存储服务就是本机上的一个目录，字节写到这里就结束了，没有到存储的那一段可以测。",
   "probe.latency": "延迟",
   "probe.upload": "上传",
