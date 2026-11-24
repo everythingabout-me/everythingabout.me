@@ -5,8 +5,10 @@ import { api } from "../../api/client";
 import { filesText, locale, t } from "../../i18n";
 import { formatSize } from "../../pages/sizeFormat";
 import { DownloadIcon } from "../icons";
+import type { Bytes } from "./bytes";
+import { CompressionError, compressionKind, inflateChain, uncompressedName } from "./compression";
 import { previewPlugins } from "./plugins";
-import { canPreviewFile } from "./supported";
+import { canPreviewFile, isArchiveFile } from "./supported";
 import {
   HttpByteSource,
   MAX_ENTRY_BYTES,
@@ -29,6 +31,10 @@ import styles from "./ZipPreview.module.css";
  *
  * A nested archive is drilled into rather than embedded: embedding would nest a sidebar inside a
  * sidebar, while a breadcrumb keeps one list on screen and makes the way back obvious.
+ *
+ * The two halves are separate components because a ZIP can also *be inside* something: a
+ * compressed `.zip.gz` hands `ZipBrowser` bytes it already inflated in memory, and the browser
+ * neither knows nor cares where they came from.
  */
 
 /** Rows rendered at once. An archive with 50 000 entries stays responsive; the filter is how the
@@ -44,12 +50,61 @@ interface Level {
 
 interface Selection {
   entry: ZipEntry;
+  /** The name the pane previews under: an entry's own name, or the inner name once inflated. */
+  name: string;
   kind: "loading" | "ready" | "failed" | "unsupported" | "large";
   blob?: Blob;
   detail?: string;
 }
 
+/** Fetch the archive behind this path, then browse it. */
 export default function ZipPreview({ path, name }: { path: string; name: string }) {
+  const [source, setSource] = useState<ByteSource | null>(null);
+  const [failure, setFailure] = useState<string | null>(null);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    setSource(null);
+    setFailure(null);
+    void (async () => {
+      try {
+        const grant = await api.downloadGrant(path, "attachment", controller.signal);
+        if (controller.signal.aborted) return;
+        setSource(new HttpByteSource({
+          url: grant.url,
+          headers: grant.headers,
+          // A bearer grant is not cookie-authenticated; a same-origin relay URL is.
+          credentials: grant.kind === "bearer" ? "omit" : "same-origin",
+          size: grant.size,
+          acceptRanges: grant.acceptRanges,
+        }));
+      } catch (error) {
+        if (controller.signal.aborted) return;
+        setFailure(archiveFailure(error));
+      }
+    })();
+    return () => controller.abort();
+  }, [path]);
+
+  if (failure) {
+    return (
+      <div className={styles.archive}>
+        <div className={styles.notice} role="alert">{failure}</div>
+      </div>
+    );
+  }
+  if (!source) {
+    return (
+      <div className={styles.archive}>
+        <div className={styles.notice} role="status">{t("zip.reading")}</div>
+      </div>
+    );
+  }
+  return <ZipBrowser label={name} source={source} />;
+}
+
+/** One archive's contents: the list, the filter, and the selected entry's preview. */
+export function ZipBrowser({ label, source }: { label: string; source: ByteSource }) {
   const [levels, setLevels] = useState<Level[]>([]);
   const [reading, setReading] = useState(true);
   const [archiveError, setArchiveError] = useState<string | null>(null);
@@ -73,18 +128,9 @@ export default function ZipPreview({ path, name }: { path: string; name: string 
     setFilter("");
     void (async () => {
       try {
-        const grant = await api.downloadGrant(path, "attachment", controller.signal);
-        const source = new HttpByteSource({
-          url: grant.url,
-          headers: grant.headers,
-          // A bearer grant is not cookie-authenticated; a same-origin relay URL is.
-          credentials: grant.kind === "bearer" ? "omit" : "same-origin",
-          size: grant.size,
-          acceptRanges: grant.acceptRanges,
-        });
         const directory = await readZipDirectory(source, controller.signal);
         if (controller.signal.aborted) return;
-        setLevels([{ label: name, source, entries: directory.entries }]);
+        setLevels([{ label, source, entries: directory.entries }]);
         setReading(false);
       } catch (error) {
         if (controller.signal.aborted) return;
@@ -93,7 +139,7 @@ export default function ZipPreview({ path, name }: { path: string; name: string 
       }
     })();
     return () => controller.abort();
-  }, [path, name]);
+  }, [source, label]);
 
   const level = levels.length > 0 ? levels[levels.length - 1] : null;
   const files = useMemo(() => (level ? level.entries.filter((entry) => !entry.directory) : []), [level]);
@@ -114,42 +160,33 @@ export default function ZipPreview({ path, name }: { path: string; name: string 
     if (entry.directory || !level) return;
     const signal = abortRef.current?.signal;
     const token = ++requestRef.current;
-    if (isNestedArchive(entry.name)) {
-      setSelection({ entry, kind: "loading" });
-      void (async () => {
-        try {
-          const bytes = await readZipEntry(level.source, entry, signal);
-          const inner = new MemoryByteSource(bytes);
-          const directory = await readZipDirectory(inner, signal);
-          if (token !== requestRef.current) return;
-          setLevels((current) => [...current, { label: baseName(entry.name), source: inner, entries: directory.entries }]);
-          setSelection(null);
-          setFilter("");
-        } catch (error) {
-          if (token !== requestRef.current) return;
-          setSelection({ entry, kind: "failed", detail: entryFailure(error) });
-        }
-      })();
-      return;
-    }
     if (!canPreviewFile(entry.name)) {
-      setSelection({ entry, kind: "unsupported" });
+      setSelection({ entry, name: baseName(entry.name), kind: "unsupported" });
       return;
     }
     if (entry.uncompressedSize > MAX_ENTRY_BYTES) {
-      setSelection({ entry, kind: "large" });
+      setSelection({ entry, name: baseName(entry.name), kind: "large" });
       return;
     }
-    setSelection({ entry, kind: "loading" });
+    setSelection({ entry, name: baseName(entry.name), kind: "loading" });
     void (async () => {
       try {
-        const bytes = await readZipEntry(level.source, entry, signal);
+        const opened = await entryContents(level.source, entry, signal);
         if (token !== requestRef.current) return;
+        if (isArchiveFile(opened.name)) {
+          const inner = new MemoryByteSource(opened.bytes);
+          const directory = await readZipDirectory(inner, signal);
+          if (token !== requestRef.current) return;
+          setLevels((current) => [...current, { label: opened.name, source: inner, entries: directory.entries }]);
+          setSelection(null);
+          setFilter("");
+          return;
+        }
         // No MIME type: the viewer maps the entry's extension, exactly as it does for an upload.
-        setSelection({ entry, kind: "ready", blob: new Blob([bytes]) });
+        setSelection({ entry, name: opened.name, kind: "ready", blob: new Blob([opened.bytes]) });
       } catch (error) {
         if (token !== requestRef.current) return;
-        setSelection({ entry, kind: "failed", detail: entryFailure(error) });
+        setSelection({ entry, name: baseName(entry.name), kind: "failed", detail: entryFailure(error) });
       }
     })();
   }
@@ -165,7 +202,7 @@ export default function ZipPreview({ path, name }: { path: string; name: string 
       anchor.click();
       setTimeout(() => URL.revokeObjectURL(url), 60_000);
     } catch (error) {
-      setSelection({ entry, kind: "failed", detail: entryFailure(error) });
+      setSelection({ entry, name: baseName(entry.name), kind: "failed", detail: entryFailure(error) });
     }
   }
 
@@ -226,7 +263,7 @@ export default function ZipPreview({ path, name }: { path: string; name: string 
                 onClick={() => openEntry(entry)}
               >
                 <span className={styles.rowName}>{entry.name}</span>
-                {isNestedArchive(entry.name) ? <span className={styles.rowHint}>›</span> : null}
+                {opensArchive(entry.name) ? <span className={styles.rowHint}>›</span> : null}
                 <span className={styles.rowSize}>{formatSize(entry.uncompressedSize)}</span>
               </button>
             ))
@@ -237,6 +274,8 @@ export default function ZipPreview({ path, name }: { path: string; name: string 
           {selection ? (
             <>
               <div className={styles.paneHeader}>
+                {/* The row's own name and size: the pane downloads this entry, so it must say
+                    which entry that is — an inflated entry's inner name belongs to the viewer. */}
                 <span className={styles.paneName} title={selection.entry.name}>{selection.entry.name}</span>
                 <span className={styles.paneSize}>{formatSize(selection.entry.uncompressedSize)}</span>
                 <button
@@ -254,7 +293,7 @@ export default function ZipPreview({ path, name }: { path: string; name: string 
                 {selection.kind === "ready" && selection.blob ? (
                   <FileViewer
                     file={selection.blob}
-                    fileName={baseName(selection.entry.name)}
+                    fileName={selection.name}
                     width="100%"
                     height="100%"
                     fit="contain"
@@ -301,9 +340,26 @@ function baseName(name: string): string {
   return name.split("/").pop() || name;
 }
 
-/** Only a ZIP can be read by `zipArchive`; other archive formats stay "unsupported" and download. */
-function isNestedArchive(name: string): boolean {
-  return /\.zip$/i.test(baseName(name));
+/**
+ * One entry's bytes, inflated when the entry is itself compressed, plus the name to render them
+ * under.
+ *
+ * `session.v4.jsonl.zstd` is stored in an archive exactly as it is on the drive: a Zstandard
+ * frame. The viewer would be handed that frame as if it were text, so the layer is removed here —
+ * in memory, with the same bounded chain the standalone preview uses — and `session.v4.jsonl` is
+ * what decides the renderer.
+ */
+async function entryContents(source: ByteSource, entry: ZipEntry, signal?: AbortSignal): Promise<{ name: string; bytes: Bytes }> {
+  const bytes = await readZipEntry(source, entry, signal);
+  const name = baseName(entry.name);
+  if (!compressionKind(name)) return { name, bytes };
+  const inner = await inflateChain(bytes, name, { signal });
+  return { name: baseName(inner.name), bytes: inner.bytes };
+}
+
+/** A row that opens another archive: a ZIP, or a compressed one (`photos.zip.gz`). */
+function opensArchive(name: string): boolean {
+  return isArchiveFile(baseName(name)) || isArchiveFile(baseName(uncompressedName(name)));
 }
 
 function archiveFailure(error: unknown): string {
@@ -323,6 +379,22 @@ function archiveFailure(error: unknown): string {
 }
 
 function entryFailure(error: unknown): string {
+  // An entry that is itself compressed can fail on either layer; the inner one has its own
+  // sentences, so a damaged Zstandard frame does not read as a damaged archive.
+  if (error instanceof CompressionError) {
+    switch (error.kind) {
+      case "too_large":
+        return t("compressed.tooLarge");
+      case "not_compressed":
+        return t("compressed.notCompressed");
+      case "damaged":
+        return t("compressed.damaged");
+      case "unsupported":
+        return t("compressed.unsupported");
+      case "nested":
+        return t("compressed.nested");
+    }
+  }
   if (error instanceof ZipError) {
     switch (error.kind) {
       case "encrypted":

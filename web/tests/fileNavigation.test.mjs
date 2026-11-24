@@ -38,6 +38,15 @@ test("authored HTML permits same-origin data and blob media while blocking remot
   assert.equal(htmlCardPolicy("http://192.168.1.2:8080").includes("img-src http://192.168.1.2:8080 data: blob:"), true);
 });
 
+// A compressed file opens the preview — the viewer chunk loads, inflates the stream and renders
+// what was inside it (compression.ts). The name still decides: a compressible `.bin` is not.
+test("a compression extension opens the preview while the name alone decides", () => {
+  for (const name of ["session.v4.jsonl.zstd", "session.v4.jsonl.zst", "notes.txt.gz", "archive.GZ"]) {
+    assert.equal(canPreviewFile(name), true, name);
+  }
+  assert.equal(canPreviewFile("backup.bin", "application/zstd"), false);
+});
+
 test("navigation decodes accepted names exactly once and preserves native spelling", () => {
   for (const path of ["Photos/a +#?.jpg", "Notes/literal%2F%25.txt", "Cafe\u0301/  name .txt", "健康/步数.json"]) {
     assert.equal(filesRoutePath(filesHref(`/${path}`)), path);

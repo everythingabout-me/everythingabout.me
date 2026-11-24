@@ -4,6 +4,8 @@ import "@open-file-viewer/core/style.css";
 import { acquirePrefetchedPreview, api, isNativeAbsent } from "../../api/client";
 import { locale, t } from "../../i18n";
 import { StorageNotice } from "../StorageNotice";
+import CompressedPreview from "./CompressedPreview";
+import { compressionKind } from "./compression";
 import { previewPlugins } from "./plugins";
 import { isArchiveFile } from "./supported";
 import ZipPreview from "./ZipPreview";
@@ -17,12 +19,24 @@ import styles from "./FilePreview.module.css";
  * before it has a file to hand to a plugin — and, unlike every other format, must not download
  * the whole object to work out what is inside it. The plugin chain is shared, so an entry
  * rendered inside the archive is the same preview as the same file on its own.
+ *
+ * A compressed file (`.gz`, `.zst`) is the one case where the viewer has nothing to show until
+ * something is undone: `CompressedPreview` inflates the stream and previews the file it holds,
+ * under that file's own name. It is not the archive path because there is no listing — the
+ * content *is* the file that was compressed.
  */
 export default function FilePreview({ path, name, mediaType }: { path: string; name: string; mediaType: string | null }) {
   if (isArchiveFile(name)) {
     return (
       <div className={styles.viewer}>
         <ZipPreview path={path} name={name} />
+      </div>
+    );
+  }
+  if (compressionKind(name)) {
+    return (
+      <div className={styles.viewer}>
+        <CompressedPreview path={path} name={name} />
       </div>
     );
   }

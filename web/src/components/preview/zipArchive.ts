@@ -17,6 +17,10 @@
  * uses. Those answer with a typed error the page turns into a sentence.
  */
 
+import type { Bytes } from "./bytes";
+
+export type { Bytes };
+
 /** Largest entry a preview will inflate. Above this a page cannot hold the result, and a
  *  decompression bomb would otherwise be limited only by the archive's declared size. */
 export const MAX_ENTRY_BYTES = 128 * 1000 * 1000;
@@ -57,12 +61,6 @@ export class ZipError extends Error {
     this.kind = kind;
   }
 }
-
-/**
- * Bytes with an ArrayBuffer backing. The default `Uint8Array` type is `ArrayBufferLike`, which a
- * `Blob` refuses — and every array here is built over an ArrayBuffer anyway.
- */
-export type Bytes = Uint8Array<ArrayBuffer>;
 
 /** Bytes of one archive, addressed by offset. `size` is 0 only until `prepare` learns it. */
 export interface ByteSource {

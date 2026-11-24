@@ -13,6 +13,7 @@
   "dependencies": {
     "@open-file-viewer/core": "^1.0.0",
     "@open-file-viewer/react": "^1.0.0",
+    "fzstd": "^0.1.1",
     "libheif-js": "^1.23.5",
     "pdfjs-dist": "^4.10.38",
     "react": "^19.3.1",

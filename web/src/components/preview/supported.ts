@@ -1,9 +1,9 @@
 /**
  * Which extensions are worth previewing.
  *
- * This list must match the renderers enabled in `plugins.ts` (plus the archive reader the ZIP
- * entry is routed to in `FilePreview.tsx`): too many entries make users wait on a 190KB chunk for
- * an empty preview, too few leave viewable files unopenable.
+ * This list must match the renderers enabled in `plugins.ts` (plus the archive reader and the
+ * compression reader `FilePreview.tsx` routes those families to): too many entries make users
+ * wait on a 190KB chunk for an empty preview, too few leave viewable files unopenable.
  *
  * It deliberately does not import `@open-file-viewer/core` — FilesPage checks on every render, so
  * a static reference to the core package would defeat lazy loading. Hence the hand-written list.
@@ -116,6 +116,11 @@ const previewableExtensions: ReadonlySet<string> = new Set([
   "lrc",
   // ZIP (ZipPreview: contents are listed and entries are extracted on demand; see zipArchive)
   "zip",
+  // Compressed single streams (CompressedPreview: the inner file is inflated in the browser and
+  // previewed under its own name, the way an archive entry is; see compression)
+  "gz",
+  "zst",
+  "zstd",
   // Audio and video (videoPlugin / audioPlugin; hls and mpegts load on demand)
   "mp4",
   "m4v",

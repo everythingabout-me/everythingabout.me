@@ -319,6 +319,18 @@ const en = {
   "preview.htmlFailed": "The HTML file could not be read for rendering. Downloading it still works.",
   "preview.heicFailed": "This HEIC image could not be decoded. Downloading the original still works.",
 
+  // A compressed file (`.gz`, `.zst`) previews as the file it holds, so the copy names the reasons
+  // the inner file could not be produced rather than the outer one.
+  "compressed.reading": "Decompressing…",
+  "compressed.size": "{size} decompressed",
+  "compressed.failed": "This compressed file could not be read.",
+  "compressed.notCompressed": "This file does not hold gzip or Zstandard data.",
+  "compressed.damaged": "The compressed data is damaged or truncated.",
+  "compressed.tooLarge": "This file is too large to preview.",
+  "compressed.limit": "Preview stops at {size}; download the file to open it locally.",
+  "compressed.unsupported": "This browser cannot decompress this file.",
+  "compressed.nested": "This file is compressed in more layers than a preview opens.",
+
   "pdf.passwordTitle": "This PDF is password-protected",
   "pdf.passwordText":
     "Enter the password that opens the file. It unlocks this preview only and is not stored anywhere.",
@@ -869,6 +881,16 @@ const zh: Record<MessageKey, string> = {
   "preview.failed": "预览加载失败，可以试试下载这个文件。",
   "preview.htmlFailed": "无法读取这个 HTML 文件用于渲染，可以下载后用浏览器打开。",
   "preview.heicFailed": "这张 HEIC 图片无法解码，可以下载原图。",
+
+  "compressed.reading": "正在解压…",
+  "compressed.size": "解压后 {size}",
+  "compressed.failed": "无法读取这个压缩文件。",
+  "compressed.notCompressed": "这个文件里不是 gzip 或 Zstandard 数据。",
+  "compressed.damaged": "压缩数据已损坏或不完整。",
+  "compressed.tooLarge": "这个文件太大，无法预览。",
+  "compressed.limit": "预览上限为 {size}，可以下载后用本地应用打开。",
+  "compressed.unsupported": "这个浏览器无法解压该文件。",
+  "compressed.nested": "这个文件嵌套压缩的层数超出了预览能打开的范围。",
 
   "pdf.passwordTitle": "这个 PDF 需要密码",
   "pdf.passwordText": "输入打开文件的密码。它只用来解锁这次预览，不会保存到任何地方。",
