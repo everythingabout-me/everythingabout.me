@@ -11,8 +11,6 @@ import (
 )
 
 // UserRow is one row of the users table; password_hash may be null (the password is optional).
-// Username is the account's current handle, joined from usernames (sql/058) — the address
-// a person types, never an identity or a credential, so it is nullable and mutable.
 type UserRow struct {
 	ID             string
 	Email          string
@@ -21,14 +19,12 @@ type UserRow struct {
 	UpdatedAt      string
 	EmailChangedAt *string
 	LastLoginAt    *string
-	Username       *string
 }
 
 // User is the shape exposed to the frontend; it never carries password_hash.
 type User struct {
 	ID             string  `json:"id"`
 	Email          string  `json:"email"`
-	Username       *string `json:"username"`
 	HasPassword    bool    `json:"hasPassword"`
 	CreatedAt      string  `json:"createdAt"`
 	EmailChangedAt *string `json:"emailChangedAt"`
@@ -38,7 +34,6 @@ func ToUser(row *UserRow) *User {
 	return &User{
 		ID:             row.ID,
 		Email:          row.Email,
-		Username:       row.Username,
 		HasPassword:    row.PasswordHash != nil,
 		CreatedAt:      row.CreatedAt,
 		EmailChangedAt: row.EmailChangedAt,
@@ -71,21 +66,15 @@ func userColumns(alias string) string {
 	)
 }
 
-// userSelectFrom is the one read shape of an account: every users column plus the current
-// handle, which lives in its own table because a handle is unique across current AND
-// superseded names (a freed old name must stay reserved while its alias still redirects).
-// Every account read appends its own where/join clause; there is no second spelling of
-// "select an account" that could forget the handle.
-var userSelectFrom = "select " + userColumns("u") + `, n.handle
-	from users u
-	left join usernames n on n.user_id = u.id and n.current`
+// userSelectFrom is the one read shape of an account. Every account read appends its own
+// where clause, so there is no second spelling of "select an account" to keep in step.
+var userSelectFrom = "select " + userColumns("u") + ` from users u`
 
 func scanUserRow(row pgx.Row) (*UserRow, error) {
 	var user UserRow
 	err := row.Scan(
 		&user.ID, &user.Email, &user.PasswordHash,
 		&user.CreatedAt, &user.UpdatedAt, &user.EmailChangedAt, &user.LastLoginAt,
-		&user.Username,
 	)
 	if err != nil {
 		if err == pgx.ErrNoRows {
@@ -120,8 +109,8 @@ func (s *Service) FindUserByID(ctx context.Context, id string) (*UserRow, error)
 		userSelectFrom+` where u.id = $1::uuid limit 1`, id))
 }
 
-// CreateUser inserts and reads the account back in one transaction: RETURNING cannot
-// carry the handle join, and reading through userSelectFrom keeps one select list.
+// CreateUser inserts and reads the account back in one transaction, so the caller always
+// gets the same shape userSelectFrom produces rather than what RETURNING happens to expose.
 func (s *Service) CreateUser(ctx context.Context, email string, passwordHash *string) (*UserRow, error) {
 	tx, err := s.db.Pool().Begin(ctx)
 	if err != nil {

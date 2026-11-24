@@ -2,7 +2,7 @@
 //
 // A web page cannot claim an operating-system URL scheme: only a bundle that declares
 // CFBundleURLTypes can. This helper is that bundle, and it does one thing — turn
-// eam://<handle>/<path> into https://everythingabout.me/<handle>/<path> and hand it to the
+// eam:///files/<path> into https://everythingabout.me/files/<path> and hand it to the
 // default browser. It is a local convenience for this machine, not a service feature: a
 // link sent to someone else opens nothing unless they installed it too.
 import Cocoa
@@ -31,9 +31,10 @@ final class Delegate: NSObject, NSApplicationDelegate {
 
     private func forward(_ url: URL) {
         guard url.scheme?.lowercased() == "eam" else { return }
-        // eam://iloahz/Photos/a.jpg -> https://everythingabout.me/iloahz/Photos/a.jpg
-        // The authority is the handle, exactly as in the web address. A path-only form
-        // (eam:/iloahz/...) is accepted too, because shells and editors both produce it.
+        // eam:///files/Photos/a.jpg -> https://everythingabout.me/files/Photos/a.jpg
+        // The address is the path below /files, exactly as in the web address, so there is
+        // no host part to read. eam:/files/... and eam://files/... are accepted too, because
+        // shells and editors both produce them.
         var rest = url.absoluteString.dropFirst("eam://".count)
         while rest.hasPrefix("/") { rest = rest.dropFirst() }
         guard !rest.isEmpty, let target = URL(string: String(rest), relativeTo: base) else { return }

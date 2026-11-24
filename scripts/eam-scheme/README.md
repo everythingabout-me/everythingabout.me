@@ -1,7 +1,8 @@
 # eam:// on macOS
 
-A drive address is `https://everythingabout.me/<handle>/<path>`, and `eam://<handle>/<path>`
-is the same address with a shorter prefix. This folder builds the app that makes the short
+A drive address is `https://everythingabout.me/files/<path>`, and `eam:///files/<path>`
+is the same address with a shorter prefix. There is no account name in either: the session
+decides whose tree the address opens. This folder builds the app that makes the short
 form work from Finder, a terminal, notes, or any other Mac app.
 
 ## Why this exists at all
@@ -17,9 +18,9 @@ The OS resolves a scheme through LaunchServices, which only knows bundles that d
 
 | Layer | Address | Registered by |
 |---|---|---|
-| System-wide | `eam://<handle>/<path>` | `EAM.app` (this folder) |
-| In one browser | `web+eam://<handle>/<path>` | Settings → Connect → Register, or the manifest |
-| Anywhere | `https://everythingabout.me/<handle>/<path>` | nothing — it just works |
+| System-wide | `eam:///files/<path>` | `EAM.app` (this folder) |
+| In one browser | `web+eam:///files/<path>` | Settings → Connect → Register, or the manifest |
+| Anywhere | `https://everythingabout.me/files/<path>` | nothing — it just works |
 
 ## Build and install
 
@@ -27,7 +28,7 @@ The OS resolves a scheme through LaunchServices, which only knows bundles that d
 scripts/eam-scheme/build.sh
 cp -R scripts/eam-scheme/EAM.app /Applications/
 open /Applications/EAM.app        # first run registers the scheme, then it exits
-open 'eam://<your-handle>/'       # should open your drive
+open 'eam:///files/'              # should open your drive
 ```
 
 Requires the Xcode command line tools (`xcode-select --install`) for `swiftc`.

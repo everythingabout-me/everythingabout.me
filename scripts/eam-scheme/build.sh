@@ -4,7 +4,7 @@
 # A URL scheme belongs to a bundle, not to a website: the OS finds a handler by asking
 # LaunchServices which installed .app declared the scheme. That is why "the web app
 # registers eam://" cannot exist, and why this exists instead — one tiny app whose only
-# behaviour is forwarding eam://<handle>/<path> to the drive's https address.
+# behaviour is forwarding eam:///files/<path> to the drive's https address.
 #
 # Usage: ./build.sh [output.app]     (default: ./EAM.app next to this script)
 set -eu
@@ -37,4 +37,4 @@ lsregister=/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchSe
 
 echo "built $out"
 echo "install: cp -R \"$out\" /Applications/ && open /Applications/$(basename "$out")"
-echo "test:    open 'eam://<handle>/'"
+echo "test:    open 'eam:///files/'"

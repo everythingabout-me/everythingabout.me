@@ -10,13 +10,13 @@ const SCHEME = "web+eam";
  *
  * The browser, not the OS: registerProtocolHandler only lets one origin claim a scheme
  * inside that browser profile, and the spec only allows a custom scheme when it starts
- * with `web+`. So the address here is web+eam://<handle>/<path>, and an eam:// link from
+ * with `web+`. So the address here is web+eam:///files/<path>, and an eam:// link from
  * Finder or a terminal still needs a native helper — which the repository ships.
  *
  * There is no API to ask whether this origin already registered, so the card reports what
  * the click did (asked the browser) rather than claiming a state it cannot read.
  */
-export function BrowserProtocol({ handle }: { handle: string | null }) {
+export function BrowserProtocol() {
   const supported =
     typeof navigator !== "undefined" && typeof navigator.registerProtocolHandler === "function";
   const [asked, setAsked] = useState(false);
@@ -43,7 +43,7 @@ export function BrowserProtocol({ handle }: { handle: string | null }) {
       </div>
 
       <p className={settingsStyles.schemeExample}>
-        {t("connect.schemeExample", { handle: handle ?? "you" })}
+        {t("connect.schemeExample")}
       </p>
 
       {supported ? (

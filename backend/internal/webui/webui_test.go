@@ -9,7 +9,7 @@ import (
 	"testing"
 )
 
-// A drive address is /<handle>/<path>: real visual paths that usually carry an extension, so
+// A drive address is /files/<path>: real visual paths that usually carry an extension, so
 // everything below the first segment gets the SPA fallback rather than the "missing asset" 404.
 func TestSPAFallbackServesFileDetailPaths(t *testing.T) {
 	root := t.TempDir()
@@ -25,9 +25,9 @@ func TestSPAFallbackServesFileDetailPaths(t *testing.T) {
 	}{
 		{path: "/", status: http.StatusOK, body: "<!doctype html>spa"},
 		{path: "/files/Photos/2024/a.jpg", status: http.StatusOK, body: "<!doctype html>spa"},
-		{path: "/iloahz", status: http.StatusOK, body: "<!doctype html>spa"},
-		{path: "/iloahz/Photos/2024/a.jpg", status: http.StatusOK, body: "<!doctype html>spa"},
-		{path: "/iloahz/%E7%BE%BD%E6%AF%9B%E7%90%83/a.pdf", status: http.StatusOK, body: "<!doctype html>spa"},
+		{path: "/files", status: http.StatusOK, body: "<!doctype html>spa"},
+		{path: "/files/Photos/2024/a.jpg", status: http.StatusOK, body: "<!doctype html>spa"},
+		{path: "/files/%E7%BE%BD%E6%AF%9B%E7%90%83/a.pdf", status: http.StatusOK, body: "<!doctype html>spa"},
 		{path: "/assets/app.js", status: http.StatusNotFound},
 		{path: "/missing.png", status: http.StatusNotFound},
 	}

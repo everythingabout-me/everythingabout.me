@@ -62,26 +62,25 @@ Any future incompatible change needs an explicit contract decision and rollout p
 
 ### Human addresses are web routes, not API routes
 
-The file API is selected by id or path and never by a username. A person-facing address is
-`/<handle>/<path>`, where the handle is an account's globally unique name (`POST /api/auth/username`
-claims or renames it; `GET /api/auth/username/{handle}` resolves the caller's own old names). Three
-distinctions keep that split honest:
+The file API is selected by id or path and never by an account name. A person-facing address is
+`/files/<path>` — the same shape for every account, with the session deciding whose tree it opens.
 
-- **The handle is addressing, not identity and not authorization.** `id` still identifies an entry and
-  the session still decides what may be read; `/<handle>/…` carries no rights, so a handle cannot leak
-  access and a rename cannot break a reference that names an entry.
-- **A rename keeps the old name redirecting.** The old handle stays reserved for its account, so a link
-  pasted before the rename still opens the tree instead of 404ing — and no other account can take the
-  freed name while that is true. That is why handles live in one `usernames` table with a single primary
-  key over current and superseded names (sql/058), not in a `users` column plus an alias table.
+- **No account name in the address, on purpose.** An address like `/<someone>/Photos` reads like a page
+  somebody publishes; this product keeps a private tree, so its URLs must not suggest one. Two accounts
+  therefore have paths that collide, and only their sessions tell them apart — the collision is the
+  claim: the trees are disjoint and neither is addressed by a name a stranger could type.
+- **The address carries no rights.** The session still decides what may be read, so no URL grants
+  access; a signed-out request to any file address is sent to `/login` before the tree is rendered.
+- **`/files` and not `/`.** The tree is mounted under one fixed prefix so that a folder named `settings`
+  cannot shadow the settings page and a top-level file named `README.md` cannot collide with the SPA's
+  missing-asset rule. The site root and the rest of the namespace belong to the app.
 - **A path is mutable, an id is not.** `/f/<id>` is the stable pointer to one entry: it resolves the id
   and redirects to the entry's current address, because an address copied from the location bar dies on
   the next rename. Share links for other people stay `/s/<code>`; `/f/<id>` is the owner's own pointer and
   requires the owner's session.
 
-`/files/...` was the pre-handle spelling of the same tree and now redirects to `/<handle>/...`. `/` and
-`/files` are not where the drive is mounted, so the site root stays available for pages that are not an
-account's files.
+Addresses are not versioned and not permanent: a bookmark is a path, so renaming a file changes it. The
+`/f/<id>` form exists so something durable can be pasted where a path would rot.
 
 ### Identity, selectors, and unique paths
 

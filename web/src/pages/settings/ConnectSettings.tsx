@@ -190,7 +190,7 @@ export function ConnectSettings() {
 
       {error && <p className={styles.error}>{error}</p>}
 
-      <BrowserProtocol handle={summary.user.username} />
+      <BrowserProtocol />
 
       <section className={settingsStyles.card}>
         <div className={settingsStyles.cardHead}>

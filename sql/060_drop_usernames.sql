@@ -1,0 +1,15 @@
+-- Drop the handle table: a drive address no longer names its account.
+--
+-- Before this, an address was /<handle>/<path> and a handle had to be unique and permanent
+-- (a rename kept the old name redirecting, and the freed name stayed out of anyone else's
+-- reach). The address is now /files/<path> for every account: the session names the account,
+-- so two people's trees sit at the same addresses and only their sessions tell them apart.
+-- That is deliberate — the paths of two accounts collide, which is what says the trees are
+-- private and disjoint rather than pages of one public site.
+--
+-- Nothing else read a handle: it was never identity (users.id is) and never a credential
+-- (the session is), so the table is derived metadata and loses nothing a user kept.
+--
+-- `if exists` keeps the file re-runnable: a database restored from before 058, or one whose
+-- schema_migrations row was lost, must not fail here.
+drop table if exists usernames;

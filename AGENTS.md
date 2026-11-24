@@ -186,17 +186,18 @@ while its tests were skipping. CI (`.github/workflows/test.yml`) runs `make migr
   and database-only moves/copies/deletes are rejected. Keep current COS key construction in `internal/paths`.
 - Multi-user isolation rests on `owner_id` (`users.id`, a UUID) — new tables and queries must always carry the
   user dimension.
-- **The web address is `/<handle>/<path>`; the handle is addressing, not identity and not authorization.**
-  `usernames` (sql/058) holds every handle an account has ever held, one primary key over current and
-  superseded names, because a rename must keep old links redirecting *and* keep the freed name out of
-  anyone else's reach; a `users.username` column plus an alias table would need a transaction lock to say
-  the same thing and could still disagree with itself. Authorization never keys off a handle — the session
-  owns the tree, so `/someone-else/...` cannot grant anything. `/f/<id>` is the stable pointer to one entry
-  and resolves the id before redirecting, because a path copied from the location bar dies on the next
-  rename; share links for other people remain `/s/<code>`. `/` and `/files` stay unmounted (the drive is
-  not at the site root) and `/files/...` only redirects. Revisit this if handles ever need to address
-  *another* account's data: that would be a sharing model, not an address, and it belongs in the access
-  contract instead.
+- **The web address is `/files/<path>`; the account is the session, never a segment of the URL.** An
+  address that names its owner (`/<someone>/Photos`) reads like a page somebody publishes. This product
+  keeps a private tree, so every account's drive sits at the same addresses and only the session says
+  whose it is: two accounts' paths collide on purpose, which is the claim that the trees are disjoint and
+  that nothing is addressed by a name a stranger could type. For the same reason there is no handle to
+  claim, rename or keep redirecting — `usernames` was deleted in sql/060, and no route, id or token keys
+  off an account name. The tree is mounted under the fixed `/files` prefix rather than at `/` so a folder
+  named `settings` cannot shadow an app route and a top-level `README.md` cannot trip the SPA's
+  missing-asset rule; the rest of the namespace belongs to the app. `/f/<id>` remains the stable pointer
+  to one entry (it resolves the id, because a pasted path dies on the next rename) and share links for
+  other people remain `/s/<code>`. Revisit this if a URL ever has to address *another* account's data:
+  that is a sharing model, not an address, and it belongs in the access contract instead.
 - Dependencies are wired in `api.New`; define an interface first for a new service (see `storage.Storage`,
   `timeline.Analyzer`) and never construct clients inside a handler.
 - **Deletion is permanent** (there is no trash); deleting a nonempty directory requires explicit `?recursive=true`, and
@@ -316,10 +317,9 @@ while its tests were skipping. CI (`.github/workflows/test.yml`) runs `make migr
   server-side. Class A/B transfer grants are the narrow exception documented below.
 - Styling: global tokens live in `src/styles/globals.css` (warm paper feel + blue accent + automatic
   light/dark via `prefers-color-scheme`); page layouts use `*.module.css`. **No Tailwind, no CSS-in-JS.**
-- Drive addresses are built only by `web/src/filesPath.ts`: `filesHref` writes `/<handle>/…` and
-  `filesRoutePath` reads the logical path back. The base is module state set by each authenticated route
-  loader from the signed-in account, so no link builder can forget it; a page must not hand-encode
-  `/<handle>/...` itself. Before a handle exists `filesHref` falls back to `/files/...`, which redirects.
+- Drive addresses are built only by `web/src/filesPath.ts`: `filesHref` writes `/files/…` and
+  `filesRoutePath` reads the logical path back, so no page hand-encodes the prefix. There is no per-account
+  base to thread through link builders: every signed-in account's tree is at `/files`.
 - i18n: the locale is chosen once at module load from the browser language (zh / en), with no switcher. New
   copy must be added to both the `en` and `zh` entries in `messages.ts`; a missing key fails `tsc`. Never
   hard-code Chinese UI copy.

@@ -57,7 +57,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		// A missing top-level file with an extension is an asset and must 404 rather than
 		// receiving index.html in place of a .js. Everything below a first segment is an
-		// app address: /<handle>/Photos/2024/a.jpg is a real file detail page and ends in
+		// app address: /files/Photos/2024/a.jpg is a real file detail page and ends in
 		// an extension, so the rule cannot be "contains a dot".
 		if missingAsset(clean) {
 			http.NotFound(w, r)
